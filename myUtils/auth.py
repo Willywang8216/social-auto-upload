@@ -1,15 +1,23 @@
 import asyncio
-import configparser
-import os
-
 from playwright.async_api import async_playwright
-from xhs import XhsClient
 
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS
+from myUtils.platforms import REDDIT_PLATFORM, X_PLATFORM
 from utils.base_social_media import set_init_script
 from utils.log import tencent_logger, kuaishou_logger, douyin_logger
 from pathlib import Path
-from uploader.xhs_uploader.main import sign_local
+from uploader.reddit_uploader.main import (
+    RedditAPIError,
+    load_reddit_credentials,
+    save_reddit_credentials,
+    validate_reddit_credentials,
+)
+from uploader.x_uploader.main import (
+    XAPIError,
+    load_x_credentials,
+    save_x_credentials,
+    validate_x_credentials,
+)
 
 
 async def cookie_auth_douyin(account_file):
@@ -102,6 +110,20 @@ async def cookie_auth_xhs(account_file):
             return True
 
 
+def _validate_reddit_file(account_file):
+    credentials = load_reddit_credentials(account_file)
+    refreshed_credentials = validate_reddit_credentials(credentials)
+    save_reddit_credentials(account_file, refreshed_credentials)
+    return True
+
+
+def _validate_x_file(account_file):
+    credentials = load_x_credentials(account_file)
+    refreshed_credentials = validate_x_credentials(credentials)
+    save_x_credentials(account_file, refreshed_credentials)
+    return True
+
+
 async def check_cookie(type, file_path):
     match type:
         # 小红书
@@ -116,6 +138,18 @@ async def check_cookie(type, file_path):
         # 快手
         case 4:
             return await cookie_auth_ks(Path(BASE_DIR / "cookiesFile" / file_path))
+        case _ if type == REDDIT_PLATFORM:
+            try:
+                return await asyncio.to_thread(_validate_reddit_file, Path(BASE_DIR / "cookiesFile" / file_path))
+            except (FileNotFoundError, RedditAPIError, KeyError, ValueError) as exc:
+                print(f"Reddit 账号校验失败: {exc}")
+                return False
+        case _ if type == X_PLATFORM:
+            try:
+                return await asyncio.to_thread(_validate_x_file, Path(BASE_DIR / "cookiesFile" / file_path))
+            except (FileNotFoundError, XAPIError, KeyError, ValueError) as exc:
+                print(f"X 账号校验失败: {exc}")
+                return False
         case _:
             return False
 

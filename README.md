@@ -33,6 +33,42 @@
 | 百家号 | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | 浏览器自动化 |
 | TikTok | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | 当前示例走 Chrome 版实现 |
 
+### Reddit / X 发布（实验性 Web 流程）
+
+仓库当前新增了一条独立的 Web 发布路径，用于 `Reddit` 和 `X`：
+
+- 账号管理里可直接为 `Reddit` 和 `X` 发起 OAuth 登录
+- Web 端新增 `Reddit / X 发布` 页面，用于同一份内容同时发布到：
+  - 多个 Reddit 子版块
+  - 一个或多个 X 账号
+- 这条路径不会修改历史 `发布中心` 对国内平台的现有逻辑
+
+当前阶段的能力边界：
+
+- `X`：走官方 OAuth / API，支持文本和媒体发布
+- `Reddit`：phase 1 仅支持 `self post` 和 `link post`
+- `Reddit` 原生图片 / 视频发布尚未接入，当前会在结果里明确返回“第二阶段实现”
+
+使用前请先在 `conf.py` 中配置以下参数：
+
+```python
+APP_BASE_URL = "http://localhost:5409"
+
+REDDIT_CLIENT_ID = ""
+REDDIT_CLIENT_SECRET = ""
+REDDIT_REDIRECT_URI = "http://localhost:5409/oauth/reddit/callback"
+
+X_CLIENT_ID = ""
+X_CLIENT_SECRET = ""
+X_REDIRECT_URI = "http://localhost:5409/oauth/x/callback"
+```
+
+补充说明：
+
+- `Reddit` 与 `X` 账号走 OAuth 凭证，不再复用历史 Cookie 上传/下载流程
+- `X` 官方发帖 / 媒体接口依赖开发者权限与可用额度，请先确认账号侧权限已经开通
+- 如果你的前端和后端不在同一个公网地址下，请把回调地址和 `APP_BASE_URL` 配成实际可访问地址
+
 ### AI这么强，为什么还需要这个项目
 在你使用AI的能力，browser agent等等，每次都让 agent 重新解析网页、截图理解, 临场判断
 该项目经过大量验证，上传这种 高频，重复，无聊的工作交给脚本和程序去执行

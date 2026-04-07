@@ -10,7 +10,9 @@ export const useAccountStore = defineStore('account', () => {
     1: '小红书',
     2: '视频号',
     3: '抖音',
-    4: '快手'
+    4: '快手',
+    5: 'Reddit',
+    6: 'X'
   }
   
   // 设置账号列表

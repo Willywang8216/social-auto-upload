@@ -1,5 +1,7 @@
 import asyncio
+import json
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -8,12 +10,33 @@ from pathlib import Path
 from queue import Queue
 from flask_cors import CORS
 from myUtils.auth import check_cookie
-from flask import Flask, request, jsonify, Response, render_template, send_from_directory
+from flask import Flask, request, jsonify, Response, redirect, send_from_directory
 from conf import BASE_DIR
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
+from myUtils.social_publish import SocialPublishValidationError, publish_social_destinations
+from myUtils.platforms import REDDIT_PLATFORM, X_PLATFORM
+from uploader.reddit_uploader.main import (
+    RedditAPIError,
+    build_authorize_url as build_reddit_authorize_url,
+    create_reddit_credentials,
+    exchange_code_for_tokens as exchange_reddit_code_for_tokens,
+    get_current_user as get_reddit_current_user,
+    save_reddit_credentials,
+)
+from uploader.x_uploader.main import (
+    XAPIError,
+    build_authorize_url as build_x_authorize_url,
+    build_pkce_pair,
+    create_x_credentials,
+    exchange_code_for_tokens as exchange_x_code_for_tokens,
+    get_current_user as get_x_current_user,
+    save_x_credentials,
+)
 
 active_queues = {}
+oauth_states = {}
+OAUTH_STATE_TTL_SECONDS = 600
 app = Flask(__name__)
 
 #允许所有来源跨域访问
@@ -24,6 +47,89 @@ app.config['MAX_CONTENT_LENGTH'] = 160 * 1024 * 1024
 
 # 获取当前目录（假设 index.html 和 assets 在这里）
 current_dir = os.path.dirname(os.path.abspath(__file__))
+
+
+def get_db_path():
+    return Path(BASE_DIR / "db" / "database.db")
+
+
+def get_cookie_root():
+    cookie_root = Path(BASE_DIR / "cookiesFile")
+    cookie_root.mkdir(exist_ok=True)
+    return cookie_root
+
+
+def cleanup_oauth_states():
+    expire_before = time.time() - OAUTH_STATE_TTL_SECONDS
+    expired_states = [state for state, payload in oauth_states.items() if payload.get("created_at", 0) < expire_before]
+    for state in expired_states:
+        del oauth_states[state]
+
+
+def build_oauth_account_path(platform_slug):
+    return f"{platform_slug}/{uuid.uuid1()}.json"
+
+
+def upsert_account_record(platform_type, file_path, user_name, status=1):
+    previous_file_path = None
+    with sqlite3.connect(get_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT id, filePath
+            FROM user_info
+            WHERE type = ? AND userName = ?
+            ''',
+            (platform_type, user_name),
+        )
+        row = cursor.fetchone()
+        if row:
+            previous_file_path = row["filePath"]
+            cursor.execute(
+                '''
+                UPDATE user_info
+                SET filePath = ?, status = ?
+                WHERE id = ?
+                ''',
+                (file_path, status, row["id"]),
+            )
+            account_id = row["id"]
+        else:
+            cursor.execute(
+                '''
+                INSERT INTO user_info (type, filePath, userName, status)
+                VALUES (?, ?, ?, ?)
+                ''',
+                (platform_type, file_path, user_name, status),
+            )
+            account_id = cursor.lastrowid
+        conn.commit()
+
+    if previous_file_path and previous_file_path != file_path:
+        previous_file = Path(BASE_DIR / "cookiesFile" / previous_file_path)
+        if previous_file.exists():
+            previous_file.unlink()
+
+    return account_id
+
+
+def oauth_popup_response(payload, status_code=200):
+    safe_payload = json.dumps(payload, ensure_ascii=False)
+    html = f"""<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>OAuth Result</title></head>
+<body>
+<script>
+const payload = {safe_payload};
+if (window.opener) {{
+  window.opener.postMessage(payload, "*");
+}}
+window.close();
+</script>
+</body>
+</html>"""
+    return Response(html, status=status_code, mimetype="text/html")
 
 # 处理所有静态资源请求（未来打包用）
 @app.route('/assets/<filename>')
@@ -223,7 +329,7 @@ def getAccounts():
 
 @app.route("/getValidAccounts",methods=['GET'])
 async def getValidAccounts():
-    with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+    with sqlite3.connect(get_db_path()) as conn:
         cursor = conn.cursor()
         cursor.execute('''
         SELECT * FROM user_info''')
@@ -234,15 +340,14 @@ async def getValidAccounts():
             print(row)
         for row in rows_list:
             flag = await check_cookie(row[1],row[2])
-            if not flag:
-                row[4] = 0
-                cursor.execute('''
-                UPDATE user_info 
-                SET status = ? 
-                WHERE id = ?
-                ''', (0,row[0]))
-                conn.commit()
-                print("✅ 用户状态已更新")
+            row[4] = 1 if flag else 0
+            cursor.execute('''
+            UPDATE user_info 
+            SET status = ? 
+            WHERE id = ?
+            ''', (row[4],row[0]))
+            conn.commit()
+            print("✅ 用户状态已更新")
         for row in rows:
             print(row)
         return jsonify(
@@ -251,6 +356,118 @@ async def getValidAccounts():
                             "msg": None,
                             "data": rows_list
                         }),200
+
+
+@app.route('/oauth/<platform>/authorize')
+def oauth_authorize(platform):
+    account_name = (request.args.get('accountName') or '').strip()
+    cleanup_oauth_states()
+    state = secrets.token_urlsafe(24)
+
+    try:
+        if platform == 'reddit':
+            authorize_url = build_reddit_authorize_url(state)
+            oauth_states[state] = {
+                "platform": platform,
+                "account_name": account_name,
+                "created_at": time.time(),
+            }
+        elif platform == 'x':
+            code_verifier, code_challenge = build_pkce_pair()
+            authorize_url = build_x_authorize_url(state, code_challenge)
+            oauth_states[state] = {
+                "platform": platform,
+                "account_name": account_name,
+                "code_verifier": code_verifier,
+                "created_at": time.time(),
+            }
+        else:
+            return jsonify({
+                "code": 400,
+                "msg": f"不支持的 OAuth 平台: {platform}",
+                "data": None
+            }), 400
+    except (RedditAPIError, XAPIError) as exc:
+        return jsonify({
+            "code": 500,
+            "msg": str(exc),
+            "data": None
+        }), 500
+
+    return redirect(authorize_url)
+
+
+@app.route('/oauth/<platform>/callback')
+def oauth_callback(platform):
+    error = request.args.get('error')
+    state = request.args.get('state')
+    if error:
+        return oauth_popup_response({
+            "success": False,
+            "platform": platform,
+            "message": error,
+        }, status_code=400)
+
+    if not state:
+        return oauth_popup_response({
+            "success": False,
+            "platform": platform,
+            "message": "OAuth state 缺失",
+        }, status_code=400)
+
+    oauth_state = oauth_states.pop(state, None)
+    if not oauth_state or oauth_state.get("platform") != platform:
+        return oauth_popup_response({
+            "success": False,
+            "platform": platform,
+            "message": "OAuth state 无效或已过期",
+        }, status_code=400)
+
+    code = request.args.get('code')
+    if not code:
+        return oauth_popup_response({
+            "success": False,
+            "platform": platform,
+            "message": "OAuth code 缺失",
+        }, status_code=400)
+
+    try:
+        if platform == 'reddit':
+            token_data = exchange_reddit_code_for_tokens(code)
+            user_data = get_reddit_current_user(token_data["access_token"])
+            credentials = create_reddit_credentials(token_data, user_data)
+            account_name = oauth_state.get("account_name") or credentials.get("external_username") or "Reddit"
+            relative_path = build_oauth_account_path("reddit")
+            save_reddit_credentials(get_cookie_root() / relative_path, credentials)
+            account_id = upsert_account_record(REDDIT_PLATFORM, relative_path, account_name, status=1)
+        elif platform == 'x':
+            token_data = exchange_x_code_for_tokens(code, oauth_state.get("code_verifier", ""))
+            user_data = get_x_current_user(token_data["access_token"])
+            credentials = create_x_credentials(token_data, user_data)
+            account_name = oauth_state.get("account_name") or credentials.get("external_username") or "X"
+            relative_path = build_oauth_account_path("x")
+            save_x_credentials(get_cookie_root() / relative_path, credentials)
+            account_id = upsert_account_record(X_PLATFORM, relative_path, account_name, status=1)
+        else:
+            return oauth_popup_response({
+                "success": False,
+                "platform": platform,
+                "message": f"不支持的 OAuth 平台: {platform}",
+            }, status_code=400)
+    except (RedditAPIError, XAPIError, KeyError, ValueError) as exc:
+        return oauth_popup_response({
+            "success": False,
+            "platform": platform,
+            "message": str(exc),
+        }, status_code=500)
+
+    return oauth_popup_response({
+        "success": True,
+        "platform": platform,
+        "accountId": account_id,
+        "accountName": account_name,
+        "externalUsername": credentials.get("external_username", ""),
+    })
 
 @app.route('/deleteFile', methods=['GET'])
 def delete_file():
@@ -471,6 +688,32 @@ def postVideo():
             "msg": f"发布失败: {str(e)}",
             "data": None
         }), 500
+
+
+@app.route('/publishSocial', methods=['POST'])
+def publish_social():
+    payload = request.get_json() or {}
+
+    try:
+        results = publish_social_destinations(payload)
+    except SocialPublishValidationError as exc:
+        return jsonify({
+            "code": 400,
+            "msg": str(exc),
+            "data": None
+        }), 400
+    except Exception as exc:
+        return jsonify({
+            "code": 500,
+            "msg": f"发布失败: {str(exc)}",
+            "data": None
+        }), 500
+
+    return jsonify({
+        "code": 200,
+        "msg": "发布结果已返回",
+        "data": results
+    }), 200
 
 
 @app.route('/updateUserinfo', methods=['POST'])
