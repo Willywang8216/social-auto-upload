@@ -1,6 +1,7 @@
 import sqlite3
-import json
-import os
+from pathlib import Path
+
+from utils.profile_pipeline import ensure_profile_tables
 
 # 数据库文件路径（如果不存在会自动创建）
 db_file = './database.db'
@@ -37,6 +38,7 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS file_records (
 
 # 提交更改
 conn.commit()
+ensure_profile_tables(Path(db_file))
 print("✅ 表创建成功")
 # 关闭连接
 conn.close()

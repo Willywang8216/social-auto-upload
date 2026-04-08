@@ -12,6 +12,15 @@ from flask import Flask, request, jsonify, Response, render_template, send_from_
 from conf import BASE_DIR
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
+from utils.profile_pipeline import (
+    delete_profile as delete_profile_record,
+    ensure_profile_tables,
+    generate_profile_content,
+    get_profile,
+    list_profiles,
+    migrate_uploaded_asset,
+    save_profile,
+)
 
 active_queues = {}
 app = Flask(__name__)
@@ -24,6 +33,12 @@ app.config['MAX_CONTENT_LENGTH'] = 160 * 1024 * 1024
 
 # 获取当前目录（假设 index.html 和 assets 在这里）
 current_dir = os.path.dirname(os.path.abspath(__file__))
+
+
+def get_db_path():
+    db_path = Path(BASE_DIR / "db" / "database.db")
+    ensure_profile_tables(db_path)
+    return db_path
 
 # 处理所有静态资源请求（未来打包用）
 @app.route('/assets/<filename>')
@@ -186,6 +201,121 @@ def get_all_files():
         return jsonify({
             "code": 500,
             "msg": str("get file failed!"),
+            "data": None
+        }), 500
+
+
+@app.route('/getProfiles', methods=['GET'])
+def get_profiles():
+    try:
+        data = list_profiles(get_db_path())
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": data
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/saveProfile', methods=['POST'])
+def save_profile_route():
+    data = request.get_json() or {}
+    try:
+        profile = save_profile(get_db_path(), data)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": profile
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/deleteProfile', methods=['GET'])
+def delete_profile_route():
+    profile_id = request.args.get('id')
+    if not profile_id or not profile_id.isdigit():
+        return jsonify({
+            "code": 400,
+            "msg": "Invalid or missing profile ID",
+            "data": None
+        }), 400
+
+    try:
+        delete_profile_record(get_db_path(), int(profile_id))
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": None
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/generateProfileContent', methods=['POST'])
+def generate_profile_content_route():
+    data = request.get_json() or {}
+    try:
+        result = generate_profile_content(get_db_path(), Path(BASE_DIR), data)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/migrateProfileMedia', methods=['POST'])
+def migrate_profile_media_route():
+    data = request.get_json() or {}
+    profile_id = data.get('profileId')
+    relative_path = data.get('relativePath')
+    target_storage = data.get('targetStorage') or {}
+
+    if not profile_id:
+        return jsonify({
+            "code": 400,
+            "msg": "profileId is required",
+            "data": None
+        }), 400
+
+    if not relative_path:
+        return jsonify({
+            "code": 400,
+            "msg": "relativePath is required",
+            "data": None
+        }), 400
+
+    try:
+        profile = get_profile(get_db_path(), int(profile_id))
+        result = migrate_uploaded_asset(profile, relative_path, target_storage)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
             "data": None
         }), 500
 

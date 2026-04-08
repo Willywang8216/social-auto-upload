@@ -3,6 +3,7 @@ import Dashboard from '../views/Dashboard.vue'
 import AccountManagement from '../views/AccountManagement.vue'
 import MaterialManagement from '../views/MaterialManagement.vue'
 import PublishCenter from '../views/PublishCenter.vue'
+import ProfileManagement from '../views/ProfileManagement.vue'
 import About from '../views/About.vue'
 
 const routes = [
@@ -25,6 +26,11 @@ const routes = [
     path: '/publish-center',
     name: 'PublishCenter',
     component: PublishCenter
+  },
+  {
+    path: '/profile-management',
+    name: 'ProfileManagement',
+    component: ProfileManagement
   },
   {
     path: '/about',
