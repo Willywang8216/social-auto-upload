@@ -1,8 +1,12 @@
 .venv
 .git
 .idea
+.env
 cookies
 conf.py
+data
+docker/rclone
+secrets
 sau_frontend/dist
 sau_frontend/node_modules
 sau_frontend/package-lock.json

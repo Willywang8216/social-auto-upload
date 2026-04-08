@@ -1,17 +1,24 @@
 import sqlite3
+import sys
 from pathlib import Path
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from conf import BASE_DIR
 from utils.profile_pipeline import ensure_profile_tables
 
 # 数据库文件路径（如果不存在会自动创建）
-db_file = './database.db'
+db_file = Path(BASE_DIR / 'db' / 'database.db')
+db_file.parent.mkdir(parents=True, exist_ok=True)
 
 # 如果数据库已存在，则删除旧的表（可选）
 # if os.path.exists(db_file):
 #     os.remove(db_file)
 
 # 连接到SQLite数据库（如果文件不存在则会自动创建）
-conn = sqlite3.connect(db_file)
+conn = sqlite3.connect(str(db_file))
 cursor = conn.cursor()
 
 # 创建账号记录表

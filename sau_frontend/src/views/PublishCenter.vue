@@ -498,10 +498,9 @@ import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { materialApi } from '@/api/material'
 import { http } from '@/utils/request'
+import { apiBaseUrl } from '@/utils/apiBase'
 
 // API base URL
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409'
-
 // Authorization headers
 const authHeaders = computed(() => ({
   'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
