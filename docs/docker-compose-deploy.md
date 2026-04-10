@@ -12,7 +12,7 @@
 容器会：
 
 - 构建前端静态文件
-- 安装 Python 依赖、Playwright、`ffmpeg`、`rclone`
+- 安装 Python 依赖、Playwright、Patchright、`chromium`、`ffmpeg`、`rclone`
 - 启动时自动初始化 SQLite 数据库
 - 监听 `5409` 端口
 
@@ -76,6 +76,14 @@ cp .env.example .env
 - `SAU_GOOGLE_SERVICE_ACCOUNT_JSON`
 
 优先推荐 `SAU_GOOGLE_SERVICE_ACCOUNT_FILE`。
+
+Docker Compose 部署时，建议直接使用：
+
+```env
+LOCAL_CHROME_PATH=/usr/bin/chromium
+```
+
+这样容器内的 Playwright / Patchright 都会优先走系统 Chromium，而不是依赖额外的 Chrome 安装。
 
 ### 可选默认值
 

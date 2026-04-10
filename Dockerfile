@@ -29,6 +29,7 @@ ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    chromium \
     curl \
     ffmpeg \
     fonts-dejavu-core \
@@ -60,7 +61,7 @@ dst.write_text(src.read_text(encoding='utf-16'), encoding='utf-8')
 PY
 
 RUN pip install --no-cache-dir -r /tmp/requirements-utf8.txt && \
-    pip install --no-cache-dir gspread==6.2.1
+    pip install --no-cache-dir gspread==6.2.1 patchright==1.58.2
 
 RUN playwright install chromium-headless-shell
 

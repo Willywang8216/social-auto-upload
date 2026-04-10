@@ -28,6 +28,17 @@ def _msg(emoji: str, text: str) -> str:
     return f"{emoji} {text}"
 
 
+def _get_browser_launch_kwargs(headless: bool) -> dict:
+    options = {
+        "headless": headless
+    }
+    if LOCAL_CHROME_PATH:
+        options["executable_path"] = LOCAL_CHROME_PATH
+    else:
+        options["channel"] = "chrome"
+    return options
+
+
 async def _emit_qrcode_callback(qrcode_callback, payload: dict):
     if not qrcode_callback:
         return
@@ -50,7 +61,7 @@ def _build_login_result(success: bool, status: str, message: str, account_file: 
 
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True, channel="chrome")
+        browser = await playwright.chromium.launch(**_get_browser_launch_kwargs(True))
         try:
             context = await browser.new_context(storage_state=account_file)
             context = await set_init_script(context)
@@ -176,7 +187,7 @@ async def douyin_cookie_gen(
     headless: bool = LOCAL_CHROME_HEADLESS,
 ):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless, channel="chrome")
+        browser = await playwright.chromium.launch(**_get_browser_launch_kwargs(headless))
         context = await browser.new_context()
         context = await set_init_script(context)
         qrcode_path = None
@@ -471,7 +482,7 @@ class DouYinVideo(DouYinBaseUploader):
         await self.validate_upload_args()
         douyin_logger.info(_msg("🥳", "上传前检查通过"))
 
-        browser = await playwright.chromium.launch(headless=self.headless, channel="chrome")
+        browser = await playwright.chromium.launch(**_get_browser_launch_kwargs(self.headless))
         context = await browser.new_context(
             storage_state=f"{self.account_file}",
             permissions=["geolocation"],
@@ -664,7 +675,7 @@ class DouYinNote(DouYinBaseUploader):
         await self.validate_upload_args()
         douyin_logger.info(_msg("🥳", "图文上传前检查通过"))
 
-        browser = await playwright.chromium.launch(headless=self.headless, channel="chrome")
+        browser = await playwright.chromium.launch(**_get_browser_launch_kwargs(self.headless))
         context = await browser.new_context(
             storage_state=f"{self.account_file}",
             permissions=["geolocation"],
