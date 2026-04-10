@@ -1,0 +1,307 @@
+# Profile 批量設定範例
+#
+# 用途：
+# - 這是一份「可批量編輯」的 Profile 設定範本
+# - 適合先在檔案裡整理好所有 Profile，再由後續匯入工具/API 讀取
+#
+# 注意：
+# 1. 目前系統已支援在 UI 中逐一編輯 Profile，但「直接匯入這份 YAML」的功能還沒有實作。
+# 2. `accountIds` 對應的是帳號管理資料表中的帳號 ID，不是帳號名稱。
+# 3. Google service account JSON 不是每個 profile 各自保存；它是全域設定，需另外在系統中設定。
+# 4. `googleSheet.worksheetName` 目前僅保留相容欄位；實際匯出時會自動使用：
+#    `YYYY-MM-DD-Profile名稱`
+#
+# 建議做法：
+# - 你可以先用這份檔案整理所有設定
+# - 下一步若你要，我可以再幫你實作：
+#   a. 從 YAML/JSON 匯入 profiles
+#   b. 匯出現有 profiles 成 YAML/JSON
+
+version: 1
+
+profiles:
+  - name: "Tao 主品牌"
+    # 給 LLM 的全域 system prompt。
+    # 這裡建議放品牌語氣、受眾、禁語、內容風格、語言偏好。
+    systemPrompt: >
+      你是 Tao 品牌的社群文案策略助手。
+      文案要自然、直接、可信，不要過度誇張。
+      受眾以海外華語與英文使用者為主。
+      若素材本身是中文，就優先輸出繁體中文；若素材本身是英文，就輸出英文。
+
+    # 全域聯絡資訊。若 contentAccounts 裡的個別帳號沒有覆寫，會沿用這裡。
+    contactDetails: |
+      Patreon: https://patreon.com/tao
+      Telegram: https://t.me/tao_channel
+      Business: contact@example.com
+
+    # 全域 CTA。若 contentAccounts 裡的個別帳號沒有覆寫，會沿用這裡。
+    cta: "想看完整版本、原檔與更多幕後內容，請到 Patreon 或 Telegram。"
+
+    # 綁定到這個 profile 的「實際發佈帳號」ID。
+    # 這些 ID 來自帳號管理頁，通常包含國內平台與後續國際平台的 publishing accounts。
+    accountIds:
+      - 1     # 例如：小紅書主帳
+      - 3     # 例如：抖音主帳
+      - 12    # 例如：Facebook Page
+      - 18    # 例如：YouTube Channel
+
+    settings:
+      llm:
+        # LLM API base URL。後端生成文案與轉錄都會使用。
+        apiBaseUrl: "https://llmapi.iamwillywang.com/"
+
+        # 音訊/影片轉錄模型名稱。
+        transcriptionModel: "Audio-Speech-Group"
+
+        # 文案生成模型名稱。
+        generationModel: "reasoning"
+
+      storage:
+        # rclone remote 名稱。
+        # 你前面提到你已設定成 Onedrive-Yahooforsub-Tao，這裡直接示範填入。
+        remoteName: "Onedrive-Yahooforsub-Tao"
+
+        # 素材上傳到 remote 後的目標路徑。
+        remotePath: "Scripts-ssh-ssl-keys/SocialUpload"
+
+        # 選填。若你有固定公開網址規則，可以用 {relative_path} 佔位。
+        # 例如：https://public.example.com/{relative_path}
+        #
+        # 如果留空，系統會依目前上傳結果與後端邏輯決定 public URL。
+        publicUrlTemplate: ""
+
+      watermark:
+        # 是否啟用浮水印。
+        enabled: true
+
+        # 類型：
+        # - text  = 文字浮水印
+        # - image = 圖片浮水印
+        type: "text"
+
+        # 模式：
+        # - static  = 固定位置
+        # - dynamic = 動態 / 隨機位置
+        #
+        # 目前邏輯：
+        # - 圖片：dynamic 會用隨機位置
+        # - 影片：dynamic 會在 1~5 秒區段切換位置
+        mode: "dynamic"
+
+        # type=text 時使用。
+        text: "@TaoOfficial"
+
+        # type=image 時使用。必須是後端執行環境可讀到的本機路徑。
+        imagePath: ""
+
+        # 預設位置：
+        # - bottom-right
+        # - bottom-left
+        # - top-right
+        # - top-left
+        # - center
+        position: "bottom-right"
+
+        # 透明度。建議 0.25 ~ 0.60。
+        opacity: 0.45
+
+      googleSheet:
+        # 匯出貼文到 Google Sheet 時使用的 spreadsheet ID。
+        spreadsheetId: "1AbCdEfGhIjKlMnOpQrStUvWxYz1234567890"
+
+        # 相容欄位；目前匯出時不直接使用這個名稱。
+        # 系統會自動建立：
+        # YYYY-MM-DD-Profile名稱
+        worksheetName: "Sheet1"
+
+      socialImport:
+        # 匯出到 Google Sheet / CSV 時放在 Link 欄位的預設網址。
+        defaultLink: "https://patreon.com/tao"
+
+        # 對應排程工具 CSV 的 Category 欄位。
+        category: "Global Campaign"
+
+        # 對應排程工具 CSV 的 Watermark 欄位。
+        # 這是排程工具內建的 watermark 名稱，不是本系統的本地浮水印設定。
+        watermarkName: "Default"
+
+        # 對應排程工具 CSV 的 HashtagGroup 欄位。
+        hashtagGroup: "TAO-GLOBAL-TAGS"
+
+        # 對應排程工具 CSV 的 VideoThumbnailURL 欄位。
+        videoThumbnailUrl: "https://cdn.example.com/thumbnails/default.jpg"
+
+        # 對應排程工具 CSV 的 CTAGroup 欄位。
+        ctaGroup: "TAO-CTA"
+
+        # 對應排程工具 CSV 的 FirstComment 欄位。
+        firstComment: "完整版與所有連結請看置頂資訊。"
+
+        # 對應排程工具 CSV 的 Story(YorN) 欄位。
+        story: false
+
+        # 對應排程工具 CSV 的 PinterestBoard 欄位。
+        pinterestBoard: ""
+
+        # 對應排程工具 CSV 的 AltText 欄位。
+        altText: "Tao 品牌短影音與封面圖片"
+
+        # 對應排程工具 CSV 的 PinTitle 欄位。
+        pinTitle: "Tao Official Update"
+
+      postPresets:
+        # 對應排程工具 CSV 的 PostPreset 欄位。
+        # 若 contentAccounts 裡的個別帳號設定了 postPreset，該帳號會優先使用自己的值。
+        twitter: "TAO_X_DEFAULT"
+        threads: "TAO_THREADS_DEFAULT"
+        instagram: "TAO_INSTAGRAM_DEFAULT"
+        facebook: "TAO_FACEBOOK_DEFAULT"
+        youtube: "TAO_YOUTUBE_DEFAULT"
+        tiktok: "TAO_TIKTOK_DEFAULT"
+
+      contentAccounts:
+        # contentAccounts 是「文案 persona / 內容帳號」
+        # 它不是登入憑證，而是用來區分不同平台、不同語氣、不同 CTA 的內容生成設定。
+        #
+        # 可用 platform：
+        # twitter / threads / instagram / facebook / youtube / tiktok / telegram / patreon / reddit
+
+        - id: "x-main"
+          platform: "twitter"
+          name: "Tao X 主帳"
+          # 這個 prompt 只作用在這個內容帳號的生成，不會影響其他帳號。
+          prompt: >
+            保持短句、節奏快、資訊密度高。
+            必須有 emoji，必須剛好 3 個 hashtags。
+            避免過度廣告感，像真實創作者更新。
+          # 留空則沿用 profile.contactDetails
+          contactDetails: ""
+          # 留空則沿用 profile.cta
+          cta: "看完整版請到 Patreon，日常更新請進 Telegram。"
+          # 若要讓這個帳號匯出到 sheet 時使用專屬 preset，可在這裡覆寫。
+          postPreset: "TAO_X_MAIN"
+
+        - id: "threads-main"
+          platform: "threads"
+          name: "Tao Threads 主帳"
+          prompt: >
+            比 X 更口語、更像對社群說話。
+            仍要有 emoji 與 3 個 hashtags。
+          contactDetails: ""
+          cta: ""
+          postPreset: "TAO_THREADS_MAIN"
+
+        - id: "ig-longform"
+          platform: "instagram"
+          name: "Tao Instagram 長文"
+          prompt: >
+            寫成有鉤子的長 caption。
+            第一段要能抓住注意力，結尾要自然導向 CTA。
+          contactDetails: ""
+          cta: ""
+          postPreset: "TAO_IG_LONGFORM"
+
+        - id: "fb-longform"
+          platform: "facebook"
+          name: "Tao Facebook Page"
+          prompt: >
+            寫成可直接貼到 Facebook Page 的長文。
+            保持敘事性，不要只像廣告文案。
+          contactDetails: ""
+          cta: ""
+          postPreset: "TAO_FB_PAGE"
+
+        - id: "yt-community"
+          platform: "youtube"
+          name: "Tao YouTube 社群"
+          prompt: >
+            用社群貼文口吻，前面先下 hook，再補充 2 到 4 句描述。
+          contactDetails: ""
+          cta: ""
+          postPreset: "TAO_YT_COMMUNITY"
+
+        - id: "tiktok-caption"
+          platform: "tiktok"
+          name: "Tao TikTok Caption"
+          prompt: >
+            保持短、直接、好懂，像短影音 caption。
+            仍要有 CTA 與 3 個 hashtags。
+          contactDetails: ""
+          cta: ""
+          postPreset: "TAO_TIKTOK_CAPTION"
+
+        - id: "telegram-main"
+          platform: "telegram"
+          name: "Tao Telegram Channel"
+          prompt: >
+            寫得像頻道更新通知，精簡但清楚。
+          contactDetails: "https://t.me/tao_channel"
+          cta: "加入 Telegram 看即時更新。"
+          postPreset: ""
+
+        - id: "patreon-longform"
+          platform: "patreon"
+          name: "Tao Patreon 長文"
+          prompt: >
+            強調會員價值、幕後內容、完整版與專屬資源。
+          contactDetails: "https://patreon.com/tao"
+          cta: "加入 Patreon 取得完整內容與獨家更新。"
+          postPreset: ""
+
+        - id: "reddit-community"
+          platform: "reddit"
+          name: "Tao Reddit 社群版"
+          prompt: >
+            用社群口吻，不要像銷售文。
+            可帶一些背景、觀察與討論點。
+          contactDetails: ""
+          cta: "如果你想看完整脈絡，可以再告訴我，我補充更多資訊。"
+          postPreset: ""
+
+  - name: "Tao 副品牌 / 測試 Profile"
+    systemPrompt: >
+      這是測試用 profile，語氣可以更實驗、更輕鬆。
+    contactDetails: "contact@example.com"
+    cta: "追蹤、留言、分享你最想看的主題。"
+    accountIds: []
+    settings:
+      llm:
+        apiBaseUrl: "https://llmapi.iamwillywang.com/"
+        transcriptionModel: "Audio-Speech-Group"
+        generationModel: "Multimodal-Generation-Groups"
+      storage:
+        remoteName: "Onedrive-Yahooforsub-Tao"
+        remotePath: "Scripts-ssh-ssl-keys/SocialUpload/testing"
+        publicUrlTemplate: ""
+      watermark:
+        enabled: false
+        type: "text"
+        mode: "static"
+        text: ""
+        imagePath: ""
+        position: "bottom-right"
+        opacity: 0.45
+      googleSheet:
+        spreadsheetId: ""
+        worksheetName: "Sheet1"
+      socialImport:
+        defaultLink: ""
+        category: ""
+        watermarkName: ""
+        hashtagGroup: ""
+        videoThumbnailUrl: ""
+        ctaGroup: ""
+        firstComment: ""
+        story: false
+        pinterestBoard: ""
+        altText: ""
+        pinTitle: ""
+      postPresets:
+        twitter: ""
+        threads: ""
+        instagram: ""
+        facebook: ""
+        youtube: ""
+        tiktok: ""
+      contentAccounts: []
