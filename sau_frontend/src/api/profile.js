@@ -72,6 +72,14 @@ export const profileApi = {
     return http.post('/validateGoogleSheetConfig', data)
   },
 
+  getDirectPublishersConfig() {
+    return http.get('/getDirectPublishersConfig')
+  },
+
+  saveDirectPublishersConfig(data) {
+    return http.post('/saveDirectPublishersConfig', data)
+  },
+
   migrateMedia(data) {
     return http.post('/migrateProfileMedia', data)
   }

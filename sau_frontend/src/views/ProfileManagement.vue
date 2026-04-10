@@ -27,6 +27,7 @@
             YAML 備份
           </el-button>
           <el-button type="warning" plain @click="openGoogleSheetDialog">Google 試算表連線</el-button>
+          <el-button type="warning" plain @click="openDirectPublishersDialog">Direct Publishers</el-button>
           <el-button type="info" @click="fetchProfiles" :loading="isRefreshing">
             <el-icon :class="{ 'is-loading': isRefreshing }"><Refresh /></el-icon>
             <span>{{ isRefreshing ? '重新整理中' : '重新整理' }}</span>
@@ -202,6 +203,30 @@
                     v-model="contentAccount.postPreset"
                     placeholder="匯出 Google Sheet 時，此帳號要套用的 Post Preset"
                   />
+                </el-form-item>
+
+                <el-form-item
+                  v-if="supportsDirectPublisherTarget(contentAccount.platform)"
+                  label="Direct Target"
+                  label-width="120px"
+                >
+                  <el-select
+                    v-model="contentAccount.publisherTargetId"
+                    clearable
+                    filterable
+                    placeholder="選擇對應的直發 target"
+                    style="width: 100%"
+                  >
+                    <el-option
+                      v-for="target in getAvailableDirectPublisherTargets(contentAccount.platform)"
+                      :key="target.id"
+                      :label="target.name"
+                      :value="target.id"
+                    />
+                  </el-select>
+                  <div class="muted-text">
+                    可在上方「Direct Publishers」管理 Telegram / Discord / Reddit / X 的直發目標。
+                  </div>
                 </el-form-item>
               </div>
             </div>
@@ -555,6 +580,119 @@
     </el-dialog>
 
     <el-dialog
+      v-model="directPublishersDialogVisible"
+      title="Direct Publishers 設定"
+      width="900px"
+    >
+      <el-alert
+        title="這裡管理 Telegram / Discord / Reddit / X 的直發目標。內容帳號會用 target id 綁到這裡的設定。"
+        type="info"
+        :closable="false"
+        show-icon
+      />
+
+      <div class="content-account-toolbar direct-target-toolbar">
+        <div class="muted-text">
+          Telegram 使用 Bot Token + Chat ID；Discord 使用 Webhook；Reddit 使用 refresh token；X 使用 API key + access token。
+        </div>
+        <el-button type="primary" plain @click="addDirectPublisherTarget">新增 target</el-button>
+      </div>
+
+      <div v-if="directPublishersForm.targets.length" class="content-account-list">
+        <div
+          v-for="(target, index) in directPublishersForm.targets"
+          :key="target.id"
+          class="content-account-card"
+        >
+          <div class="content-account-card-header">
+            <strong>Target {{ index + 1 }}</strong>
+            <el-button type="danger" link @click="removeDirectPublisherTarget(index)">刪除</el-button>
+          </div>
+
+          <el-form :model="target" label-width="120px">
+            <el-form-item label="平台">
+              <el-select v-model="target.platform" style="width: 100%" @change="handleDirectPublisherPlatformChange(target)">
+                <el-option label="Telegram" value="telegram" />
+                <el-option label="Discord" value="discord" />
+                <el-option label="Reddit" value="reddit" />
+                <el-option label="X / Twitter" value="twitter" />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item label="名稱">
+              <el-input v-model="target.name" placeholder="例如：主 Telegram 頻道 / X 主帳" />
+            </el-form-item>
+
+            <el-form-item label="啟用">
+              <el-switch v-model="target.enabled" />
+            </el-form-item>
+
+            <template v-if="target.platform === 'telegram'">
+              <el-form-item label="Bot Token">
+                <el-input v-model="target.config.botToken" type="password" show-password />
+              </el-form-item>
+              <el-form-item label="Chat ID">
+                <el-input v-model="target.config.chatId" placeholder="@channel 或 -100..." />
+              </el-form-item>
+            </template>
+
+            <template v-else-if="target.platform === 'discord'">
+              <el-form-item label="Webhook URL">
+                <el-input v-model="target.config.webhookUrl" type="password" show-password />
+              </el-form-item>
+              <el-form-item label="Webhook 名稱">
+                <el-input v-model="target.config.username" placeholder="留空則沿用 Discord 預設 webhook 名稱" />
+              </el-form-item>
+            </template>
+
+            <template v-else-if="target.platform === 'reddit'">
+              <el-form-item label="Client ID">
+                <el-input v-model="target.config.clientId" type="password" show-password />
+              </el-form-item>
+              <el-form-item label="Client Secret">
+                <el-input v-model="target.config.clientSecret" type="password" show-password />
+              </el-form-item>
+              <el-form-item label="Refresh Token">
+                <el-input v-model="target.config.refreshToken" type="password" show-password />
+              </el-form-item>
+              <el-form-item label="Subreddit">
+                <el-input v-model="target.config.subreddit" placeholder="例如：mysubreddit" />
+              </el-form-item>
+            </template>
+
+            <template v-else-if="target.platform === 'twitter'">
+              <el-form-item label="API Key">
+                <el-input v-model="target.config.apiKey" type="password" show-password />
+              </el-form-item>
+              <el-form-item label="API Key Secret">
+                <el-input v-model="target.config.apiKeySecret" type="password" show-password />
+              </el-form-item>
+              <el-form-item label="Access Token">
+                <el-input v-model="target.config.accessToken" type="password" show-password />
+              </el-form-item>
+              <el-form-item label="Access Token Secret">
+                <el-input v-model="target.config.accessTokenSecret" type="password" show-password />
+              </el-form-item>
+            </template>
+          </el-form>
+        </div>
+      </div>
+
+      <div v-else class="muted-text">
+        尚未設定任何 direct publisher target。
+      </div>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="directPublishersDialogVisible = false">取消</el-button>
+          <el-button type="primary" @click="submitSaveDirectPublishersConfig" :loading="isSavingDirectPublishers">
+            {{ isSavingDirectPublishers ? '儲存中' : '儲存設定' }}
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="generateDialogVisible"
       title="批次產生文案並匯出 Google 試算表"
       width="900px"
@@ -877,7 +1015,7 @@
       width="720px"
     >
       <el-alert
-        title="備份內容為整份 Profile YAML 設定，會上傳到你設定的 Rclone remote 目錄。"
+        title="備份內容包含 Profile 匯出 YAML、資料庫與直發/Google 設定檔，會打包後上傳到你設定的 Rclone remote 目錄。"
         type="info"
         :closable="false"
         show-icon
@@ -952,11 +1090,13 @@ const isValidatingGoogleSheet = ref(false)
 const isImportingProfiles = ref(false)
 const isSavingBackupConfig = ref(false)
 const isRunningBackup = ref(false)
+const isSavingDirectPublishers = ref(false)
 
 const profiles = ref([])
 const dialogVisible = ref(false)
 const dialogType = ref('create')
 const googleSheetDialogVisible = ref(false)
+const directPublishersDialogVisible = ref(false)
 const backupDialogVisible = ref(false)
 const generateDialogVisible = ref(false)
 const importPreviewDialogVisible = ref(false)
@@ -974,6 +1114,9 @@ const googleSheetConfig = ref({
 })
 const contentResultTabMap = ref({})
 const profileYamlInputRef = ref(null)
+const directPublishersForm = ref({
+  targets: []
+})
 const pendingImportYamlContent = ref('')
 const importPreview = ref({
   summary: {
@@ -1003,6 +1146,7 @@ const postLabels = {
   youtube: 'YouTube 貼文與說明',
   tiktok: 'TikTok 貼文與說明',
   telegram: 'Telegram',
+  discord: 'Discord',
   patreon: 'Patreon'
 }
 
@@ -1015,6 +1159,7 @@ const contentAccountPlatformOptions = [
   { label: 'YouTube', value: 'youtube' },
   { label: 'TikTok', value: 'tiktok' },
   { label: 'Telegram', value: 'telegram' },
+  { label: 'Discord', value: 'discord' },
   { label: 'Patreon', value: 'patreon' },
   { label: 'Reddit', value: 'reddit' }
 ]
@@ -1042,8 +1187,63 @@ const createContentAccount = () => ({
   prompt: '',
   contactDetails: '',
   cta: '',
-  postPreset: ''
+  postPreset: '',
+  publisherTargetId: ''
 })
+
+const normalizeDirectPublisherConfig = (platform, config = {}) => {
+  if (platform === 'telegram') {
+    return {
+      botToken: config.botToken || '',
+      chatId: config.chatId || '',
+      parseMode: config.parseMode || 'HTML',
+      disableWebPagePreview: Boolean(config.disableWebPagePreview)
+    }
+  }
+  if (platform === 'discord') {
+    return {
+      webhookUrl: config.webhookUrl || '',
+      username: config.username || ''
+    }
+  }
+  if (platform === 'reddit') {
+    return {
+      clientId: config.clientId || '',
+      clientSecret: config.clientSecret || '',
+      refreshToken: config.refreshToken || '',
+      subreddit: config.subreddit || ''
+    }
+  }
+  return {
+    apiKey: config.apiKey || '',
+    apiKeySecret: config.apiKeySecret || '',
+    accessToken: config.accessToken || '',
+    accessTokenSecret: config.accessTokenSecret || ''
+  }
+}
+
+const createDirectPublisherTarget = (platform = 'telegram') => ({
+  id: `publisher-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  platform,
+  name: '',
+  enabled: true,
+  config: normalizeDirectPublisherConfig(platform, {})
+})
+
+const normalizeDirectPublisherTargets = (targets = []) => {
+  if (!Array.isArray(targets)) {
+    return []
+  }
+  return targets
+    .filter(item => item && typeof item === 'object')
+    .map(item => ({
+      id: item.id || createDirectPublisherTarget(item.platform || 'telegram').id,
+      platform: item.platform || 'telegram',
+      name: item.name || '',
+      enabled: item.enabled !== false,
+      config: normalizeDirectPublisherConfig(item.platform || 'telegram', item.config || {})
+    }))
+}
 
 const normalizeWatermarkFormSettings = (watermark = {}) => ({
   enabled: Boolean(watermark.enabled),
@@ -1075,7 +1275,8 @@ const normalizeContentAccounts = (values = []) => {
       prompt: item.prompt || '',
       contactDetails: item.contactDetails || '',
       cta: item.cta || '',
-      postPreset: item.postPreset || ''
+      postPreset: item.postPreset || '',
+      publisherTargetId: item.publisherTargetId || ''
     }))
 }
 
@@ -1262,6 +1463,7 @@ const selectedGenerationContentAccounts = computed(() => {
   const selectedIds = new Set(generationBatchResult.value?.selectedContentAccountIds || [])
   return allContentAccounts.filter(item => selectedIds.has(item.id))
 })
+const directPublisherTargetOptions = computed(() => normalizeDirectPublisherTargets(directPublishersForm.value.targets || []))
 const availablePublishHandoffPlatforms = computed(() => (
   publishHandoffPlatforms.filter(platform => selectedGenerationAccounts.value.some(account => account.type === platform.accountType))
 ))
@@ -1283,6 +1485,12 @@ const getContentAccountDisplayName = (contentAccount) => {
   const platformLabel = getContentAccountPlatformLabel(contentAccount.platform)
   return name ? `${name}（${platformLabel}）` : platformLabel
 }
+
+const supportsDirectPublisherTarget = (platform) => ['telegram', 'discord', 'reddit', 'twitter'].includes(platform)
+
+const getAvailableDirectPublisherTargets = (platform) => (
+  directPublisherTargetOptions.value.filter(item => item.platform === platform)
+)
 
 const truncateText = (value, limit = 120) => {
   const text = (value || '').trim()
@@ -1327,6 +1535,21 @@ const removeContentAccount = (index) => {
   profileForm.value.settings.contentAccounts.splice(index, 1)
 }
 
+const addDirectPublisherTarget = () => {
+  directPublishersForm.value.targets.push(createDirectPublisherTarget())
+}
+
+const removeDirectPublisherTarget = (index) => {
+  directPublishersForm.value.targets.splice(index, 1)
+}
+
+const handleDirectPublisherPlatformChange = (target) => {
+  if (!target) {
+    return
+  }
+  target.config = normalizeDirectPublisherConfig(target.platform, {})
+}
+
 const fetchProfiles = async () => {
   isRefreshing.value = true
   try {
@@ -1336,6 +1559,18 @@ const fetchProfiles = async () => {
     ElMessage.error('取得 Profile 清單失敗')
   } finally {
     isRefreshing.value = false
+  }
+}
+
+const fetchDirectPublishersConfig = async () => {
+  try {
+    const response = await profileApi.getDirectPublishersConfig()
+    directPublishersForm.value = {
+      targets: normalizeDirectPublisherTargets(response.data?.targets || [])
+    }
+  } catch (error) {
+    directPublishersForm.value = { targets: [] }
+    ElMessage.error(error.message || '取得 Direct Publishers 設定失敗')
   }
 }
 
@@ -1580,6 +1815,11 @@ const openGoogleSheetDialog = async () => {
   googleSheetDialogVisible.value = true
 }
 
+const openDirectPublishersDialog = async () => {
+  await fetchDirectPublishersConfig()
+  directPublishersDialogVisible.value = true
+}
+
 const saveGoogleSheetConfig = async () => {
   if (!googleSheetForm.value.serviceAccountJson.trim()) {
     ElMessage.warning('請貼上 Google service account JSON')
@@ -1620,6 +1860,28 @@ const validateGoogleSheetConfig = async () => {
     ElMessage.error(error.message || 'Google 試算表連線失敗')
   } finally {
     isValidatingGoogleSheet.value = false
+  }
+}
+
+const submitSaveDirectPublishersConfig = async () => {
+  isSavingDirectPublishers.value = true
+  try {
+    const payload = {
+      targets: normalizeDirectPublisherTargets(directPublishersForm.value.targets || []).map(target => ({
+        ...target,
+        config: normalizeDirectPublisherConfig(target.platform, target.config || {})
+      }))
+    }
+    const response = await profileApi.saveDirectPublishersConfig(payload)
+    directPublishersForm.value = {
+      targets: normalizeDirectPublisherTargets(response.data?.targets || [])
+    }
+    directPublishersDialogVisible.value = false
+    ElMessage.success('Direct Publishers 設定已儲存')
+  } catch (error) {
+    ElMessage.error(error.message || '儲存 Direct Publishers 設定失敗')
+  } finally {
+    isSavingDirectPublishers.value = false
   }
 }
 
@@ -1850,7 +2112,8 @@ onMounted(async () => {
     fetchProfiles(),
     ensureAccounts(),
     ensureMaterials(),
-    fetchGoogleSheetConfig()
+    fetchGoogleSheetConfig(),
+    fetchDirectPublishersConfig()
   ])
 })
 </script>

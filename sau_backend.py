@@ -33,6 +33,7 @@ from utils.profile_pipeline import (
     save_google_service_account_config,
     validate_google_sheet_connection,
 )
+from utils.direct_publishers import get_direct_publishers_config, save_direct_publishers_config
 from utils.publish_jobs import ensure_publish_job_tables
 from utils.publish_jobs import (
     cancel_publish_job,
@@ -774,6 +775,41 @@ def get_google_sheet_config_route():
             "code": 500,
             "msg": str(e),
             "data": None
+        }), 500
+
+
+@app.route('/getDirectPublishersConfig', methods=['GET'])
+def get_direct_publishers_config_route():
+    try:
+        result = get_direct_publishers_config(Path(BASE_DIR))
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": {"targets": []}
+        }), 500
+
+
+@app.route('/saveDirectPublishersConfig', methods=['POST'])
+def save_direct_publishers_config_route():
+    data = request.get_json() or {}
+    try:
+        result = save_direct_publishers_config(Path(BASE_DIR), data)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": {"targets": []}
         }), 500
 
 

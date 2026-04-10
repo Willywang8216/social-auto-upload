@@ -8,6 +8,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import tarfile
 import uuid
 from copy import deepcopy
 from datetime import datetime
@@ -47,7 +48,7 @@ PLATFORM_LIMITS = {
 }
 
 EXPORT_PLATFORMS = ["twitter", "threads", "instagram", "facebook", "youtube", "tiktok"]
-NON_SHEET_PLATFORMS = ["telegram", "patreon"]
+NON_SHEET_PLATFORMS = ["telegram", "discord", "patreon"]
 CONTENT_ACCOUNT_PLATFORMS = EXPORT_PLATFORMS + NON_SHEET_PLATFORMS + ["reddit"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".m4v"}
@@ -249,13 +250,12 @@ def run_profile_backup(base_dir: Path, db_path: Path) -> dict[str, Any]:
     if not rclone_bin:
         raise RuntimeError("rclone is not installed or not in PATH")
 
-    yaml_text = export_profiles_yaml(db_path)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    filename = f"{PROFILE_BACKUP_FILENAME_PREFIX}{timestamp}.yaml"
+    filename = f"{PROFILE_BACKUP_FILENAME_PREFIX}{timestamp}.tar.gz"
     local_dir = base_dir / "db" / "profile_backups"
     local_dir.mkdir(parents=True, exist_ok=True)
     local_path = local_dir / filename
-    local_path.write_text(yaml_text, encoding="utf-8")
+    temp_paths = _build_profile_backup_bundle(base_dir, db_path, local_path)
 
     remote_relative_path = _join_remote_path(remote_path, filename)
     remote_spec = f"{remote_name}:{remote_relative_path}"
@@ -301,6 +301,11 @@ def run_profile_backup(base_dir: Path, db_path: Path) -> dict[str, Any]:
             local_path.unlink()
         except OSError:
             pass
+        for temp_path in temp_paths:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def run_scheduled_profile_backup_if_due(base_dir: Path, db_path: Path, now: datetime | None = None) -> dict[str, Any] | None:
@@ -688,7 +693,7 @@ def build_google_sheet_row_mappings(
 
 def append_rows_to_google_sheet(profile: dict[str, Any], rows: list[list[str]], schedule_at: str | None = None) -> dict[str, Any]:
     if not rows:
-        return {"appended": 0, "worksheet": None}
+        return {"appended": 0, "worksheet": None, "rowNumbers": []}
 
     settings = profile.get("settings") or {}
     google_sheet = settings.get("googleSheet") or {}
@@ -718,9 +723,43 @@ def append_rows_to_google_sheet(profile: dict[str, Any], rows: list[list[str]], 
     if existing_header != SHEET_COLUMNS:
         worksheet.update("A1:T1", [SHEET_COLUMNS])
 
+    start_row = max(len(worksheet.col_values(1)) + 1, 2)
     worksheet.append_rows(rows, value_input_option="USER_ENTERED")
     return {
         "appended": len(rows),
+        "worksheet": worksheet_name,
+        "spreadsheetId": spreadsheet_id,
+        "rowNumbers": [start_row + index for index in range(len(rows))],
+    }
+
+
+def delete_rows_from_google_sheet(profile: dict[str, Any], worksheet_name: str, row_numbers: list[int]) -> dict[str, Any]:
+    valid_rows = sorted({int(row) for row in (row_numbers or []) if int(row) > 1}, reverse=True)
+    if not valid_rows:
+        return {"deleted": 0, "worksheet": worksheet_name}
+
+    settings = profile.get("settings") or {}
+    google_sheet = settings.get("googleSheet") or {}
+    spreadsheet_id = (google_sheet.get("spreadsheetId") or "").strip()
+    if not spreadsheet_id:
+        raise ValueError("Google Sheet spreadsheetId is required")
+
+    service_account_data = _load_google_service_account_data()
+    if not service_account_data:
+        raise RuntimeError("Google service account credentials are not configured")
+
+    try:
+        import gspread
+    except ImportError as exc:
+        raise RuntimeError("gspread is required to delete rows from Google Sheets") from exc
+
+    client = gspread.service_account_from_dict(service_account_data)
+    spreadsheet = client.open_by_key(spreadsheet_id)
+    worksheet = spreadsheet.worksheet(worksheet_name)
+    for row_number in valid_rows:
+        worksheet.delete_rows(row_number)
+    return {
+        "deleted": len(valid_rows),
         "worksheet": worksheet_name,
         "spreadsheetId": spreadsheet_id,
     }
@@ -1069,13 +1108,14 @@ def build_generation_system_prompt(profile: dict[str, Any]) -> str:
     custom_prompt = (profile.get("systemPrompt") or "").strip()
     return (
         "You are a social media content strategist. "
-        "Return valid JSON only with these keys: twitter, threads, instagram, facebook, youtube, tiktok, telegram, patreon. "
+        "Return valid JSON only with these keys: twitter, threads, instagram, facebook, youtube, tiktok, telegram, discord, patreon. "
         "Do not wrap the JSON in markdown. "
         "Requirements: twitter and threads must include emoji and exactly 3 hashtags, plus natural contact details and a CTA. "
         "instagram and facebook should be long-form posts with contact details and a CTA woven naturally into the copy. "
         "youtube should be a post with a strong hook plus a useful description-style body. "
         "tiktok should be short, direct, and include a description-ready CTA. "
         "telegram should be concise and readable. "
+        "discord should be community-friendly, readable in one screen, and include a soft CTA. "
         "patreon should be long-form and membership-oriented. "
         "Keep each platform within its typical character constraints. "
         f"{custom_prompt}"
@@ -1092,6 +1132,7 @@ def build_content_account_system_prompt(profile: dict[str, Any], content_account
         "youtube": "Write one YouTube community-style post with a useful description tone and exactly 3 hashtags.",
         "tiktok": "Write one TikTok caption-style post with a direct hook, CTA, and exactly 3 hashtags.",
         "telegram": "Write one concise Telegram post that reads naturally and includes a CTA.",
+        "discord": "Write one Discord announcement-style post that feels natural for a server channel and includes a soft CTA.",
         "patreon": "Write one Patreon-oriented long-form post that emphasizes membership value and CTA.",
         "reddit": "Write one Reddit post title plus body in a natural community tone without sounding promotional. Keep it readable and specific.",
     }.get(platform, "Write one platform-native social media post.")
@@ -1368,6 +1409,7 @@ def _normalize_content_accounts(values: Any) -> list[dict[str, str]]:
             "contactDetails": str(item.get("contactDetails") or "").strip(),
             "cta": str(item.get("cta") or "").strip(),
             "postPreset": str(item.get("postPreset") or "").strip(),
+            "publisherTargetId": str(item.get("publisherTargetId") or "").strip(),
         })
 
     return normalized
@@ -1647,7 +1689,7 @@ def _prune_profile_backup_remote_files(rclone_bin: str, remote_name: str, remote
     filenames = [
         line.strip()
         for line in result.stdout.splitlines()
-        if line.strip().startswith(PROFILE_BACKUP_FILENAME_PREFIX) and line.strip().endswith(".yaml")
+        if line.strip().startswith(PROFILE_BACKUP_FILENAME_PREFIX) and line.strip().endswith(".tar.gz")
     ]
     if len(filenames) <= keep_copies:
         return
@@ -1662,6 +1704,41 @@ def _prune_profile_backup_remote_files(rclone_bin: str, remote_name: str, remote
         )
         if delete_result.returncode != 0:
             raise RuntimeError(delete_result.stderr.strip() or delete_result.stdout.strip() or "rclone backup cleanup failed")
+
+
+def _build_profile_backup_bundle(base_dir: Path, db_path: Path, archive_path: Path) -> list[Path]:
+    export_path = base_dir / "db" / "profiles.export.yaml"
+    export_path.write_text(export_profiles_yaml(db_path), encoding="utf-8")
+
+    files_to_include = [export_path]
+    for candidate in [
+        base_dir / "db" / "database.db",
+        base_dir / "db" / "direct_publishers.json",
+        base_dir / "db" / "google_service_account.json",
+        base_dir / "db" / PROFILE_BACKUP_CONFIG_FILENAME,
+    ]:
+        if candidate.exists():
+            files_to_include.append(candidate)
+
+    manifest_path = base_dir / "db" / "backup-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "createdAt": datetime.now().isoformat(timespec="seconds"),
+                "formatVersion": 2,
+                "files": [str(path.relative_to(base_dir)) for path in files_to_include],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    files_to_include.append(manifest_path)
+
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for path in files_to_include:
+            archive.add(path, arcname=str(path.relative_to(base_dir)))
+    return [export_path, manifest_path]
 
 
 def _load_google_service_account_data(base_dir: Path | None = None) -> dict[str, Any] | None:

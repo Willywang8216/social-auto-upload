@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from utils.account_registry import serialize_account_row
+from utils.direct_publishers import get_direct_publisher_target, publish_job_to_direct_target
 from utils.profile_pipeline import (
     append_rows_to_google_sheet,
     build_google_sheet_rows,
+    delete_rows_from_google_sheet,
     generate_profile_batch_content,
     generate_post_for_content_account,
     generate_posts,
@@ -18,11 +20,12 @@ from utils.profile_pipeline import (
     infer_media_kind,
 )
 
-DIRECT_UPLOAD_PLATFORMS = {"xiaohongshu", "channels", "douyin", "kuaishou"}
-SHEET_EXPORT_PLATFORMS = {"twitter", "threads", "instagram", "facebook", "youtube", "tiktok"}
-MANUAL_ONLY_PLATFORMS = {"telegram", "patreon", "reddit", "discord"}
+DIRECT_UPLOAD_PLATFORMS = {"xiaohongshu", "channels", "douyin", "kuaishou", "twitter", "telegram", "reddit", "discord"}
+SHEET_EXPORT_PLATFORMS = {"threads", "instagram", "facebook", "youtube", "tiktok"}
+MANUAL_ONLY_PLATFORMS = {"patreon"}
 ACTIVE_JOB_STATUSES = {"queued", "scheduled"}
 TERMINAL_JOB_STATUSES = {"published", "exported", "manual_done", "failed", "cancelled"}
+SCHEDULER_MIRROR_PLATFORMS = {"twitter"}
 
 
 def ensure_publish_job_tables(db_path: Path) -> None:
@@ -188,6 +191,9 @@ def save_publish_jobs(db_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 )
                 saved_ids.append(job_id)
         conn.commit()
+
+    for job_id in saved_ids:
+        _sync_scheduler_sheet_copy_for_job(db_path, job_id)
 
     return {
         "batchId": batch_id,
@@ -500,7 +506,7 @@ def execute_due_publish_jobs(
         job_ids = None
         try:
             if claimed["deliveryMode"] == "direct_upload":
-                _execute_direct_upload_job(db_path, claimed)
+                _execute_direct_upload_job(db_path, claimed, base_dir)
                 final_status = "published"
             elif claimed["deliveryMode"] == "sheet_export":
                 _execute_sheet_export_job(db_path, claimed)
@@ -634,6 +640,7 @@ def _build_draft_items(db_path: Path, batch_result: dict[str, Any]) -> list[dict
                     "mediaKind": storage.get("mediaKind") or infer_media_kind(Path(processed_media_path)) if processed_media_path else "file",
                     "transcript": transcript,
                     "postPreset": account.get("postPreset") or "",
+                    "publisherTargetId": account.get("publisherTargetId") or "",
                     "source": "content_account_generation",
                 },
             })
@@ -871,15 +878,17 @@ def _serialize_job_row_with_native_fields(row: sqlite3.Row | dict[str, Any]) -> 
     }
 
 
-def _execute_direct_upload_job(db_path: Path, job: dict[str, Any]) -> None:
+def _execute_direct_upload_job(db_path: Path, job: dict[str, Any], base_dir: Path | None = None) -> None:
     from myUtils.postVideo import post_video_DouYin, post_video_ks, post_video_tencent, post_video_xhs
 
-    account = _get_account_by_id(db_path, job["accountId"])
-    account_file = account["filePath"]
-    media_path = job["mediaPath"]
-    title = job["title"] or job["materialName"] or "Untitled"
-    message = job["message"] or ""
     platform_key = job["platformKey"]
+
+    if platform_key in {"xiaohongshu", "channels", "douyin", "kuaishou"}:
+        account = _get_account_by_id(db_path, job["accountId"])
+        account_file = account["filePath"]
+        media_path = job["mediaPath"]
+        title = job["title"] or job["materialName"] or "Untitled"
+        message = job["message"] or ""
 
     if platform_key == "xiaohongshu":
         post_video_xhs(title, [media_path], "", [account_file], None, False, 1, None, 0, message)
@@ -892,6 +901,15 @@ def _execute_direct_upload_job(db_path: Path, job: dict[str, Any]) -> None:
         return
     if platform_key == "kuaishou":
         post_video_ks(title, [media_path], "", [account_file], None, False, 1, None, 0, message)
+        return
+    if platform_key in {"twitter", "telegram", "reddit", "discord"}:
+        if base_dir is None:
+            raise ValueError("base_dir is required for direct publisher targets")
+        target_id = str((job.get("metadata") or {}).get("publisherTargetId") or "").strip()
+        if not target_id:
+            raise ValueError(f"{platform_key} direct upload job requires publisherTargetId")
+        target = get_direct_publisher_target(base_dir, target_id)
+        publish_job_to_direct_target(base_dir, job, target)
         return
     raise ValueError(f"unsupported direct upload platform: {platform_key}")
 
@@ -935,6 +953,134 @@ def _execute_sheet_export_job(db_path: Path, job: dict[str, Any]) -> None:
     append_rows_to_google_sheet(profile, rows, job.get("scheduledAt") or None)
 
 
+def _sync_scheduler_sheet_copy_for_job(db_path: Path, job_id: int) -> None:
+    job = _get_job_by_id(db_path, job_id)
+    if not _should_create_scheduler_sheet_copy(job):
+        return
+    profile = get_profile(db_path, int(job["profileId"]))
+    if not ((profile.get("settings") or {}).get("googleSheet") or {}).get("spreadsheetId"):
+        return
+
+    metadata = dict(job.get("metadata") or {})
+    scheduler_sheet = metadata.get("schedulerSheet") if isinstance(metadata.get("schedulerSheet"), dict) else {}
+    if scheduler_sheet.get("rowNumbers"):
+        return
+
+    profile, rows = _build_google_sheet_rows_for_job(db_path, job, job.get("scheduledAt") or None)
+    result = append_rows_to_google_sheet(profile, rows, job.get("scheduledAt") or None)
+    metadata["schedulerSheet"] = {
+        "spreadsheetId": result.get("spreadsheetId") or "",
+        "worksheet": result.get("worksheet") or "",
+        "rowNumbers": result.get("rowNumbers") or [],
+        "scheduledAt": job.get("scheduledAt") or "",
+        "state": "active",
+        "retryCount": int(scheduler_sheet.get("retryCount") or 0),
+    }
+    _update_job_metadata(db_path, job["id"], metadata)
+
+
+def _cleanup_scheduler_sheet_for_job(db_path: Path, job: dict[str, Any]) -> None:
+    if not _should_create_scheduler_sheet_copy(job):
+        return
+    profile = get_profile(db_path, int(job["profileId"])) if job.get("profileId") else None
+    if not profile or not (((profile.get("settings") or {}).get("googleSheet") or {}).get("spreadsheetId")):
+        return
+
+    metadata = dict(job.get("metadata") or {})
+    scheduler_sheet = metadata.get("schedulerSheet") if isinstance(metadata.get("schedulerSheet"), dict) else {}
+    row_numbers = scheduler_sheet.get("rowNumbers") or []
+    worksheet_name = str(scheduler_sheet.get("worksheet") or "").strip()
+    if not row_numbers or not worksheet_name or not job.get("profileId"):
+        return
+
+    delete_rows_from_google_sheet(profile, worksheet_name, row_numbers)
+    scheduler_sheet["rowNumbers"] = []
+    scheduler_sheet["state"] = "deleted"
+    metadata["schedulerSheet"] = scheduler_sheet
+    _update_job_metadata(db_path, job["id"], metadata)
+
+
+def _reschedule_scheduler_sheet_retry_for_job(db_path: Path, job: dict[str, Any]) -> None:
+    if not _should_create_scheduler_sheet_copy(job):
+        return
+    profile = get_profile(db_path, int(job["profileId"])) if job.get("profileId") else None
+    if not profile or not (((profile.get("settings") or {}).get("googleSheet") or {}).get("spreadsheetId")):
+        return
+
+    metadata = dict(job.get("metadata") or {})
+    scheduler_sheet = metadata.get("schedulerSheet") if isinstance(metadata.get("schedulerSheet"), dict) else {}
+    if scheduler_sheet.get("retryCreatedAt"):
+        return
+
+    source_value = job.get("scheduledAt") or job.get("createdAt") or ""
+    if not source_value:
+        return
+
+    retry_at = (_parse_iso_datetime(source_value) + timedelta(days=7)).isoformat(timespec="seconds")
+    profile, rows = _build_google_sheet_rows_for_job(db_path, job, retry_at)
+    result = append_rows_to_google_sheet(profile, rows, retry_at)
+
+    old_rows = scheduler_sheet.get("rowNumbers") or []
+    old_worksheet = str(scheduler_sheet.get("worksheet") or "").strip()
+    if old_rows and old_worksheet:
+        delete_rows_from_google_sheet(profile, old_worksheet, old_rows)
+
+    scheduler_sheet.update({
+        "spreadsheetId": result.get("spreadsheetId") or scheduler_sheet.get("spreadsheetId") or "",
+        "worksheet": result.get("worksheet") or "",
+        "rowNumbers": result.get("rowNumbers") or [],
+        "scheduledAt": retry_at,
+        "state": "retry_active",
+        "retryCount": int(scheduler_sheet.get("retryCount") or 0) + 1,
+        "retryCreatedAt": datetime.utcnow().isoformat(timespec="seconds"),
+    })
+    metadata["schedulerSheet"] = scheduler_sheet
+    _update_job_metadata(db_path, job["id"], metadata)
+
+
+def _build_google_sheet_rows_for_job(
+    db_path: Path,
+    job: dict[str, Any],
+    schedule_at: str | None,
+) -> tuple[dict[str, Any], list[list[str]]]:
+    if not job["profileId"]:
+        raise ValueError("scheduler sheet copy requires profileId")
+
+    profile = get_profile(db_path, int(job["profileId"]))
+    upload_result = {
+        "publicUrl": job["mediaPublicUrl"],
+        "mediaKind": job["metadata"].get("mediaKind") or infer_media_kind(Path(job["mediaPath"])),
+    }
+
+    if job["targetKind"] == "content_account":
+        rows = build_google_sheet_rows(
+            profile,
+            {},
+            upload_result,
+            schedule_at,
+            [
+                {
+                    "account": {
+                        "id": job["contentAccountId"],
+                        "name": job["targetName"],
+                        "platform": job["platformKey"],
+                        "postPreset": job["metadata"].get("postPreset") or "",
+                    },
+                    "content": job["message"],
+                }
+            ],
+        )
+    else:
+        rows = build_google_sheet_rows(
+            profile,
+            {job["platformKey"]: job["message"]},
+            upload_result,
+            schedule_at,
+            None,
+        )
+    return profile, rows
+
+
 def _get_accounts_by_ids(db_path: Path, account_ids: list[int]) -> list[dict[str, Any]]:
     if not account_ids:
         return []
@@ -961,6 +1107,42 @@ def _get_account_by_id(db_path: Path, account_id: int | None) -> dict[str, Any]:
     if not row:
         raise ValueError("managed account not found")
     return serialize_account_row(row)
+
+
+def _get_job_by_id(db_path: Path, job_id: int) -> dict[str, Any]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT j.*,
+                   COALESCE(MAX(r.revision_no), 0) AS revision_count
+            FROM publish_jobs j
+            LEFT JOIN publish_job_revisions r ON r.job_id = j.id
+            WHERE j.id = ?
+            GROUP BY j.id
+            """,
+            (int(job_id),),
+        )
+        row = cursor.fetchone()
+    if not row:
+        raise ValueError("publish job not found")
+    return _serialize_job_row(row)
+
+
+def _update_job_metadata(db_path: Path, job_id: int, metadata: dict[str, Any]) -> None:
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE publish_jobs
+            SET metadata_json = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (json.dumps(metadata, ensure_ascii=False), int(job_id)),
+        )
+        conn.commit()
 
 
 def _update_job_status(db_path: Path, job_id: int, status: str) -> dict[str, Any]:
@@ -1010,6 +1192,7 @@ def _set_job_success(db_path: Path, job_id: int, status: str) -> None:
             (status, int(job_id)),
         )
         conn.commit()
+    _cleanup_scheduler_sheet_for_job(db_path, _get_job_by_id(db_path, job_id))
 
 
 def _set_job_failure(db_path: Path, job_id: int, error_text: str) -> None:
@@ -1026,6 +1209,7 @@ def _set_job_failure(db_path: Path, job_id: int, error_text: str) -> None:
             (str(error_text or "").strip(), int(job_id)),
         )
         conn.commit()
+    _reschedule_scheduler_sheet_retry_for_job(db_path, _get_job_by_id(db_path, job_id))
 
 
 def _build_job_title(material: dict[str, Any], message: str) -> str:
@@ -1047,6 +1231,16 @@ def _delivery_mode_for_platform(platform_key: str) -> str:
     if normalized in MANUAL_ONLY_PLATFORMS:
         return "manual_only"
     return "manual_only"
+
+
+def _should_create_scheduler_sheet_copy(job: dict[str, Any]) -> bool:
+    platform_key = str(job.get("platformKey") or "").strip().lower()
+    return (
+        job.get("deliveryMode") == "direct_upload"
+        and platform_key in SCHEDULER_MIRROR_PLATFORMS
+        and bool(job.get("profileId"))
+        and bool(job.get("message"))
+    )
 
 
 def _pick_primary_message(posts: dict[str, Any]) -> str:

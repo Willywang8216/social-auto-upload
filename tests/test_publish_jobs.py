@@ -118,7 +118,7 @@ class PublishJobsTests(unittest.TestCase):
 
         self.assertEqual(result["summary"]["items"], 2)
         delivery_modes = {item["deliveryMode"] for item in result["items"]}
-        self.assertEqual(delivery_modes, {"direct_upload", "sheet_export"})
+        self.assertEqual(delivery_modes, {"direct_upload"})
         managed_item = next(item for item in result["items"] if item["targetKind"] == "managed_account")
         self.assertEqual(managed_item["platformKey"], "douyin")
         content_item = next(item for item in result["items"] if item["targetKind"] == "content_account")
@@ -381,6 +381,150 @@ class PublishJobsTests(unittest.TestCase):
         self.assertEqual(statuses["douyin"], "published")
         self.assertEqual(statuses["twitter"], "exported")
         self.assertEqual(statuses["telegram"], "scheduled")
+
+    def test_save_publish_jobs_creates_scheduler_sheet_copy_for_twitter_direct_jobs(self):
+        profile_with_sheet = save_profile(
+            self.db_path,
+            {
+                "name": "Creator With Sheet",
+                "settings": {
+                    "googleSheet": {"spreadsheetId": "sheet-123"},
+                    "contentAccounts": [
+                        {
+                            "id": "acct-twitter-sheet",
+                            "platform": "twitter",
+                            "name": "X 排程帳",
+                            "postPreset": "Preset X",
+                            "publisherTargetId": "publisher-x-main",
+                        }
+                    ],
+                },
+            },
+        )
+
+        with patch("utils.publish_jobs.append_rows_to_google_sheet", return_value={
+            "appended": 1,
+            "worksheet": "2026-04-10-Creator With Sheet",
+            "spreadsheetId": "sheet-123",
+            "rowNumbers": [2],
+        }):
+            saved = save_publish_jobs(
+                self.db_path,
+                {
+                    "items": [
+                        {
+                            "profileId": profile_with_sheet["id"],
+                            "profileName": profile_with_sheet["name"],
+                            "targetKind": "content_account",
+                            "contentAccountId": "acct-twitter-sheet",
+                            "platformKey": "twitter",
+                            "targetName": "X 排程帳",
+                            "deliveryMode": "direct_upload",
+                            "materialId": 1,
+                            "materialName": "clip.mp4",
+                            "mediaPath": "videoFile/clip.mp4",
+                            "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                            "title": "Tweet Title",
+                            "message": "Tweet copy",
+                            "metadata": {
+                                "mediaKind": "video",
+                                "postPreset": "Preset X",
+                                "publisherTargetId": "publisher-x-main",
+                            },
+                        }
+                    ],
+                    "mode": "queue",
+                    "startAt": "2026-04-10T10:00:00",
+                    "repeatCount": 1,
+                    "frequencyValue": 1,
+                    "frequencyUnit": "days",
+                },
+            )
+
+        job = list_publish_jobs(self.db_path, {"jobId": saved["jobIds"][0]})[0]
+        scheduler_sheet = job["metadata"]["schedulerSheet"]
+        self.assertEqual(scheduler_sheet["worksheet"], "2026-04-10-Creator With Sheet")
+        self.assertEqual(scheduler_sheet["rowNumbers"], [2])
+        self.assertEqual(scheduler_sheet["state"], "active")
+
+    def test_execute_due_publish_jobs_retries_scheduler_sheet_copy_one_week_later_on_failure(self):
+        profile_with_sheet = save_profile(
+            self.db_path,
+            {
+                "name": "Creator Retry Sheet",
+                "settings": {
+                    "googleSheet": {"spreadsheetId": "sheet-456"},
+                    "contentAccounts": [
+                        {
+                            "id": "acct-twitter-retry",
+                            "platform": "twitter",
+                            "name": "X Retry 帳",
+                            "postPreset": "Preset Retry",
+                            "publisherTargetId": "publisher-x-retry",
+                        }
+                    ],
+                },
+            },
+        )
+
+        with patch("utils.publish_jobs.append_rows_to_google_sheet", side_effect=[
+            {
+                "appended": 1,
+                "worksheet": "2026-04-10-Creator Retry Sheet",
+                "spreadsheetId": "sheet-456",
+                "rowNumbers": [2],
+            },
+            {
+                "appended": 1,
+                "worksheet": "2026-04-17-Creator Retry Sheet",
+                "spreadsheetId": "sheet-456",
+                "rowNumbers": [7],
+            },
+        ]), patch("utils.publish_jobs.delete_rows_from_google_sheet") as delete_rows_mock:
+            saved = save_publish_jobs(
+                self.db_path,
+                {
+                    "items": [
+                        {
+                            "profileId": profile_with_sheet["id"],
+                            "profileName": profile_with_sheet["name"],
+                            "targetKind": "content_account",
+                            "contentAccountId": "acct-twitter-retry",
+                            "platformKey": "twitter",
+                            "targetName": "X Retry 帳",
+                            "deliveryMode": "direct_upload",
+                            "materialId": 1,
+                            "materialName": "clip.mp4",
+                            "mediaPath": "videoFile/clip.mp4",
+                            "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                            "title": "Tweet Retry",
+                            "message": "Tweet retry copy",
+                            "metadata": {
+                                "mediaKind": "video",
+                                "postPreset": "Preset Retry",
+                                "publisherTargetId": "publisher-x-retry",
+                            },
+                        }
+                    ],
+                    "mode": "queue",
+                    "startAt": "2026-04-10T10:00:00",
+                    "repeatCount": 1,
+                    "frequencyValue": 1,
+                    "frequencyUnit": "days",
+                },
+            )
+
+            with patch("utils.publish_jobs._execute_direct_upload_job", side_effect=RuntimeError("x failed")):
+                result = execute_due_publish_jobs(self.db_path, self.base_dir, job_ids=saved["jobIds"])
+
+        self.assertEqual(result["items"][0]["status"], "failed")
+        job = list_publish_jobs(self.db_path, {"jobId": saved["jobIds"][0]})[0]
+        scheduler_sheet = job["metadata"]["schedulerSheet"]
+        self.assertEqual(scheduler_sheet["worksheet"], "2026-04-17-Creator Retry Sheet")
+        self.assertEqual(scheduler_sheet["rowNumbers"], [7])
+        self.assertEqual(scheduler_sheet["state"], "retry_active")
+        self.assertEqual(scheduler_sheet["retryCount"], 1)
+        delete_rows_mock.assert_called()
 
     def test_get_publish_calendar_entries_groups_by_day(self):
         save_publish_jobs(

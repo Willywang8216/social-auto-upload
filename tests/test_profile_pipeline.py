@@ -84,10 +84,12 @@ class ProfilePipelineTests(unittest.TestCase):
                                 "contactDetails": "@guang_main",
                                 "cta": "追蹤主帳",
                                 "postPreset": "X Main Preset",
+                                "publisherTargetId": "publisher-x-main",
                             },
                             {
-                                "platform": "facebook",
-                                "name": "光光 FB 備用",
+                                "platform": "discord",
+                                "name": "光光 Discord 備用",
+                                "publisherTargetId": "publisher-discord-main",
                             },
                         ],
                     },
@@ -100,11 +102,14 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertEqual(len(saved["settings"]["contentAccounts"]), 2)
             self.assertEqual(saved["settings"]["contentAccounts"][0]["platform"], "twitter")
             self.assertTrue(saved["settings"]["contentAccounts"][1]["id"])
+            self.assertEqual(saved["settings"]["contentAccounts"][0]["publisherTargetId"], "publisher-x-main")
+            self.assertEqual(saved["settings"]["contentAccounts"][1]["platform"], "discord")
 
             profiles = list_profiles(db_path)
             self.assertEqual(len(profiles), 1)
             self.assertEqual(profiles[0]["accountIds"], [1, 2])
             self.assertEqual(profiles[0]["settings"]["contentAccounts"][0]["postPreset"], "X Main Preset")
+            self.assertEqual(profiles[0]["settings"]["contentAccounts"][1]["publisherTargetId"], "publisher-discord-main")
 
     def test_build_google_sheet_rows_maps_platform_presets_and_schedule(self):
         profile = {
@@ -607,10 +612,10 @@ class ProfilePipelineTests(unittest.TestCase):
                 type("Result", (), {
                     "returncode": 0,
                     "stdout": "\n".join([
-                        "profiles-backup-20260103-010101.yaml",
-                        "profiles-backup-20260102-010101.yaml",
-                        "profiles-backup-20260101-010101.yaml",
-                        "profiles-backup-20251231-010101.yaml",
+                        "profiles-backup-20260103-010101.tar.gz",
+                        "profiles-backup-20260102-010101.tar.gz",
+                        "profiles-backup-20260101-010101.tar.gz",
+                        "profiles-backup-20251231-010101.tar.gz",
                     ]),
                     "stderr": "",
                 })(),
@@ -620,6 +625,7 @@ class ProfilePipelineTests(unittest.TestCase):
             result = run_profile_backup(base_dir, db_path)
 
             self.assertIn("profiles-backup-", result["filename"])
+            self.assertTrue(result["filename"].endswith(".tar.gz"))
             self.assertEqual(mock_run.call_args_list[0].args[0][1], "copyto")
             self.assertEqual(mock_run.call_args_list[1].args[0][1], "lsf")
             self.assertEqual(mock_run.call_args_list[2].args[0][1], "deletefile")
