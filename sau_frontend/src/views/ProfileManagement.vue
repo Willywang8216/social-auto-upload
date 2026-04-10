@@ -457,6 +457,11 @@
               <el-link :href="item.storage?.publicUrl" target="_blank" type="primary">
                 {{ item.storage?.publicUrl }}
               </el-link>
+              <div class="handoff-actions">
+                <el-button size="small" type="primary" @click="openPublishHandoffDialog(item)">
+                  匯入發佈中心
+                </el-button>
+              </div>
             </div>
 
             <div class="result-block">
@@ -483,6 +488,41 @@
         </div>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="publishHandoffDialogVisible"
+      title="匯入發佈中心"
+      width="720px"
+    >
+      <div class="cell-lines">
+        <div>素材：{{ handoffTargetItem?.material?.filename || '未選擇' }}</div>
+        <div class="muted-text">你可以為每個國內平台指定要套用哪一種已生成文案來源。</div>
+      </div>
+
+      <el-form :model="publishHandoffForm" label-width="160px" class="google-sheet-form">
+        <el-form-item
+          v-for="platform in availablePublishHandoffPlatforms"
+          :key="platform.key"
+          :label="`${platform.label} 文案來源`"
+        >
+          <el-select v-model="publishHandoffForm[platform.key]" style="width: 100%">
+            <el-option
+              v-for="option in publishSourceOptions"
+              :key="option.key"
+              :label="option.label"
+              :value="option.key"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="publishHandoffDialogVisible = false">取消</el-button>
+          <el-button type="primary" @click="submitPublishHandoff">建立發佈草稿</el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -490,6 +530,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
+import { useRouter } from 'vue-router'
 import { profileApi } from '@/api/profile'
 import { accountApi } from '@/api/account'
 import { materialApi } from '@/api/material'
@@ -498,6 +539,7 @@ import { useAppStore } from '@/stores/app'
 
 const accountStore = useAccountStore()
 const appStore = useAppStore()
+const router = useRouter()
 
 const searchKeyword = ref('')
 const isRefreshing = ref(false)
@@ -511,8 +553,10 @@ const dialogVisible = ref(false)
 const dialogType = ref('create')
 const googleSheetDialogVisible = ref(false)
 const generateDialogVisible = ref(false)
+const publishHandoffDialogVisible = ref(false)
 const currentProfile = ref(null)
 const generationBatchResult = ref(null)
+const handoffTargetItem = ref(null)
 const googleSheetValidationResult = ref(null)
 const googleSheetConfig = ref({
   configured: false,
@@ -532,6 +576,24 @@ const postLabels = {
   telegram: 'Telegram',
   patreon: 'Patreon'
 }
+
+const PUBLISH_HANDOFF_STORAGE_KEY = 'sau-publish-handoff-drafts'
+const publishSourceOptions = [
+  { key: 'twitter', label: 'X / Twitter' },
+  { key: 'threads', label: 'Threads' },
+  { key: 'instagram', label: 'Instagram 長文' },
+  { key: 'facebook', label: 'Facebook 長文' },
+  { key: 'youtube', label: 'YouTube 貼文' },
+  { key: 'tiktok', label: 'TikTok 貼文' },
+  { key: 'telegram', label: 'Telegram' },
+  { key: 'patreon', label: 'Patreon' }
+]
+const publishHandoffPlatforms = [
+  { key: 'douyin', label: '抖音', publishType: 3, accountType: 3, defaultSource: 'tiktok', titleLimit: 30 },
+  { key: 'kuaishou', label: '快手', publishType: 4, accountType: 4, defaultSource: 'tiktok', titleLimit: 30 },
+  { key: 'videohao', label: '影片號', publishType: 2, accountType: 2, defaultSource: 'facebook', titleLimit: 100 },
+  { key: 'xiaohongshu', label: '小紅書', publishType: 1, accountType: 1, defaultSource: 'instagram', titleLimit: 20 }
+]
 
 const makeDefaultProfile = () => ({
   id: null,
@@ -593,6 +655,12 @@ const googleSheetForm = ref({
   serviceAccountJson: '',
   spreadsheetId: ''
 })
+const publishHandoffForm = ref({
+  douyin: 'tiktok',
+  kuaishou: 'tiktok',
+  videohao: 'facebook',
+  xiaohongshu: 'instagram'
+})
 const generateForm = ref({
   materialIds: [],
   selectedAccountIds: [],
@@ -622,6 +690,9 @@ const selectedGenerationAccounts = computed(() => {
   const selectedIds = new Set(generationBatchResult.value?.selectedAccountIds || [])
   return accountStore.accounts.filter(item => selectedIds.has(item.id))
 })
+const availablePublishHandoffPlatforms = computed(() => (
+  publishHandoffPlatforms.filter(platform => selectedGenerationAccounts.value.some(account => account.type === platform.accountType))
+))
 
 const getAccountName = (accountId) => {
   const account = accountStore.accounts.find(item => item.id === accountId)
@@ -836,6 +907,97 @@ const submitGeneration = async () => {
   }
 }
 
+const openPublishHandoffDialog = (item) => {
+  if (!selectedGenerationAccounts.value.length) {
+    ElMessage.warning('這次批次結果沒有可匯入的帳號')
+    return
+  }
+
+  handoffTargetItem.value = item
+  publishHandoffForm.value = publishHandoffPlatforms.reduce((acc, platform) => {
+    acc[platform.key] = platform.defaultSource
+    return acc
+  }, {})
+  publishHandoffDialogVisible.value = true
+}
+
+const normalizeWhitespace = (value) => (value || '').replace(/\s+/g, ' ').trim()
+
+const extractHashtags = (value) => {
+  const matches = [...(value || '').matchAll(/#([^\s#]+)/g)]
+  return [...new Set(matches.map(match => match[1].trim()).filter(Boolean))].slice(0, 5)
+}
+
+const stripHashtags = (value) => normalizeWhitespace((value || '').replace(/#[^\s#]+/g, ' '))
+
+const buildPublishTitle = (value, limit) => {
+  const text = stripHashtags(value)
+  if (!text) {
+    return ''
+  }
+  return text.slice(0, limit).trim()
+}
+
+const submitPublishHandoff = async () => {
+  if (!handoffTargetItem.value) {
+    return
+  }
+
+  const item = handoffTargetItem.value
+  const drafts = []
+
+  for (const platform of availablePublishHandoffPlatforms.value) {
+    const sourceKey = publishHandoffForm.value[platform.key]
+    const sourceText = normalizeWhitespace(item.posts?.[sourceKey] || '')
+    const accountIds = selectedGenerationAccounts.value
+      .filter(account => account.type === platform.accountType)
+      .map(account => account.id)
+
+    if (!sourceText || accountIds.length === 0) {
+      continue
+    }
+
+    drafts.push({
+      label: `${platform.label}-${item.material.filename}`,
+      fileList: [
+        {
+          name: item.material.filename,
+          url: item.storage?.publicUrl || '',
+          path: item.processedMediaPath || item.material.file_path,
+          size: Number(item.material.filesize || 0) * 1024 * 1024,
+          type: item.storage?.mediaKind === 'image' ? 'image/*' : 'video/mp4'
+        }
+      ],
+      selectedAccounts: accountIds,
+      selectedPlatform: platform.publishType,
+      title: buildPublishTitle(sourceText, platform.titleLimit),
+      description: sourceText,
+      productLink: '',
+      productTitle: '',
+      selectedTopics: extractHashtags(sourceText),
+      scheduleEnabled: false,
+      videosPerDay: 1,
+      dailyTimes: ['10:00'],
+      startDays: 0,
+      publishStatus: null,
+      publishing: false,
+      isDraft: false,
+      isOriginal: false
+    })
+  }
+
+  if (!drafts.length) {
+    ElMessage.warning('找不到可匯入發佈中心的內容或帳號')
+    return
+  }
+
+  const existingDrafts = JSON.parse(localStorage.getItem(PUBLISH_HANDOFF_STORAGE_KEY) || '[]')
+  localStorage.setItem(PUBLISH_HANDOFF_STORAGE_KEY, JSON.stringify([...existingDrafts, ...drafts]))
+  publishHandoffDialogVisible.value = false
+  ElMessage.success(`已建立 ${drafts.length} 個發佈草稿，正在前往發佈中心`)
+  await router.push('/publish-center')
+}
+
 const buildBatchSummaryTitle = () => {
   if (!generationBatchResult.value) {
     return ''
@@ -982,6 +1144,10 @@ onMounted(async () => {
     border: 1px solid #e5eaf3;
     border-radius: 10px;
     padding: 20px;
+  }
+
+  .handoff-actions {
+    margin-top: 12px;
   }
 
   .validation-details {

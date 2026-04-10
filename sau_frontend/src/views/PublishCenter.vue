@@ -349,6 +349,19 @@
             />
           </div>
 
+          <div class="title-section">
+            <h3>正文描述</h3>
+            <el-input
+              v-model="tab.description"
+              type="textarea"
+              :rows="6"
+              placeholder="請輸入正文描述"
+              maxlength="5000"
+              show-word-limit
+              class="title-input"
+            />
+          </div>
+
           <!-- 话题输入 -->
           <div class="topic-section">
             <h3>话题</h3>
@@ -491,9 +504,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { Upload, Plus, Close, Folder } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { accountApi } from '@/api/account'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { materialApi } from '@/api/material'
@@ -527,6 +541,7 @@ const materials = computed(() => appStore.materials)
 const batchPublishing = ref(false)
 const batchPublishMessage = ref('')
 const batchPublishType = ref('info')
+const PUBLISH_HANDOFF_STORAGE_KEY = 'sau-publish-handoff-drafts'
 
 // 平台列表 - 对应后端type字段
 const platforms = [
@@ -544,6 +559,7 @@ const defaultTabInit = {
   selectedAccounts: [], // 选中的帳號ID列表
   selectedPlatform: 1, // 选中的平台（单选）
   title: '',
+  description: '',
   productLink: '', // 商品链接
   productTitle: '', // 商品名称
   selectedTopics: [], // 话题列表（不带#号）
@@ -582,14 +598,8 @@ const accountStore = useAccountStore()
 
 // 根据選擇的平台获取可用帳號列表
 const availableAccounts = computed(() => {
-  const platformMap = {
-    3: '抖音',
-    2: '影片号',
-    1: '小红书',
-    4: '快手'
-  }
-  const currentPlatform = currentTab.value ? platformMap[currentTab.value.selectedPlatform] : null
-  return currentPlatform ? accountStore.accounts.filter(acc => acc.platform === currentPlatform) : []
+  const currentPlatform = currentTab.value?.selectedPlatform
+  return currentPlatform ? accountStore.accounts.filter(acc => acc.type === currentPlatform) : []
 })
 
 // 话题相关状态
@@ -611,6 +621,86 @@ const addTab = () => {
   newTab.label = `發佈${tabCounter}`
   tabs.push(newTab)
   activeTab.value = newTab.name
+}
+
+const ensureAccounts = async () => {
+  if (accountStore.accounts.length > 0) {
+    return
+  }
+
+  try {
+    const response = await accountApi.getAccounts()
+    if (response.code === 200 && response.data) {
+      accountStore.setAccounts(response.data)
+    }
+  } catch (error) {
+    ElMessage.error('取得帳號清單失敗')
+  }
+}
+
+const buildDisplayFileList = (fileList) => fileList.map(item => ({
+  name: item.name,
+  url: item.url
+}))
+
+const importPublishHandoffDrafts = () => {
+  const raw = localStorage.getItem(PUBLISH_HANDOFF_STORAGE_KEY)
+  if (!raw) {
+    return
+  }
+
+  let drafts = []
+  try {
+    drafts = JSON.parse(raw)
+  } catch (error) {
+    localStorage.removeItem(PUBLISH_HANDOFF_STORAGE_KEY)
+    return
+  }
+
+  if (!Array.isArray(drafts) || drafts.length === 0) {
+    localStorage.removeItem(PUBLISH_HANDOFF_STORAGE_KEY)
+    return
+  }
+
+  const hasOnlyEmptyDefaultTab = (
+    tabs.length === 1 &&
+    tabs[0].fileList.length === 0 &&
+    !tabs[0].title.trim() &&
+    !tabs[0].description.trim() &&
+    tabs[0].selectedAccounts.length === 0
+  )
+
+  if (hasOnlyEmptyDefaultTab) {
+    tabs.splice(0, tabs.length)
+    tabCounter = 0
+  }
+
+  drafts.forEach((draft) => {
+    tabCounter++
+    const tab = makeNewTab()
+    tab.name = `tab${tabCounter}`
+    tab.label = draft.label || `發佈${tabCounter}`
+    tab.fileList = draft.fileList || []
+    tab.displayFileList = buildDisplayFileList(tab.fileList)
+    tab.selectedAccounts = draft.selectedAccounts || []
+    tab.selectedPlatform = draft.selectedPlatform || 1
+    tab.title = draft.title || ''
+    tab.description = draft.description || ''
+    tab.productLink = draft.productLink || ''
+    tab.productTitle = draft.productTitle || ''
+    tab.selectedTopics = draft.selectedTopics || []
+    tab.scheduleEnabled = Boolean(draft.scheduleEnabled)
+    tab.videosPerDay = draft.videosPerDay || 1
+    tab.dailyTimes = draft.dailyTimes?.length ? draft.dailyTimes : ['10:00']
+    tab.startDays = draft.startDays || 0
+    tab.isDraft = Boolean(draft.isDraft)
+    tab.isOriginal = Boolean(draft.isOriginal)
+    tabs.push(tab)
+  })
+
+  activeTab.value = tabs[Math.max(0, tabs.length - drafts.length)]?.name || 'tab1'
+  localStorage.removeItem(PUBLISH_HANDOFF_STORAGE_KEY)
+  ElMessage.success(`已匯入 ${drafts.length} 個發佈草稿`)
 }
 
 // 刪除tab
@@ -792,6 +882,7 @@ const confirmPublish = async (tab) => {
   const publishData = {
     type: tab.selectedPlatform,
     title: tab.title,
+    desc: tab.description,
     tags: tab.selectedTopics, // 不带#号的话题列表
     fileList: tab.fileList.map(file => file.path), // 只发送文件路径
     accountList: tab.selectedAccounts.map(accountId => {
@@ -819,6 +910,7 @@ const confirmPublish = async (tab) => {
     tab.fileList = []
     tab.displayFileList = []
     tab.title = ''
+    tab.description = ''
     tab.selectedTopics = []
     tab.selectedAccounts = []
     tab.scheduleEnabled = false
@@ -995,6 +1087,11 @@ const batchPublish = async () => {
     isCancelled.value = false
   }
 }
+
+onMounted(async () => {
+  await ensureAccounts()
+  importPublishHandoffDrafts()
+})
 </script>
 
 <style lang="scss" scoped>
