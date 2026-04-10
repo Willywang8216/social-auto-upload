@@ -25,6 +25,15 @@ from utils.profile_pipeline import (
     save_google_service_account_config,
     validate_google_sheet_connection,
 )
+from utils.account_registry import (
+    default_auth_mode_for_platform,
+    ensure_account_tables,
+    normalize_platform_key,
+    parse_metadata,
+    platform_key_from_type,
+    platform_type_from_key,
+    serialize_account_row,
+)
 
 active_queues = {}
 app = Flask(__name__)
@@ -41,6 +50,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 
 def get_db_path():
     db_path = Path(BASE_DIR / "db" / "database.db")
+    ensure_account_tables(db_path)
     ensure_profile_tables(db_path)
     return db_path
 
@@ -405,17 +415,13 @@ def migrate_profile_media_route():
 def getAccounts():
     """快速获取所有账号信息，不进行cookie验证"""
     try:
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
-            SELECT * FROM user_info''')
+            SELECT * FROM user_info ORDER BY id DESC''')
             rows = cursor.fetchall()
-            rows_list = [list(row) for row in rows]
-
-            print("\n📋 当前数据表内容（快速获取）：")
-            for row in rows:
-                print(row)
+            rows_list = [serialize_account_row(row) for row in rows]
 
             return jsonify(
                 {
@@ -434,33 +440,46 @@ def getAccounts():
 
 @app.route("/getValidAccounts",methods=['GET'])
 async def getValidAccounts():
-    with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+    with sqlite3.connect(get_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute('''
-        SELECT * FROM user_info''')
+        SELECT * FROM user_info ORDER BY id DESC''')
         rows = cursor.fetchall()
-        rows_list = [list(row) for row in rows]
-        print("\n📋 当前数据表内容：")
+        serialized_rows = []
         for row in rows:
-            print(row)
-        for row in rows_list:
-            flag = await check_cookie(row[1],row[2])
-            if not flag:
-                row[4] = 0
-                cursor.execute('''
-                UPDATE user_info 
-                SET status = ? 
-                WHERE id = ?
-                ''', (0,row[0]))
+            account = serialize_account_row(row)
+            if account["supportsValidation"] and row["filePath"]:
+                flag = await check_cookie(account["type"], row["filePath"])
+                if not flag:
+                    account["statusCode"] = 0
+                    account["status"] = "異常"
+                    cursor.execute(
+                        '''
+                        UPDATE user_info
+                        SET status = ?
+                        WHERE id = ?
+                        ''',
+                        (0, row["id"]),
+                    )
+                else:
+                    account["statusCode"] = 1
+                    account["status"] = "正常"
+                    cursor.execute(
+                        '''
+                        UPDATE user_info
+                        SET status = ?
+                        WHERE id = ?
+                        ''',
+                        (1, row["id"]),
+                    )
                 conn.commit()
-                print("✅ 用户状态已更新")
-        for row in rows:
-            print(row)
+            serialized_rows.append(account)
         return jsonify(
                         {
                             "code": 200,
                             "msg": None,
-                            "data": rows_list
+                            "data": serialized_rows
                         }),200
 
 @app.route('/deleteFile', methods=['GET'])
@@ -685,6 +704,60 @@ def postVideo():
         }), 500
 
 
+@app.route('/account', methods=['POST'])
+def create_account():
+    data = request.get_json() or {}
+    user_name = (data.get('userName') or data.get('name') or '').strip()
+    platform_key = normalize_platform_key(data.get('platformKey') or data.get('platform'))
+    auth_mode = (data.get('authMode') or '').strip()
+    metadata_json = json.dumps(parse_metadata(data.get('metadata') or data.get('metadataJson') or {}), ensure_ascii=False)
+
+    if not user_name:
+        return jsonify({
+            "code": 400,
+            "msg": "userName is required",
+            "data": None
+        }), 400
+    if not platform_key:
+        return jsonify({
+            "code": 400,
+            "msg": "platformKey is required",
+            "data": None
+        }), 400
+
+    account_type = platform_type_from_key(platform_key)
+    resolved_auth_mode = auth_mode or default_auth_mode_for_platform(platform_key, account_type)
+    file_path = (data.get('filePath') or '').strip()
+    status = int(data.get('status', 1))
+
+    try:
+        with sqlite3.connect(get_db_path()) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                INSERT INTO user_info (type, filePath, userName, status, platform_key, auth_mode, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (account_type, file_path, user_name, status, platform_key, resolved_auth_mode, metadata_json)
+            )
+            conn.commit()
+            cursor.execute('SELECT * FROM user_info WHERE id = ?', (cursor.lastrowid,))
+            record = cursor.fetchone()
+
+        return jsonify({
+            "code": 200,
+            "msg": "account created successfully",
+            "data": serialize_account_row(record)
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": f"create account failed: {str(e)}",
+            "data": None
+        }), 500
+
+
 @app.route('/updateUserinfo', methods=['POST'])
 def updateUserinfo():
     # 获取JSON数据
@@ -693,32 +766,69 @@ def updateUserinfo():
     # 从JSON数据中提取 type 和 userName
     user_id = data.get('id')
     type = data.get('type')
-    userName = data.get('userName')
+    userName = (data.get('userName') or data.get('name') or '').strip()
+    platform_key = normalize_platform_key(data.get('platformKey') or data.get('platform')) or platform_key_from_type(type)
+    auth_mode = (data.get('authMode') or '').strip()
+    metadata_json = json.dumps(parse_metadata(data.get('metadata') or data.get('metadataJson') or {}), ensure_ascii=False)
+    file_path = data.get('filePath')
+
+    if not user_id or not userName or not platform_key:
+        return jsonify({
+            "code": 400,
+            "msg": "id, userName, and platformKey are required",
+            "data": None
+        }), 400
+
+    account_type = platform_type_from_key(platform_key) if type in (None, "", 0, "0") else int(type)
+    resolved_auth_mode = auth_mode or default_auth_mode_for_platform(platform_key, account_type)
     try:
         # 获取数据库连接
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
             # 更新数据库记录
-            cursor.execute('''
-                           UPDATE user_info
-                           SET type     = ?,
-                               userName = ?
-                           WHERE id = ?;
-                           ''', (type, userName, user_id))
+            if file_path is None:
+                cursor.execute(
+                    '''
+                    UPDATE user_info
+                    SET type = ?,
+                        userName = ?,
+                        platform_key = ?,
+                        auth_mode = ?,
+                        metadata_json = ?
+                    WHERE id = ?;
+                    ''',
+                    (account_type, userName, platform_key, resolved_auth_mode, metadata_json, user_id)
+                )
+            else:
+                cursor.execute(
+                    '''
+                    UPDATE user_info
+                    SET type = ?,
+                        filePath = ?,
+                        userName = ?,
+                        platform_key = ?,
+                        auth_mode = ?,
+                        metadata_json = ?
+                    WHERE id = ?;
+                    ''',
+                    (account_type, str(file_path).strip(), userName, platform_key, resolved_auth_mode, metadata_json, user_id)
+                )
             conn.commit()
+            cursor.execute('SELECT * FROM user_info WHERE id = ?', (user_id,))
+            record = cursor.fetchone()
 
         return jsonify({
             "code": 200,
             "msg": "account update successfully",
-            "data": None
+            "data": serialize_account_row(record) if record else None
         }), 200
 
     except Exception as e:
         return jsonify({
             "code": 500,
-            "msg": str("update failed!"),
+            "msg": f"update failed: {str(e)}",
             "data": None
         }), 500
 

@@ -82,9 +82,9 @@ async def douyin_cookie_gen(id,status_queue):
         with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                                INSERT INTO user_info (type, filePath, userName, status)
-                                VALUES (?, ?, ?, ?)
-                                ''', (3, f"{uuid_v1}.json", id, 1))
+                                INSERT INTO user_info (type, filePath, userName, status, platform_key, auth_mode, metadata_json)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                ''', (3, f"{uuid_v1}.json", id, 1, 'douyin', 'qr_cookie', '{}'))
             conn.commit()
             print("✅ 用户状态已记录")
         status_queue.put("200")
@@ -161,9 +161,9 @@ async def get_tencent_cookie(id,status_queue):
         with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                                INSERT INTO user_info (type, filePath, userName, status)
-                                VALUES (?, ?, ?, ?)
-                                ''', (2, f"{uuid_v1}.json", id, 1))
+                                INSERT INTO user_info (type, filePath, userName, status, platform_key, auth_mode, metadata_json)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                ''', (2, f"{uuid_v1}.json", id, 1, 'channels', 'qr_cookie', '{}'))
             conn.commit()
             print("✅ 用户状态已记录")
         status_queue.put("200")
@@ -235,9 +235,9 @@ async def get_ks_cookie(id,status_queue):
         with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                                        INSERT INTO user_info (type, filePath, userName, status)
-                                        VALUES (?, ?, ?, ?)
-                                        ''', (4, f"{uuid_v1}.json", id, 1))
+                                        INSERT INTO user_info (type, filePath, userName, status, platform_key, auth_mode, metadata_json)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                                        ''', (4, f"{uuid_v1}.json", id, 1, 'kuaishou', 'qr_cookie', '{}'))
             conn.commit()
             print("✅ 用户状态已记录")
         status_queue.put("200")
@@ -309,9 +309,9 @@ async def xiaohongshu_cookie_gen(id,status_queue):
         with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                           INSERT INTO user_info (type, filePath, userName, status)
-                           VALUES (?, ?, ?, ?)
-                           ''', (1, f"{uuid_v1}.json", id, 1))
+                           INSERT INTO user_info (type, filePath, userName, status, platform_key, auth_mode, metadata_json)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)
+                           ''', (1, f"{uuid_v1}.json", id, 1, 'xiaohongshu', 'qr_cookie', '{}'))
             conn.commit()
             print("✅ 用户状态已记录")
         status_queue.put("200")

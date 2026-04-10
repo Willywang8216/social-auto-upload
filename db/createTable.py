@@ -25,10 +25,13 @@ cursor = conn.cursor()
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS user_info (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type INTEGER NOT NULL,
-    filePath TEXT NOT NULL,  -- 存储文件路径
+    type INTEGER NOT NULL DEFAULT 0,
+    filePath TEXT NOT NULL DEFAULT '',  -- 存储文件路径
     userName TEXT NOT NULL,
-    status INTEGER DEFAULT 0
+    status INTEGER DEFAULT 0,
+    platform_key TEXT,
+    auth_mode TEXT DEFAULT 'qr_cookie',
+    metadata_json TEXT DEFAULT '{}'
 )
 ''')
 
