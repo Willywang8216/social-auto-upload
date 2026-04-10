@@ -8,6 +8,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from conf import BASE_DIR
 from utils.profile_pipeline import ensure_profile_tables
+from utils.publish_jobs import ensure_publish_job_tables
 
 # 数据库文件路径（如果不存在会自动创建）
 db_file = Path(BASE_DIR / 'db' / 'database.db')
@@ -49,6 +50,7 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS file_records (
 # 提交更改
 conn.commit()
 ensure_profile_tables(Path(db_file))
+ensure_publish_job_tables(Path(db_file))
 print("✅ 表创建成功")
 # 关闭连接
 conn.close()

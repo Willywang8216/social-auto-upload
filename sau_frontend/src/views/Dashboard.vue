@@ -113,12 +113,12 @@
             </el-card>
           </el-col>
           <el-col :span="6">
-            <el-card class="action-card" @click="navigateTo('/about')">
+            <el-card class="action-card" @click="navigateTo('/publish-calendar')">
               <div class="action-icon">
-                <el-icon><DataAnalysis /></el-icon>
+                <el-icon><Calendar /></el-icon>
               </div>
-              <div class="action-title">關於系統</div>
-              <div class="action-desc">查看系統資訊</div>
+              <div class="action-title">發佈日曆</div>
+              <div class="action-desc">查看排程與 Queue 任務</div>
             </el-card>
           </el-col>
         </el-row>
@@ -163,7 +163,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   User, UserFilled, Platform, Document,
-  Upload, Timer, DataAnalysis
+  Upload, Timer, Calendar
 } from '@element-plus/icons-vue'
 import { accountApi } from '@/api/account'
 import { materialApi } from '@/api/material'

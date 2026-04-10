@@ -73,6 +73,9 @@ profiles:
         # 是否啟用浮水印。
         enabled: true
 
+        # 選填。方便你在 UI 或 YAML 裡辨識這組浮水印模板。
+        templateName: "主品牌斜向網格"
+
         # 類型：
         # - text  = 文字浮水印
         # - image = 圖片浮水印
@@ -84,8 +87,30 @@ profiles:
         #
         # 目前邏輯：
         # - 圖片：dynamic 會用隨機位置
-        # - 影片：dynamic 會在 1~5 秒區段切換位置
+        # - 影片：single 模板會切換位置，repeat-slanted 模板會切換不同偏移版面
         mode: "dynamic"
+
+        # 文字浮水印模板：
+        # - single         = 單一位置
+        # - repeat-slanted = 重複斜向鋪排
+        #
+        # image 類型目前仍使用單一圖像浮水印。
+        pattern: "repeat-slanted"
+
+        # repeat-slanted 時使用。可選 2 / 3 / 4 / 5。
+        repeatLines: 4
+
+        # repeat-slanted 時使用。斜向角度，負值代表往左上傾斜。
+        angle: -30
+
+        # repeat-slanted 時使用。控制每組文字之間的距離。
+        spacing: 220
+
+        # type=text 時使用。字體大小。
+        fontSize: 28
+
+        # type=text 時使用。文字顏色，需使用 #RRGGBB 格式。
+        color: "#FFFFFF"
 
         # type=text 時使用。
         text: "@TaoOfficial"
@@ -274,8 +299,15 @@ profiles:
         publicUrlTemplate: ""
       watermark:
         enabled: false
+        templateName: ""
         type: "text"
         mode: "static"
+        pattern: "single"
+        repeatLines: 3
+        angle: -30
+        spacing: 220
+        fontSize: 28
+        color: "#FFFFFF"
         text: ""
         imagePath: ""
         position: "bottom-right"

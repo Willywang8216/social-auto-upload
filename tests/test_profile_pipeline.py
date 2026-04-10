@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from utils.profile_pipeline import (
     SHEET_COLUMNS,
+    apply_watermark_if_needed,
     build_google_sheet_row_mappings,
     build_google_sheet_rows,
     ensure_profile_tables,
@@ -230,6 +231,81 @@ class ProfilePipelineTests(unittest.TestCase):
         self.assertEqual(mappings[0]["accountName"], "光光 X 主帳")
         self.assertEqual(mappings[0]["platform"], "twitter")
         self.assertEqual(mappings[0]["postPreset"], "Twitter Main Preset")
+
+    def test_save_profile_normalizes_extended_watermark_settings(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "database.db"
+            ensure_profile_tables(db_path)
+
+            saved = save_profile(
+                db_path,
+                {
+                    "name": "Watermark Profile",
+                    "settings": {
+                        "watermark": {
+                            "enabled": True,
+                            "type": "text",
+                            "mode": "dynamic",
+                            "templateName": "Main Grid",
+                            "pattern": "repeat-slanted",
+                            "repeatLines": 9,
+                            "angle": -120,
+                            "spacing": 12,
+                            "fontSize": 6,
+                            "color": "not-a-color",
+                            "text": "@brand",
+                            "opacity": 2,
+                        }
+                    },
+                },
+            )
+
+            watermark = saved["settings"]["watermark"]
+            self.assertTrue(watermark["enabled"])
+            self.assertEqual(watermark["pattern"], "repeat-slanted")
+            self.assertEqual(watermark["repeatLines"], 5)
+            self.assertEqual(watermark["angle"], -85.0)
+            self.assertEqual(watermark["spacing"], 40)
+            self.assertEqual(watermark["fontSize"], 12)
+            self.assertEqual(watermark["color"], "#FFFFFF")
+            self.assertEqual(watermark["opacity"], 1.0)
+
+    def test_apply_watermark_if_needed_supports_repeated_slanted_text_for_images(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow not installed")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            source_path = base_dir / "sample.png"
+            Image.new("RGB", (640, 360), (20, 30, 40)).save(source_path)
+
+            result_path = apply_watermark_if_needed(
+                source_path,
+                {
+                    "settings": {
+                        "watermark": {
+                            "enabled": True,
+                            "type": "text",
+                            "mode": "dynamic",
+                            "pattern": "repeat-slanted",
+                            "repeatLines": 4,
+                            "angle": -25,
+                            "spacing": 180,
+                            "fontSize": 26,
+                            "color": "#FFEEAA",
+                            "text": "@demo-brand",
+                            "opacity": 0.35,
+                        }
+                    }
+                },
+                base_dir,
+            )
+
+            self.assertTrue(result_path.exists())
+            self.assertNotEqual(result_path, source_path)
+            self.assertEqual(result_path.suffix.lower(), ".png")
 
     def test_extract_json_payload_accepts_fenced_json(self):
         payload = extract_json_payload(

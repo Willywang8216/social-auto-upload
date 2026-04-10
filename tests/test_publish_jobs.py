@@ -1,0 +1,427 @@
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from utils.account_registry import ensure_account_tables
+from utils.profile_pipeline import ensure_profile_tables, save_profile
+from utils.publish_jobs import (
+    ensure_publish_job_tables,
+    execute_due_publish_jobs,
+    generate_publish_batch_drafts,
+    get_publish_calendar_entries,
+    list_publish_jobs,
+    regenerate_publish_job_content,
+    save_publish_jobs,
+    update_publish_job_content,
+)
+
+
+class PublishJobsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.base_dir = Path(self.tmp_dir.name)
+        self.db_path = self.base_dir / "database.db"
+        ensure_account_tables(self.db_path)
+        ensure_profile_tables(self.db_path)
+        ensure_publish_job_tables(self.db_path)
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE file_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT NOT NULL,
+                    filesize REAL,
+                    upload_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    file_path TEXT
+                )
+                """
+            )
+            cursor.execute(
+                """
+                INSERT INTO user_info (type, filePath, userName, status, platform_key, auth_mode, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (3, "douyin-cookie.json", "抖音主帳", 1, "douyin", "qr_cookie", "{}"),
+            )
+            cursor.execute(
+                """
+                INSERT INTO file_records (filename, filesize, file_path)
+                VALUES (?, ?, ?)
+                """,
+                ("clip.mp4", 12.3, "videoFile/clip.mp4"),
+            )
+            conn.commit()
+        self.profile = save_profile(
+            self.db_path,
+            {
+                "name": "Creator Alpha",
+                "accountIds": [1],
+                "settings": {
+                    "contentAccounts": [
+                        {
+                            "id": "acct-twitter-main",
+                            "platform": "twitter",
+                            "name": "X 主帳",
+                            "postPreset": "Preset X",
+                        }
+                    ]
+                },
+            },
+        )
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_generate_publish_batch_drafts_creates_managed_and_content_targets(self):
+        fake_batch_result = {
+            "profile": {"id": self.profile["id"], "name": "Creator Alpha"},
+            "selectedAccountIds": [1],
+            "results": [
+                {
+                    "material": {"id": 1, "filename": "clip.mp4"},
+                    "processedMediaPath": str(self.base_dir / "videoFile" / "clip.mp4"),
+                    "storage": {
+                        "publicUrl": "https://cdn.example.com/clip.mp4",
+                        "mediaKind": "video",
+                    },
+                    "transcript": "transcript body",
+                    "posts": {"twitter": "Tweet copy", "facebook": "FB copy"},
+                    "contentAccountResults": [
+                        {
+                            "account": {
+                                "id": "acct-twitter-main",
+                                "platform": "twitter",
+                                "name": "X 主帳",
+                                "postPreset": "Preset X",
+                            },
+                            "content": "Tweet copy",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with patch("utils.publish_jobs.generate_profile_batch_content", return_value=fake_batch_result):
+            result = generate_publish_batch_drafts(
+                self.db_path,
+                self.base_dir,
+                {
+                    "profileId": self.profile["id"],
+                    "materialIds": [1],
+                    "selectedAccountIds": [1],
+                    "selectedContentAccountIds": ["acct-twitter-main"],
+                },
+            )
+
+        self.assertEqual(result["summary"]["items"], 2)
+        delivery_modes = {item["deliveryMode"] for item in result["items"]}
+        self.assertEqual(delivery_modes, {"direct_upload", "sheet_export"})
+        managed_item = next(item for item in result["items"] if item["targetKind"] == "managed_account")
+        self.assertEqual(managed_item["platformKey"], "douyin")
+        content_item = next(item for item in result["items"] if item["targetKind"] == "content_account")
+        self.assertEqual(content_item["contentAccountId"], "acct-twitter-main")
+
+    def test_save_publish_jobs_expands_fixed_frequency_queue(self):
+        result = save_publish_jobs(
+            self.db_path,
+            {
+                "batchId": "batch-a",
+                "mode": "queue",
+                "startAt": "2026-05-01T10:00:00",
+                "repeatCount": 3,
+                "frequencyValue": 6,
+                "frequencyUnit": "hours",
+                "items": [
+                    {
+                        "profileId": self.profile["id"],
+                        "profileName": "Creator Alpha",
+                        "targetKind": "content_account",
+                        "contentAccountId": "acct-twitter-main",
+                        "platformKey": "twitter",
+                        "targetName": "X 主帳",
+                        "deliveryMode": "sheet_export",
+                        "materialId": 1,
+                        "materialName": "clip.mp4",
+                        "mediaPath": str(self.base_dir / "videoFile" / "clip.mp4"),
+                        "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                        "title": "clip",
+                        "message": "Tweet copy",
+                        "metadata": {"mediaKind": "video"},
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(result["count"], 3)
+        jobs = list_publish_jobs(self.db_path, {"profileId": self.profile["id"]})
+        self.assertEqual([job["scheduledAt"] for job in jobs], [
+            "2026-05-01T10:00:00",
+            "2026-05-01T16:00:00",
+            "2026-05-01T22:00:00",
+        ])
+        self.assertTrue(all(job["status"] == "scheduled" for job in jobs))
+
+    def test_update_publish_job_content_appends_revision(self):
+        saved = save_publish_jobs(
+            self.db_path,
+            {
+                "items": [
+                    {
+                        "profileId": self.profile["id"],
+                        "profileName": "Creator Alpha",
+                        "targetKind": "content_account",
+                        "contentAccountId": "acct-twitter-main",
+                        "platformKey": "twitter",
+                        "targetName": "X 主帳",
+                        "deliveryMode": "sheet_export",
+                        "materialId": 1,
+                        "materialName": "clip.mp4",
+                        "mediaPath": str(self.base_dir / "videoFile" / "clip.mp4"),
+                        "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                        "title": "clip",
+                        "message": "Tweet copy",
+                        "metadata": {"mediaKind": "video"},
+                    }
+                ]
+            },
+        )
+
+        updated = update_publish_job_content(
+            self.db_path,
+            {
+                "jobId": saved["jobIds"][0],
+                "title": "clip updated",
+                "message": "Tweet copy revised",
+                "metadata": {"tone": "sharp"},
+            },
+        )
+
+        self.assertEqual(updated["title"], "clip updated")
+        self.assertEqual(updated["message"], "Tweet copy revised")
+        self.assertEqual(updated["revisionCount"], 2)
+        self.assertEqual(updated["metadata"]["tone"], "sharp")
+
+    def test_update_publish_job_content_can_reschedule_job(self):
+        saved = save_publish_jobs(
+            self.db_path,
+            {
+                "items": [
+                    {
+                        "profileId": self.profile["id"],
+                        "profileName": "Creator Alpha",
+                        "targetKind": "content_account",
+                        "contentAccountId": "acct-twitter-main",
+                        "platformKey": "twitter",
+                        "targetName": "X 主帳",
+                        "deliveryMode": "sheet_export",
+                        "materialId": 1,
+                        "materialName": "clip.mp4",
+                        "mediaPath": str(self.base_dir / "videoFile" / "clip.mp4"),
+                        "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                        "title": "clip",
+                        "message": "Tweet copy",
+                        "metadata": {"mediaKind": "video"},
+                    }
+                ]
+            },
+        )
+
+        updated = update_publish_job_content(
+            self.db_path,
+            {
+                "jobId": saved["jobIds"][0],
+                "scheduledAt": "2026-06-01T12:30:00",
+            },
+        )
+
+        self.assertEqual(updated["scheduledAt"], "2026-06-01T12:30:00")
+        self.assertEqual(updated["status"], "scheduled")
+
+    def test_regenerate_publish_job_content_updates_content_and_revision(self):
+        saved = save_publish_jobs(
+            self.db_path,
+            {
+                "items": [
+                    {
+                        "profileId": self.profile["id"],
+                        "profileName": "Creator Alpha",
+                        "targetKind": "content_account",
+                        "contentAccountId": "acct-twitter-main",
+                        "platformKey": "twitter",
+                        "targetName": "X 主帳",
+                        "deliveryMode": "sheet_export",
+                        "materialId": 1,
+                        "materialName": "clip.mp4",
+                        "mediaPath": str(self.base_dir / "videoFile" / "clip.mp4"),
+                        "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                        "title": "clip",
+                        "message": "Tweet copy",
+                        "metadata": {"mediaKind": "video", "transcript": "old transcript"},
+                    }
+                ]
+            },
+        )
+
+        with patch("utils.publish_jobs.generate_post_for_content_account", return_value="Regenerated tweet copy"):
+            updated = regenerate_publish_job_content(
+                self.db_path,
+                self.base_dir,
+                {
+                    "jobId": saved["jobIds"][0],
+                    "instructionText": "Make it more urgent",
+                },
+            )
+
+        self.assertEqual(updated["message"], "Regenerated tweet copy")
+        self.assertEqual(updated["revisionCount"], 2)
+        self.assertEqual(updated["metadata"]["transcript"], "old transcript")
+        self.assertTrue(updated["metadata"]["lastRegeneratedAt"])
+
+    def test_regenerate_publish_job_content_accepts_unsaved_draft_payload(self):
+        with patch("utils.publish_jobs.generate_post_for_content_account", return_value="Fresh regenerated draft"):
+            updated = regenerate_publish_job_content(
+                self.db_path,
+                self.base_dir,
+                {
+                    "instructionText": "Make it more urgent",
+                    "draft": {
+                        "profileId": self.profile["id"],
+                        "profileName": "Creator Alpha",
+                        "targetKind": "content_account",
+                        "contentAccountId": "acct-twitter-main",
+                        "platformKey": "twitter",
+                        "targetName": "X 主帳",
+                        "deliveryMode": "sheet_export",
+                        "materialId": 1,
+                        "materialName": "clip.mp4",
+                        "mediaPath": str(self.base_dir / "videoFile" / "clip.mp4"),
+                        "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                        "title": "clip",
+                        "message": "Old draft copy",
+                        "metadata": {"mediaKind": "video", "transcript": "old transcript"},
+                    },
+                },
+            )
+
+        self.assertEqual(updated["message"], "Fresh regenerated draft")
+        self.assertEqual(updated["title"], "clip")
+        self.assertEqual(updated["metadata"]["transcript"], "old transcript")
+        self.assertTrue(updated["metadata"]["lastRegeneratedAt"])
+
+    def test_execute_due_publish_jobs_handles_sheet_and_direct_only(self):
+        save_publish_jobs(
+            self.db_path,
+            {
+                "mode": "schedule",
+                "scheduledAt": "2026-01-01T10:00:00",
+                "items": [
+                    {
+                        "profileId": self.profile["id"],
+                        "profileName": "Creator Alpha",
+                        "targetKind": "managed_account",
+                        "accountId": 1,
+                        "platformKey": "douyin",
+                        "targetName": "抖音主帳",
+                        "deliveryMode": "direct_upload",
+                        "materialId": 1,
+                        "materialName": "clip.mp4",
+                        "mediaPath": str(self.base_dir / "videoFile" / "clip.mp4"),
+                        "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                        "title": "clip",
+                        "message": "Caption copy",
+                        "metadata": {"mediaKind": "video"},
+                    },
+                    {
+                        "profileId": self.profile["id"],
+                        "profileName": "Creator Alpha",
+                        "targetKind": "content_account",
+                        "contentAccountId": "acct-twitter-main",
+                        "platformKey": "twitter",
+                        "targetName": "X 主帳",
+                        "deliveryMode": "sheet_export",
+                        "materialId": 1,
+                        "materialName": "clip.mp4",
+                        "mediaPath": str(self.base_dir / "videoFile" / "clip.mp4"),
+                        "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                        "title": "clip",
+                        "message": "Tweet copy",
+                        "metadata": {"mediaKind": "video", "postPreset": "Preset X"},
+                    },
+                    {
+                        "profileId": self.profile["id"],
+                        "profileName": "Creator Alpha",
+                        "targetKind": "content_account",
+                        "contentAccountId": "acct-telegram-main",
+                        "platformKey": "telegram",
+                        "targetName": "Telegram 主帳",
+                        "deliveryMode": "manual_only",
+                        "materialId": 1,
+                        "materialName": "clip.mp4",
+                        "mediaPath": str(self.base_dir / "videoFile" / "clip.mp4"),
+                        "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                        "title": "clip",
+                        "message": "Telegram copy",
+                        "metadata": {"mediaKind": "video"},
+                    },
+                ],
+            },
+        )
+
+        with patch("utils.publish_jobs._execute_direct_upload_job") as direct_mock, patch("utils.publish_jobs._execute_sheet_export_job") as sheet_mock:
+            result = execute_due_publish_jobs(self.db_path, self.base_dir)
+
+        self.assertEqual(result["processed"], 2)
+        self.assertEqual(direct_mock.call_count, 1)
+        self.assertEqual(sheet_mock.call_count, 1)
+        jobs = list_publish_jobs(self.db_path)
+        statuses = {job["platformKey"]: job["status"] for job in jobs}
+        self.assertEqual(statuses["douyin"], "published")
+        self.assertEqual(statuses["twitter"], "exported")
+        self.assertEqual(statuses["telegram"], "scheduled")
+
+    def test_get_publish_calendar_entries_groups_by_day(self):
+        save_publish_jobs(
+            self.db_path,
+            {
+                "mode": "queue",
+                "startAt": "2026-05-01T10:00:00",
+                "repeatCount": 2,
+                "frequencyValue": 1,
+                "frequencyUnit": "days",
+                "items": [
+                    {
+                        "profileId": self.profile["id"],
+                        "profileName": "Creator Alpha",
+                        "targetKind": "content_account",
+                        "contentAccountId": "acct-twitter-main",
+                        "platformKey": "twitter",
+                        "targetName": "X 主帳",
+                        "deliveryMode": "sheet_export",
+                        "materialId": 1,
+                        "materialName": "clip.mp4",
+                        "mediaPath": str(self.base_dir / "videoFile" / "clip.mp4"),
+                        "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                        "title": "clip",
+                        "message": "Tweet copy",
+                        "metadata": {"mediaKind": "video"},
+                    }
+                ],
+            },
+        )
+
+        calendar = get_publish_calendar_entries(
+            self.db_path,
+            "2026-05-01T00:00:00",
+            "2026-05-03T00:00:00",
+        )
+
+        self.assertEqual(len(calendar["items"]), 2)
+        self.assertEqual(calendar["items"][0]["date"], "2026-05-01")
+        self.assertEqual(calendar["items"][1]["date"], "2026-05-02")
+
+
+if __name__ == "__main__":
+    unittest.main()

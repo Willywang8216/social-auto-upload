@@ -33,6 +33,19 @@ from utils.profile_pipeline import (
     save_google_service_account_config,
     validate_google_sheet_connection,
 )
+from utils.publish_jobs import ensure_publish_job_tables
+from utils.publish_jobs import (
+    cancel_publish_job,
+    complete_manual_publish_job,
+    execute_due_publish_jobs,
+    generate_publish_batch_drafts,
+    get_publish_calendar_entries,
+    list_publish_jobs,
+    regenerate_publish_job_content,
+    run_publish_job_now,
+    save_publish_jobs,
+    update_publish_job_content,
+)
 from utils.account_registry import (
     default_auth_mode_for_platform,
     ensure_account_tables,
@@ -47,6 +60,7 @@ from utils.account_registry import (
 active_queues = {}
 app = Flask(__name__)
 profile_backup_scheduler_started = False
+publish_scheduler_started = False
 
 #允许所有来源跨域访问
 CORS(app)
@@ -62,6 +76,7 @@ def get_db_path():
     db_path = Path(BASE_DIR / "db" / "database.db")
     ensure_account_tables(db_path)
     ensure_profile_tables(db_path)
+    ensure_publish_job_tables(db_path)
     return db_path
 
 
@@ -81,6 +96,24 @@ def start_profile_backup_scheduler() -> None:
     thread = threading.Thread(target=backup_scheduler_loop, daemon=True)
     thread.start()
     profile_backup_scheduler_started = True
+
+
+def start_publish_scheduler() -> None:
+    global publish_scheduler_started
+    if publish_scheduler_started:
+        return
+
+    def publish_scheduler_loop():
+        while True:
+            try:
+                execute_due_publish_jobs(get_db_path(), Path(BASE_DIR))
+            except Exception as exc:
+                print(f"排程發布失敗: {exc}")
+            time.sleep(60)
+
+    thread = threading.Thread(target=publish_scheduler_loop, daemon=True)
+    thread.start()
+    publish_scheduler_started = True
 
 
 def build_cookie_storage_name(platform_key: str) -> str:
@@ -508,6 +541,212 @@ def generate_profile_batch_content_route():
     data = request.get_json() or {}
     try:
         result = generate_profile_batch_content(get_db_path(), Path(BASE_DIR), data)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/generatePublishBatchDrafts', methods=['POST'])
+def generate_publish_batch_drafts_route():
+    data = request.get_json() or {}
+    try:
+        result = generate_publish_batch_drafts(get_db_path(), Path(BASE_DIR), data)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/savePublishJobs', methods=['POST'])
+def save_publish_jobs_route():
+    data = request.get_json() or {}
+    try:
+        result = save_publish_jobs(get_db_path(), data)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/getPublishJobs', methods=['GET'])
+def get_publish_jobs_route():
+    filters = {
+        "status": request.args.get("status"),
+        "deliveryMode": request.args.get("deliveryMode"),
+        "platformKey": request.args.get("platformKey"),
+        "profileId": request.args.get("profileId"),
+        "dateFrom": request.args.get("dateFrom"),
+        "dateTo": request.args.get("dateTo"),
+    }
+    batch_id = request.args.get("batchId")
+    if batch_id:
+        filters["batchId"] = batch_id
+    try:
+        result = list_publish_jobs(get_db_path(), filters)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/getPublishCalendarEntries', methods=['GET'])
+def get_publish_calendar_entries_route():
+    start_date = request.args.get("startDate", "")
+    end_date = request.args.get("endDate", "")
+    if not start_date or not end_date:
+        return jsonify({
+            "code": 400,
+            "msg": "startDate and endDate are required",
+            "data": None
+        }), 400
+    filters = {
+        "status": request.args.get("status"),
+        "deliveryMode": request.args.get("deliveryMode"),
+        "platformKey": request.args.get("platformKey"),
+        "profileId": request.args.get("profileId"),
+    }
+    try:
+        result = get_publish_calendar_entries(get_db_path(), start_date, end_date, filters)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/updatePublishJob', methods=['POST'])
+def update_publish_job_route():
+    data = request.get_json() or {}
+    try:
+        result = update_publish_job_content(get_db_path(), data)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/regeneratePublishJob', methods=['POST'])
+def regenerate_publish_job_route():
+    data = request.get_json() or {}
+    try:
+        result = regenerate_publish_job_content(get_db_path(), Path(BASE_DIR), data)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/runPublishJobNow', methods=['POST'])
+def run_publish_job_now_route():
+    data = request.get_json() or {}
+    job_id = data.get("jobId")
+    if not job_id:
+        return jsonify({
+            "code": 400,
+            "msg": "jobId is required",
+            "data": None
+        }), 400
+    try:
+        result = run_publish_job_now(get_db_path(), Path(BASE_DIR), int(job_id))
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/cancelPublishJob', methods=['POST'])
+def cancel_publish_job_route():
+    data = request.get_json() or {}
+    job_id = data.get("jobId")
+    if not job_id:
+        return jsonify({
+            "code": 400,
+            "msg": "jobId is required",
+            "data": None
+        }), 400
+    try:
+        result = cancel_publish_job(get_db_path(), int(job_id))
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/completeManualPublishJob', methods=['POST'])
+def complete_manual_publish_job_route():
+    data = request.get_json() or {}
+    job_id = data.get("jobId")
+    if not job_id:
+        return jsonify({
+            "code": 400,
+            "msg": "jobId is required",
+            "data": None
+        }), 400
+    try:
+        result = complete_manual_publish_job(get_db_path(), int(job_id))
         return jsonify({
             "code": 200,
             "msg": "success",
@@ -1263,4 +1502,5 @@ def sse_stream(status_queue):
 
 if __name__ == '__main__':
     start_profile_backup_scheduler()
+    start_publish_scheduler()
     app.run(host='0.0.0.0' ,port=5409)

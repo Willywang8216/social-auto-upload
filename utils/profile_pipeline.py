@@ -1,4 +1,5 @@
 import json
+import math
 import mimetypes
 import os
 import posixpath
@@ -1281,8 +1282,64 @@ def _serialize_profile_export_item(profile: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_profile_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
     normalized = deepcopy(settings or {})
+    normalized["watermark"] = _normalize_watermark_settings(normalized.get("watermark"))
     normalized["contentAccounts"] = _normalize_content_accounts(normalized.get("contentAccounts"))
     return normalized
+
+
+def _normalize_watermark_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
+    settings = deepcopy(settings or {})
+    pattern = str(settings.get("pattern") or "single").strip() or "single"
+    if pattern not in {"single", "repeat-slanted"}:
+        pattern = "single"
+
+    watermark_type = str(settings.get("type") or "text").strip() or "text"
+    if watermark_type not in {"text", "image"}:
+        watermark_type = "text"
+
+    mode = str(settings.get("mode") or "static").strip() or "static"
+    if mode not in {"static", "dynamic"}:
+        mode = "static"
+
+    position = str(settings.get("position") or "bottom-right").strip() or "bottom-right"
+    if position not in {"top-left", "top-right", "bottom-left", "bottom-right", "center"}:
+        position = "bottom-right"
+
+    repeat_lines = _coerce_int(settings.get("repeatLines"), 3)
+    repeat_lines = min(max(repeat_lines, 2), 5)
+
+    font_size = _coerce_int(settings.get("fontSize"), 28)
+    font_size = min(max(font_size, 12), 120)
+
+    spacing = _coerce_int(settings.get("spacing"), 220)
+    spacing = min(max(spacing, 40), 600)
+
+    angle = _coerce_float(settings.get("angle"), -30.0)
+    angle = min(max(angle, -85.0), 85.0)
+
+    opacity = _coerce_float(settings.get("opacity"), 0.45)
+    opacity = min(max(opacity, 0.1), 1.0)
+
+    color = str(settings.get("color") or "#FFFFFF").strip().upper() or "#FFFFFF"
+    if not re.fullmatch(r"#[0-9A-F]{6}", color):
+        color = "#FFFFFF"
+
+    return {
+        "enabled": bool(settings.get("enabled")),
+        "type": watermark_type,
+        "mode": mode,
+        "templateName": str(settings.get("templateName") or "").strip(),
+        "pattern": pattern,
+        "repeatLines": repeat_lines,
+        "angle": angle,
+        "spacing": spacing,
+        "fontSize": font_size,
+        "color": color,
+        "text": str(settings.get("text") or "").strip(),
+        "imagePath": str(settings.get("imagePath") or "").strip(),
+        "position": position,
+        "opacity": opacity,
+    }
 
 
 def _normalize_content_accounts(values: Any) -> list[dict[str, str]]:
@@ -1724,9 +1781,11 @@ def _apply_image_watermark(source_path: Path, output_path: Path, watermark: dict
 
     base = Image.open(source_path).convert("RGBA")
     overlay = Image.new("RGBA", base.size, (255, 255, 255, 0))
+    watermark = _normalize_watermark_settings(watermark)
     opacity = float(watermark.get("opacity", 0.45) or 0.45)
     position = _resolve_image_watermark_position(watermark)
     watermark_type = (watermark.get("type") or "text").strip()
+    pattern = (watermark.get("pattern") or "single").strip()
 
     if watermark_type == "image" and watermark.get("imagePath"):
         mark_path = Path(str(watermark["imagePath"]))
@@ -1742,12 +1801,16 @@ def _apply_image_watermark(source_path: Path, output_path: Path, watermark: dict
         overlay.alpha_composite(mark, (x, y))
     else:
         text = watermark.get("text") or profile_default_watermark_text(source_path)
-        draw = ImageDraw.Draw(overlay)
-        font = ImageFont.load_default()
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_size = (bbox[2] - bbox[0], bbox[3] - bbox[1])
-        x, y = _resolve_overlay_position(base.size, text_size, position)
-        draw.text((x, y), text, fill=(255, 255, 255, int(255 * opacity)), font=font)
+        if pattern == "repeat-slanted":
+            overlay = _build_repeated_text_overlay(base.size, text, watermark)
+        else:
+            draw = ImageDraw.Draw(overlay)
+            font = _load_watermark_font(ImageFont, int(watermark.get("fontSize") or 28))
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_size = (bbox[2] - bbox[0], bbox[3] - bbox[1])
+            x, y = _resolve_overlay_position(base.size, text_size, position)
+            fill = _color_to_rgba(str(watermark.get("color") or "#FFFFFF"), opacity)
+            draw.text((x, y), text, fill=fill, font=font)
 
     output = Image.alpha_composite(base, overlay).convert("RGB")
     output.save(output_path)
@@ -1759,11 +1822,16 @@ def _apply_video_watermark(source_path: Path, output_path: Path, watermark: dict
     if not ffmpeg_bin:
         raise RuntimeError("ffmpeg is required for video watermarking")
 
+    watermark = _normalize_watermark_settings(watermark)
     position = (watermark.get("position") or "bottom-right").strip()
     mode = (watermark.get("mode") or "static").strip()
     opacity = float(watermark.get("opacity", 0.45) or 0.45)
     watermark_type = (watermark.get("type") or "text").strip()
+    pattern = (watermark.get("pattern") or "single").strip()
     duration = _get_video_duration_seconds(source_path) if mode == "dynamic" else None
+
+    if watermark_type == "text" and pattern == "repeat-slanted":
+        return _apply_video_text_template_watermark(source_path, output_path, watermark, duration)
 
     if watermark_type == "image" and watermark.get("imagePath"):
         image_path = Path(str(watermark["imagePath"]))
@@ -1850,6 +1918,143 @@ def _resolve_overlay_position(base_size: tuple[int, int], mark_size: tuple[int, 
     return positions.get(position, positions["bottom-right"])
 
 
+def _build_repeated_text_overlay(base_size: tuple[int, int], text: str, watermark: dict[str, Any], seed: int | None = None):
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required for repeated watermark rendering") from exc
+
+    width, height = base_size
+    diagonal = int(math.sqrt((width * width) + (height * height)))
+    canvas_size = diagonal * 2
+    canvas = Image.new("RGBA", (canvas_size, canvas_size), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(canvas)
+    font = _load_watermark_font(ImageFont, int(watermark.get("fontSize") or 28))
+    fill = _color_to_rgba(str(watermark.get("color") or "#FFFFFF"), float(watermark.get("opacity") or 0.45))
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_width = max(1, bbox[2] - bbox[0])
+    text_height = max(1, bbox[3] - bbox[1])
+    repeat_lines = int(watermark.get("repeatLines") or 3)
+    spacing = int(watermark.get("spacing") or 220)
+    line_gap = max(12, text_height // 2)
+    row_step = max(text_height * repeat_lines + line_gap * max(repeat_lines - 1, 0) + spacing, text_height + spacing)
+    column_step = max(text_width + spacing, text_width + 40)
+    rng = random.Random(seed)
+    offset_x = rng.randint(0, max(column_step - 1, 1)) if watermark.get("mode") == "dynamic" else column_step // 3
+    offset_y = rng.randint(0, max(row_step - 1, 1)) if watermark.get("mode") == "dynamic" else row_step // 3
+
+    for base_y in range(-row_step, canvas_size + row_step, row_step):
+        for base_x in range(-column_step, canvas_size + column_step, column_step):
+            for line_index in range(repeat_lines):
+                stagger = (text_width // 4) if line_index % 2 else 0
+                draw.text(
+                    (base_x + offset_x + stagger, base_y + offset_y + line_index * (text_height + line_gap)),
+                    text,
+                    fill=fill,
+                    font=font,
+                )
+
+    rotated = canvas.rotate(float(watermark.get("angle") or -30.0), resample=Image.BICUBIC, expand=True)
+    left = max((rotated.width - width) // 2, 0)
+    top = max((rotated.height - height) // 2, 0)
+    return rotated.crop((left, top, left + width, top + height))
+
+
+def _load_watermark_font(image_font_module, font_size: int):
+    candidate_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    ]
+    for candidate in candidate_paths:
+        try:
+            return image_font_module.truetype(candidate, font_size)
+        except (OSError, AttributeError):
+            continue
+    return image_font_module.load_default()
+
+
+def _color_to_rgba(color: str, opacity: float) -> tuple[int, int, int, int]:
+    normalized = str(color or "#FFFFFF").strip().lstrip("#")
+    if len(normalized) != 6:
+        normalized = "FFFFFF"
+    try:
+        red = int(normalized[0:2], 16)
+        green = int(normalized[2:4], 16)
+        blue = int(normalized[4:6], 16)
+    except ValueError:
+        red, green, blue = 255, 255, 255
+    return red, green, blue, int(255 * max(0.0, min(opacity, 1.0)))
+
+
+def _apply_video_text_template_watermark(
+    source_path: Path,
+    output_path: Path,
+    watermark: dict[str, Any],
+    duration: float | None,
+) -> Path:
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        raise RuntimeError("ffmpeg is required for video watermarking")
+
+    overlay_paths = []
+    command = [ffmpeg_bin, "-y", "-i", str(source_path)]
+    try:
+        frame_size = _get_video_frame_size(source_path)
+        overlay_count = 3 if watermark.get("mode") == "dynamic" else 1
+        for index in range(overlay_count):
+            overlay_seed = random.randint(0, 1_000_000) if watermark.get("mode") == "dynamic" else index
+            overlay_image = _build_repeated_text_overlay(
+                frame_size,
+                watermark.get("text") or profile_default_watermark_text(source_path),
+                watermark,
+                overlay_seed,
+            )
+            overlay_path = output_path.parent / f"{output_path.stem}_wm_{index}.png"
+            overlay_image.save(overlay_path)
+            overlay_paths.append(overlay_path)
+            command.extend(["-loop", "1", "-i", str(overlay_path)])
+
+        filter_parts = []
+        previous_label = "0:v"
+        output_label = "vout"
+        if watermark.get("mode") == "dynamic":
+            segments = _build_dynamic_segments(duration or 1.0)
+            for index, (start_at, end_at, _) in enumerate(segments):
+                input_label = index % len(overlay_paths) + 1
+                output_label = f"v{index}"
+                filter_parts.append(
+                    f"[{previous_label}][{input_label}:v]overlay=x=0:y=0:enable='between(t,{start_at:.3f},{end_at:.3f})'[{output_label}]"
+                )
+                previous_label = output_label
+        else:
+            filter_parts.append(f"[0:v][1:v]overlay=x=0:y=0[vout]")
+            output_label = "vout"
+
+        command.extend([
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            f"[{output_label}]",
+            "-map",
+            "0:a?",
+            "-c:a",
+            "copy",
+            str(output_path),
+        ])
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "ffmpeg watermark failed")
+        return output_path
+    finally:
+        for overlay_path in overlay_paths:
+            try:
+                overlay_path.unlink()
+            except OSError:
+                continue
+
+
 def _build_video_overlay_expression(position: str, mode: str) -> str:
     if mode == "dynamic":
         return "overlay=x='mod(t*120, max(main_w-overlay_w,1))':y='main_h-overlay_h-40'"
@@ -1897,6 +2102,37 @@ def _resolve_image_watermark_position(watermark: dict[str, Any]) -> str:
     if (watermark.get("mode") or "static").strip() == "dynamic":
         return random.choice(["top-left", "top-right", "bottom-left", "bottom-right", "center"])
     return position
+
+
+def _get_video_frame_size(source_path: Path) -> tuple[int, int]:
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        raise RuntimeError("ffprobe is required for video watermarking")
+
+    result = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(source_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "ffprobe failed")
+    width_text, _, height_text = result.stdout.strip().partition("x")
+    try:
+        return max(int(width_text), 1), max(int(height_text), 1)
+    except ValueError as exc:
+        raise RuntimeError("unable to read video size") from exc
 
 
 def _get_video_duration_seconds(source_path: Path) -> float:
@@ -1990,3 +2226,17 @@ def _get_overlay_coordinates(position: str) -> tuple[str, str]:
 
 def _escape_ffmpeg_text(text: str) -> str:
     return str(text).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default

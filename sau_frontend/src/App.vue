@@ -32,6 +32,10 @@
               <el-icon><Upload /></el-icon>
               <span>發佈中心</span>
             </el-menu-item>
+            <el-menu-item index="/publish-calendar">
+              <el-icon><Calendar /></el-icon>
+              <span>發佈日曆</span>
+            </el-menu-item>
             <el-menu-item index="/profile-management">
               <el-icon><Setting /></el-icon>
               <span>Profile 設定</span>
@@ -67,7 +71,7 @@ import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   HomeFilled, User, DataAnalysis,
-  Fold, Picture, Upload, Setting
+  Fold, Picture, Upload, Setting, Calendar
 } from '@element-plus/icons-vue'
 
 const route = useRoute()

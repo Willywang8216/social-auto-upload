@@ -249,6 +249,13 @@
           <el-switch v-model="profileForm.settings.watermark.enabled" />
         </el-form-item>
 
+        <el-form-item label="模板名稱">
+          <el-input
+            v-model="profileForm.settings.watermark.templateName"
+            placeholder="例如：主品牌斜向網格"
+          />
+        </el-form-item>
+
         <el-form-item label="浮水印類型">
           <el-radio-group v-model="profileForm.settings.watermark.type">
             <el-radio label="text">文字</el-radio>
@@ -265,7 +272,7 @@
 
         <el-form-item label="模式說明">
           <div class="muted-text">
-            圖片使用隨機位置；影片會以 1 至 5 秒區段隨機切換浮水印位置。
+            固定模式會套用同一版面；隨機模式會對圖片與影片切換不同偏移版本。文字型可使用重複斜線模板；圖片型仍採單一圖像浮水印。
           </div>
         </el-form-item>
 
@@ -277,7 +284,69 @@
           <el-input v-model="profileForm.settings.watermark.imagePath" placeholder="本機可存取路徑，例如：C:/logo.png" />
         </el-form-item>
 
-        <el-form-item label="預設位置">
+        <el-form-item label="模板樣式" v-if="profileForm.settings.watermark.type === 'text'">
+          <el-radio-group v-model="profileForm.settings.watermark.pattern">
+            <el-radio label="single">單一位置</el-radio>
+            <el-radio label="repeat-slanted">重複斜線</el-radio>
+          </el-radio-group>
+        </el-form-item>
+
+        <el-form-item
+          label="重複行數"
+          v-if="profileForm.settings.watermark.type === 'text' && profileForm.settings.watermark.pattern === 'repeat-slanted'"
+        >
+          <el-select v-model="profileForm.settings.watermark.repeatLines" style="width: 100%">
+            <el-option label="2 行" :value="2" />
+            <el-option label="3 行" :value="3" />
+            <el-option label="4 行" :value="4" />
+            <el-option label="5 行" :value="5" />
+          </el-select>
+        </el-form-item>
+
+        <el-form-item
+          label="斜角"
+          v-if="profileForm.settings.watermark.type === 'text' && profileForm.settings.watermark.pattern === 'repeat-slanted'"
+        >
+          <el-slider
+            v-model="profileForm.settings.watermark.angle"
+            :min="-80"
+            :max="80"
+            :step="1"
+            show-input
+          />
+        </el-form-item>
+
+        <el-form-item
+          label="間距"
+          v-if="profileForm.settings.watermark.type === 'text' && profileForm.settings.watermark.pattern === 'repeat-slanted'"
+        >
+          <el-slider
+            v-model="profileForm.settings.watermark.spacing"
+            :min="40"
+            :max="600"
+            :step="10"
+            show-input
+          />
+        </el-form-item>
+
+        <el-form-item label="字體大小" v-if="profileForm.settings.watermark.type === 'text'">
+          <el-slider
+            v-model="profileForm.settings.watermark.fontSize"
+            :min="12"
+            :max="80"
+            :step="1"
+            show-input
+          />
+        </el-form-item>
+
+        <el-form-item label="字體顏色" v-if="profileForm.settings.watermark.type === 'text'">
+          <el-color-picker v-model="profileForm.settings.watermark.color" />
+        </el-form-item>
+
+        <el-form-item
+          label="預設位置"
+          v-if="profileForm.settings.watermark.type === 'image' || profileForm.settings.watermark.pattern === 'single'"
+        >
           <el-select v-model="profileForm.settings.watermark.position" style="width: 100%">
             <el-option label="右下角" value="bottom-right" />
             <el-option label="左下角" value="bottom-left" />
@@ -289,6 +358,44 @@
 
         <el-form-item label="透明度">
           <el-slider v-model="profileForm.settings.watermark.opacity" :min="0.1" :max="1" :step="0.05" show-input />
+        </el-form-item>
+
+        <el-form-item label="即時預覽" v-if="profileForm.settings.watermark.enabled">
+          <div class="watermark-preview">
+            <div class="preview-canvas">
+              <div
+                v-if="profileForm.settings.watermark.type === 'text' && profileForm.settings.watermark.pattern === 'repeat-slanted'"
+                class="preview-repeat-layer"
+                :style="watermarkPreviewLayerStyle"
+              >
+                <div
+                  v-for="tile in watermarkPreviewTileArray"
+                  :key="tile"
+                  class="preview-repeat-tile"
+                >
+                  <div
+                    v-for="line in watermarkPreviewLineArray"
+                    :key="line"
+                    class="preview-repeat-line"
+                  >
+                    {{ watermarkPreviewText }}
+                  </div>
+                </div>
+              </div>
+
+              <div
+                v-else
+                class="preview-single-mark"
+                :style="watermarkSinglePreviewStyle"
+              >
+                {{ profileForm.settings.watermark.type === 'image' ? 'LOGO' : watermarkPreviewText }}
+              </div>
+            </div>
+
+            <div class="muted-text">
+              預覽只用來幫你感受密度、角度與透明度。實際輸出仍會依圖片 / 影片尺寸與動態模式略作調整。
+            </div>
+          </div>
         </el-form-item>
 
         <el-divider>Google 試算表</el-divider>
@@ -938,6 +1045,23 @@ const createContentAccount = () => ({
   postPreset: ''
 })
 
+const normalizeWatermarkFormSettings = (watermark = {}) => ({
+  enabled: Boolean(watermark.enabled),
+  type: watermark.type === 'image' ? 'image' : 'text',
+  mode: watermark.mode === 'dynamic' ? 'dynamic' : 'static',
+  templateName: watermark.templateName || '',
+  pattern: watermark.pattern === 'repeat-slanted' ? 'repeat-slanted' : 'single',
+  repeatLines: Math.min(Math.max(Number(watermark.repeatLines) || 3, 2), 5),
+  angle: Math.min(Math.max(Number(watermark.angle) || -30, -80), 80),
+  spacing: Math.min(Math.max(Number(watermark.spacing) || 220, 40), 600),
+  fontSize: Math.min(Math.max(Number(watermark.fontSize) || 28, 12), 80),
+  color: /^#[0-9A-Fa-f]{6}$/.test(watermark.color || '') ? watermark.color : '#FFFFFF',
+  text: watermark.text || '',
+  imagePath: watermark.imagePath || '',
+  position: watermark.position || 'bottom-right',
+  opacity: Math.min(Math.max(Number(watermark.opacity) || 0.45, 0.1), 1)
+})
+
 const normalizeContentAccounts = (values = []) => {
   if (!Array.isArray(values)) {
     return []
@@ -971,10 +1095,10 @@ const normalizeProfileForm = (profile = {}) => {
         ...base.settings.storage,
         ...((profile.settings || {}).storage || {})
       },
-      watermark: {
+      watermark: normalizeWatermarkFormSettings({
         ...base.settings.watermark,
         ...((profile.settings || {}).watermark || {})
-      },
+      }),
       googleSheet: {
         ...base.settings.googleSheet,
         ...((profile.settings || {}).googleSheet || {})
@@ -1016,6 +1140,13 @@ const makeDefaultProfile = () => ({
       enabled: false,
       type: 'text',
       mode: 'static',
+      templateName: '',
+      pattern: 'single',
+      repeatLines: 3,
+      angle: -30,
+      spacing: 220,
+      fontSize: 28,
+      color: '#FFFFFF',
       text: '',
       imagePath: '',
       position: 'bottom-right',
@@ -1080,6 +1211,38 @@ const filteredProfiles = computed(() => {
 })
 
 const materials = computed(() => appStore.materials)
+const watermarkPreviewText = computed(() => (
+  profileForm.value.settings.watermark.text || '@brandname'
+))
+const watermarkPreviewLineArray = computed(() => (
+  Array.from({ length: Number(profileForm.value.settings.watermark.repeatLines || 3) }, (_, index) => index)
+))
+const watermarkPreviewTileArray = computed(() => (
+  Array.from({ length: 8 }, (_, index) => index)
+))
+const watermarkPreviewLayerStyle = computed(() => ({
+  opacity: profileForm.value.settings.watermark.opacity,
+  transform: `rotate(${profileForm.value.settings.watermark.angle || -30}deg)`,
+  color: profileForm.value.settings.watermark.color || '#FFFFFF',
+  fontSize: `${Math.max(Number(profileForm.value.settings.watermark.fontSize) || 28, 12)}px`,
+  gap: `${Math.max(Math.round((Number(profileForm.value.settings.watermark.spacing) || 220) / 6), 24)}px`
+}))
+const watermarkSinglePreviewStyle = computed(() => {
+  const watermark = profileForm.value.settings.watermark
+  const positionMap = {
+    'top-left': { top: '24px', left: '24px' },
+    'top-right': { top: '24px', right: '24px' },
+    'bottom-left': { bottom: '24px', left: '24px' },
+    'bottom-right': { bottom: '24px', right: '24px' },
+    center: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }
+  }
+  return {
+    ...positionMap[watermark.position || 'bottom-right'],
+    opacity: watermark.opacity,
+    color: watermark.color || '#FFFFFF',
+    fontSize: `${Math.max(Number(watermark.fontSize) || 28, 12)}px`
+  }
+})
 const currentProfileAccounts = computed(() => {
   if (!currentProfile.value) {
     return []
@@ -1844,6 +2007,56 @@ onMounted(async () => {
     justify-content: space-between;
     align-items: center;
     margin-bottom: 12px;
+  }
+
+  .watermark-preview {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .preview-canvas {
+    position: relative;
+    overflow: hidden;
+    width: 100%;
+    max-width: 520px;
+    aspect-ratio: 16 / 9;
+    border-radius: 12px;
+    border: 1px solid #e5eaf3;
+    background: linear-gradient(135deg, #1f2937, #334155 55%, #475569);
+  }
+
+  .preview-repeat-layer {
+    position: absolute;
+    inset: -30%;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(120px, 1fr));
+    align-content: center;
+    pointer-events: none;
+  }
+
+  .preview-repeat-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    text-align: center;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .preview-repeat-line,
+  .preview-single-mark {
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    font-weight: 600;
+  }
+
+  .preview-single-mark {
+    position: absolute;
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.18);
+    pointer-events: none;
   }
 
   .generate-account-list {
