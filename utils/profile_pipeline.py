@@ -219,10 +219,12 @@ def generate_profile_content(db_path: Path, base_dir: Path, payload: dict[str, A
             payload.get("scheduleAt"),
             content_account_results,
         )
+        row_mappings = build_google_sheet_row_mappings(normalized_posts, content_account_results)
     else:
         generated_posts = generate_posts(runtime_profile, transcript, material, upload_result["publicUrl"])
         normalized_posts = normalize_posts(generated_posts)
         rows = build_google_sheet_rows(runtime_profile, normalized_posts, upload_result, payload.get("scheduleAt"))
+        row_mappings = build_google_sheet_row_mappings(normalized_posts)
 
     sheet_result = None
     if payload.get("writeToSheet", True):
@@ -237,6 +239,7 @@ def generate_profile_content(db_path: Path, base_dir: Path, payload: dict[str, A
         "posts": normalized_posts,
         "contentAccountResults": content_account_results,
         "sheetRows": [dict(zip(SHEET_COLUMNS, row)) for row in rows],
+        "sheetRowMappings": row_mappings,
         "sheetResult": sheet_result,
     }
 
@@ -423,6 +426,49 @@ def build_google_sheet_rows(
     return rows
 
 
+def build_google_sheet_row_mappings(
+    posts: dict[str, str],
+    content_account_results: list[dict[str, Any]] | None = None,
+) -> list[dict[str, str]]:
+    mappings = []
+    row_number = 2
+
+    if content_account_results:
+        for result in content_account_results:
+            account = result.get("account") or {}
+            platform = (account.get("platform") or "").strip().lower()
+            message = (result.get("content") or "").strip()
+            if not message or platform not in EXPORT_PLATFORMS:
+                continue
+
+            mappings.append({
+                "rowNumber": row_number,
+                "platform": platform,
+                "accountId": str(account.get("id") or ""),
+                "accountName": str(account.get("name") or ""),
+                "postPreset": str(account.get("postPreset") or ""),
+                "message": message,
+            })
+            row_number += 1
+        return mappings
+
+    for platform in EXPORT_PLATFORMS:
+        message = (posts.get(platform) or "").strip()
+        if not message:
+            continue
+        mappings.append({
+            "rowNumber": row_number,
+            "platform": platform,
+            "accountId": "",
+            "accountName": "",
+            "postPreset": "",
+            "message": message,
+        })
+        row_number += 1
+
+    return mappings
+
+
 def append_rows_to_google_sheet(profile: dict[str, Any], rows: list[list[str]], schedule_at: str | None = None) -> dict[str, Any]:
     if not rows:
         return {"appended": 0, "worksheet": None}
@@ -496,7 +542,17 @@ def get_google_service_account_config(base_dir: Path) -> dict[str, Any]:
                 "filePath": str(path),
                 "error": f"Google service account file not found: {path}",
             }
-        data, error = _parse_google_service_account_json(path.read_text(encoding="utf-8"), str(path))
+        raw_content, read_error = _read_text_file_for_config(path)
+        if read_error:
+            return {
+                "configured": False,
+                "source": "env_file",
+                "clientEmail": "",
+                "projectId": "",
+                "filePath": str(path),
+                "error": read_error,
+            }
+        data, error = _parse_google_service_account_json(raw_content, str(path))
         if error:
             return {
                 "configured": False,
@@ -516,7 +572,17 @@ def get_google_service_account_config(base_dir: Path) -> dict[str, Any]:
 
     stored_path = get_google_service_account_storage_path(base_dir)
     if stored_path.exists():
-        data, error = _parse_google_service_account_json(stored_path.read_text(encoding="utf-8"), str(stored_path))
+        raw_content, read_error = _read_text_file_for_config(stored_path)
+        if read_error:
+            return {
+                "configured": False,
+                "source": "stored_file",
+                "clientEmail": "",
+                "projectId": "",
+                "filePath": str(stored_path),
+                "error": read_error,
+            }
+        data, error = _parse_google_service_account_json(raw_content, str(stored_path))
         if error:
             return {
                 "configured": False,
@@ -1146,7 +1212,7 @@ def _load_google_service_account_data(base_dir: Path | None = None) -> dict[str,
         path = Path(file_path)
         if not path.exists():
             raise RuntimeError(f"Google service account file not found: {path}")
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(_read_text_file(path))
 
     candidate_paths = []
     if base_dir is not None:
@@ -1157,7 +1223,7 @@ def _load_google_service_account_data(base_dir: Path | None = None) -> dict[str,
     ])
     for path in candidate_paths:
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads(_read_text_file(path))
     return None
 
 
@@ -1171,6 +1237,20 @@ def _parse_google_service_account_json(raw_value: str, source_name: str) -> tupl
         return None, f"{source_name} must contain a JSON object"
 
     return data, None
+
+
+def _read_text_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"Failed to read Google service account file: {path}: {exc}") from exc
+
+
+def _read_text_file_for_config(path: Path) -> tuple[str | None, str | None]:
+    try:
+        return path.read_text(encoding="utf-8"), None
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, f"Failed to read Google service account file: {path}: {exc}"
 
 
 def _validate_google_service_account_payload(data: dict[str, Any]) -> None:
@@ -1207,7 +1287,11 @@ def _load_env_values() -> dict[str, str]:
     if not env_path.exists():
         return {}
     values = {}
-    for line in env_path.read_text(encoding="utf-8").splitlines():
+    try:
+        content = env_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    for line in content.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue

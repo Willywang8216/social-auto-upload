@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from utils.profile_pipeline import (
     SHEET_COLUMNS,
+    build_google_sheet_row_mappings,
     build_google_sheet_rows,
     ensure_profile_tables,
     extract_json_payload,
@@ -183,6 +184,38 @@ class ProfilePipelineTests(unittest.TestCase):
         self.assertEqual(rows[0][19], "Twitter Main Preset")
         self.assertEqual(rows[1][19], "")
 
+    def test_build_google_sheet_row_mappings_include_content_account_identity(self):
+        mappings = build_google_sheet_row_mappings(
+            {},
+            [
+                {
+                    "account": {
+                        "id": "acct-twitter-main",
+                        "platform": "twitter",
+                        "name": "光光 X 主帳",
+                        "postPreset": "Twitter Main Preset",
+                    },
+                    "content": "Tweet body",
+                },
+                {
+                    "account": {
+                        "id": "acct-telegram-main",
+                        "platform": "telegram",
+                        "name": "光光 Telegram 主帳",
+                        "postPreset": "",
+                    },
+                    "content": "Telegram body",
+                },
+            ],
+        )
+
+        self.assertEqual(len(mappings), 1)
+        self.assertEqual(mappings[0]["rowNumber"], 2)
+        self.assertEqual(mappings[0]["accountId"], "acct-twitter-main")
+        self.assertEqual(mappings[0]["accountName"], "光光 X 主帳")
+        self.assertEqual(mappings[0]["platform"], "twitter")
+        self.assertEqual(mappings[0]["postPreset"], "Twitter Main Preset")
+
     def test_extract_json_payload_accepts_fenced_json(self):
         payload = extract_json_payload(
             """```json
@@ -248,6 +281,19 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertFalse(result["configured"])
             self.assertEqual(result["source"], "env_file")
             self.assertIn("file not found", result["error"])
+
+    def test_get_google_service_account_config_handles_unreadable_stored_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            storage_path = base_dir / "db" / "google_service_account.json"
+            storage_path.parent.mkdir(parents=True, exist_ok=True)
+            storage_path.write_bytes(b"\xff\xfe\x00\x00")
+
+            result = get_google_service_account_config(base_dir)
+
+            self.assertFalse(result["configured"])
+            self.assertEqual(result["source"], "stored_file")
+            self.assertIn("Failed to read Google service account file", result["error"])
 
 
 if __name__ == "__main__":

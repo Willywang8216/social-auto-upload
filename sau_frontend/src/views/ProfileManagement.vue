@@ -575,20 +575,60 @@
             </div>
 
             <div v-if="item.contentAccountResults?.length" class="content-account-result-list">
-              <div
-                v-for="contentResult in item.contentAccountResults"
-                :key="contentResult.account?.id"
-                class="post-card"
-              >
-                <h4>{{ getContentAccountDisplayName(contentResult.account) }}</h4>
-                <div v-if="contentResult.account?.postPreset" class="muted-text">
-                  Post Preset：{{ contentResult.account.postPreset }}
-                </div>
-                <el-input :model-value="contentResult.content || ''" type="textarea" :rows="6" readonly />
-              </div>
+              <h3>內容帳號文案</h3>
+              <el-tabs v-model="contentResultTabMap[item.material.id]" class="content-result-tabs">
+                <el-tab-pane
+                  v-for="group in groupContentAccountResultsByPlatform(item.contentAccountResults)"
+                  :key="group.platform"
+                  :label="`${group.label}（${group.items.length}）`"
+                  :name="group.platform"
+                >
+                  <div class="platform-result-list">
+                    <div
+                      v-for="contentResult in group.items"
+                      :key="contentResult.account?.id"
+                      class="post-card"
+                    >
+                      <h4>{{ getContentAccountDisplayName(contentResult.account) }}</h4>
+                      <div v-if="contentResult.account?.postPreset" class="muted-text">
+                        Post Preset：{{ contentResult.account.postPreset }}
+                      </div>
+                      <el-input :model-value="contentResult.content || ''" type="textarea" :rows="6" readonly />
+                    </div>
+                  </div>
+                </el-tab-pane>
+              </el-tabs>
             </div>
 
-            <div v-else class="post-grid">
+            <div v-if="item.sheetRowMappings?.length" class="result-block">
+              <h3>Google Sheet 列對應</h3>
+              <el-table :data="item.sheetRowMappings" size="small" style="width: 100%">
+                <el-table-column prop="rowNumber" label="列號" width="80" />
+                <el-table-column label="內容帳號" min-width="220">
+                  <template #default="scope">
+                    <span v-if="scope.row.accountName">
+                      {{ scope.row.accountName }}（{{ getContentAccountPlatformLabel(scope.row.platform) }}）
+                    </span>
+                    <span v-else class="muted-text">
+                      {{ getContentAccountPlatformLabel(scope.row.platform) }}（共用文案）
+                    </span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="postPreset" label="Post Preset" min-width="180" />
+                <el-table-column label="訊息預覽" min-width="260">
+                  <template #default="scope">
+                    <span>{{ truncateText(scope.row.message, 120) }}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+
+            <div v-else-if="item.contentAccountResults?.length" class="result-block">
+              <h3>Google Sheet 列對應</h3>
+              <div class="muted-text">這次內容帳號沒有對應可匯出的 Google Sheet 平台列。</div>
+            </div>
+
+            <div v-if="!item.contentAccountResults?.length" class="post-grid">
               <div v-for="(label, key) in postLabels" :key="key" class="post-card">
                 <h4>{{ label }}</h4>
                 <el-input :model-value="item.posts?.[key] || ''" type="textarea" :rows="6" readonly />
@@ -684,6 +724,7 @@ const googleSheetConfig = ref({
   projectId: '',
   filePath: ''
 })
+const contentResultTabMap = ref({})
 
 const postLabels = {
   twitter: 'X / Twitter 貼文',
@@ -918,6 +959,41 @@ const getContentAccountDisplayName = (contentAccount) => {
   return name ? `${name}（${platformLabel}）` : platformLabel
 }
 
+const truncateText = (value, limit = 120) => {
+  const text = (value || '').trim()
+  if (!text || text.length <= limit) {
+    return text
+  }
+  return `${text.slice(0, Math.max(limit - 1, 1)).trim()}…`
+}
+
+const groupContentAccountResultsByPlatform = (results = []) => {
+  const groups = new Map()
+  results.forEach((result) => {
+    const platform = result?.account?.platform || 'unknown'
+    if (!groups.has(platform)) {
+      groups.set(platform, {
+        platform,
+        label: getContentAccountPlatformLabel(platform),
+        items: []
+      })
+    }
+    groups.get(platform).items.push(result)
+  })
+  return [...groups.values()]
+}
+
+const ensureContentResultTabs = (batchResult) => {
+  const nextMap = {}
+  ;(batchResult?.results || []).forEach((item) => {
+    const groups = groupContentAccountResultsByPlatform(item.contentAccountResults || [])
+    if (groups.length > 0) {
+      nextMap[item.material.id] = groups[0].platform
+    }
+  })
+  contentResultTabMap.value = nextMap
+}
+
 const addContentAccount = () => {
   profileForm.value.settings.contentAccounts.push(createContentAccount())
 }
@@ -975,13 +1051,24 @@ const openCreateDialog = () => {
 }
 
 const fetchGoogleSheetConfig = async () => {
-  const response = await profileApi.getGoogleSheetConfig()
-  googleSheetConfig.value = response.data || {
-    configured: false,
-    source: null,
-    clientEmail: '',
-    projectId: '',
-    filePath: ''
+  try {
+    const response = await profileApi.getGoogleSheetConfig()
+    googleSheetConfig.value = response.data || {
+      configured: false,
+      source: null,
+      clientEmail: '',
+      projectId: '',
+      filePath: ''
+    }
+  } catch (error) {
+    googleSheetConfig.value = {
+      configured: false,
+      source: null,
+      clientEmail: '',
+      projectId: '',
+      filePath: ''
+    }
+    ElMessage.error(error.message || '取得 Google 試算表設定失敗')
   }
 }
 
@@ -1133,6 +1220,7 @@ const submitGeneration = async () => {
       writeToSheet: generateForm.value.writeToSheet
     })
     generationBatchResult.value = response.data
+    ensureContentResultTabs(response.data)
     ElMessage.success('批次文案產生完成')
   } catch (error) {
     ElMessage.error(error.message || '批次產生失敗')
@@ -1410,6 +1498,16 @@ onMounted(async () => {
     flex-direction: column;
     gap: 16px;
     margin-top: 20px;
+  }
+
+  .content-result-tabs {
+    width: 100%;
+  }
+
+  .platform-result-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
   }
 
   .batch-result-card {
