@@ -2,6 +2,7 @@ import json
 import mimetypes
 import os
 import posixpath
+import random
 import re
 import shutil
 import sqlite3
@@ -193,6 +194,7 @@ def generate_profile_content(db_path: Path, base_dir: Path, payload: dict[str, A
         raise FileNotFoundError(f"material file not found: {source_path}")
 
     runtime_profile = deepcopy(profile)
+    runtime_profile["selectedAccountIds"] = _resolve_selected_account_ids(runtime_profile, payload.get("selectedAccountIds"))
     runtime_social_settings = (((runtime_profile.get("settings") or {}).get("socialImport")) or {})
     if payload.get("link"):
         runtime_social_settings["defaultLink"] = payload.get("link")
@@ -207,7 +209,7 @@ def generate_profile_content(db_path: Path, base_dir: Path, payload: dict[str, A
 
     sheet_result = None
     if payload.get("writeToSheet", True):
-        sheet_result = append_rows_to_google_sheet(runtime_profile, rows)
+        sheet_result = append_rows_to_google_sheet(runtime_profile, rows, payload.get("scheduleAt"))
 
     return {
         "profile": runtime_profile,
@@ -218,6 +220,35 @@ def generate_profile_content(db_path: Path, base_dir: Path, payload: dict[str, A
         "posts": normalized_posts,
         "sheetRows": [dict(zip(SHEET_COLUMNS, row)) for row in rows],
         "sheetResult": sheet_result,
+    }
+
+
+def generate_profile_batch_content(db_path: Path, base_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    material_ids = _normalize_account_ids(payload.get("materialIds"))
+    if not material_ids:
+        raise ValueError("materialIds is required")
+
+    results = []
+    for material_id in material_ids:
+        item_payload = dict(payload)
+        item_payload["materialId"] = material_id
+        results.append(generate_profile_content(db_path, base_dir, item_payload))
+
+    return {
+        "profile": results[0]["profile"] if results else None,
+        "selectedAccountIds": (results[0]["profile"] or {}).get("selectedAccountIds", []) if results else [],
+        "results": results,
+        "summary": {
+            "materials": len(results),
+            "sheetRows": sum(len(item.get("sheetRows") or []) for item in results),
+            "worksheets": sorted(
+                {
+                    item.get("sheetResult", {}).get("worksheet")
+                    for item in results
+                    if item.get("sheetResult", {}).get("worksheet")
+                }
+            ),
+        },
     }
 
 
@@ -344,14 +375,14 @@ def build_google_sheet_rows(
     return rows
 
 
-def append_rows_to_google_sheet(profile: dict[str, Any], rows: list[list[str]]) -> dict[str, Any]:
+def append_rows_to_google_sheet(profile: dict[str, Any], rows: list[list[str]], schedule_at: str | None = None) -> dict[str, Any]:
     if not rows:
         return {"appended": 0, "worksheet": None}
 
     settings = profile.get("settings") or {}
     google_sheet = settings.get("googleSheet") or {}
     spreadsheet_id = (google_sheet.get("spreadsheetId") or "").strip()
-    worksheet_name = (google_sheet.get("worksheetName") or "Sheet1").strip()
+    worksheet_name = resolve_google_sheet_worksheet_name(profile, schedule_at)
 
     if not spreadsheet_id:
         raise ValueError("Google Sheet spreadsheetId is required")
@@ -508,12 +539,13 @@ def build_generation_system_prompt(profile: dict[str, Any]) -> str:
         "You are a social media content strategist. "
         "Return valid JSON only with these keys: twitter, threads, instagram, facebook, youtube, tiktok, telegram, patreon. "
         "Do not wrap the JSON in markdown. "
-        "Requirements: twitter and threads must include emoji and exactly 3 hashtags. "
+        "Requirements: twitter and threads must include emoji and exactly 3 hashtags, plus natural contact details and a CTA. "
         "instagram and facebook should be long-form posts with contact details and a CTA woven naturally into the copy. "
-        "youtube should be a concise community-style post plus description-style detail. "
-        "tiktok should be short and direct. "
+        "youtube should be a post with a strong hook plus a useful description-style body. "
+        "tiktok should be short, direct, and include a description-ready CTA. "
         "telegram should be concise and readable. "
         "patreon should be long-form and membership-oriented. "
+        "Keep each platform within its typical character constraints. "
         f"{custom_prompt}"
     )
 
@@ -610,6 +642,21 @@ def slugify(value: str) -> str:
     return slug or "profile"
 
 
+def resolve_google_sheet_worksheet_name(profile: dict[str, Any], schedule_at: str | None = None) -> str:
+    if schedule_at:
+        try:
+            base_date = datetime.fromisoformat(schedule_at)
+        except ValueError as exc:
+            raise ValueError("scheduleAt must be a valid ISO datetime string") from exc
+    else:
+        base_date = datetime.now()
+
+    profile_name = (profile.get("name") or "Profile").strip() or "Profile"
+    safe_profile_name = re.sub(r"[:\\/?*\[\]]", "-", profile_name)
+    worksheet_name = f"{base_date.strftime('%Y-%m-%d')}-{safe_profile_name}"
+    return worksheet_name[:100]
+
+
 def _serialize_profile_row(row: sqlite3.Row | None) -> dict[str, Any]:
     if not row:
         raise ValueError("profile not found")
@@ -647,6 +694,14 @@ def _normalize_account_ids(values: Any) -> list[int]:
         except (TypeError, ValueError):
             continue
     return sorted(set(normalized))
+
+
+def _resolve_selected_account_ids(profile: dict[str, Any], values: Any) -> list[int]:
+    selected_ids = _normalize_account_ids(values)
+    profile_account_ids = set(_normalize_account_ids(profile.get("accountIds")))
+    if not selected_ids:
+        return sorted(profile_account_ids)
+    return [account_id for account_id in selected_ids if account_id in profile_account_ids]
 
 
 def _build_schedule_columns(schedule_at: str | None) -> list[str]:
@@ -749,7 +804,7 @@ def _apply_image_watermark(source_path: Path, output_path: Path, watermark: dict
     base = Image.open(source_path).convert("RGBA")
     overlay = Image.new("RGBA", base.size, (255, 255, 255, 0))
     opacity = float(watermark.get("opacity", 0.45) or 0.45)
-    position = (watermark.get("position") or "bottom-right").strip()
+    position = _resolve_image_watermark_position(watermark)
     watermark_type = (watermark.get("type") or "text").strip()
 
     if watermark_type == "image" and watermark.get("imagePath"):
@@ -787,13 +842,18 @@ def _apply_video_watermark(source_path: Path, output_path: Path, watermark: dict
     mode = (watermark.get("mode") or "static").strip()
     opacity = float(watermark.get("opacity", 0.45) or 0.45)
     watermark_type = (watermark.get("type") or "text").strip()
+    duration = _get_video_duration_seconds(source_path) if mode == "dynamic" else None
 
     if watermark_type == "image" and watermark.get("imagePath"):
         image_path = Path(str(watermark["imagePath"]))
         if not image_path.exists():
             raise RuntimeError(f"watermark image not found: {image_path}")
-        overlay_expr = _build_video_overlay_expression(position, mode)
-        filter_complex = f"[1:v]format=rgba,colorchannelmixer=aa={opacity}[wm];[0:v][wm]{overlay_expr}"
+        if mode == "dynamic":
+            filter_complex, output_label = _build_dynamic_image_overlay_filter(duration, opacity)
+        else:
+            overlay_expr = _build_video_overlay_expression(position, mode)
+            filter_complex = f"[1:v]format=rgba,colorchannelmixer=aa={opacity}[wm];[0:v][wm]{overlay_expr}[vout]"
+            output_label = "vout"
         command = [
             ffmpeg_bin,
             "-y",
@@ -803,22 +863,29 @@ def _apply_video_watermark(source_path: Path, output_path: Path, watermark: dict
             str(image_path),
             "-filter_complex",
             filter_complex,
-            "-codec:a",
+            "-map",
+            f"[{output_label}]",
+            "-map",
+            "0:a?",
+            "-c:a",
             "copy",
             str(output_path),
         ]
     else:
         text = _escape_ffmpeg_text(watermark.get("text") or profile_default_watermark_text(source_path))
-        x_expr, y_expr = _build_drawtext_coordinates(position, mode)
-        filter_complex = (
-            "drawtext="
-            f"text='{text}':"
-            "fontcolor=white:"
-            f"alpha={opacity}:"
-            "fontsize=28:"
-            f"x={x_expr}:"
-            f"y={y_expr}"
-        )
+        if mode == "dynamic":
+            filter_complex = _build_dynamic_drawtext_filter(text, opacity, duration)
+        else:
+            x_expr, y_expr = _build_drawtext_coordinates(position, mode)
+            filter_complex = (
+                "drawtext="
+                f"text='{text}':"
+                "fontcolor=white:"
+                f"alpha={opacity}:"
+                "fontsize=28:"
+                f"x={x_expr}:"
+                f"y={y_expr}"
+            )
         command = [
             ffmpeg_bin,
             "-y",
@@ -826,7 +893,11 @@ def _apply_video_watermark(source_path: Path, output_path: Path, watermark: dict
             str(source_path),
             "-vf",
             filter_complex,
-            "-codec:a",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:a",
             "copy",
             str(output_path),
         ]
@@ -896,6 +967,102 @@ def _build_drawtext_coordinates(position: str, mode: str) -> tuple[str, str]:
         "bottom-left": "h-text_h-40",
         "bottom-right": "h-text_h-40",
         "center": "(h-text_h)/2",
+    }
+    return x_map.get(position, x_map["bottom-right"]), y_map.get(position, y_map["bottom-right"])
+
+
+def _resolve_image_watermark_position(watermark: dict[str, Any]) -> str:
+    position = (watermark.get("position") or "bottom-right").strip()
+    if (watermark.get("mode") or "static").strip() == "dynamic":
+        return random.choice(["top-left", "top-right", "bottom-left", "bottom-right", "center"])
+    return position
+
+
+def _get_video_duration_seconds(source_path: Path) -> float:
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        raise RuntimeError("ffprobe is required for dynamic video watermarking")
+
+    result = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(source_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "ffprobe failed")
+    try:
+        return max(float(result.stdout.strip()), 1.0)
+    except ValueError as exc:
+        raise RuntimeError("unable to read video duration") from exc
+
+
+def _build_dynamic_segments(duration: float) -> list[tuple[float, float, str]]:
+    segments = []
+    current = 0.0
+    positions = ["top-left", "top-right", "bottom-left", "bottom-right", "center"]
+    while current < duration:
+        span = float(random.randint(1, 5))
+        end_at = min(duration, current + span)
+        segments.append((current, end_at, random.choice(positions)))
+        current = end_at
+    return segments or [(0.0, duration, "bottom-right")]
+
+
+def _build_dynamic_drawtext_filter(text: str, opacity: float, duration: float | None) -> str:
+    filters = []
+    for start_at, end_at, position in _build_dynamic_segments(duration or 1.0):
+        x_expr, y_expr = _build_drawtext_coordinates(position, "static")
+        filters.append(
+            "drawtext="
+            f"text='{text}':"
+            "fontcolor=white:"
+            f"alpha={opacity}:"
+            "fontsize=28:"
+            f"x={x_expr}:"
+            f"y={y_expr}:"
+            f"enable='between(t,{start_at:.3f},{end_at:.3f})'"
+        )
+    return ",".join(filters)
+
+
+def _build_dynamic_image_overlay_filter(duration: float | None, opacity: float) -> tuple[str, str]:
+    filter_parts = [f"[1:v]format=rgba,colorchannelmixer=aa={opacity}[wm]"]
+    previous_label = "0:v"
+    output_label = "v0"
+    for index, (start_at, end_at, position) in enumerate(_build_dynamic_segments(duration or 1.0), start=1):
+        x_expr, y_expr = _get_overlay_coordinates(position)
+        output_label = f"v{index}"
+        filter_parts.append(
+            f"[{previous_label}][wm]overlay=x='{x_expr}':y='{y_expr}':enable='between(t,{start_at:.3f},{end_at:.3f})'[{output_label}]"
+        )
+        previous_label = output_label
+    return ";".join(filter_parts), output_label
+
+
+def _get_overlay_coordinates(position: str) -> tuple[str, str]:
+    x_map = {
+        "top-left": "40",
+        "top-right": "main_w-overlay_w-40",
+        "bottom-left": "40",
+        "bottom-right": "main_w-overlay_w-40",
+        "center": "(main_w-overlay_w)/2",
+    }
+    y_map = {
+        "top-left": "40",
+        "top-right": "40",
+        "bottom-left": "main_h-overlay_h-40",
+        "bottom-right": "main_h-overlay_h-40",
+        "center": "(main_h-overlay_h)/2",
     }
     return x_map.get(position, x_map["bottom-right"]), y_map.get(position, y_map["bottom-right"])
 

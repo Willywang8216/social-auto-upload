@@ -15,6 +15,7 @@ from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_
 from utils.profile_pipeline import (
     delete_profile as delete_profile_record,
     ensure_profile_tables,
+    generate_profile_batch_content,
     generate_profile_content,
     get_profile,
     list_profiles,
@@ -270,6 +271,24 @@ def generate_profile_content_route():
     data = request.get_json() or {}
     try:
         result = generate_profile_content(get_db_path(), Path(BASE_DIR), data)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/generateProfileBatchContent', methods=['POST'])
+def generate_profile_batch_content_route():
+    data = request.get_json() or {}
+    try:
+        result = generate_profile_batch_content(get_db_path(), Path(BASE_DIR), data)
         return jsonify({
             "code": 200,
             "msg": "success",

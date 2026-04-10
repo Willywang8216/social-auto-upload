@@ -1,14 +1,14 @@
 <template>
   <div class="profile-management">
     <div class="page-header">
-      <h1>Profile 管理</h1>
+      <h1>Profile 設定</h1>
     </div>
 
     <div class="profile-list-container">
       <div class="profile-toolbar">
         <el-input
           v-model="searchKeyword"
-          placeholder="输入 Profile 名称搜索"
+          placeholder="輸入 Profile 名稱搜尋"
           prefix-icon="Search"
           clearable
         />
@@ -16,7 +16,7 @@
           <el-button type="primary" @click="openCreateDialog">新增 Profile</el-button>
           <el-button type="info" @click="fetchProfiles" :loading="isRefreshing">
             <el-icon :class="{ 'is-loading': isRefreshing }"><Refresh /></el-icon>
-            <span v-if="isRefreshing">刷新中</span>
+            <span>{{ isRefreshing ? '重新整理中' : '重新整理' }}</span>
           </el-button>
         </div>
       </div>
@@ -24,7 +24,7 @@
       <div v-if="filteredProfiles.length > 0" class="profile-list">
         <el-table :data="filteredProfiles" style="width: 100%">
           <el-table-column prop="name" label="Profile" min-width="180" />
-          <el-table-column label="绑定账号" min-width="220">
+          <el-table-column label="綁定帳號" min-width="220">
             <template #default="scope">
               <div class="account-tags">
                 <el-tag
@@ -34,11 +34,11 @@
                 >
                   {{ getAccountName(accountId) }}
                 </el-tag>
-                <span v-if="scope.row.accountIds.length === 0" class="muted-text">未绑定</span>
+                <span v-if="scope.row.accountIds.length === 0" class="muted-text">尚未綁定</span>
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="存储" min-width="220">
+          <el-table-column label="OneDrive / 儲存" min-width="220">
             <template #default="scope">
               <div class="cell-lines">
                 <div>{{ scope.row.settings?.storage?.remoteName || '-' }}</div>
@@ -46,67 +46,67 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="Google Sheet" min-width="220">
+          <el-table-column label="Google 試算表" min-width="220">
             <template #default="scope">
               <div class="cell-lines">
                 <div>{{ scope.row.settings?.googleSheet?.spreadsheetId || '-' }}</div>
-                <div class="muted-text">{{ scope.row.settings?.googleSheet?.worksheetName || 'Sheet1' }}</div>
+                <div class="muted-text">匯出時自動建立：日期-Profile 名稱</div>
               </div>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="320">
             <template #default="scope">
-              <el-button size="small" @click="openEditDialog(scope.row)">编辑</el-button>
-              <el-button size="small" type="success" @click="openGenerateDialog(scope.row)">生成内容</el-button>
-              <el-button size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
+              <el-button size="small" @click="openEditDialog(scope.row)">編輯</el-button>
+              <el-button size="small" type="success" @click="openGenerateDialog(scope.row)">批次產生</el-button>
+              <el-button size="small" type="danger" @click="handleDelete(scope.row)">刪除</el-button>
             </template>
           </el-table-column>
         </el-table>
       </div>
 
       <div v-else class="empty-data">
-        <el-empty description="暂无 Profile 数据" />
+        <el-empty description="目前沒有 Profile 資料" />
       </div>
     </div>
 
     <el-dialog
       v-model="dialogVisible"
-      :title="dialogType === 'create' ? '新增 Profile' : '编辑 Profile'"
+      :title="dialogType === 'create' ? '新增 Profile' : '編輯 Profile'"
       width="900px"
       class="profile-dialog"
     >
       <el-form :model="profileForm" label-width="140px">
-        <el-form-item label="Profile 名称">
-          <el-input v-model="profileForm.name" placeholder="例如：sports-creator" />
+        <el-form-item label="Profile 名稱">
+          <el-input v-model="profileForm.name" placeholder="例如：運動品牌-主帳號群組" />
         </el-form-item>
 
-        <el-form-item label="绑定账号">
+        <el-form-item label="預設帳號群組">
           <el-select
             v-model="profileForm.accountIds"
             multiple
             filterable
-            placeholder="选择对应账号"
+            placeholder="選擇這個 Profile 預設要用的帳號"
             style="width: 100%"
           >
             <el-option
               v-for="account in accountStore.accounts"
               :key="account.id"
-              :label="`${account.name} (${account.platform})`"
+              :label="`${account.name}（${account.platform}）`"
               :value="account.id"
             />
           </el-select>
         </el-form-item>
 
-        <el-form-item label="System Prompt">
+        <el-form-item label="系統提示詞">
           <el-input
             v-model="profileForm.systemPrompt"
             type="textarea"
             :rows="4"
-            placeholder="定义此 Profile 的内容风格、语气、禁忌和目标受众"
+            placeholder="定義這個 Profile 的寫作風格、語氣、禁忌、目標受眾與輸出格式"
           />
         </el-form-item>
 
-        <el-form-item label="Contact Details">
+        <el-form-item label="聯絡資訊">
           <el-input
             v-model="profileForm.contactDetails"
             type="textarea"
@@ -115,30 +115,30 @@
           />
         </el-form-item>
 
-        <el-form-item label="CTA">
+        <el-form-item label="CTA / 行動呼籲">
           <el-input
             v-model="profileForm.cta"
             type="textarea"
             :rows="2"
-            placeholder="例如：Follow、Join Patreon、DM for collab"
+            placeholder="例如：追蹤、加入 Patreon、私訊合作"
           />
         </el-form-item>
 
-        <el-divider>LLM 与转录</el-divider>
+        <el-divider>LLM 與轉錄</el-divider>
 
         <el-form-item label="API Base URL">
           <el-input v-model="profileForm.settings.llm.apiBaseUrl" placeholder="https://llmapi.iamwillywang.com/" />
         </el-form-item>
 
-        <el-form-item label="转录模型">
+        <el-form-item label="轉錄模型">
           <el-input v-model="profileForm.settings.llm.transcriptionModel" placeholder="Audio-Speech-Group" />
         </el-form-item>
 
-        <el-form-item label="生成模型">
+        <el-form-item label="文案生成模型">
           <el-input v-model="profileForm.settings.llm.generationModel" placeholder="reasoning / Multimodal-Generation-Groups" />
         </el-form-item>
 
-        <el-divider>媒体存储</el-divider>
+        <el-divider>素材同步與 OneDrive</el-divider>
 
         <el-form-item label="Rclone Remote">
           <el-input v-model="profileForm.settings.storage.remoteName" placeholder="Onedrive-Yahooforsub-Tao" />
@@ -148,47 +148,53 @@
           <el-input v-model="profileForm.settings.storage.remotePath" placeholder="Scripts-ssh-ssl-keys/SocialUpload" />
         </el-form-item>
 
-        <el-form-item label="Public URL Template">
+        <el-form-item label="公開網址範本">
           <el-input
             v-model="profileForm.settings.storage.publicUrlTemplate"
-            placeholder="选填，例如：https://cdn.example.com/{relative_path}"
+            placeholder="選填，例如：https://cdn.example.com/{relative_path}"
           />
         </el-form-item>
 
         <el-divider>浮水印</el-divider>
 
-        <el-form-item label="启用浮水印">
+        <el-form-item label="啟用浮水印">
           <el-switch v-model="profileForm.settings.watermark.enabled" />
         </el-form-item>
 
-        <el-form-item label="浮水印类型">
+        <el-form-item label="浮水印類型">
           <el-radio-group v-model="profileForm.settings.watermark.type">
             <el-radio label="text">文字</el-radio>
-            <el-radio label="image">图片</el-radio>
+            <el-radio label="image">圖片</el-radio>
           </el-radio-group>
         </el-form-item>
 
         <el-form-item label="浮水印模式">
           <el-radio-group v-model="profileForm.settings.watermark.mode">
-            <el-radio label="static">静态</el-radio>
-            <el-radio label="dynamic">动态</el-radio>
+            <el-radio label="static">固定</el-radio>
+            <el-radio label="dynamic">隨機</el-radio>
           </el-radio-group>
+        </el-form-item>
+
+        <el-form-item label="模式說明">
+          <div class="muted-text">
+            圖片使用隨機位置；影片會以 1 至 5 秒區段隨機切換浮水印位置。
+          </div>
         </el-form-item>
 
         <el-form-item label="浮水印文字" v-if="profileForm.settings.watermark.type === 'text'">
           <el-input v-model="profileForm.settings.watermark.text" placeholder="例如：@brandname" />
         </el-form-item>
 
-        <el-form-item label="浮水印图片路径" v-else>
-          <el-input v-model="profileForm.settings.watermark.imagePath" placeholder="本机可访问路径，例如：C:/logo.png" />
+        <el-form-item label="浮水印圖片路徑" v-else>
+          <el-input v-model="profileForm.settings.watermark.imagePath" placeholder="本機可存取路徑，例如：C:/logo.png" />
         </el-form-item>
 
-        <el-form-item label="位置">
+        <el-form-item label="預設位置">
           <el-select v-model="profileForm.settings.watermark.position" style="width: 100%">
-            <el-option label="右下" value="bottom-right" />
-            <el-option label="左下" value="bottom-left" />
-            <el-option label="右上" value="top-right" />
-            <el-option label="左上" value="top-left" />
+            <el-option label="右下角" value="bottom-right" />
+            <el-option label="左下角" value="bottom-left" />
+            <el-option label="右上角" value="top-right" />
+            <el-option label="左上角" value="top-left" />
             <el-option label="居中" value="center" />
           </el-select>
         </el-form-item>
@@ -197,40 +203,45 @@
           <el-slider v-model="profileForm.settings.watermark.opacity" :min="0.1" :max="1" :step="0.05" show-input />
         </el-form-item>
 
-        <el-divider>Google Sheet</el-divider>
+        <el-divider>Google 試算表</el-divider>
 
         <el-form-item label="Spreadsheet ID">
           <el-input v-model="profileForm.settings.googleSheet.spreadsheetId" placeholder="Google Sheet ID" />
         </el-form-item>
 
-        <el-form-item label="Worksheet Name">
-          <el-input v-model="profileForm.settings.googleSheet.worksheetName" placeholder="Sheet1" />
+        <el-form-item label="工作表命名規則">
+          <el-alert
+            title="匯出時會自動建立「YYYY-MM-DD-Profile 名稱」工作表"
+            type="info"
+            :closable="false"
+            show-icon
+          />
         </el-form-item>
 
-        <el-divider>CSV / Import 默认值</el-divider>
+        <el-divider>CSV / Import 預設值</el-divider>
 
-        <el-form-item label="默认链接">
+        <el-form-item label="預設連結">
           <el-input v-model="profileForm.settings.socialImport.defaultLink" placeholder="https://example.com" />
         </el-form-item>
 
         <el-form-item label="Category">
-          <el-input v-model="profileForm.settings.socialImport.category" placeholder="可选" />
+          <el-input v-model="profileForm.settings.socialImport.category" placeholder="選填" />
         </el-form-item>
 
-        <el-form-item label="Watermark 名称">
+        <el-form-item label="Watermark 名稱">
           <el-input v-model="profileForm.settings.socialImport.watermarkName" placeholder="例如：Default" />
         </el-form-item>
 
         <el-form-item label="Hashtag Group">
-          <el-input v-model="profileForm.settings.socialImport.hashtagGroup" placeholder="调度器内已存在的 Hashtag Group 名称" />
+          <el-input v-model="profileForm.settings.socialImport.hashtagGroup" placeholder="排程工具中既有的 Hashtag Group 名稱" />
         </el-form-item>
 
         <el-form-item label="CTA Group">
-          <el-input v-model="profileForm.settings.socialImport.ctaGroup" placeholder="调度器内已存在的 CTA Group 名称" />
+          <el-input v-model="profileForm.settings.socialImport.ctaGroup" placeholder="排程工具中既有的 CTA Group 名稱" />
         </el-form-item>
 
-        <el-form-item label="First Comment">
-          <el-input v-model="profileForm.settings.socialImport.firstComment" placeholder="Facebook / Instagram / LinkedIn / Bluesky / Threads 首评" />
+        <el-form-item label="首則留言">
+          <el-input v-model="profileForm.settings.socialImport.firstComment" placeholder="Facebook / Instagram / LinkedIn / Bluesky / Threads 首則留言" />
         </el-form-item>
 
         <el-form-item label="Story">
@@ -238,7 +249,7 @@
         </el-form-item>
 
         <el-form-item label="Pinterest Board">
-          <el-input v-model="profileForm.settings.socialImport.pinterestBoard" placeholder="可选" />
+          <el-input v-model="profileForm.settings.socialImport.pinterestBoard" placeholder="選填" />
         </el-form-item>
 
         <el-form-item label="Alt Text">
@@ -276,7 +287,7 @@
         <div class="dialog-footer">
           <el-button @click="dialogVisible = false">取消</el-button>
           <el-button type="primary" @click="submitProfile" :loading="isSubmitting">
-            {{ isSubmitting ? '保存中' : '保存' }}
+            {{ isSubmitting ? '儲存中' : '儲存' }}
           </el-button>
         </div>
       </template>
@@ -284,7 +295,7 @@
 
     <el-dialog
       v-model="generateDialogVisible"
-      title="生成内容并写入 Google Sheet"
+      title="批次產生文案並匯出 Google 試算表"
       width="900px"
       class="generate-dialog"
     >
@@ -294,7 +305,15 @@
         </el-form-item>
 
         <el-form-item label="素材">
-          <el-select v-model="generateForm.materialId" filterable placeholder="选择素材" style="width: 100%">
+          <el-select
+            v-model="generateForm.materialIds"
+            multiple
+            filterable
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="可一次選擇多個圖片或影片素材"
+            style="width: 100%"
+          >
             <el-option
               v-for="material in materials"
               :key="material.id"
@@ -304,58 +323,95 @@
           </el-select>
         </el-form-item>
 
-        <el-form-item label="导流链接">
-          <el-input v-model="generateForm.link" placeholder="选填，覆盖 profile 默认链接" />
+        <el-form-item label="本次發送帳號">
+          <el-checkbox-group v-model="generateForm.selectedAccountIds" class="generate-account-list">
+            <el-checkbox
+              v-for="account in currentProfileAccounts"
+              :key="account.id"
+              :label="account.id"
+            >
+              {{ account.name }}（{{ account.platform }}）
+            </el-checkbox>
+          </el-checkbox-group>
+          <div v-if="currentProfileAccounts.length === 0" class="muted-text">
+            這個 Profile 目前沒有綁定任何帳號。
+          </div>
         </el-form-item>
 
-        <el-form-item label="排程时间">
+        <el-form-item label="導流連結">
+          <el-input v-model="generateForm.link" placeholder="選填，可覆蓋 Profile 預設連結" />
+        </el-form-item>
+
+        <el-form-item label="排程時間">
           <el-date-picker
             v-model="generateForm.scheduleAt"
             type="datetime"
             value-format="YYYY-MM-DDTHH:mm:ss"
-            placeholder="选填"
+            placeholder="選填"
             style="width: 100%"
           />
         </el-form-item>
 
-        <el-form-item label="写入 Google Sheet">
+        <el-form-item label="寫入 Google 試算表">
           <el-switch v-model="generateForm.writeToSheet" />
         </el-form-item>
       </el-form>
 
-      <div v-if="generationResult" class="generation-result">
+      <div v-if="generationBatchResult" class="generation-result">
         <el-alert
-          :title="generationResult.sheetResult ? `已写入 ${generationResult.sheetResult.appended} 行` : '仅生成，未写入 Sheet'"
+          :title="buildBatchSummaryTitle()"
           type="success"
           :closable="false"
           show-icon
         />
 
         <div class="result-block">
-          <h3>媒体 URL</h3>
-          <el-link :href="generationResult.storage?.publicUrl" target="_blank" type="primary">
-            {{ generationResult.storage?.publicUrl }}
-          </el-link>
+          <h3>本次帳號</h3>
+          <div class="account-tags">
+            <el-tag
+              v-for="account in selectedGenerationAccounts"
+              :key="account.id"
+              class="account-tag"
+            >
+              {{ account.name }}（{{ account.platform }}）
+            </el-tag>
+            <span v-if="selectedGenerationAccounts.length === 0" class="muted-text">未挑選帳號</span>
+          </div>
         </div>
 
-        <div class="result-block">
-          <h3>Transcript</h3>
-          <el-input :model-value="generationResult.transcript" type="textarea" :rows="8" readonly />
-        </div>
+        <div class="batch-result-list">
+          <div
+            v-for="item in generationBatchResult.results"
+            :key="item.material.id"
+            class="batch-result-card"
+          >
+            <div class="result-block">
+              <h3>{{ item.material.filename }}</h3>
+              <el-link :href="item.storage?.publicUrl" target="_blank" type="primary">
+                {{ item.storage?.publicUrl }}
+              </el-link>
+            </div>
 
-        <div class="post-grid">
-          <div v-for="(label, key) in postLabels" :key="key" class="post-card">
-            <h4>{{ label }}</h4>
-            <el-input :model-value="generationResult.posts?.[key] || ''" type="textarea" :rows="6" readonly />
+            <div class="result-block">
+              <h3>轉錄內容</h3>
+              <el-input :model-value="item.transcript" type="textarea" :rows="6" readonly />
+            </div>
+
+            <div class="post-grid">
+              <div v-for="(label, key) in postLabels" :key="key" class="post-card">
+                <h4>{{ label }}</h4>
+                <el-input :model-value="item.posts?.[key] || ''" type="textarea" :rows="6" readonly />
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
       <template #footer>
         <div class="dialog-footer">
-          <el-button @click="generateDialogVisible = false">关闭</el-button>
+          <el-button @click="generateDialogVisible = false">關閉</el-button>
           <el-button type="primary" @click="submitGeneration" :loading="isGenerating">
-            {{ isGenerating ? '生成中' : '开始生成' }}
+            {{ isGenerating ? '產生中' : '開始批次產生' }}
           </el-button>
         </div>
       </template>
@@ -386,15 +442,15 @@ const dialogVisible = ref(false)
 const dialogType = ref('create')
 const generateDialogVisible = ref(false)
 const currentProfile = ref(null)
-const generationResult = ref(null)
+const generationBatchResult = ref(null)
 
 const postLabels = {
-  twitter: 'X / Twitter',
+  twitter: 'X / Twitter 貼文',
   threads: 'Threads',
-  instagram: 'Instagram',
-  facebook: 'Facebook',
-  youtube: 'YouTube',
-  tiktok: 'TikTok',
+  instagram: 'Instagram 長文',
+  facebook: 'Facebook 長文',
+  youtube: 'YouTube 貼文與說明',
+  tiktok: 'TikTok 貼文與說明',
   telegram: 'Telegram',
   patreon: 'Patreon'
 }
@@ -456,7 +512,8 @@ const makeDefaultProfile = () => ({
 
 const profileForm = ref(makeDefaultProfile())
 const generateForm = ref({
-  materialId: null,
+  materialIds: [],
+  selectedAccountIds: [],
   link: '',
   scheduleAt: '',
   writeToSheet: true
@@ -472,10 +529,21 @@ const filteredProfiles = computed(() => {
 })
 
 const materials = computed(() => appStore.materials)
+const currentProfileAccounts = computed(() => {
+  if (!currentProfile.value) {
+    return []
+  }
+  const selectedIds = new Set(currentProfile.value.accountIds || [])
+  return accountStore.accounts.filter(item => selectedIds.has(item.id))
+})
+const selectedGenerationAccounts = computed(() => {
+  const selectedIds = new Set(generationBatchResult.value?.selectedAccountIds || [])
+  return accountStore.accounts.filter(item => selectedIds.has(item.id))
+})
 
 const getAccountName = (accountId) => {
   const account = accountStore.accounts.find(item => item.id === accountId)
-  return account ? `${account.name} (${account.platform})` : accountId
+  return account ? `${account.name}（${account.platform}）` : accountId
 }
 
 const fetchProfiles = async () => {
@@ -484,7 +552,7 @@ const fetchProfiles = async () => {
     const response = await profileApi.getProfiles()
     profiles.value = response.data || []
   } catch (error) {
-    ElMessage.error('获取 Profile 列表失败')
+    ElMessage.error('取得 Profile 清單失敗')
   } finally {
     isRefreshing.value = false
   }
@@ -501,7 +569,7 @@ const ensureAccounts = async () => {
       accountStore.setAccounts(response.data)
     }
   } catch (error) {
-    ElMessage.error('获取账号列表失败')
+    ElMessage.error('取得帳號清單失敗')
   }
 }
 
@@ -516,7 +584,7 @@ const ensureMaterials = async () => {
       appStore.setMaterials(response.data || [])
     }
   } catch (error) {
-    ElMessage.error('获取素材列表失败')
+    ElMessage.error('取得素材清單失敗')
   }
 }
 
@@ -534,7 +602,7 @@ const openEditDialog = (profile) => {
 
 const submitProfile = async () => {
   if (!profileForm.value.name.trim()) {
-    ElMessage.warning('请输入 Profile 名称')
+    ElMessage.warning('請輸入 Profile 名稱')
     return
   }
 
@@ -551,9 +619,9 @@ const submitProfile = async () => {
     }
 
     dialogVisible.value = false
-    ElMessage.success('Profile 保存成功')
+    ElMessage.success('Profile 儲存成功')
   } catch (error) {
-    ElMessage.error(error.message || 'Profile 保存失败')
+    ElMessage.error(error.message || 'Profile 儲存失敗')
   } finally {
     isSubmitting.value = false
   }
@@ -561,10 +629,10 @@ const submitProfile = async () => {
 
 const handleDelete = (profile) => {
   ElMessageBox.confirm(
-    `确定要删除 Profile ${profile.name} 吗？`,
-    '警告',
+    `確定要刪除 Profile「${profile.name}」嗎？`,
+    '提醒',
     {
-      confirmButtonText: '确定',
+      confirmButtonText: '確定',
       cancelButtonText: '取消',
       type: 'warning'
     }
@@ -572,18 +640,19 @@ const handleDelete = (profile) => {
     try {
       await profileApi.deleteProfile(profile.id)
       profiles.value = profiles.value.filter(item => item.id !== profile.id)
-      ElMessage.success('删除成功')
+      ElMessage.success('刪除成功')
     } catch (error) {
-      ElMessage.error('删除失败')
+      ElMessage.error('刪除失敗')
     }
   }).catch(() => {})
 }
 
 const openGenerateDialog = async (profile) => {
   currentProfile.value = profile
-  generationResult.value = null
+  generationBatchResult.value = null
   generateForm.value = {
-    materialId: null,
+    materialIds: [],
+    selectedAccountIds: [...(profile.accountIds || [])],
     link: profile.settings?.socialImport?.defaultLink || '',
     scheduleAt: '',
     writeToSheet: true
@@ -597,27 +666,42 @@ const submitGeneration = async () => {
     return
   }
 
-  if (!generateForm.value.materialId) {
-    ElMessage.warning('请选择素材')
+  if (generateForm.value.materialIds.length === 0) {
+    ElMessage.warning('請至少選擇一份素材')
     return
   }
 
   isGenerating.value = true
   try {
-    const response = await profileApi.generateContent({
+    const response = await profileApi.generateBatchContent({
       profileId: currentProfile.value.id,
-      materialId: generateForm.value.materialId,
+      materialIds: generateForm.value.materialIds,
+      selectedAccountIds: generateForm.value.selectedAccountIds,
       link: generateForm.value.link,
       scheduleAt: generateForm.value.scheduleAt,
       writeToSheet: generateForm.value.writeToSheet
     })
-    generationResult.value = response.data
-    ElMessage.success('内容生成完成')
+    generationBatchResult.value = response.data
+    ElMessage.success('批次文案產生完成')
   } catch (error) {
-    ElMessage.error(error.message || '生成失败')
+    ElMessage.error(error.message || '批次產生失敗')
   } finally {
     isGenerating.value = false
   }
+}
+
+const buildBatchSummaryTitle = () => {
+  if (!generationBatchResult.value) {
+    return ''
+  }
+  const summary = generationBatchResult.value.summary || {}
+  const rowCount = summary.sheetRows || 0
+  const materialCount = summary.materials || 0
+  const worksheetText = (summary.worksheets || []).join('、')
+  if (generateForm.value.writeToSheet) {
+    return `已完成 ${materialCount} 份素材，匯出 ${rowCount} 列到 ${worksheetText || 'Google 試算表'}`
+  }
+  return `已完成 ${materialCount} 份素材，僅產生文案，尚未寫入 Google 試算表`
 }
 
 onMounted(async () => {
@@ -702,6 +786,12 @@ onMounted(async () => {
     line-height: 1.6;
   }
 
+  .generate-account-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+  }
+
   .generation-result {
     margin-top: 20px;
   }
@@ -714,6 +804,20 @@ onMounted(async () => {
       font-size: 16px;
       color: $text-primary;
     }
+  }
+
+  .batch-result-list {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    margin-top: 20px;
+  }
+
+  .batch-result-card {
+    background-color: #f8fafc;
+    border: 1px solid #e5eaf3;
+    border-radius: 10px;
+    padding: 20px;
   }
 
   .post-grid {

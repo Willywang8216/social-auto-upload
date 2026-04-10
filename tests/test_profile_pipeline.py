@@ -9,6 +9,7 @@ from utils.profile_pipeline import (
     ensure_profile_tables,
     extract_json_payload,
     list_profiles,
+    resolve_google_sheet_worksheet_name,
     save_profile,
     trim_text,
 )
@@ -121,6 +122,13 @@ class ProfilePipelineTests(unittest.TestCase):
     def test_trim_text_adds_ellipsis_when_limit_exceeded(self):
         self.assertEqual(trim_text("abcdef", 4), "abc…")
         self.assertEqual(trim_text("abc", 4), "abc")
+
+    def test_resolve_google_sheet_worksheet_name_uses_date_and_profile_name(self):
+        worksheet_name = resolve_google_sheet_worksheet_name(
+            {"name": "Creator Alpha"},
+            "2026-05-03T14:30:00",
+        )
+        self.assertEqual(worksheet_name, "2026-05-03-Creator Alpha")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,10 @@ export const profileApi = {
     return http.post('/generateProfileContent', data)
   },
 
+  generateBatchContent(data) {
+    return http.post('/generateProfileBatchContent', data)
+  },
+
   migrateMedia(data) {
     return http.post('/migrateProfileMedia', data)
   }
