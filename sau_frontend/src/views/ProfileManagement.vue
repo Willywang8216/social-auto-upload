@@ -14,6 +14,7 @@
         />
         <div class="action-buttons">
           <el-button type="primary" @click="openCreateDialog">新增 Profile</el-button>
+          <el-button type="warning" plain @click="openGoogleSheetDialog">Google 試算表連線</el-button>
           <el-button type="info" @click="fetchProfiles" :loading="isRefreshing">
             <el-icon :class="{ 'is-loading': isRefreshing }"><Refresh /></el-icon>
             <span>{{ isRefreshing ? '重新整理中' : '重新整理' }}</span>
@@ -294,6 +295,72 @@
     </el-dialog>
 
     <el-dialog
+      v-model="googleSheetDialogVisible"
+      title="Google 試算表連線設定"
+      width="900px"
+    >
+      <el-alert
+        :title="googleSheetConfig.configured ? '已找到可用的 Google service account 設定' : '尚未設定 Google service account'"
+        :type="googleSheetConfig.configured ? 'success' : 'warning'"
+        :closable="false"
+        show-icon
+      />
+
+      <div class="result-block">
+        <h3>目前狀態</h3>
+        <div class="cell-lines">
+          <div>來源：{{ buildGoogleSheetSourceLabel(googleSheetConfig.source) }}</div>
+          <div>Service Account Email：{{ googleSheetConfig.clientEmail || '尚未設定' }}</div>
+          <div>Project ID：{{ googleSheetConfig.projectId || '尚未設定' }}</div>
+          <div class="muted-text">若使用環境變數，會優先於此頁面儲存的檔案設定。</div>
+        </div>
+      </div>
+
+      <el-form :model="googleSheetForm" label-width="180px" class="google-sheet-form">
+        <el-form-item label="Service Account JSON">
+          <el-input
+            v-model="googleSheetForm.serviceAccountJson"
+            type="textarea"
+            :rows="12"
+            placeholder="貼上完整 Google service account JSON"
+          />
+        </el-form-item>
+
+        <el-form-item label="測試 Spreadsheet ID">
+          <el-input
+            v-model="googleSheetForm.spreadsheetId"
+            placeholder="貼上 Google Sheet URL 中 /d/ 與 /edit 之間那段 ID"
+          />
+        </el-form-item>
+      </el-form>
+
+      <div v-if="googleSheetValidationResult" class="result-block">
+        <h3>驗證結果</h3>
+        <el-alert
+          :title="`已連線到「${googleSheetValidationResult.title}」`"
+          type="success"
+          :closable="false"
+          show-icon
+        />
+        <div class="cell-lines validation-details">
+          <div>Spreadsheet ID：{{ googleSheetValidationResult.spreadsheetId }}</div>
+          <div>可見工作表數：{{ googleSheetValidationResult.worksheetCount }}</div>
+          <div>工作表：{{ (googleSheetValidationResult.worksheets || []).join('、') || '無' }}</div>
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="googleSheetDialogVisible = false">關閉</el-button>
+          <el-button @click="validateGoogleSheetConfig" :loading="isValidatingGoogleSheet">測試連線</el-button>
+          <el-button type="primary" @click="saveGoogleSheetConfig" :loading="isSavingGoogleSheet">
+            儲存設定
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="generateDialogVisible"
       title="批次產生文案並匯出 Google 試算表"
       width="900px"
@@ -436,13 +503,24 @@ const searchKeyword = ref('')
 const isRefreshing = ref(false)
 const isSubmitting = ref(false)
 const isGenerating = ref(false)
+const isSavingGoogleSheet = ref(false)
+const isValidatingGoogleSheet = ref(false)
 
 const profiles = ref([])
 const dialogVisible = ref(false)
 const dialogType = ref('create')
+const googleSheetDialogVisible = ref(false)
 const generateDialogVisible = ref(false)
 const currentProfile = ref(null)
 const generationBatchResult = ref(null)
+const googleSheetValidationResult = ref(null)
+const googleSheetConfig = ref({
+  configured: false,
+  source: null,
+  clientEmail: '',
+  projectId: '',
+  filePath: ''
+})
 
 const postLabels = {
   twitter: 'X / Twitter 貼文',
@@ -511,6 +589,10 @@ const makeDefaultProfile = () => ({
 })
 
 const profileForm = ref(makeDefaultProfile())
+const googleSheetForm = ref({
+  serviceAccountJson: '',
+  spreadsheetId: ''
+})
 const generateForm = ref({
   materialIds: [],
   selectedAccountIds: [],
@@ -592,6 +674,70 @@ const openCreateDialog = () => {
   dialogType.value = 'create'
   profileForm.value = makeDefaultProfile()
   dialogVisible.value = true
+}
+
+const fetchGoogleSheetConfig = async () => {
+  const response = await profileApi.getGoogleSheetConfig()
+  googleSheetConfig.value = response.data || {
+    configured: false,
+    source: null,
+    clientEmail: '',
+    projectId: '',
+    filePath: ''
+  }
+}
+
+const openGoogleSheetDialog = async () => {
+  googleSheetValidationResult.value = null
+  googleSheetForm.value = {
+    serviceAccountJson: '',
+    spreadsheetId: ''
+  }
+  await fetchGoogleSheetConfig()
+  googleSheetDialogVisible.value = true
+}
+
+const saveGoogleSheetConfig = async () => {
+  if (!googleSheetForm.value.serviceAccountJson.trim()) {
+    ElMessage.warning('請貼上 Google service account JSON')
+    return
+  }
+
+  isSavingGoogleSheet.value = true
+  try {
+    const response = await profileApi.saveGoogleSheetConfig({
+      serviceAccountJson: googleSheetForm.value.serviceAccountJson
+    })
+    googleSheetConfig.value = response.data
+    googleSheetForm.value.serviceAccountJson = ''
+    ElMessage.success('Google 試算表設定已儲存')
+  } catch (error) {
+    ElMessage.error(error.message || 'Google 試算表設定儲存失敗')
+  } finally {
+    isSavingGoogleSheet.value = false
+  }
+}
+
+const validateGoogleSheetConfig = async () => {
+  const spreadsheetId = googleSheetForm.value.spreadsheetId.trim() || profileForm.value.settings.googleSheet.spreadsheetId.trim()
+  if (!spreadsheetId) {
+    ElMessage.warning('請輸入要測試的 Spreadsheet ID')
+    return
+  }
+
+  isValidatingGoogleSheet.value = true
+  try {
+    const response = await profileApi.validateGoogleSheetConfig({
+      spreadsheetId
+    })
+    googleSheetValidationResult.value = response.data
+    ElMessage.success('Google 試算表連線成功')
+  } catch (error) {
+    googleSheetValidationResult.value = null
+    ElMessage.error(error.message || 'Google 試算表連線失敗')
+  } finally {
+    isValidatingGoogleSheet.value = false
+  }
 }
 
 const openEditDialog = (profile) => {
@@ -704,11 +850,25 @@ const buildBatchSummaryTitle = () => {
   return `已完成 ${materialCount} 份素材，僅產生文案，尚未寫入 Google 試算表`
 }
 
+const buildGoogleSheetSourceLabel = (source) => {
+  if (source === 'env_json') {
+    return '環境變數 JSON'
+  }
+  if (source === 'env_file') {
+    return '環境變數檔案路徑'
+  }
+  if (source === 'stored_file') {
+    return '後台儲存檔案'
+  }
+  return '尚未設定'
+}
+
 onMounted(async () => {
   await Promise.all([
     fetchProfiles(),
     ensureAccounts(),
-    ensureMaterials()
+    ensureMaterials(),
+    fetchGoogleSheetConfig()
   ])
 })
 </script>
@@ -796,6 +956,10 @@ onMounted(async () => {
     margin-top: 20px;
   }
 
+  .google-sheet-form {
+    margin-top: 20px;
+  }
+
   .result-block {
     margin-top: 20px;
 
@@ -818,6 +982,10 @@ onMounted(async () => {
     border: 1px solid #e5eaf3;
     border-radius: 10px;
     padding: 20px;
+  }
+
+  .validation-details {
+    margin-top: 12px;
   }
 
   .post-grid {

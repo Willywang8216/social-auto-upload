@@ -50,6 +50,7 @@ NON_SHEET_PLATFORMS = ["telegram", "patreon"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
+GOOGLE_SERVICE_ACCOUNT_FILENAME = "google_service_account.json"
 
 
 def ensure_profile_tables(db_path: Path) -> None:
@@ -415,6 +416,87 @@ def append_rows_to_google_sheet(profile: dict[str, Any], rows: list[list[str]], 
     }
 
 
+def get_google_service_account_config(base_dir: Path) -> dict[str, Any]:
+    env_json = _resolve_value(None, "SAU_GOOGLE_SERVICE_ACCOUNT_JSON", "GOOGLE_SERVICE_ACCOUNT_JSON")
+    if env_json:
+        data = json.loads(env_json)
+        return {
+            "configured": True,
+            "source": "env_json",
+            "clientEmail": data.get("client_email", ""),
+            "projectId": data.get("project_id", ""),
+            "filePath": None,
+        }
+
+    env_file = _resolve_value(None, "SAU_GOOGLE_SERVICE_ACCOUNT_FILE", "GOOGLE_SERVICE_ACCOUNT_FILE")
+    if env_file:
+        path = Path(env_file)
+        if not path.exists():
+            raise RuntimeError(f"Google service account file not found: {path}")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            "configured": True,
+            "source": "env_file",
+            "clientEmail": data.get("client_email", ""),
+            "projectId": data.get("project_id", ""),
+            "filePath": str(path),
+        }
+
+    stored_path = get_google_service_account_storage_path(base_dir)
+    if stored_path.exists():
+        data = json.loads(stored_path.read_text(encoding="utf-8"))
+        return {
+            "configured": True,
+            "source": "stored_file",
+            "clientEmail": data.get("client_email", ""),
+            "projectId": data.get("project_id", ""),
+            "filePath": str(stored_path),
+        }
+
+    return {
+        "configured": False,
+        "source": None,
+        "clientEmail": "",
+        "projectId": "",
+        "filePath": str(stored_path),
+    }
+
+
+def save_google_service_account_config(base_dir: Path, service_account_json: str) -> dict[str, Any]:
+    data = json.loads((service_account_json or "").strip())
+    _validate_google_service_account_payload(data)
+    path = get_google_service_account_storage_path(base_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return get_google_service_account_config(base_dir)
+
+
+def validate_google_sheet_connection(base_dir: Path, spreadsheet_id: str) -> dict[str, Any]:
+    spreadsheet_id = (spreadsheet_id or "").strip()
+    if not spreadsheet_id:
+        raise ValueError("spreadsheetId is required")
+
+    service_account_data = _load_google_service_account_data(base_dir)
+    if not service_account_data:
+        raise RuntimeError("Google service account credentials are not configured")
+
+    try:
+        import gspread
+    except ImportError as exc:
+        raise RuntimeError("gspread is required to validate Google Sheets access") from exc
+
+    client = gspread.service_account_from_dict(service_account_data)
+    spreadsheet = client.open_by_key(spreadsheet_id)
+    worksheets = spreadsheet.worksheets()
+    return {
+        "spreadsheetId": spreadsheet_id,
+        "title": spreadsheet.title,
+        "worksheetCount": len(worksheets),
+        "worksheets": [sheet.title for sheet in worksheets[:20]],
+        "clientEmail": service_account_data.get("client_email", ""),
+    }
+
+
 def upload_media(local_path: Path, profile: dict[str, Any]) -> dict[str, str]:
     settings = profile.get("settings") or {}
     storage = settings.get("storage") or {}
@@ -657,6 +739,10 @@ def resolve_google_sheet_worksheet_name(profile: dict[str, Any], schedule_at: st
     return worksheet_name[:100]
 
 
+def get_google_service_account_storage_path(base_dir: Path) -> Path:
+    return base_dir / "db" / GOOGLE_SERVICE_ACCOUNT_FILENAME
+
+
 def _serialize_profile_row(row: sqlite3.Row | None) -> dict[str, Any]:
     if not row:
         raise ValueError("profile not found")
@@ -744,7 +830,7 @@ def _build_public_url(storage: dict[str, Any], relative_path: str, remote_spec: 
     return result.stdout.strip()
 
 
-def _load_google_service_account_data() -> dict[str, Any] | None:
+def _load_google_service_account_data(base_dir: Path | None = None) -> dict[str, Any] | None:
     raw_json = _resolve_value(None, "SAU_GOOGLE_SERVICE_ACCOUNT_JSON", "GOOGLE_SERVICE_ACCOUNT_JSON")
     if raw_json:
         try:
@@ -758,7 +844,35 @@ def _load_google_service_account_data() -> dict[str, Any] | None:
         if not path.exists():
             raise RuntimeError(f"Google service account file not found: {path}")
         return json.loads(path.read_text(encoding="utf-8"))
+
+    candidate_paths = []
+    if base_dir is not None:
+        candidate_paths.append(get_google_service_account_storage_path(base_dir))
+    candidate_paths.extend([
+        Path("db") / GOOGLE_SERVICE_ACCOUNT_FILENAME,
+        Path(GOOGLE_SERVICE_ACCOUNT_FILENAME),
+    ])
+    for path in candidate_paths:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
     return None
+
+
+def _validate_google_service_account_payload(data: dict[str, Any]) -> None:
+    required_fields = [
+        "type",
+        "project_id",
+        "private_key_id",
+        "private_key",
+        "client_email",
+        "client_id",
+        "token_uri",
+    ]
+    missing = [field for field in required_fields if not str(data.get(field) or "").strip()]
+    if missing:
+        raise ValueError(f"missing required Google service account fields: {', '.join(missing)}")
+    if str(data.get("type", "")).strip() != "service_account":
+        raise ValueError("Google credential type must be service_account")
 
 
 def _resolve_value(explicit_value: Any, *env_names: str) -> str:

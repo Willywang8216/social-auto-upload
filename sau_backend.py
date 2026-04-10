@@ -17,10 +17,13 @@ from utils.profile_pipeline import (
     ensure_profile_tables,
     generate_profile_batch_content,
     generate_profile_content,
+    get_google_service_account_config,
     get_profile,
     list_profiles,
     migrate_uploaded_asset,
     save_profile,
+    save_google_service_account_config,
+    validate_google_sheet_connection,
 )
 
 active_queues = {}
@@ -289,6 +292,65 @@ def generate_profile_batch_content_route():
     data = request.get_json() or {}
     try:
         result = generate_profile_batch_content(get_db_path(), Path(BASE_DIR), data)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/getGoogleSheetConfig', methods=['GET'])
+def get_google_sheet_config_route():
+    try:
+        result = get_google_service_account_config(Path(BASE_DIR))
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/saveGoogleSheetConfig', methods=['POST'])
+def save_google_sheet_config_route():
+    data = request.get_json() or {}
+    try:
+        result = save_google_service_account_config(
+            Path(BASE_DIR),
+            data.get("serviceAccountJson", ""),
+        )
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/validateGoogleSheetConfig', methods=['POST'])
+def validate_google_sheet_config_route():
+    data = request.get_json() or {}
+    try:
+        result = validate_google_sheet_connection(
+            Path(BASE_DIR),
+            data.get("spreadsheetId", ""),
+        )
         return jsonify({
             "code": 200,
             "msg": "success",

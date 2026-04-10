@@ -21,6 +21,18 @@ export const profileApi = {
     return http.post('/generateProfileBatchContent', data)
   },
 
+  getGoogleSheetConfig() {
+    return http.get('/getGoogleSheetConfig')
+  },
+
+  saveGoogleSheetConfig(data) {
+    return http.post('/saveGoogleSheetConfig', data)
+  },
+
+  validateGoogleSheetConfig(data) {
+    return http.post('/validateGoogleSheetConfig', data)
+  },
+
   migrateMedia(data) {
     return http.post('/migrateProfileMedia', data)
   }

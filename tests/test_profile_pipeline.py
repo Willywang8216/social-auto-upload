@@ -8,8 +8,10 @@ from utils.profile_pipeline import (
     build_google_sheet_rows,
     ensure_profile_tables,
     extract_json_payload,
+    get_google_service_account_config,
     list_profiles,
     resolve_google_sheet_worksheet_name,
+    save_google_service_account_config,
     save_profile,
     trim_text,
 )
@@ -129,6 +131,32 @@ class ProfilePipelineTests(unittest.TestCase):
             "2026-05-03T14:30:00",
         )
         self.assertEqual(worksheet_name, "2026-05-03-Creator Alpha")
+
+    def test_save_google_service_account_config_persists_local_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            result = save_google_service_account_config(
+                base_dir,
+                """
+                {
+                  "type": "service_account",
+                  "project_id": "demo-project",
+                  "private_key_id": "abc123",
+                  "private_key": "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\\n",
+                  "client_email": "demo@demo-project.iam.gserviceaccount.com",
+                  "client_id": "1234567890",
+                  "token_uri": "https://oauth2.googleapis.com/token"
+                }
+                """,
+            )
+
+            self.assertTrue(result["configured"])
+            self.assertEqual(result["source"], "stored_file")
+            self.assertEqual(result["clientEmail"], "demo@demo-project.iam.gserviceaccount.com")
+
+            loaded = get_google_service_account_config(base_dir)
+            self.assertTrue(loaded["configured"])
+            self.assertEqual(loaded["projectId"], "demo-project")
 
 
 if __name__ == "__main__":
