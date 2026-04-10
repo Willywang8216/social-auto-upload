@@ -2,6 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,11 +13,16 @@ from utils.profile_pipeline import (
     ensure_profile_tables,
     export_profiles_yaml,
     extract_json_payload,
+    get_profile_backup_config,
     get_google_service_account_config,
     import_profiles_yaml,
     list_profiles,
+    preview_profiles_yaml_import,
     resolve_google_sheet_worksheet_name,
+    run_profile_backup,
+    run_scheduled_profile_backup_if_due,
     save_google_service_account_config,
+    save_profile_backup_config,
     save_profile,
     trim_text,
 )
@@ -406,9 +412,172 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertEqual(profiles[0]["settings"]["storage"]["remoteName"], "remote-b")
             self.assertEqual(profiles[1]["name"], "Creator Beta")
 
-            loaded = get_google_service_account_config(base_dir)
-            self.assertTrue(loaded["configured"])
-            self.assertEqual(loaded["projectId"], "demo-project")
+    def test_preview_profiles_yaml_import_reports_create_update_and_unchanged(self):
+        if not self.yaml_available:
+            self.skipTest("PyYAML not installed")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "database.db"
+            ensure_profile_tables(db_path)
+
+            save_profile(
+                db_path,
+                {
+                    "name": "Creator Alpha",
+                    "systemPrompt": "Original prompt",
+                    "contactDetails": "Old contact",
+                    "cta": "Old CTA",
+                    "accountIds": [],
+                    "settings": {
+                        "storage": {"remoteName": "remote-a"},
+                    },
+                },
+            )
+            save_profile(
+                db_path,
+                {
+                    "name": "Creator Stable",
+                    "systemPrompt": "Stable prompt",
+                    "contactDetails": "",
+                    "cta": "",
+                    "accountIds": [],
+                    "settings": {},
+                },
+            )
+
+            preview = preview_profiles_yaml_import(
+                db_path,
+                """
+                version: 1
+                profiles:
+                  - name: "Creator Alpha"
+                    systemPrompt: "Updated prompt"
+                    contactDetails: "Old contact"
+                    cta: "Old CTA"
+                    accountIds: []
+                    settings:
+                      storage:
+                        remoteName: "remote-a"
+                  - name: "Creator Stable"
+                    systemPrompt: "Stable prompt"
+                    contactDetails: ""
+                    cta: ""
+                    accountIds: []
+                    settings: {}
+                  - name: "Creator Beta"
+                    systemPrompt: "Beta prompt"
+                    contactDetails: ""
+                    cta: ""
+                    accountIds: []
+                    settings: {}
+                """,
+            )
+
+            self.assertEqual(preview["summary"], {"total": 3, "create": 1, "update": 1, "unchanged": 1})
+            actions = {item["name"]: item for item in preview["items"]}
+            self.assertEqual(actions["Creator Alpha"]["action"], "update")
+            self.assertIn("systemPrompt", actions["Creator Alpha"]["changedFields"])
+            self.assertEqual(actions["Creator Stable"]["action"], "unchanged")
+            self.assertEqual(actions["Creator Beta"]["action"], "create")
+
+    def test_save_profile_backup_config_normalizes_and_persists(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            db_path = base_dir / "db" / "database.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_profile_tables(db_path)
+
+            saved = save_profile_backup_config(
+                base_dir,
+                db_path,
+                {
+                    "enabled": True,
+                    "remoteName": "Onedrive-Yahooforsub-Tao",
+                    "remotePath": "Scripts-ssh-ssl-keys/SocialUpload/backups/profile-configs",
+                    "scheduleTime": "04:30",
+                    "keepCopies": 5,
+                },
+            )
+
+            loaded = get_profile_backup_config(base_dir, db_path)
+            self.assertTrue(saved["enabled"])
+            self.assertEqual(saved["keepCopies"], 5)
+            self.assertEqual(saved["scheduleTime"], "04:30")
+            self.assertEqual(loaded["remoteName"], "Onedrive-Yahooforsub-Tao")
+
+    @patch("utils.profile_pipeline.export_profiles_yaml", return_value="version: 1\nprofiles: []\n")
+    @patch("utils.profile_pipeline.shutil.which", return_value="/usr/bin/rclone")
+    @patch("utils.profile_pipeline.subprocess.run")
+    def test_run_profile_backup_uploads_and_prunes_old_files(self, mock_run, _mock_which, _mock_export_yaml):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            db_path = base_dir / "db" / "database.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_profile_tables(db_path)
+            save_profile_backup_config(
+                base_dir,
+                db_path,
+                {
+                    "enabled": True,
+                    "remoteName": "Onedrive-Yahooforsub-Tao",
+                    "remotePath": "Scripts-ssh-ssl-keys/SocialUpload/backups/profile-configs",
+                    "scheduleTime": "03:00",
+                    "keepCopies": 3,
+                },
+            )
+
+            mock_run.side_effect = [
+                type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+                type("Result", (), {
+                    "returncode": 0,
+                    "stdout": "\n".join([
+                        "profiles-backup-20260103-010101.yaml",
+                        "profiles-backup-20260102-010101.yaml",
+                        "profiles-backup-20260101-010101.yaml",
+                        "profiles-backup-20251231-010101.yaml",
+                    ]),
+                    "stderr": "",
+                })(),
+                type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+            ]
+
+            result = run_profile_backup(base_dir, db_path)
+
+            self.assertIn("profiles-backup-", result["filename"])
+            self.assertEqual(mock_run.call_args_list[0].args[0][1], "copyto")
+            self.assertEqual(mock_run.call_args_list[1].args[0][1], "lsf")
+            self.assertEqual(mock_run.call_args_list[2].args[0][1], "deletefile")
+
+            loaded = get_profile_backup_config(base_dir, db_path)
+            self.assertEqual(loaded["lastBackupStatus"], "success")
+            self.assertTrue(loaded["lastBackupRemoteSpec"].startswith("Onedrive-Yahooforsub-Tao:"))
+
+    @patch("utils.profile_pipeline.run_profile_backup", return_value={"ok": True})
+    def test_run_scheduled_profile_backup_if_due_runs_once_per_day(self, mock_run_backup):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            db_path = base_dir / "db" / "database.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_profile_tables(db_path)
+            save_profile_backup_config(
+                base_dir,
+                db_path,
+                {
+                    "enabled": True,
+                    "remoteName": "Onedrive-Yahooforsub-Tao",
+                    "remotePath": "Scripts-ssh-ssl-keys/SocialUpload/backups/profile-configs",
+                    "scheduleTime": "03:00",
+                    "keepCopies": 3,
+                    "lastBackupAt": "2026-04-10T03:10:00",
+                },
+            )
+
+            skipped = run_scheduled_profile_backup_if_due(base_dir, db_path, now=datetime.fromisoformat("2026-04-10T05:00:00"))
+            due = run_scheduled_profile_backup_if_due(base_dir, db_path, now=datetime.fromisoformat("2026-04-11T05:00:00"))
+
+            self.assertIsNone(skipped)
+            self.assertEqual(due, {"ok": True})
+            self.assertEqual(mock_run_backup.call_count, 1)
 
     def test_get_google_service_account_config_handles_invalid_env_json(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -19,11 +19,17 @@ from utils.profile_pipeline import (
     generate_profile_batch_content,
     generate_profile_content,
     get_google_service_account_config,
+    get_profile_backup_config,
+    get_profile_config_example_yaml,
     get_profile,
     import_profiles_yaml,
     list_profiles,
     migrate_uploaded_asset,
+    preview_profiles_yaml_import,
+    run_scheduled_profile_backup_if_due,
+    run_profile_backup,
     save_profile,
+    save_profile_backup_config,
     save_google_service_account_config,
     validate_google_sheet_connection,
 )
@@ -40,6 +46,7 @@ from utils.account_registry import (
 
 active_queues = {}
 app = Flask(__name__)
+profile_backup_scheduler_started = False
 
 #允许所有来源跨域访问
 CORS(app)
@@ -56,6 +63,24 @@ def get_db_path():
     ensure_account_tables(db_path)
     ensure_profile_tables(db_path)
     return db_path
+
+
+def start_profile_backup_scheduler() -> None:
+    global profile_backup_scheduler_started
+    if profile_backup_scheduler_started:
+        return
+
+    def backup_scheduler_loop():
+        while True:
+            try:
+                run_scheduled_profile_backup_if_due(Path(BASE_DIR), get_db_path())
+            except Exception as exc:
+                print(f"排程備份失敗: {exc}")
+            time.sleep(60)
+
+    thread = threading.Thread(target=backup_scheduler_loop, daemon=True)
+    thread.start()
+    profile_backup_scheduler_started = True
 
 
 def build_cookie_storage_name(platform_key: str) -> str:
@@ -335,6 +360,118 @@ def import_profiles_yaml_route():
 
     try:
         result = import_profiles_yaml(get_db_path(), yaml_text)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/previewImportProfilesYaml', methods=['POST'])
+def preview_import_profiles_yaml_route():
+    yaml_text = ''
+    if 'file' in request.files:
+        file = request.files['file']
+        if not file or not file.filename:
+            return jsonify({
+                "code": 400,
+                "msg": "YAML file is required",
+                "data": None
+            }), 400
+        try:
+            yaml_text = file.read().decode('utf-8')
+        except UnicodeDecodeError:
+            return jsonify({
+                "code": 400,
+                "msg": "YAML file must be UTF-8 encoded",
+                "data": None
+            }), 400
+    else:
+        data = request.get_json(silent=True) or {}
+        yaml_text = data.get('yamlContent', '')
+
+    if not str(yaml_text or '').strip():
+        return jsonify({
+            "code": 400,
+            "msg": "yamlContent is required",
+            "data": None
+        }), 400
+
+    try:
+        result = preview_profiles_yaml_import(get_db_path(), yaml_text)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/downloadProfileConfigExample', methods=['GET'])
+def download_profile_config_example_route():
+    try:
+        yaml_text = get_profile_config_example_yaml(Path(BASE_DIR))
+        response = Response(yaml_text, mimetype='application/x-yaml')
+        response.headers['Content-Disposition'] = f'attachment; filename="profile-config.example.yaml"'
+        return response
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/getProfileBackupConfig', methods=['GET'])
+def get_profile_backup_config_route():
+    try:
+        result = get_profile_backup_config(Path(BASE_DIR), get_db_path())
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/saveProfileBackupConfig', methods=['POST'])
+def save_profile_backup_config_route():
+    data = request.get_json() or {}
+    try:
+        result = save_profile_backup_config(Path(BASE_DIR), get_db_path(), data)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/runProfileBackup', methods=['POST'])
+def run_profile_backup_route():
+    try:
+        result = run_profile_backup(Path(BASE_DIR), get_db_path())
         return jsonify({
             "code": 200,
             "msg": "success",
@@ -1125,4 +1262,5 @@ def sse_stream(status_queue):
             time.sleep(0.1)
 
 if __name__ == '__main__':
+    start_profile_backup_scheduler()
     app.run(host='0.0.0.0' ,port=5409)

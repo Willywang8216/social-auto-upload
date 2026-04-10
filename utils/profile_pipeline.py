@@ -53,6 +53,11 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 GOOGLE_SERVICE_ACCOUNT_FILENAME = "google_service_account.json"
 PROFILE_CONFIG_VERSION = 1
+PROFILE_CONFIG_EXAMPLE_FILENAME = "profile-config.example.yaml"
+PROFILE_BACKUP_CONFIG_FILENAME = "profile_backup_config.json"
+PROFILE_BACKUP_FILENAME_PREFIX = "profiles-backup-"
+DEFAULT_PROFILE_BACKUP_SCHEDULE_TIME = "03:00"
+DEFAULT_PROFILE_BACKUP_KEEP_COPIES = 3
 
 
 def ensure_profile_tables(db_path: Path) -> None:
@@ -122,13 +127,7 @@ def export_profiles_yaml(db_path: Path) -> str:
 
 
 def import_profiles_yaml(db_path: Path, yaml_text: str) -> dict[str, Any]:
-    yaml = _get_yaml_module()
-    try:
-        payload = yaml.safe_load((yaml_text or "").strip())
-    except yaml.YAMLError as exc:
-        raise ValueError(f"Invalid YAML: {exc}") from exc
-
-    profiles_payload = _extract_profiles_import_payload(payload)
+    profiles_payload = _parse_profiles_yaml_payload(yaml_text)
     if not profiles_payload:
         raise ValueError("No profiles found in YAML")
 
@@ -162,6 +161,164 @@ def import_profiles_yaml(db_path: Path, yaml_text: str) -> dict[str, Any]:
         "updated": updated,
         "profiles": imported_profiles,
     }
+
+
+def preview_profiles_yaml_import(db_path: Path, yaml_text: str) -> dict[str, Any]:
+    profiles_payload = _parse_profiles_yaml_payload(yaml_text)
+    existing_profiles_by_name = {
+        (item.get("name") or "").strip(): _serialize_profile_export_item(item)
+        for item in list_profiles(db_path)
+        if (item.get("name") or "").strip()
+    }
+
+    items = []
+    counts = {"create": 0, "update": 0, "unchanged": 0}
+    for item in profiles_payload:
+        normalized_payload = _normalize_import_profile_payload(item)
+        exported_payload = _serialize_profile_export_item(normalized_payload)
+        existing_profile = existing_profiles_by_name.get(exported_payload["name"])
+        if not existing_profile:
+            action = "create"
+            changed_fields = ["name", "systemPrompt", "contactDetails", "cta", "accountIds", "settings"]
+        else:
+            changed_fields = _diff_profile_export_fields(existing_profile, exported_payload)
+            action = "unchanged" if not changed_fields else "update"
+
+        counts[action] += 1
+        items.append({
+            "name": exported_payload["name"],
+            "action": action,
+            "changedFields": changed_fields,
+            "accountCount": len(exported_payload.get("accountIds") or []),
+            "contentAccountCount": len(((exported_payload.get("settings") or {}).get("contentAccounts")) or []),
+        })
+
+    return {
+        "version": PROFILE_CONFIG_VERSION,
+        "summary": {
+            "total": len(items),
+            "create": counts["create"],
+            "update": counts["update"],
+            "unchanged": counts["unchanged"],
+        },
+        "items": items,
+    }
+
+
+def get_profile_config_example_yaml(base_dir: Path) -> str:
+    path = get_profile_config_example_path(base_dir)
+    if not path.exists():
+        raise FileNotFoundError(f"Profile config example file not found: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def get_profile_backup_config(base_dir: Path, db_path: Path) -> dict[str, Any]:
+    defaults = _build_default_profile_backup_config(db_path)
+    storage_path = get_profile_backup_config_storage_path(base_dir)
+    if not storage_path.exists():
+        return defaults
+
+    try:
+        raw_data = json.loads(storage_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return defaults
+
+    if not isinstance(raw_data, dict):
+        return defaults
+    return _normalize_profile_backup_config(raw_data, defaults)
+
+
+def save_profile_backup_config(base_dir: Path, db_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    current = get_profile_backup_config(base_dir, db_path)
+    config = _normalize_profile_backup_config(payload, current)
+    storage_path = get_profile_backup_config_storage_path(base_dir)
+    storage_path.parent.mkdir(parents=True, exist_ok=True)
+    storage_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    return config
+
+
+def run_profile_backup(base_dir: Path, db_path: Path) -> dict[str, Any]:
+    config = get_profile_backup_config(base_dir, db_path)
+    remote_name = (config.get("remoteName") or "").strip()
+    remote_path = (config.get("remotePath") or "").strip().strip("/")
+    if not remote_name:
+        raise ValueError("backup remoteName is required")
+
+    rclone_bin = shutil.which("rclone")
+    if not rclone_bin:
+        raise RuntimeError("rclone is not installed or not in PATH")
+
+    yaml_text = export_profiles_yaml(db_path)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"{PROFILE_BACKUP_FILENAME_PREFIX}{timestamp}.yaml"
+    local_dir = base_dir / "db" / "profile_backups"
+    local_dir.mkdir(parents=True, exist_ok=True)
+    local_path = local_dir / filename
+    local_path.write_text(yaml_text, encoding="utf-8")
+
+    remote_relative_path = _join_remote_path(remote_path, filename)
+    remote_spec = f"{remote_name}:{remote_relative_path}"
+
+    try:
+        result = subprocess.run(
+            [rclone_bin, "copyto", str(local_path), remote_spec],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "rclone backup upload failed")
+
+        _prune_profile_backup_remote_files(rclone_bin, remote_name, remote_path, int(config.get("keepCopies") or DEFAULT_PROFILE_BACKUP_KEEP_COPIES))
+        updated_config = save_profile_backup_config(
+            base_dir,
+            db_path,
+            {
+                **config,
+                "lastBackupAt": datetime.now().isoformat(timespec="seconds"),
+                "lastBackupRemoteSpec": remote_spec,
+                "lastBackupStatus": "success",
+            },
+        )
+        return {
+            "backup": updated_config,
+            "remoteSpec": remote_spec,
+            "filename": filename,
+        }
+    except Exception:
+        save_profile_backup_config(
+            base_dir,
+            db_path,
+            {
+                **config,
+                "lastBackupStatus": "failed",
+            },
+        )
+        raise
+    finally:
+        try:
+            local_path.unlink()
+        except OSError:
+            pass
+
+
+def run_scheduled_profile_backup_if_due(base_dir: Path, db_path: Path, now: datetime | None = None) -> dict[str, Any] | None:
+    config = get_profile_backup_config(base_dir, db_path)
+    if not config.get("enabled"):
+        return None
+    if not (config.get("remoteName") or "").strip():
+        return None
+
+    current_time = now or datetime.now()
+    scheduled_hour, scheduled_minute = _parse_backup_schedule_time(config.get("scheduleTime"))
+    if (current_time.hour, current_time.minute) < (scheduled_hour, scheduled_minute):
+        return None
+
+    last_backup_at = _parse_datetime(config.get("lastBackupAt"))
+    if last_backup_at and last_backup_at.date() == current_time.date():
+        return None
+
+    return run_profile_backup(base_dir, db_path)
 
 
 def save_profile(db_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1192,6 +1349,15 @@ def _extract_profiles_import_payload(payload: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _parse_profiles_yaml_payload(yaml_text: str) -> list[dict[str, Any]]:
+    yaml = _get_yaml_module()
+    try:
+        payload = yaml.safe_load((yaml_text or "").strip())
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML: {exc}") from exc
+    return _extract_profiles_import_payload(payload)
+
+
 def _normalize_import_profile_payload(payload: dict[str, Any]) -> dict[str, Any]:
     name = (payload.get("name") or "").strip()
     if not name:
@@ -1209,6 +1375,24 @@ def _normalize_import_profile_payload(payload: dict[str, Any]) -> dict[str, Any]
     if not normalized_payload["id"]:
         normalized_payload.pop("id")
     return normalized_payload
+
+
+def _diff_profile_export_fields(existing_profile: dict[str, Any], incoming_profile: dict[str, Any]) -> list[str]:
+    changed_fields = []
+    for key in ("systemPrompt", "contactDetails", "cta"):
+        if (existing_profile.get(key) or "") != (incoming_profile.get(key) or ""):
+            changed_fields.append(key)
+
+    if _normalize_account_ids(existing_profile.get("accountIds")) != _normalize_account_ids(incoming_profile.get("accountIds")):
+        changed_fields.append("accountIds")
+
+    existing_settings = existing_profile.get("settings") or {}
+    incoming_settings = incoming_profile.get("settings") or {}
+    for key in sorted(set(existing_settings.keys()) | set(incoming_settings.keys())):
+        if existing_settings.get(key) != incoming_settings.get(key):
+            changed_fields.append(f"settings.{key}")
+
+    return changed_fields
 
 
 def _resolve_selected_account_ids(profile: dict[str, Any], values: Any) -> list[int]:
@@ -1307,12 +1491,120 @@ def _build_public_url(storage: dict[str, Any], relative_path: str, remote_spec: 
     return result.stdout.strip()
 
 
+def get_profile_config_example_path(base_dir: Path) -> Path:
+    return base_dir / "docs" / PROFILE_CONFIG_EXAMPLE_FILENAME
+
+
+def get_profile_backup_config_storage_path(base_dir: Path) -> Path:
+    return base_dir / "db" / PROFILE_BACKUP_CONFIG_FILENAME
+
+
 def _get_yaml_module():
     try:
         import yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required for profile YAML import/export") from exc
     return yaml
+
+
+def _build_default_profile_backup_config(db_path: Path) -> dict[str, Any]:
+    inferred_remote_name = ""
+    inferred_remote_path = "profile-backups"
+    for profile in list_profiles(db_path):
+        storage = ((profile.get("settings") or {}).get("storage") or {})
+        remote_name = (storage.get("remoteName") or "").strip()
+        remote_path = (storage.get("remotePath") or "").strip().strip("/")
+        if remote_name:
+            inferred_remote_name = remote_name
+            inferred_remote_path = _join_remote_path(remote_path, "backups", "profile-configs") or "profile-backups"
+            break
+
+    return {
+        "enabled": True,
+        "remoteName": inferred_remote_name,
+        "remotePath": inferred_remote_path,
+        "scheduleTime": DEFAULT_PROFILE_BACKUP_SCHEDULE_TIME,
+        "keepCopies": DEFAULT_PROFILE_BACKUP_KEEP_COPIES,
+        "lastBackupAt": "",
+        "lastBackupRemoteSpec": "",
+        "lastBackupStatus": "",
+    }
+
+
+def _normalize_profile_backup_config(payload: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    keep_copies = payload.get("keepCopies", fallback.get("keepCopies", DEFAULT_PROFILE_BACKUP_KEEP_COPIES))
+    try:
+        keep_copies = int(keep_copies)
+    except (TypeError, ValueError):
+        keep_copies = fallback.get("keepCopies", DEFAULT_PROFILE_BACKUP_KEEP_COPIES)
+    keep_copies = max(1, keep_copies)
+
+    schedule_time = str(payload.get("scheduleTime", fallback.get("scheduleTime", DEFAULT_PROFILE_BACKUP_SCHEDULE_TIME)) or "").strip()
+    _parse_backup_schedule_time(schedule_time)
+
+    return {
+        "enabled": bool(payload.get("enabled", fallback.get("enabled", True))),
+        "remoteName": str(payload.get("remoteName", fallback.get("remoteName", "")) or "").strip(),
+        "remotePath": str(payload.get("remotePath", fallback.get("remotePath", "profile-backups")) or "").strip().strip("/"),
+        "scheduleTime": schedule_time,
+        "keepCopies": keep_copies,
+        "lastBackupAt": str(payload.get("lastBackupAt", fallback.get("lastBackupAt", "")) or "").strip(),
+        "lastBackupRemoteSpec": str(payload.get("lastBackupRemoteSpec", fallback.get("lastBackupRemoteSpec", "")) or "").strip(),
+        "lastBackupStatus": str(payload.get("lastBackupStatus", fallback.get("lastBackupStatus", "")) or "").strip(),
+    }
+
+
+def _parse_backup_schedule_time(value: Any) -> tuple[int, int]:
+    text = str(value or "").strip() or DEFAULT_PROFILE_BACKUP_SCHEDULE_TIME
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    if not match:
+        raise ValueError("scheduleTime must be in HH:MM format")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError("scheduleTime must be a valid 24-hour time")
+    return hour, minute
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _prune_profile_backup_remote_files(rclone_bin: str, remote_name: str, remote_path: str, keep_copies: int) -> None:
+    remote_dir_spec = f"{remote_name}:{remote_path}" if remote_path else f"{remote_name}:"
+    result = subprocess.run(
+        [rclone_bin, "lsf", remote_dir_spec, "--files-only"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "rclone backup listing failed")
+
+    filenames = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip().startswith(PROFILE_BACKUP_FILENAME_PREFIX) and line.strip().endswith(".yaml")
+    ]
+    if len(filenames) <= keep_copies:
+        return
+
+    for filename in sorted(filenames, reverse=True)[keep_copies:]:
+        remote_spec = f"{remote_name}:{_join_remote_path(remote_path, filename)}"
+        delete_result = subprocess.run(
+            [rclone_bin, "deletefile", remote_spec],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if delete_result.returncode != 0:
+            raise RuntimeError(delete_result.stderr.strip() or delete_result.stdout.strip() or "rclone backup cleanup failed")
 
 
 def _load_google_service_account_data(base_dir: Path | None = None) -> dict[str, Any] | None:

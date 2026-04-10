@@ -14,9 +14,17 @@ export const profileApi = {
     return http.get(`/deleteProfile?id=${id}`)
   },
 
-  importProfilesYaml(file) {
+  previewProfilesYaml(yamlContent) {
+    return http.post('/previewImportProfilesYaml', { yamlContent })
+  },
+
+  importProfilesYaml(input) {
+    if (typeof input === 'string') {
+      return http.post('/importProfilesYaml', { yamlContent: input })
+    }
+
     const formData = new FormData()
-    formData.append('file', file)
+    formData.append('file', input)
     return http.post('/importProfilesYaml', formData, {
       headers: {
         'Content-Type': 'multipart/form-data'
@@ -26,6 +34,22 @@ export const profileApi = {
 
   getExportProfilesYamlUrl() {
     return buildApiUrl('/exportProfilesYaml')
+  },
+
+  getExampleProfilesYamlUrl() {
+    return buildApiUrl('/downloadProfileConfigExample')
+  },
+
+  getProfileBackupConfig() {
+    return http.get('/getProfileBackupConfig')
+  },
+
+  saveProfileBackupConfig(data) {
+    return http.post('/saveProfileBackupConfig', data)
+  },
+
+  runProfileBackup() {
+    return http.post('/runProfileBackup', {})
   },
 
   generateContent(data) {

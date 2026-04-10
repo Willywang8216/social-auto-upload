@@ -14,11 +14,17 @@
         />
         <div class="action-buttons">
           <el-button type="primary" @click="openCreateDialog">新增 Profile</el-button>
+          <el-button type="info" plain @click="downloadExampleProfilesYaml">
+            下載 Example YAML
+          </el-button>
           <el-button type="primary" plain @click="triggerImportProfilesYaml" :loading="isImportingProfiles">
             匯入 YAML
           </el-button>
           <el-button type="success" plain @click="exportProfilesYaml">
             匯出 YAML
+          </el-button>
+          <el-button type="warning" plain @click="openBackupDialog">
+            YAML 備份
           </el-button>
           <el-button type="warning" plain @click="openGoogleSheetDialog">Google 試算表連線</el-button>
           <el-button type="info" @click="fetchProfiles" :loading="isRefreshing">
@@ -689,6 +695,122 @@
       </template>
     </el-dialog>
 
+    <el-dialog
+      v-model="importPreviewDialogVisible"
+      title="YAML 匯入預覽"
+      width="860px"
+    >
+      <div class="import-preview-summary">
+        <el-alert
+          title="匯入會以 Profile 名稱為主鍵：同名更新，不同名新增，不會自動刪除既有 Profile。"
+          type="info"
+          :closable="false"
+          show-icon
+        />
+        <div class="summary-cards">
+          <div class="summary-card">
+            <strong>{{ importPreview.summary.total }}</strong>
+            <span>總筆數</span>
+          </div>
+          <div class="summary-card">
+            <strong>{{ importPreview.summary.create }}</strong>
+            <span>新增</span>
+          </div>
+          <div class="summary-card">
+            <strong>{{ importPreview.summary.update }}</strong>
+            <span>更新</span>
+          </div>
+          <div class="summary-card">
+            <strong>{{ importPreview.summary.unchanged }}</strong>
+            <span>不變</span>
+          </div>
+        </div>
+      </div>
+
+      <el-table :data="importPreview.items" style="width: 100%">
+        <el-table-column prop="name" label="Profile" min-width="220" />
+        <el-table-column label="動作" width="120">
+          <template #default="scope">
+            <el-tag :type="getImportPreviewActionTagType(scope.row.action)">
+              {{ getImportPreviewActionLabel(scope.row.action) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="變更欄位" min-width="280">
+          <template #default="scope">
+            <span v-if="scope.row.changedFields?.length">{{ scope.row.changedFields.join(', ') }}</span>
+            <span v-else class="muted-text">無變更</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="帳號數" width="100">
+          <template #default="scope">
+            {{ scope.row.accountCount }}
+          </template>
+        </el-table-column>
+        <el-table-column label="內容帳號數" width="120">
+          <template #default="scope">
+            {{ scope.row.contentAccountCount }}
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="closeImportPreviewDialog">取消</el-button>
+          <el-button type="primary" @click="confirmImportProfilesYaml" :loading="isImportingProfiles">
+            {{ isImportingProfiles ? '匯入中' : '確認匯入' }}
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="backupDialogVisible"
+      title="Profile YAML 備份"
+      width="720px"
+    >
+      <el-alert
+        title="備份內容為整份 Profile YAML 設定，會上傳到你設定的 Rclone remote 目錄。"
+        type="info"
+        :closable="false"
+        show-icon
+      />
+
+      <el-form :model="backupForm" label-width="150px" class="google-sheet-form backup-form">
+        <el-form-item label="啟用每日備份">
+          <el-switch v-model="backupForm.enabled" />
+        </el-form-item>
+        <el-form-item label="Rclone Remote">
+          <el-input v-model="backupForm.remoteName" placeholder="Onedrive-Yahooforsub-Tao" />
+        </el-form-item>
+        <el-form-item label="備份資料夾">
+          <el-input v-model="backupForm.remotePath" placeholder="Scripts-ssh-ssl-keys/SocialUpload/backups/profile-configs" />
+        </el-form-item>
+        <el-form-item label="每日備份時間">
+          <el-input v-model="backupForm.scheduleTime" placeholder="03:00" />
+        </el-form-item>
+        <el-form-item label="保留份數">
+          <el-input-number v-model="backupForm.keepCopies" :min="1" :max="30" />
+        </el-form-item>
+      </el-form>
+
+      <div class="backup-status-block">
+        <div><strong>上次備份：</strong>{{ backupForm.lastBackupAt || '尚未執行' }}</div>
+        <div><strong>最後狀態：</strong>{{ buildBackupStatusLabel(backupForm.lastBackupStatus) }}</div>
+        <div class="cell-lines"><strong>遠端位置：</strong>{{ backupForm.lastBackupRemoteSpec || '尚未產生' }}</div>
+      </div>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="backupDialogVisible = false">取消</el-button>
+          <el-button @click="submitRunProfileBackup" :loading="isRunningBackup">立即備份一次</el-button>
+          <el-button type="primary" @click="submitSaveBackupConfig" :loading="isSavingBackupConfig">
+            {{ isSavingBackupConfig ? '儲存中' : '儲存設定' }}
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
+
     <input
       ref="profileYamlInputRef"
       type="file"
@@ -721,12 +843,16 @@ const isGenerating = ref(false)
 const isSavingGoogleSheet = ref(false)
 const isValidatingGoogleSheet = ref(false)
 const isImportingProfiles = ref(false)
+const isSavingBackupConfig = ref(false)
+const isRunningBackup = ref(false)
 
 const profiles = ref([])
 const dialogVisible = ref(false)
 const dialogType = ref('create')
 const googleSheetDialogVisible = ref(false)
+const backupDialogVisible = ref(false)
 const generateDialogVisible = ref(false)
+const importPreviewDialogVisible = ref(false)
 const publishHandoffDialogVisible = ref(false)
 const currentProfile = ref(null)
 const generationBatchResult = ref(null)
@@ -741,6 +867,26 @@ const googleSheetConfig = ref({
 })
 const contentResultTabMap = ref({})
 const profileYamlInputRef = ref(null)
+const pendingImportYamlContent = ref('')
+const importPreview = ref({
+  summary: {
+    total: 0,
+    create: 0,
+    update: 0,
+    unchanged: 0
+  },
+  items: []
+})
+const backupForm = ref({
+  enabled: true,
+  remoteName: '',
+  remotePath: 'profile-backups',
+  scheduleTime: '03:00',
+  keepCopies: 3,
+  lastBackupAt: '',
+  lastBackupRemoteSpec: '',
+  lastBackupStatus: ''
+})
 
 const postLabels = {
   twitter: 'X / Twitter 貼文',
@@ -1066,6 +1212,56 @@ const openCreateDialog = () => {
   dialogVisible.value = true
 }
 
+const normalizeBackupForm = (value = {}) => ({
+  enabled: value.enabled !== false,
+  remoteName: value.remoteName || '',
+  remotePath: value.remotePath || 'profile-backups',
+  scheduleTime: value.scheduleTime || '03:00',
+  keepCopies: Number.isFinite(Number(value.keepCopies)) ? Number(value.keepCopies) : 3,
+  lastBackupAt: value.lastBackupAt || '',
+  lastBackupRemoteSpec: value.lastBackupRemoteSpec || '',
+  lastBackupStatus: value.lastBackupStatus || ''
+})
+
+const getImportPreviewActionLabel = (action) => {
+  if (action === 'create') {
+    return '新增'
+  }
+  if (action === 'update') {
+    return '更新'
+  }
+  return '不變'
+}
+
+const getImportPreviewActionTagType = (action) => {
+  if (action === 'create') {
+    return 'success'
+  }
+  if (action === 'update') {
+    return 'warning'
+  }
+  return 'info'
+}
+
+const buildBackupStatusLabel = (status) => {
+  if (status === 'success') {
+    return '成功'
+  }
+  if (status === 'failed') {
+    return '失敗'
+  }
+  return '尚未執行'
+}
+
+const downloadExampleProfilesYaml = () => {
+  const link = document.createElement('a')
+  link.href = profileApi.getExampleProfilesYamlUrl()
+  link.download = ''
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+}
+
 const triggerImportProfilesYaml = () => {
   if (!profileYamlInputRef.value) {
     return
@@ -1082,17 +1278,60 @@ const handleImportProfilesYaml = async (event) => {
 
   isImportingProfiles.value = true
   try {
-    const response = await profileApi.importProfilesYaml(file)
-    await fetchProfiles()
-    const summary = response.data || {}
-    ElMessage.success(`匯入完成：新增 ${summary.created || 0} 筆，更新 ${summary.updated || 0} 筆`)
+    const yamlContent = await file.text()
+    const response = await profileApi.previewProfilesYaml(yamlContent)
+    pendingImportYamlContent.value = yamlContent
+    importPreview.value = response.data || {
+      summary: {
+        total: 0,
+        create: 0,
+        update: 0,
+        unchanged: 0
+      },
+      items: []
+    }
+    importPreviewDialogVisible.value = true
   } catch (error) {
-    ElMessage.error(error.message || '匯入 Profile YAML 失敗')
+    ElMessage.error(error.message || '預覽 Profile YAML 失敗')
   } finally {
     isImportingProfiles.value = false
     if (profileYamlInputRef.value) {
       profileYamlInputRef.value.value = ''
     }
+  }
+}
+
+const closeImportPreviewDialog = () => {
+  importPreviewDialogVisible.value = false
+  pendingImportYamlContent.value = ''
+  importPreview.value = {
+    summary: {
+      total: 0,
+      create: 0,
+      update: 0,
+      unchanged: 0
+    },
+    items: []
+  }
+}
+
+const confirmImportProfilesYaml = async () => {
+  if (!pendingImportYamlContent.value) {
+    ElMessage.warning('沒有可匯入的 YAML 內容')
+    return
+  }
+
+  isImportingProfiles.value = true
+  try {
+    const response = await profileApi.importProfilesYaml(pendingImportYamlContent.value)
+    await fetchProfiles()
+    const summary = response.data || {}
+    closeImportPreviewDialog()
+    ElMessage.success(`匯入完成：新增 ${summary.created || 0} 筆，更新 ${summary.updated || 0} 筆`)
+  } catch (error) {
+    ElMessage.error(error.message || '匯入 Profile YAML 失敗')
+  } finally {
+    isImportingProfiles.value = false
   }
 }
 
@@ -1103,6 +1342,47 @@ const exportProfilesYaml = () => {
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)
+}
+
+const fetchBackupConfig = async () => {
+  try {
+    const response = await profileApi.getProfileBackupConfig()
+    backupForm.value = normalizeBackupForm(response.data || {})
+  } catch (error) {
+    backupForm.value = normalizeBackupForm()
+    ElMessage.error('取得備份設定失敗')
+  }
+}
+
+const openBackupDialog = async () => {
+  await fetchBackupConfig()
+  backupDialogVisible.value = true
+}
+
+const submitSaveBackupConfig = async () => {
+  isSavingBackupConfig.value = true
+  try {
+    const response = await profileApi.saveProfileBackupConfig(backupForm.value)
+    backupForm.value = normalizeBackupForm(response.data || {})
+    ElMessage.success('備份設定已儲存')
+  } catch (error) {
+    ElMessage.error(error.message || '儲存備份設定失敗')
+  } finally {
+    isSavingBackupConfig.value = false
+  }
+}
+
+const submitRunProfileBackup = async () => {
+  isRunningBackup.value = true
+  try {
+    const response = await profileApi.runProfileBackup()
+    backupForm.value = normalizeBackupForm(response.data?.backup || {})
+    ElMessage.success(`備份完成：${response.data?.remoteSpec || ''}`)
+  } catch (error) {
+    ElMessage.error(error.message || '執行備份失敗')
+  } finally {
+    isRunningBackup.value = false
+  }
 }
 
 const fetchGoogleSheetConfig = async () => {
@@ -1468,6 +1748,51 @@ onMounted(async () => {
 
   .hidden-input {
     display: none;
+  }
+
+  .import-preview-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .summary-cards {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .summary-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px;
+    border: 1px solid $border-light;
+    border-radius: 8px;
+    background: $bg-color-page;
+
+    strong {
+      font-size: 22px;
+      line-height: 1.2;
+    }
+
+    span {
+      color: $text-secondary;
+      font-size: 13px;
+    }
+  }
+
+  .backup-form {
+    margin-top: 20px;
+  }
+
+  .backup-status-block {
+    margin-top: 8px;
+    padding: 12px 16px;
+    border-radius: 8px;
+    background: $bg-color-page;
+    line-height: 1.8;
   }
 
   .account-tags {
