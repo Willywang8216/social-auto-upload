@@ -7,6 +7,6 @@ if [ ! -f /app/conf.py ]; then
   cp /app/conf.example.py /app/conf.py
 fi
 
-python /app/db/createTable.py
+python /app/createTable.py
 
 exec python /app/sau_backend.py

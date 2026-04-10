@@ -65,6 +65,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements-utf8.txt && \
 RUN playwright install chromium-headless-shell
 
 COPY . .
+RUN cp /app/db/createTable.py /app/createTable.py
 
 COPY --from=frontend-builder /frontend/dist/index.html /app
 COPY --from=frontend-builder /frontend/dist/assets /app/assets
