@@ -47,6 +47,7 @@ PLATFORM_LIMITS = {
 
 EXPORT_PLATFORMS = ["twitter", "threads", "instagram", "facebook", "youtube", "tiktok"]
 NON_SHEET_PLATFORMS = ["telegram", "patreon"]
+CONTENT_ACCOUNT_PLATFORMS = EXPORT_PLATFORMS + NON_SHEET_PLATFORMS + ["reddit"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
@@ -111,7 +112,7 @@ def save_profile(db_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     if not name:
         raise ValueError("profile name is required")
 
-    settings = payload.get("settings") or {}
+    settings = _normalize_profile_settings(payload.get("settings") or {})
     account_ids = _normalize_account_ids(payload.get("accountIds"))
     system_prompt = payload.get("systemPrompt") or ""
     contact_details = payload.get("contactDetails") or ""
@@ -196,6 +197,10 @@ def generate_profile_content(db_path: Path, base_dir: Path, payload: dict[str, A
 
     runtime_profile = deepcopy(profile)
     runtime_profile["selectedAccountIds"] = _resolve_selected_account_ids(runtime_profile, payload.get("selectedAccountIds"))
+    runtime_profile["selectedContentAccountIds"] = _resolve_selected_content_account_ids(
+        runtime_profile,
+        payload.get("selectedContentAccountIds"),
+    )
     runtime_social_settings = (((runtime_profile.get("settings") or {}).get("socialImport")) or {})
     if payload.get("link"):
         runtime_social_settings["defaultLink"] = payload.get("link")
@@ -204,9 +209,20 @@ def generate_profile_content(db_path: Path, base_dir: Path, payload: dict[str, A
     processed_media_path = apply_watermark_if_needed(source_path, runtime_profile, base_dir)
     upload_result = upload_media(processed_media_path, profile)
     transcript = transcribe_media(processed_media_path, runtime_profile)
-    generated_posts = generate_posts(runtime_profile, transcript, material, upload_result["publicUrl"])
-    normalized_posts = normalize_posts(generated_posts)
-    rows = build_google_sheet_rows(runtime_profile, normalized_posts, upload_result, payload.get("scheduleAt"))
+    content_account_results = generate_content_account_posts(runtime_profile, transcript, material, upload_result["publicUrl"])
+    if content_account_results:
+        normalized_posts = aggregate_account_posts(content_account_results)
+        rows = build_google_sheet_rows(
+            runtime_profile,
+            normalized_posts,
+            upload_result,
+            payload.get("scheduleAt"),
+            content_account_results,
+        )
+    else:
+        generated_posts = generate_posts(runtime_profile, transcript, material, upload_result["publicUrl"])
+        normalized_posts = normalize_posts(generated_posts)
+        rows = build_google_sheet_rows(runtime_profile, normalized_posts, upload_result, payload.get("scheduleAt"))
 
     sheet_result = None
     if payload.get("writeToSheet", True):
@@ -219,6 +235,7 @@ def generate_profile_content(db_path: Path, base_dir: Path, payload: dict[str, A
         "storage": upload_result,
         "transcript": transcript,
         "posts": normalized_posts,
+        "contentAccountResults": content_account_results,
         "sheetRows": [dict(zip(SHEET_COLUMNS, row)) for row in rows],
         "sheetResult": sheet_result,
     }
@@ -238,6 +255,7 @@ def generate_profile_batch_content(db_path: Path, base_dir: Path, payload: dict[
     return {
         "profile": results[0]["profile"] if results else None,
         "selectedAccountIds": (results[0]["profile"] or {}).get("selectedAccountIds", []) if results else [],
+        "selectedContentAccountIds": (results[0]["profile"] or {}).get("selectedContentAccountIds", []) if results else [],
         "results": results,
         "summary": {
             "materials": len(results),
@@ -339,6 +357,7 @@ def build_google_sheet_rows(
     posts: dict[str, str],
     upload_result: dict[str, str],
     schedule_at: str | None,
+    content_account_results: list[dict[str, Any]] | None = None,
 ) -> list[list[str]]:
     settings = profile.get("settings") or {}
     social_settings = settings.get("socialImport") or {}
@@ -349,6 +368,34 @@ def build_google_sheet_rows(
     schedule_columns = _build_schedule_columns(schedule_at)
 
     rows = []
+    if content_account_results:
+        for result in content_account_results:
+            account = result.get("account") or {}
+            platform = (account.get("platform") or "").strip().lower()
+            message = (result.get("content") or "").strip()
+            if not message or platform not in EXPORT_PLATFORMS:
+                continue
+
+            row = [""] * len(SHEET_COLUMNS)
+            row[0] = message
+            row[1] = social_settings.get("defaultLink", "")
+            row[2] = media_url if media_kind == "image" else ""
+            row[3] = media_url if media_kind == "video" else ""
+            row[4:9] = schedule_columns
+            row[9] = social_settings.get("pinTitle", "")
+            row[10] = social_settings.get("category", "")
+            row[11] = social_settings.get("watermarkName", "")
+            row[12] = social_settings.get("hashtagGroup", "")
+            row[13] = social_settings.get("videoThumbnailUrl", "")
+            row[14] = social_settings.get("ctaGroup", "")
+            row[15] = social_settings.get("firstComment", "")
+            row[16] = "Y" if social_settings.get("story") else ""
+            row[17] = social_settings.get("pinterestBoard", "")
+            row[18] = social_settings.get("altText", "")
+            row[19] = (account.get("postPreset") or "").strip() or post_presets.get(platform, "")
+            rows.append(row)
+        return rows
+
     for platform in EXPORT_PLATFORMS:
         message = posts.get(platform, "").strip()
         if not message:
@@ -650,6 +697,91 @@ def generate_posts(profile: dict[str, Any], transcript: str, material: dict[str,
     return payload
 
 
+def generate_content_account_posts(
+    profile: dict[str, Any],
+    transcript: str,
+    material: dict[str, Any],
+    media_url: str,
+) -> list[dict[str, Any]]:
+    content_accounts = _get_selected_content_accounts(profile)
+    if not content_accounts:
+        return []
+
+    results = []
+    for account in content_accounts:
+        content = generate_post_for_content_account(profile, account, transcript, material, media_url)
+        if not content:
+            continue
+        results.append({
+            "account": {
+                "id": account.get("id", ""),
+                "name": account.get("name", ""),
+                "platform": account.get("platform", ""),
+                "postPreset": account.get("postPreset", ""),
+            },
+            "content": content,
+        })
+    return results
+
+
+def generate_post_for_content_account(
+    profile: dict[str, Any],
+    content_account: dict[str, Any],
+    transcript: str,
+    material: dict[str, Any],
+    media_url: str,
+) -> str:
+    requests = _get_requests_module()
+    settings = profile.get("settings") or {}
+    llm_settings = settings.get("llm") or {}
+    api_base_url = _resolve_value(llm_settings.get("apiBaseUrl"), "SAU_LLM_API_BASE_URL", "LLM_API_BASE_URL")
+    api_key = _resolve_value(None, "SAU_LLM_API_KEY", "LLM_API_KEY")
+    model_name = (llm_settings.get("generationModel") or "").strip()
+
+    if not api_base_url:
+        raise RuntimeError("LLM API base URL is not configured")
+    if not api_key:
+        raise RuntimeError("LLM API key is not configured")
+    if not model_name:
+        raise RuntimeError("generation model is not configured")
+
+    platform = (content_account.get("platform") or "").strip().lower()
+    system_prompt = build_content_account_system_prompt(profile, content_account)
+    user_prompt = build_content_account_user_prompt(profile, content_account, transcript, material, media_url)
+
+    response = requests.post(
+        f"{api_base_url.rstrip('/')}/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model_name,
+            "temperature": 0.7,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        },
+        timeout=300,
+    )
+
+    if response.status_code >= 400:
+        raise RuntimeError(f"generation request failed: {response.status_code} {response.text}")
+
+    data = response.json()
+    content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
+    payload = extract_json_payload(content)
+    if not isinstance(payload, dict):
+        raise RuntimeError("generation response did not contain a valid JSON object")
+
+    text = (payload.get("content") or payload.get(platform) or "").strip()
+    if not text:
+        raise RuntimeError(f"generation response did not contain content for {platform}")
+    limit = PLATFORM_LIMITS.get(platform)
+    return trim_text(text, limit) if limit else text
+
+
 def build_generation_system_prompt(profile: dict[str, Any]) -> str:
     custom_prompt = (profile.get("systemPrompt") or "").strip()
     return (
@@ -667,6 +799,34 @@ def build_generation_system_prompt(profile: dict[str, Any]) -> str:
     )
 
 
+def build_content_account_system_prompt(profile: dict[str, Any], content_account: dict[str, Any]) -> str:
+    platform = (content_account.get("platform") or "").strip().lower()
+    platform_rules = {
+        "twitter": "Write one X / Twitter post with emoji and exactly 3 hashtags. Keep it concise and under 280 characters.",
+        "threads": "Write one Threads post with emoji and exactly 3 hashtags. It can be slightly more conversational than Twitter.",
+        "instagram": "Write one Instagram long-form caption with a strong hook, natural CTA, and exactly 3 hashtags.",
+        "facebook": "Write one Facebook long-form post with a natural CTA and exactly 3 hashtags.",
+        "youtube": "Write one YouTube community-style post with a useful description tone and exactly 3 hashtags.",
+        "tiktok": "Write one TikTok caption-style post with a direct hook, CTA, and exactly 3 hashtags.",
+        "telegram": "Write one concise Telegram post that reads naturally and includes a CTA.",
+        "patreon": "Write one Patreon-oriented long-form post that emphasizes membership value and CTA.",
+        "reddit": "Write one Reddit post title plus body in a natural community tone without sounding promotional. Keep it readable and specific.",
+    }.get(platform, "Write one platform-native social media post.")
+    custom_prompt = "\n".join(
+        [
+            (profile.get("systemPrompt") or "").strip(),
+            (content_account.get("prompt") or "").strip(),
+        ]
+    ).strip()
+    return (
+        "You are a social media content strategist. "
+        "Return valid JSON only in the shape {\"content\": \"...\"}. "
+        "Do not wrap the JSON in markdown. "
+        f"{platform_rules} "
+        f"{custom_prompt}"
+    ).strip()
+
+
 def build_generation_user_prompt(
     profile: dict[str, Any],
     transcript: str,
@@ -676,6 +836,28 @@ def build_generation_user_prompt(
     contact_details = profile.get("contactDetails") or ""
     cta = profile.get("cta") or ""
     return (
+        f"Material filename: {material.get('filename', '')}\n"
+        f"Media URL: {media_url}\n"
+        f"Contact details: {contact_details}\n"
+        f"CTA: {cta}\n"
+        "Create content in the same language as the transcript unless it is mostly non-linguistic.\n"
+        "Base all copy on this transcript:\n"
+        f"{transcript}"
+    )
+
+
+def build_content_account_user_prompt(
+    profile: dict[str, Any],
+    content_account: dict[str, Any],
+    transcript: str,
+    material: dict[str, Any],
+    media_url: str,
+) -> str:
+    contact_details = (content_account.get("contactDetails") or profile.get("contactDetails") or "").strip()
+    cta = (content_account.get("cta") or profile.get("cta") or "").strip()
+    return (
+        f"Target account platform: {content_account.get('platform', '')}\n"
+        f"Target account name: {content_account.get('name', '')}\n"
         f"Material filename: {material.get('filename', '')}\n"
         f"Media URL: {media_url}\n"
         f"Contact details: {contact_details}\n"
@@ -787,6 +969,7 @@ def _serialize_profile_row(row: sqlite3.Row | None) -> dict[str, Any]:
             settings = json.loads(row["settings_json"])
         except json.JSONDecodeError:
             settings = {}
+    settings = _normalize_profile_settings(settings)
     account_ids = []
     if row["account_ids"]:
         account_ids = [int(item) for item in str(row["account_ids"]).split(",") if item]
@@ -801,6 +984,43 @@ def _serialize_profile_row(row: sqlite3.Row | None) -> dict[str, Any]:
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
+
+
+def _normalize_profile_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = deepcopy(settings or {})
+    normalized["contentAccounts"] = _normalize_content_accounts(normalized.get("contentAccounts"))
+    return normalized
+
+
+def _normalize_content_accounts(values: Any) -> list[dict[str, str]]:
+    if not isinstance(values, list):
+        return []
+
+    normalized = []
+    seen_ids = set()
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        platform = str(item.get("platform") or "").strip().lower()
+        if platform not in CONTENT_ACCOUNT_PLATFORMS:
+            continue
+
+        account_id = str(item.get("id") or "").strip() or uuid.uuid4().hex
+        if account_id in seen_ids:
+            continue
+        seen_ids.add(account_id)
+
+        normalized.append({
+            "id": account_id,
+            "platform": platform,
+            "name": str(item.get("name") or "").strip(),
+            "prompt": str(item.get("prompt") or "").strip(),
+            "contactDetails": str(item.get("contactDetails") or "").strip(),
+            "cta": str(item.get("cta") or "").strip(),
+            "postPreset": str(item.get("postPreset") or "").strip(),
+        })
+
+    return normalized
 
 
 def _normalize_account_ids(values: Any) -> list[int]:
@@ -823,6 +1043,54 @@ def _resolve_selected_account_ids(profile: dict[str, Any], values: Any) -> list[
     if not selected_ids:
         return sorted(profile_account_ids)
     return [account_id for account_id in selected_ids if account_id in profile_account_ids]
+
+
+def _resolve_selected_content_account_ids(profile: dict[str, Any], values: Any) -> list[str]:
+    selected_ids = _normalize_content_account_ids(values)
+    profile_account_ids = {item.get("id", "") for item in _get_profile_content_accounts(profile)}
+    if not selected_ids:
+        return sorted(profile_account_ids)
+    return [account_id for account_id in selected_ids if account_id in profile_account_ids]
+
+
+def _normalize_content_account_ids(values: Any) -> list[str]:
+    if not values:
+        return []
+    if isinstance(values, str):
+        values = [item for item in values.split(",") if item]
+    normalized = []
+    seen = set()
+    for value in values:
+        account_id = str(value or "").strip()
+        if not account_id or account_id in seen:
+            continue
+        seen.add(account_id)
+        normalized.append(account_id)
+    return normalized
+
+
+def _get_profile_content_accounts(profile: dict[str, Any]) -> list[dict[str, str]]:
+    settings = profile.get("settings") or {}
+    return _normalize_content_accounts(settings.get("contentAccounts"))
+
+
+def _get_selected_content_accounts(profile: dict[str, Any]) -> list[dict[str, str]]:
+    content_accounts = _get_profile_content_accounts(profile)
+    selected_ids = set(_resolve_selected_content_account_ids(profile, profile.get("selectedContentAccountIds")))
+    if not selected_ids:
+        return content_accounts
+    return [account for account in content_accounts if account.get("id") in selected_ids]
+
+
+def aggregate_account_posts(content_account_results: list[dict[str, Any]]) -> dict[str, str]:
+    aggregated = {platform: "" for platform in CONTENT_ACCOUNT_PLATFORMS}
+    for result in content_account_results:
+        account = result.get("account") or {}
+        platform = (account.get("platform") or "").strip().lower()
+        content = (result.get("content") or "").strip()
+        if platform in aggregated and content and not aggregated[platform]:
+            aggregated[platform] = content
+    return aggregated
 
 
 def _build_schedule_columns(schedule_at: str | None) -> list[str]:

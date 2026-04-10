@@ -125,6 +125,81 @@
           />
         </el-form-item>
 
+        <el-divider>內容帳號客製化</el-divider>
+
+        <el-form-item label="內容帳號設定">
+          <div class="content-account-config">
+            <div class="content-account-toolbar">
+              <div class="muted-text">
+                這裡可以建立每個 Profile 自己的內容帳號，例如兩個 X 帳號、兩個 Facebook 帳號。每個帳號都能有獨立提示詞、聯絡資訊、CTA 與 Post Preset。
+              </div>
+              <el-button type="primary" plain @click="addContentAccount">新增內容帳號</el-button>
+            </div>
+
+            <div v-if="profileForm.settings.contentAccounts.length > 0" class="content-account-list">
+              <div
+                v-for="(contentAccount, index) in profileForm.settings.contentAccounts"
+                :key="contentAccount.id"
+                class="content-account-card"
+              >
+                <div class="content-account-card-header">
+                  <strong>內容帳號 {{ index + 1 }}</strong>
+                  <el-button type="danger" link @click="removeContentAccount(index)">刪除</el-button>
+                </div>
+
+                <el-form-item label="平台" label-width="120px">
+                  <el-select v-model="contentAccount.platform" style="width: 100%">
+                    <el-option
+                      v-for="option in contentAccountPlatformOptions"
+                      :key="option.value"
+                      :label="option.label"
+                      :value="option.value"
+                    />
+                  </el-select>
+                </el-form-item>
+
+                <el-form-item label="帳號名稱" label-width="120px">
+                  <el-input v-model="contentAccount.name" placeholder="例如：光光 X 主帳" />
+                </el-form-item>
+
+                <el-form-item label="專屬提示詞" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.prompt"
+                    type="textarea"
+                    :rows="3"
+                    placeholder="只套用在這個內容帳號，例如語氣、禁忌、用字與受眾要求"
+                  />
+                </el-form-item>
+
+                <el-form-item label="聯絡資訊覆寫" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.contactDetails"
+                    placeholder="留空則沿用 Profile 的聯絡資訊"
+                  />
+                </el-form-item>
+
+                <el-form-item label="CTA 覆寫" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.cta"
+                    placeholder="留空則沿用 Profile 的 CTA"
+                  />
+                </el-form-item>
+
+                <el-form-item label="Post Preset" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.postPreset"
+                    placeholder="匯出 Google Sheet 時，此帳號要套用的 Post Preset"
+                  />
+                </el-form-item>
+              </div>
+            </div>
+
+            <div v-else class="muted-text">
+              尚未建立內容帳號。若要讓同一個 Profile 底下有兩個 X、兩個 Facebook 等不同帳號，請在這裡新增。
+            </div>
+          </div>
+        </el-form-item>
+
         <el-divider>LLM 與轉錄</el-divider>
 
         <el-form-item label="API Base URL">
@@ -405,6 +480,21 @@
           </div>
         </el-form-item>
 
+        <el-form-item label="本次內容帳號">
+          <el-checkbox-group v-model="generateForm.selectedContentAccountIds" class="generate-account-list">
+            <el-checkbox
+              v-for="contentAccount in currentProfileContentAccounts"
+              :key="contentAccount.id"
+              :label="contentAccount.id"
+            >
+              {{ getContentAccountDisplayName(contentAccount) }}
+            </el-checkbox>
+          </el-checkbox-group>
+          <div v-if="currentProfileContentAccounts.length === 0" class="muted-text">
+            這個 Profile 目前沒有設定內容帳號，將退回使用 Profile 的共用提示詞產生一組通用文案。
+          </div>
+        </el-form-item>
+
         <el-form-item label="導流連結">
           <el-input v-model="generateForm.link" placeholder="選填，可覆蓋 Profile 預設連結" />
         </el-form-item>
@@ -446,6 +536,21 @@
           </div>
         </div>
 
+        <div class="result-block">
+          <h3>本次內容帳號</h3>
+          <div class="account-tags">
+            <el-tag
+              v-for="contentAccount in selectedGenerationContentAccounts"
+              :key="contentAccount.id"
+              class="account-tag"
+              type="success"
+            >
+              {{ getContentAccountDisplayName(contentAccount) }}
+            </el-tag>
+            <span v-if="selectedGenerationContentAccounts.length === 0" class="muted-text">未挑選內容帳號</span>
+          </div>
+        </div>
+
         <div class="batch-result-list">
           <div
             v-for="item in generationBatchResult.results"
@@ -469,7 +574,21 @@
               <el-input :model-value="item.transcript" type="textarea" :rows="6" readonly />
             </div>
 
-            <div class="post-grid">
+            <div v-if="item.contentAccountResults?.length" class="content-account-result-list">
+              <div
+                v-for="contentResult in item.contentAccountResults"
+                :key="contentResult.account?.id"
+                class="post-card"
+              >
+                <h4>{{ getContentAccountDisplayName(contentResult.account) }}</h4>
+                <div v-if="contentResult.account?.postPreset" class="muted-text">
+                  Post Preset：{{ contentResult.account.postPreset }}
+                </div>
+                <el-input :model-value="contentResult.content || ''" type="textarea" :rows="6" readonly />
+              </div>
+            </div>
+
+            <div v-else class="post-grid">
               <div v-for="(label, key) in postLabels" :key="key" class="post-card">
                 <h4>{{ label }}</h4>
                 <el-input :model-value="item.posts?.[key] || ''" type="textarea" :rows="6" readonly />
@@ -578,6 +697,17 @@ const postLabels = {
 }
 
 const PUBLISH_HANDOFF_STORAGE_KEY = 'sau-publish-handoff-drafts'
+const contentAccountPlatformOptions = [
+  { label: 'X / Twitter', value: 'twitter' },
+  { label: 'Threads', value: 'threads' },
+  { label: 'Instagram', value: 'instagram' },
+  { label: 'Facebook', value: 'facebook' },
+  { label: 'YouTube', value: 'youtube' },
+  { label: 'TikTok', value: 'tiktok' },
+  { label: 'Telegram', value: 'telegram' },
+  { label: 'Patreon', value: 'patreon' },
+  { label: 'Reddit', value: 'reddit' }
+]
 const publishSourceOptions = [
   { key: 'twitter', label: 'X / Twitter' },
   { key: 'threads', label: 'Threads' },
@@ -594,6 +724,72 @@ const publishHandoffPlatforms = [
   { key: 'videohao', label: '影片號', publishType: 2, accountType: 2, defaultSource: 'facebook', titleLimit: 100 },
   { key: 'xiaohongshu', label: '小紅書', publishType: 1, accountType: 1, defaultSource: 'instagram', titleLimit: 20 }
 ]
+
+const createContentAccount = () => ({
+  id: `content-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  platform: 'twitter',
+  name: '',
+  prompt: '',
+  contactDetails: '',
+  cta: '',
+  postPreset: ''
+})
+
+const normalizeContentAccounts = (values = []) => {
+  if (!Array.isArray(values)) {
+    return []
+  }
+  return values
+    .filter(item => item && typeof item === 'object')
+    .map(item => ({
+      id: item.id || createContentAccount().id,
+      platform: item.platform || 'twitter',
+      name: item.name || '',
+      prompt: item.prompt || '',
+      contactDetails: item.contactDetails || '',
+      cta: item.cta || '',
+      postPreset: item.postPreset || ''
+    }))
+}
+
+const normalizeProfileForm = (profile = {}) => {
+  const base = makeDefaultProfile()
+  const merged = {
+    ...base,
+    ...profile,
+    settings: {
+      ...base.settings,
+      ...(profile.settings || {}),
+      llm: {
+        ...base.settings.llm,
+        ...((profile.settings || {}).llm || {})
+      },
+      storage: {
+        ...base.settings.storage,
+        ...((profile.settings || {}).storage || {})
+      },
+      watermark: {
+        ...base.settings.watermark,
+        ...((profile.settings || {}).watermark || {})
+      },
+      googleSheet: {
+        ...base.settings.googleSheet,
+        ...((profile.settings || {}).googleSheet || {})
+      },
+      socialImport: {
+        ...base.settings.socialImport,
+        ...((profile.settings || {}).socialImport || {})
+      },
+      postPresets: {
+        ...base.settings.postPresets,
+        ...((profile.settings || {}).postPresets || {})
+      },
+      contentAccounts: normalizeContentAccounts((profile.settings || {}).contentAccounts || [])
+    },
+    accountIds: Array.isArray(profile.accountIds) ? [...profile.accountIds] : []
+  }
+  return merged
+}
 
 const makeDefaultProfile = () => ({
   id: null,
@@ -646,7 +842,8 @@ const makeDefaultProfile = () => ({
       facebook: '',
       youtube: '',
       tiktok: ''
-    }
+    },
+    contentAccounts: []
   }
 })
 
@@ -664,6 +861,7 @@ const publishHandoffForm = ref({
 const generateForm = ref({
   materialIds: [],
   selectedAccountIds: [],
+  selectedContentAccountIds: [],
   link: '',
   scheduleAt: '',
   writeToSheet: true
@@ -686,9 +884,17 @@ const currentProfileAccounts = computed(() => {
   const selectedIds = new Set(currentProfile.value.accountIds || [])
   return accountStore.accounts.filter(item => selectedIds.has(item.id))
 })
+const currentProfileContentAccounts = computed(() => (
+  normalizeContentAccounts(currentProfile.value?.settings?.contentAccounts || [])
+))
 const selectedGenerationAccounts = computed(() => {
   const selectedIds = new Set(generationBatchResult.value?.selectedAccountIds || [])
   return accountStore.accounts.filter(item => selectedIds.has(item.id))
+})
+const selectedGenerationContentAccounts = computed(() => {
+  const allContentAccounts = normalizeContentAccounts(generationBatchResult.value?.profile?.settings?.contentAccounts || [])
+  const selectedIds = new Set(generationBatchResult.value?.selectedContentAccountIds || [])
+  return allContentAccounts.filter(item => selectedIds.has(item.id))
 })
 const availablePublishHandoffPlatforms = computed(() => (
   publishHandoffPlatforms.filter(platform => selectedGenerationAccounts.value.some(account => account.type === platform.accountType))
@@ -699,11 +905,32 @@ const getAccountName = (accountId) => {
   return account ? `${account.name}（${account.platform}）` : accountId
 }
 
+const getContentAccountPlatformLabel = (platform) => {
+  return contentAccountPlatformOptions.find(item => item.value === platform)?.label || platform
+}
+
+const getContentAccountDisplayName = (contentAccount) => {
+  if (!contentAccount) {
+    return ''
+  }
+  const name = (contentAccount.name || '').trim()
+  const platformLabel = getContentAccountPlatformLabel(contentAccount.platform)
+  return name ? `${name}（${platformLabel}）` : platformLabel
+}
+
+const addContentAccount = () => {
+  profileForm.value.settings.contentAccounts.push(createContentAccount())
+}
+
+const removeContentAccount = (index) => {
+  profileForm.value.settings.contentAccounts.splice(index, 1)
+}
+
 const fetchProfiles = async () => {
   isRefreshing.value = true
   try {
     const response = await profileApi.getProfiles()
-    profiles.value = response.data || []
+    profiles.value = (response.data || []).map(item => normalizeProfileForm(item))
   } catch (error) {
     ElMessage.error('取得 Profile 清單失敗')
   } finally {
@@ -743,7 +970,7 @@ const ensureMaterials = async () => {
 
 const openCreateDialog = () => {
   dialogType.value = 'create'
-  profileForm.value = makeDefaultProfile()
+  profileForm.value = normalizeProfileForm(makeDefaultProfile())
   dialogVisible.value = true
 }
 
@@ -813,7 +1040,7 @@ const validateGoogleSheetConfig = async () => {
 
 const openEditDialog = (profile) => {
   dialogType.value = 'edit'
-  profileForm.value = JSON.parse(JSON.stringify(profile))
+  profileForm.value = normalizeProfileForm(JSON.parse(JSON.stringify(profile)))
   dialogVisible.value = true
 }
 
@@ -825,8 +1052,8 @@ const submitProfile = async () => {
 
   isSubmitting.value = true
   try {
-    const response = await profileApi.saveProfile(profileForm.value)
-    const savedProfile = response.data
+    const response = await profileApi.saveProfile(normalizeProfileForm(profileForm.value))
+    const savedProfile = normalizeProfileForm(response.data)
     const index = profiles.value.findIndex(item => item.id === savedProfile.id)
 
     if (index > -1) {
@@ -870,6 +1097,7 @@ const openGenerateDialog = async (profile) => {
   generateForm.value = {
     materialIds: [],
     selectedAccountIds: [...(profile.accountIds || [])],
+    selectedContentAccountIds: currentProfileContentAccounts.value.map(item => item.id),
     link: profile.settings?.socialImport?.defaultLink || '',
     scheduleAt: '',
     writeToSheet: true
@@ -888,12 +1116,18 @@ const submitGeneration = async () => {
     return
   }
 
+  if (currentProfileContentAccounts.value.length > 0 && generateForm.value.selectedContentAccountIds.length === 0) {
+    ElMessage.warning('請至少選擇一個內容帳號')
+    return
+  }
+
   isGenerating.value = true
   try {
     const response = await profileApi.generateBatchContent({
       profileId: currentProfile.value.id,
       materialIds: generateForm.value.materialIds,
       selectedAccountIds: generateForm.value.selectedAccountIds,
+      selectedContentAccountIds: generateForm.value.selectedContentAccountIds,
       link: generateForm.value.link,
       scheduleAt: generateForm.value.scheduleAt,
       writeToSheet: generateForm.value.writeToSheet
@@ -1108,6 +1342,38 @@ onMounted(async () => {
     line-height: 1.6;
   }
 
+  .content-account-config {
+    width: 100%;
+  }
+
+  .content-account-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .content-account-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .content-account-card {
+    border: 1px solid #e5eaf3;
+    border-radius: 10px;
+    padding: 16px;
+    background-color: #f8fafc;
+  }
+
+  .content-account-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+
   .generate-account-list {
     display: flex;
     flex-wrap: wrap;
@@ -1136,6 +1402,13 @@ onMounted(async () => {
     display: flex;
     flex-direction: column;
     gap: 20px;
+    margin-top: 20px;
+  }
+
+  .content-account-result-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
     margin-top: 20px;
   }
 

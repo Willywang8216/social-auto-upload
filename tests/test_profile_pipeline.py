@@ -58,6 +58,21 @@ class ProfilePipelineTests(unittest.TestCase):
                     "settings": {
                         "storage": {"remoteName": "remote-a"},
                         "postPresets": {"twitter": "Preset X"},
+                        "contentAccounts": [
+                            {
+                                "id": "acct-twitter-main",
+                                "platform": "twitter",
+                                "name": "光光 X 主帳",
+                                "prompt": "語氣要更犀利",
+                                "contactDetails": "@guang_main",
+                                "cta": "追蹤主帳",
+                                "postPreset": "X Main Preset",
+                            },
+                            {
+                                "platform": "facebook",
+                                "name": "光光 FB 備用",
+                            },
+                        ],
                     },
                 },
             )
@@ -65,10 +80,14 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertEqual(saved["name"], "Creator Alpha")
             self.assertEqual(saved["accountIds"], [1, 2])
             self.assertEqual(saved["settings"]["storage"]["remoteName"], "remote-a")
+            self.assertEqual(len(saved["settings"]["contentAccounts"]), 2)
+            self.assertEqual(saved["settings"]["contentAccounts"][0]["platform"], "twitter")
+            self.assertTrue(saved["settings"]["contentAccounts"][1]["id"])
 
             profiles = list_profiles(db_path)
             self.assertEqual(len(profiles), 1)
             self.assertEqual(profiles[0]["accountIds"], [1, 2])
+            self.assertEqual(profiles[0]["settings"]["contentAccounts"][0]["postPreset"], "X Main Preset")
 
     def test_build_google_sheet_rows_maps_platform_presets_and_schedule(self):
         profile = {
@@ -113,6 +132,56 @@ class ProfilePipelineTests(unittest.TestCase):
         self.assertEqual(rows[0][19], "Preset X")
         self.assertEqual(rows[1][19], "Preset IG")
         self.assertEqual(len(rows[0]), len(SHEET_COLUMNS))
+
+    def test_build_google_sheet_rows_uses_content_account_post_presets(self):
+        profile = {
+            "settings": {
+                "socialImport": {
+                    "defaultLink": "https://example.com",
+                },
+                "postPresets": {
+                    "twitter": "Fallback Twitter Preset",
+                },
+            }
+        }
+        upload_result = {
+            "publicUrl": "https://cdn.example.com/image.jpg",
+            "mediaKind": "image",
+        }
+        content_account_results = [
+            {
+                "account": {
+                    "id": "acct-twitter-main",
+                    "platform": "twitter",
+                    "name": "光光 X 主帳",
+                    "postPreset": "Twitter Main Preset",
+                },
+                "content": "Tweet body",
+            },
+            {
+                "account": {
+                    "id": "acct-facebook-main",
+                    "platform": "facebook",
+                    "name": "光光 FB 主帳",
+                    "postPreset": "",
+                },
+                "content": "Facebook body",
+            },
+        ]
+
+        rows = build_google_sheet_rows(
+            profile,
+            {},
+            upload_result,
+            "2026-05-03T14:30:00",
+            content_account_results,
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][0], "Tweet body")
+        self.assertEqual(rows[0][2], "https://cdn.example.com/image.jpg")
+        self.assertEqual(rows[0][19], "Twitter Main Preset")
+        self.assertEqual(rows[1][19], "")
 
     def test_extract_json_payload_accepts_fenced_json(self):
         payload = extract_json_payload(
