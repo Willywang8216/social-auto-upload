@@ -28,6 +28,7 @@ from utils.profile_pipeline import (
 from utils.account_registry import (
     default_auth_mode_for_platform,
     ensure_account_tables,
+    get_platform_config,
     normalize_platform_key,
     parse_metadata,
     platform_key_from_type,
@@ -53,6 +54,11 @@ def get_db_path():
     ensure_account_tables(db_path)
     ensure_profile_tables(db_path)
     return db_path
+
+
+def build_cookie_storage_name(platform_key: str) -> str:
+    key = normalize_platform_key(platform_key) or "account"
+    return f"{key}_{uuid.uuid4().hex}.json"
 
 # 处理所有静态资源请求（未来打包用）
 @app.route('/assets/<filename>')
@@ -728,7 +734,9 @@ def create_account():
     account_type = platform_type_from_key(platform_key)
     resolved_auth_mode = auth_mode or default_auth_mode_for_platform(platform_key, account_type)
     file_path = (data.get('filePath') or '').strip()
-    status = int(data.get('status', 1))
+    if not file_path and get_platform_config(platform_key, account_type)["supportsCookieUpload"]:
+        file_path = build_cookie_storage_name(platform_key)
+    status = int(data.get('status', 0))
 
     try:
         with sqlite3.connect(get_db_path()) as conn:
@@ -786,6 +794,22 @@ def updateUserinfo():
         with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
+            cursor.execute('SELECT * FROM user_info WHERE id = ?', (user_id,))
+            existing_record = cursor.fetchone()
+            if not existing_record:
+                return jsonify({
+                    "code": 404,
+                    "msg": "account not found",
+                    "data": None
+                }), 404
+
+            resolved_file_path = (
+                str(file_path).strip()
+                if file_path is not None
+                else str(existing_record["filePath"] or "").strip()
+            )
+            if not resolved_file_path and get_platform_config(platform_key, account_type)["supportsCookieUpload"]:
+                resolved_file_path = build_cookie_storage_name(platform_key)
 
             # 更新数据库记录
             if file_path is None:
@@ -796,10 +820,11 @@ def updateUserinfo():
                         userName = ?,
                         platform_key = ?,
                         auth_mode = ?,
+                        filePath = ?,
                         metadata_json = ?
                     WHERE id = ?;
                     ''',
-                    (account_type, userName, platform_key, resolved_auth_mode, metadata_json, user_id)
+                    (account_type, userName, platform_key, resolved_auth_mode, resolved_file_path, metadata_json, user_id)
                 )
             else:
                 cursor.execute(
@@ -813,7 +838,7 @@ def updateUserinfo():
                         metadata_json = ?
                     WHERE id = ?;
                     ''',
-                    (account_type, str(file_path).strip(), userName, platform_key, resolved_auth_mode, metadata_json, user_id)
+                    (account_type, resolved_file_path, userName, platform_key, resolved_auth_mode, metadata_json, user_id)
                 )
             conn.commit()
             cursor.execute('SELECT * FROM user_info WHERE id = ?', (user_id,))

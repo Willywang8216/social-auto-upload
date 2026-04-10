@@ -1,4 +1,5 @@
 import { http } from '@/utils/request'
+import { buildApiUrl } from '@/utils/apiBase'
 
 // 账号管理相关API
 export const accountApi = {
@@ -20,6 +21,22 @@ export const accountApi = {
   // 更新账号
   updateAccount(data) {
     return http.post('/updateUserinfo', data)
+  },
+
+  uploadCookie({ id, platform, file }) {
+    const formData = new FormData()
+    formData.append('id', id)
+    formData.append('platform', platform)
+    formData.append('file', file)
+    return http.post('/uploadCookie', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      }
+    })
+  },
+
+  getDownloadCookieUrl(filePath) {
+    return buildApiUrl(`/downloadCookie?filePath=${encodeURIComponent(filePath)}`)
   },
 
   // 删除账号

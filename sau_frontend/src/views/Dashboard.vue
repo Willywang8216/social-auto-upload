@@ -179,7 +179,7 @@ const loading = ref(false)
 const accountStats = computed(() => {
   const accounts = accountStore.accounts
   const normal = accounts.filter(a => a.status === '正常').length
-  const abnormal = accounts.filter(a => a.status !== '正常' && a.status !== '验证中').length
+  const abnormal = accounts.filter(a => a.status !== '正常' && a.status !== '驗證中').length
   return {
     total: accounts.length,
     normal,
@@ -194,8 +194,7 @@ const platformStats = computed(() => {
   const douyin = accounts.filter(a => a.platform === '抖音').length
   const channels = accounts.filter(a => a.platform === '影片號').length
   const xiaohongshu = accounts.filter(a => a.platform === '小紅書').length
-  // 統計有帳號的平台數量
-  const total = [kuaishou, douyin, channels, xiaohongshu].filter(n => n > 0).length
+  const total = new Set(accounts.map(account => account.platformKey).filter(Boolean)).size
   return { total, kuaishou, douyin, channels, xiaohongshu }
 })
 
