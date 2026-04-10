@@ -56,7 +56,7 @@
     >
       <div class="upload-form">
         <el-form label-width="80px">
-          <el-form-item label="檔名称:">
+          <el-form-item label="檔案名稱:">
             <el-input
               v-model="customFilename"
               placeholder="选填 (仅单个文件时生效)"

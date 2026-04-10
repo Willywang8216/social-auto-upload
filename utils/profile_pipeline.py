@@ -419,7 +419,16 @@ def append_rows_to_google_sheet(profile: dict[str, Any], rows: list[list[str]], 
 def get_google_service_account_config(base_dir: Path) -> dict[str, Any]:
     env_json = _resolve_value(None, "SAU_GOOGLE_SERVICE_ACCOUNT_JSON", "GOOGLE_SERVICE_ACCOUNT_JSON")
     if env_json:
-        data = json.loads(env_json)
+        data, error = _parse_google_service_account_json(env_json, "GOOGLE_SERVICE_ACCOUNT_JSON")
+        if error:
+            return {
+                "configured": False,
+                "source": "env_json",
+                "clientEmail": "",
+                "projectId": "",
+                "filePath": None,
+                "error": error,
+            }
         return {
             "configured": True,
             "source": "env_json",
@@ -432,8 +441,24 @@ def get_google_service_account_config(base_dir: Path) -> dict[str, Any]:
     if env_file:
         path = Path(env_file)
         if not path.exists():
-            raise RuntimeError(f"Google service account file not found: {path}")
-        data = json.loads(path.read_text(encoding="utf-8"))
+            return {
+                "configured": False,
+                "source": "env_file",
+                "clientEmail": "",
+                "projectId": "",
+                "filePath": str(path),
+                "error": f"Google service account file not found: {path}",
+            }
+        data, error = _parse_google_service_account_json(path.read_text(encoding="utf-8"), str(path))
+        if error:
+            return {
+                "configured": False,
+                "source": "env_file",
+                "clientEmail": "",
+                "projectId": "",
+                "filePath": str(path),
+                "error": error,
+            }
         return {
             "configured": True,
             "source": "env_file",
@@ -444,7 +469,16 @@ def get_google_service_account_config(base_dir: Path) -> dict[str, Any]:
 
     stored_path = get_google_service_account_storage_path(base_dir)
     if stored_path.exists():
-        data = json.loads(stored_path.read_text(encoding="utf-8"))
+        data, error = _parse_google_service_account_json(stored_path.read_text(encoding="utf-8"), str(stored_path))
+        if error:
+            return {
+                "configured": False,
+                "source": "stored_file",
+                "clientEmail": "",
+                "projectId": "",
+                "filePath": str(stored_path),
+                "error": error,
+            }
         return {
             "configured": True,
             "source": "stored_file",
@@ -459,6 +493,7 @@ def get_google_service_account_config(base_dir: Path) -> dict[str, Any]:
         "clientEmail": "",
         "projectId": "",
         "filePath": str(stored_path),
+        "error": "",
     }
 
 
@@ -856,6 +891,18 @@ def _load_google_service_account_data(base_dir: Path | None = None) -> dict[str,
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
     return None
+
+
+def _parse_google_service_account_json(raw_value: str, source_name: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        data = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        return None, f"{source_name} is not valid JSON: {exc.msg}"
+
+    if not isinstance(data, dict):
+        return None, f"{source_name} must contain a JSON object"
+
+    return data, None
 
 
 def _validate_google_service_account_payload(data: dict[str, Any]) -> None:

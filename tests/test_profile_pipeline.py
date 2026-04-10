@@ -1,7 +1,9 @@
+import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from utils.profile_pipeline import (
     SHEET_COLUMNS,
@@ -157,6 +159,26 @@ class ProfilePipelineTests(unittest.TestCase):
             loaded = get_google_service_account_config(base_dir)
             self.assertTrue(loaded["configured"])
             self.assertEqual(loaded["projectId"], "demo-project")
+
+    def test_get_google_service_account_config_handles_invalid_env_json(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            with patch.dict(os.environ, {"GOOGLE_SERVICE_ACCOUNT_JSON": "not-json"}, clear=False):
+                result = get_google_service_account_config(base_dir)
+
+            self.assertFalse(result["configured"])
+            self.assertEqual(result["source"], "env_json")
+            self.assertIn("not valid JSON", result["error"])
+
+    def test_get_google_service_account_config_handles_missing_env_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            with patch.dict(os.environ, {"GOOGLE_SERVICE_ACCOUNT_FILE": str(base_dir / "missing.json")}, clear=False):
+                result = get_google_service_account_config(base_dir)
+
+            self.assertFalse(result["configured"])
+            self.assertEqual(result["source"], "env_file")
+            self.assertIn("file not found", result["error"])
 
 
 if __name__ == "__main__":
