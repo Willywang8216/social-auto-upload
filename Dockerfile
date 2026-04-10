@@ -61,7 +61,11 @@ dst.write_text(src.read_text(encoding='utf-16'), encoding='utf-8')
 PY
 
 RUN pip install --no-cache-dir -r /tmp/requirements-utf8.txt && \
-    pip install --no-cache-dir gspread==6.2.1 patchright==1.58.2
+    pip install --no-cache-dir \
+    gspread==6.2.1 \
+    patchright==1.58.2 \
+    "opencv-python>=4.13.0.92" \
+    "segno>=1.6.6"
 
 RUN playwright install chromium-headless-shell
 
