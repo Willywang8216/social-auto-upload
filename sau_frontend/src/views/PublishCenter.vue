@@ -28,7 +28,7 @@
             class="add-tab-btn"
           >
             <el-icon><Plus /></el-icon>
-            添加Tab
+            新增分頁
           </el-button>
           <el-button 
             type="success" 
@@ -37,7 +37,7 @@
             :loading="batchPublishing"
             class="batch-publish-btn"
           >
-            批量发布
+            批次發佈
           </el-button>
         </div>
       </div>
@@ -52,7 +52,7 @@
           v-show="activeTab === tab.name"
           class="tab-content"
         >
-          <!-- 发布状态提示 -->
+          <!-- 發佈状态提示 -->
           <div v-if="tab.publishStatus" class="publish-status">
             <el-alert
               :title="tab.publishStatus.message"
@@ -62,40 +62,40 @@
             />
           </div>
 
-          <!-- 视频上传区域 -->
+          <!-- 影片上傳区域 -->
           <div class="upload-section">
-            <h3>视频</h3>
+            <h3>影片</h3>
             <div class="upload-options">
               <el-button type="primary" @click="showUploadOptions(tab)" class="upload-btn">
                 <el-icon><Upload /></el-icon>
-                上传视频
+                上傳影片
               </el-button>
             </div>
             
-            <!-- 已上传文件列表 -->
+            <!-- 已上傳文件列表 -->
             <div v-if="tab.fileList.length > 0" class="uploaded-files">
-              <h4>已上传文件：</h4>
+              <h4>已上傳文件：</h4>
               <div class="file-list">
                 <div v-for="(file, index) in tab.fileList" :key="index" class="file-item">
                   <el-link :href="file.url" target="_blank" type="primary">{{ file.name }}</el-link>
                   <span class="file-size">{{ (file.size / 1024 / 1024).toFixed(2) }}MB</span>
-                  <el-button type="danger" size="small" @click="removeFile(tab, index)">删除</el-button>
+                  <el-button type="danger" size="small" @click="removeFile(tab, index)">刪除</el-button>
                 </div>
               </div>
             </div>
           </div>
 
-          <!-- 上传选项弹窗 -->
+          <!-- 上傳选项弹窗 -->
           <el-dialog
             v-model="uploadOptionsVisible"
-            title="选择上传方式"
+            title="選擇上傳方式"
             width="400px"
             class="upload-options-dialog"
           >
             <div class="upload-options-content">
               <el-button type="primary" @click="selectLocalUpload" class="option-btn">
                 <el-icon><Upload /></el-icon>
-                本地上传
+                本地上傳
               </el-button>
               <el-button type="success" @click="selectMaterialLibrary" class="option-btn">
                 <el-icon><Folder /></el-icon>
@@ -104,10 +104,10 @@
             </div>
           </el-dialog>
 
-          <!-- 本地上传弹窗 -->
+          <!-- 本地上傳弹窗 -->
           <el-dialog
             v-model="localUploadVisible"
-            title="本地上传"
+            title="本地上傳"
             width="600px"
             class="local-upload-dialog"
           >
@@ -124,20 +124,20 @@
             >
               <el-icon class="el-icon--upload"><Upload /></el-icon>
               <div class="el-upload__text">
-                将视频文件拖到此处，或<em>点击上传</em>
+                将影片文件拖到此处，或<em>点击上傳</em>
               </div>
               <template #tip>
                 <div class="el-upload__tip">
-                  支持MP4、AVI等视频格式，可上传多个文件
+                  支持MP4、AVI等影片格式，可上傳多个文件
                 </div>
               </template>
             </el-upload>
           </el-dialog>
 
-          <!-- 批量发布进度对话框 -->
+          <!-- 批次發佈进度对话框 -->
           <el-dialog
             v-model="batchPublishDialogVisible"
-            title="批量发布进度"
+            title="批次發佈进度"
             width="500px"
             :close-on-click-modal="false"
             :close-on-press-escape="false"
@@ -149,10 +149,10 @@
                 :status="publishProgress === 100 ? 'success' : ''"
               />
               <div v-if="currentPublishingTab" class="current-publishing">
-                正在发布：{{ currentPublishingTab.label }}
+                正在發佈：{{ currentPublishingTab.label }}
               </div>
               
-              <!-- 发布结果列表 -->
+              <!-- 發佈结果列表 -->
               <div class="publish-results" v-if="publishResults.length > 0">
                 <div 
                   v-for="(result, index) in publishResults" 
@@ -174,7 +174,7 @@
                   @click="cancelBatchPublish" 
                   :disabled="publishProgress === 100"
                 >
-                  取消发布
+                  取消發佈
                 </el-button>
                 <el-button 
                   type="primary" 
@@ -187,10 +187,10 @@
             </template>
           </el-dialog>
 
-          <!-- 素材库选择弹窗 -->
+          <!-- 素材库選擇弹窗 -->
           <el-dialog
             v-model="materialLibraryVisible"
-            title="选择素材"
+            title="選擇素材"
             width="800px"
             class="material-library-dialog"
           >
@@ -223,9 +223,9 @@
             </template>
           </el-dialog>
 
-          <!-- 账号选择 -->
+          <!-- 帳號選擇 -->
           <div class="account-section">
-            <h3>账号</h3>
+            <h3>帳號</h3>
             <div class="account-display">
               <div class="selected-accounts">
                 <el-tag
@@ -244,15 +244,15 @@
                 @click="openAccountDialog(tab)"
                 class="select-account-btn"
               >
-                选择账号
+                選擇帳號
               </el-button>
             </div>
           </div>
 
-          <!-- 账号选择弹窗 -->
+          <!-- 帳號選擇弹窗 -->
           <el-dialog
             v-model="accountDialogVisible"
-            title="选择账号"
+            title="選擇帳號"
             width="600px"
             class="account-dialog"
           >
@@ -281,7 +281,7 @@
             </template>
           </el-dialog>
 
-          <!-- 平台选择 -->
+          <!-- 平台選擇 -->
           <div class="platform-section">
             <h3>平台</h3>
             <el-radio-group v-model="tab.selectedPlatform" class="platform-radios">
@@ -305,11 +305,11 @@
             />
           </div>
 
-          <!-- 草稿选项 (仅在视频号可见) -->
+          <!-- 草稿选项 (仅在影片号可见) -->
           <div v-if="tab.selectedPlatform === 2" class="draft-section">
             <el-checkbox
               v-model="tab.isDraft"
-              label="视频号仅保存草稿(用手机发布)"
+              label="影片号仅保存草稿(用手机發佈)"
               class="draft-checkbox"
             />
           </div>
@@ -321,7 +321,7 @@
               v-model="tab.productTitle"
               type="text"
               :rows="1"
-              placeholder="请输入商品名称"
+              placeholder="請輸入商品名称"
               maxlength="200"
               class="product-name-input"
             />
@@ -329,7 +329,7 @@
               v-model="tab.productLink"
               type="text"
               :rows="1"
-              placeholder="请输入商品链接"
+              placeholder="請輸入商品链接"
               maxlength="200"
               class="product-link-input"
             />
@@ -342,7 +342,7 @@
               v-model="tab.title"
               type="textarea"
               :rows="3"
-              placeholder="请输入标题"
+              placeholder="請輸入标题"
               maxlength="100"
               show-word-limit
               class="title-input"
@@ -420,19 +420,19 @@
             </template>
           </el-dialog>
 
-          <!-- 定时发布 -->
+          <!-- 定时發佈 -->
           <div class="schedule-section">
-            <h3>定时发布</h3>
+            <h3>定时發佈</h3>
             <div class="schedule-controls">
               <el-switch
                 v-model="tab.scheduleEnabled"
-                active-text="定时发布"
-                inactive-text="立即发布"
+                active-text="定时發佈"
+                inactive-text="立即發佈"
               />
               <div v-if="tab.scheduleEnabled" class="schedule-settings">
                 <div class="schedule-item">
-                  <span class="label">每天发布视频数：</span>
-                  <el-select v-model="tab.videosPerDay" placeholder="选择发布数量">
+                  <span class="label">每天發佈影片数：</span>
+                  <el-select v-model="tab.videosPerDay" placeholder="選擇發佈数量">
                     <el-option
                       v-for="num in 55"
                       :key="num"
@@ -442,7 +442,7 @@
                   </el-select>
                 </div>
                 <div class="schedule-item">
-                  <span class="label">每天发布时间：</span>
+                  <span class="label">每天發佈时间：</span>
                   <el-time-select
                     v-for="(time, index) in tab.dailyTimes"
                     :key="index"
@@ -450,7 +450,7 @@
                     start="00:00"
                     step="00:30"
                     end="23:30"
-                    placeholder="选择时间"
+                    placeholder="選擇时间"
                   />
                   <el-button
                     v-if="tab.dailyTimes.length < tab.videosPerDay"
@@ -463,7 +463,7 @@
                 </div>
                 <div class="schedule-item">
                   <span class="label">开始天数：</span>
-                  <el-select v-model="tab.startDays" placeholder="选择开始天数">
+                  <el-select v-model="tab.startDays" placeholder="選擇开始天数">
                     <el-option :label="'明天'" :value="0" />
                     <el-option :label="'后天'" :value="1" />
                   </el-select>
@@ -481,7 +481,7 @@
               @click="confirmPublish(tab)"
               :loading="tab.publishing || false"
             >
-              {{ tab.publishing ? '发布中...' : '发布' }}
+              {{ tab.publishing ? '發佈中...' : '發佈' }}
             </el-button>
           </div>
         </div>
@@ -515,7 +515,7 @@ let tabCounter = 1
 // 获取应用状态管理
 const appStore = useAppStore()
 
-// 上传相关状态
+// 上傳相关状态
 const uploadOptionsVisible = ref(false)
 const localUploadVisible = ref(false)
 const materialLibraryVisible = ref(false)
@@ -523,7 +523,7 @@ const currentUploadTab = ref(null)
 const selectedMaterials = ref([])
 const materials = computed(() => appStore.materials)
 
-// 批量发布相关状态
+// 批次發佈相关状态
 const batchPublishing = ref(false)
 const batchPublishMessage = ref('')
 const batchPublishType = ref('info')
@@ -532,28 +532,28 @@ const batchPublishType = ref('info')
 const platforms = [
   { key: 3, name: '抖音' },
   { key: 4, name: '快手' },
-  { key: 2, name: '视频号' },
+  { key: 2, name: '影片号' },
   { key: 1, name: '小红书' }
 ]
 
 const defaultTabInit = {
   name: 'tab1',
-  label: '发布1',
+  label: '發佈1',
   fileList: [], // 后端返回的文件名列表
   displayFileList: [], // 用于显示的文件列表
-  selectedAccounts: [], // 选中的账号ID列表
+  selectedAccounts: [], // 选中的帳號ID列表
   selectedPlatform: 1, // 选中的平台（单选）
   title: '',
   productLink: '', // 商品链接
   productTitle: '', // 商品名称
   selectedTopics: [], // 话题列表（不带#号）
-  scheduleEnabled: false, // 定时发布开关
-  videosPerDay: 1, // 每天发布视频数量
-  dailyTimes: ['10:00'], // 每天发布时间点列表
-  startDays: 0, // 从今天开始计算的发布天数，0表示明天，1表示后天
-  publishStatus: null, // 发布状态，包含message和type
-  publishing: false, // 发布状态，用于控制按钮loading效果
-  isDraft: false, // 是否保存为草稿，仅视频号平台可见
+  scheduleEnabled: false, // 定时發佈开关
+  videosPerDay: 1, // 每天發佈影片数量
+  dailyTimes: ['10:00'], // 每天發佈时间点列表
+  startDays: 0, // 从今天开始计算的發佈天数，0表示明天，1表示后天
+  publishStatus: null, // 發佈状态，包含message和type
+  publishing: false, // 發佈状态，用于控制按钮loading效果
+  isDraft: false, // 是否保存为草稿，仅影片号平台可见
   isOriginal: false // 是否标记为原创
 }
 
@@ -572,19 +572,19 @@ const tabs = reactive([
   makeNewTab()
 ])
 
-// 账号相关状态
+// 帳號相关状态
 const accountDialogVisible = ref(false)
 const tempSelectedAccounts = ref([])
 const currentTab = ref(null)
 
-// 获取账号状态管理
+// 获取帳號状态管理
 const accountStore = useAccountStore()
 
-// 根据选择的平台获取可用账号列表
+// 根据選擇的平台获取可用帳號列表
 const availableAccounts = computed(() => {
   const platformMap = {
     3: '抖音',
-    2: '视频号',
+    2: '影片号',
     1: '小红书',
     4: '快手'
   }
@@ -608,24 +608,24 @@ const addTab = () => {
   tabCounter++
   const newTab = makeNewTab()
   newTab.name = `tab${tabCounter}`
-  newTab.label = `发布${tabCounter}`
+  newTab.label = `發佈${tabCounter}`
   tabs.push(newTab)
   activeTab.value = newTab.name
 }
 
-// 删除tab
+// 刪除tab
 const removeTab = (tabName) => {
   const index = tabs.findIndex(tab => tab.name === tabName)
   if (index > -1) {
     tabs.splice(index, 1)
-    // 如果删除的是当前激活的tab，切换到第一个tab
+    // 如果刪除的是当前激活的tab，切换到第一个tab
     if (activeTab.value === tabName && tabs.length > 0) {
       activeTab.value = tabs[0].name
     }
   }
 }
 
-// 处理文件上传成功
+// 处理文件上傳成功
 const handleUploadSuccess = (response, file, tab) => {
   if (response.code === 200) {
     // 获取文件路径
@@ -651,20 +651,20 @@ const handleUploadSuccess = (response, file, tab) => {
       url: item.url
     }))]
     
-    ElMessage.success('文件上传成功')
+    ElMessage.success('文件上傳成功')
   } else {
-    ElMessage.error(response.msg || '上传失败')
+    ElMessage.error(response.msg || '上傳失败')
   }
 }
 
-// 处理文件上传失败
+// 处理文件上傳失败
 const handleUploadError = (error) => {
-  ElMessage.error('文件上传失败')
+  ElMessage.error('文件上傳失败')
 }
 
-// 删除已上传文件
+// 刪除已上傳文件
 const removeFile = (tab, index) => {
-  // 从文件列表中删除
+  // 从文件列表中刪除
   tab.fileList.splice(index, 1)
   
   // 更新显示列表
@@ -673,7 +673,7 @@ const removeFile = (tab, index) => {
     url: item.url
   }))]
   
-  ElMessage.success('文件删除成功')
+  ElMessage.success('文件刪除成功')
 }
 
 // 话题相关方法
@@ -686,7 +686,7 @@ const openTopicDialog = (tab) => {
 // 添加自定义话题
 const addCustomTopic = () => {
   if (!customTopic.value.trim()) {
-    ElMessage.warning('请输入话题内容')
+    ElMessage.warning('請輸入话题内容')
     return
   }
   if (currentTab.value && !currentTab.value.selectedTopics.includes(customTopic.value.trim())) {
@@ -710,7 +710,7 @@ const toggleRecommendedTopic = (topic) => {
   }
 }
 
-// 删除话题
+// 刪除话题
 const removeTopic = (tab, index) => {
   tab.selectedTopics.splice(index, 1)
 }
@@ -723,72 +723,72 @@ const confirmTopicSelection = () => {
   ElMessage.success('添加话题完成')
 }
 
-// 账号选择相关方法
-// 打开账号选择弹窗
+// 帳號選擇相关方法
+// 打开帳號選擇弹窗
 const openAccountDialog = (tab) => {
   currentTab.value = tab
   tempSelectedAccounts.value = [...tab.selectedAccounts]
   accountDialogVisible.value = true
 }
 
-// 确认账号选择
+// 确认帳號選擇
 const confirmAccountSelection = () => {
   if (currentTab.value) {
     currentTab.value.selectedAccounts = [...tempSelectedAccounts.value]
   }
   accountDialogVisible.value = false
   currentTab.value = null
-  ElMessage.success('账号选择完成')
+  ElMessage.success('帳號選擇完成')
 }
 
-// 删除选中的账号
+// 刪除选中的帳號
 const removeAccount = (tab, index) => {
   tab.selectedAccounts.splice(index, 1)
 }
 
-// 获取账号显示名称
+// 获取帳號显示名称
 const getAccountDisplayName = (accountId) => {
   const account = accountStore.accounts.find(acc => acc.id === accountId)
   return account ? account.name : accountId
 }
 
-// 取消发布
+// 取消發佈
 const cancelPublish = (tab) => {
-  ElMessage.info('已取消发布')
+  ElMessage.info('已取消發佈')
 }
 
-// 确认发布
+// 确认發佈
 const confirmPublish = async (tab) => {
   // 防止重复点击
   if (tab.publishing) {
-    throw new Error('正在发布中，请稍候...')
+    throw new Error('正在發佈中，请稍候...')
   }
 
-  tab.publishing = true // 设置发布状态为进行中
+  tab.publishing = true // 设置發佈状态为进行中
 
   // 数据验证
   if (tab.fileList.length === 0) {
-    ElMessage.error('请先上传视频文件')
+    ElMessage.error('请先上傳影片文件')
     tab.publishing = false
-    throw new Error('请先上传视频文件')
+    throw new Error('请先上傳影片文件')
   }
   if (!tab.title.trim()) {
-    ElMessage.error('请输入标题')
+    ElMessage.error('請輸入标题')
     tab.publishing = false
-    throw new Error('请输入标题')
+    throw new Error('請輸入标题')
   }
   if (!tab.selectedPlatform) {
-    ElMessage.error('请选择发布平台')
+    ElMessage.error('请選擇發佈平台')
     tab.publishing = false
-    throw new Error('请选择发布平台')
+    throw new Error('请選擇發佈平台')
   }
   if (tab.selectedAccounts.length === 0) {
-    ElMessage.error('请选择发布账号')
+    ElMessage.error('请選擇發佈帳號')
     tab.publishing = false
-    throw new Error('请选择发布账号')
+    throw new Error('请選擇發佈帳號')
   }
 
-  // 构造发布数据，符合后端API格式
+  // 构造發佈数据，符合后端API格式
   const publishData = {
     type: tab.selectedPlatform,
     title: tab.title,
@@ -797,7 +797,7 @@ const confirmPublish = async (tab) => {
     accountList: tab.selectedAccounts.map(accountId => {
       const account = accountStore.accounts.find(acc => acc.id === accountId)
       return account ? account.filePath : accountId
-    }), // 发送账号的文件路径
+    }), // 发送帳號的文件路径
     enableTimer: tab.scheduleEnabled ? 1 : 0,
     videosPerDay: tab.scheduleEnabled ? tab.videosPerDay || 1 : 1,
     dailyTimes: tab.scheduleEnabled ? tab.dailyTimes || ['10:00'] : ['10:00'],
@@ -808,11 +808,11 @@ const confirmPublish = async (tab) => {
     isDraft: tab.isDraft
   }
 
-  // 调用后端发布API（使用统一的http封装）
+  // 调用后端發佈API（使用统一的http封装）
   try {
     const data = await http.post('/postVideo', publishData)
     tab.publishStatus = {
-      message: '发布成功',
+      message: '發佈成功',
       type: 'success'
     }
     // 清空当前tab的数据
@@ -823,9 +823,9 @@ const confirmPublish = async (tab) => {
     tab.selectedAccounts = []
     tab.scheduleEnabled = false
   } catch (error) {
-    console.error('发布错误:', error)
+    console.error('發佈错误:', error)
     tab.publishStatus = {
-      message: `发布失败：${error.message || '请检查网络连接'}`,
+      message: `發佈失败：${error.message || '请检查网络连接'}`,
       type: 'error'
     }
     throw error
@@ -834,19 +834,19 @@ const confirmPublish = async (tab) => {
   }
 }
 
-// 显示上传选项
+// 显示上傳选项
 const showUploadOptions = (tab) => {
   currentUploadTab.value = tab
   uploadOptionsVisible.value = true
 }
 
-// 选择本地上传
+// 選擇本地上傳
 const selectLocalUpload = () => {
   uploadOptionsVisible.value = false
   localUploadVisible.value = true
 }
 
-// 选择素材库
+// 選擇素材库
 const selectMaterialLibrary = async () => {
   uploadOptionsVisible.value = false
   
@@ -871,10 +871,10 @@ const selectMaterialLibrary = async () => {
   materialLibraryVisible.value = true
 }
 
-// 确认素材选择
+// 确认素材選擇
 const confirmMaterialSelection = () => {
   if (selectedMaterials.value.length === 0) {
-    ElMessage.warning('请选择至少一个素材')
+    ElMessage.warning('请選擇至少一个素材')
     return
   }
   
@@ -913,20 +913,20 @@ const confirmMaterialSelection = () => {
   ElMessage.success(`已添加 ${addedCount} 个素材`)
 }
 
-// 批量发布对话框状态
+// 批次發佈对话框状态
 const batchPublishDialogVisible = ref(false)
 const currentPublishingTab = ref(null)
 const publishProgress = ref(0)
 const publishResults = ref([])
 const isCancelled = ref(false)
 
-// 取消批量发布
+// 取消批次發佈
 const cancelBatchPublish = () => {
   isCancelled.value = true
-  ElMessage.info('正在取消发布...')
+  ElMessage.info('正在取消發佈...')
 }
 
-// 批量发布方法
+// 批次發佈方法
 const batchPublish = async () => {
   if (batchPublishing.value) return
   
@@ -957,7 +957,7 @@ const batchPublish = async () => {
         publishResults.value.push({
           label: tab.label,
           status: 'success',
-          message: '发布成功'
+          message: '發佈成功'
         })
       } catch (error) {
         publishResults.value.push({
@@ -965,31 +965,31 @@ const batchPublish = async () => {
           status: 'error',
           message: error.message
         })
-        // 不立即返回，继续显示发布结果
+        // 不立即返回，继续显示發佈结果
       }
     }
     
     publishProgress.value = 100
     
-    // 统计发布结果
+    // 统计發佈结果
     const successCount = publishResults.value.filter(r => r.status === 'success').length
     const failCount = publishResults.value.filter(r => r.status === 'error').length
     const cancelCount = publishResults.value.filter(r => r.status === 'cancelled').length
     
     if (isCancelled.value) {
-      ElMessage.warning(`发布已取消：${successCount}个成功，${failCount}个失败，${cancelCount}个未执行`)
+      ElMessage.warning(`發佈已取消：${successCount}个成功，${failCount}个失败，${cancelCount}个未执行`)
     } else if (failCount > 0) {
-      ElMessage.error(`发布完成：${successCount}个成功，${failCount}个失败`)
+      ElMessage.error(`發佈完成：${successCount}个成功，${failCount}个失败`)
     } else {
-      ElMessage.success('所有Tab发布成功')
+      ElMessage.success('所有Tab發佈成功')
       setTimeout(() => {
         batchPublishDialogVisible.value = false
       }, 1000)
     }
     
   } catch (error) {
-    console.error('批量发布出错:', error)
-    ElMessage.error('批量发布出错，请重试')
+    console.error('批次發佈出错:', error)
+    ElMessage.error('批次發佈出错，请重试')
   } finally {
     batchPublishing.value = false
     isCancelled.value = false
@@ -1090,7 +1090,7 @@ const batchPublish = async () => {
     }
   }
   
-  // 批量发布进度对话框样式
+  // 批次發佈进度对话框样式
   .publish-progress {
     padding: 20px;
     
@@ -1299,7 +1299,7 @@ const batchPublish = async () => {
     }
   }
 
-  // 已上传文件列表样式
+  // 已上傳文件列表样式
   .uploaded-files {
     margin-top: 20px;
     

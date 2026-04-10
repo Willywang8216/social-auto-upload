@@ -2,16 +2,16 @@
   <div class="about">
     <el-card class="about-card">
       <div class="about-header">
-        <h1>自媒体自动化运营系统</h1>
+        <h1>自媒体自动化运营系統</h1>
         <p class="version">social-auto-upload</p>
       </div>
 
       <el-divider />
 
       <div class="about-section">
-        <h3>系统简介</h3>
+        <h3>系統简介</h3>
         <p>
-          本系统是一款强大的自动化工具，帮助内容创作者和运营人员一键将视频内容高效发布到多个国内外主流社交媒体平台。
+          本系統是一款強大的自動化工具，協助內容創作者與營運人員一鍵把影片內容高效率發佈到多個海內外主流社群平台。
           支持视频上传、定时发布等功能。
         </p>
       </div>
@@ -21,7 +21,7 @@
         <div class="platform-tags">
           <el-tag type="danger">抖音</el-tag>
           <el-tag type="success">快手</el-tag>
-          <el-tag type="warning">视频号</el-tag>
+          <el-tag type="warning">影片號</el-tag>
           <el-tag type="info">小红书</el-tag>
         </div>
       </div>
@@ -30,7 +30,7 @@
         <h3>核心功能</h3>
         <ul class="feature-list">
           <li>多平台账号管理与登录状态维护</li>
-          <li>视频素材上传与管理</li>
+          <li>影片素材上傳與管理</li>
           <li>一键多平台发布</li>
           <li>定时发布与批量发布</li>
           <li>Cookie 导入导出</li>
@@ -53,7 +53,7 @@
 </template>
 
 <script setup>
-// 关于页面组件
+// 關於頁元件
 </script>
 
 <style lang="scss" scoped>
@@ -112,3 +112,4 @@
   }
 }
 </style>
+e>

@@ -1,7 +1,7 @@
 <template>
   <div class="dashboard">
     <div class="page-header">
-      <h1>自媒体自动化运营系统</h1>
+      <h1>社群媒體自動化工作台</h1>
     </div>
 
     <div class="dashboard-content">
@@ -15,7 +15,7 @@
               </div>
               <div class="stat-info">
                 <div class="stat-value">{{ accountStats.total }}</div>
-                <div class="stat-label">账号总数</div>
+                <div class="stat-label">帳號總數</div>
               </div>
             </div>
             <div class="stat-footer">
@@ -36,7 +36,7 @@
               </div>
               <div class="stat-info">
                 <div class="stat-value">{{ platformStats.total }}</div>
-                <div class="stat-label">已接入平台</div>
+                <div class="stat-label">已接入平台數</div>
               </div>
             </div>
             <div class="stat-footer">
@@ -67,7 +67,7 @@
               </div>
               <div class="stat-info">
                 <div class="stat-value">{{ contentStats.total }}</div>
-                <div class="stat-label">素材总数</div>
+                <div class="stat-label">素材總數</div>
               </div>
             </div>
             <div class="stat-footer">
@@ -81,9 +81,9 @@
         </el-col>
       </el-row>
 
-      <!-- 快捷操作区域 -->
+      <!-- 快速操作区域 -->
       <div class="quick-actions">
-        <h2>快捷操作</h2>
+        <h2>快速操作</h2>
         <el-row :gutter="20">
           <el-col :span="6">
             <el-card class="action-card" @click="navigateTo('/account-management')">
