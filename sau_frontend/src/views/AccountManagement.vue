@@ -281,12 +281,12 @@
             </div>
             
             <div v-else class="empty-data">
-              <el-empty description="目前沒有影片號帳號数据" />
+              <el-empty description="目前沒有影片號帳號資料" />
             </div>
           </div>
         </el-tab-pane>
         
-        <el-tab-pane label="小红书" name="xiaohongshu">
+        <el-tab-pane label="小紅書" name="xiaohongshu">
           <div class="account-list-container">
             <div class="account-search">
               <el-input
@@ -351,7 +351,7 @@
             </div>
             
             <div v-else class="empty-data">
-              <el-empty description="目前沒有小红书帳號数据" />
+              <el-empty description="目前沒有小紅書帳號資料" />
             </div>
           </div>
         </el-tab-pane>
@@ -371,20 +371,20 @@
         <el-form-item label="平台" prop="platform">
           <el-select 
             v-model="accountForm.platform" 
-            placeholder="请选择平台" 
+            placeholder="請選擇平台" 
             style="width: 100%"
             :disabled="dialogType === 'edit' || sseConnecting"
           >
             <el-option label="快手" value="快手" />
             <el-option label="抖音" value="抖音" />
             <el-option label="影片號" value="影片號" />
-            <el-option label="小红书" value="小红书" />
+            <el-option label="小紅書" value="小紅書" />
           </el-select>
         </el-form-item>
         <el-form-item label="名称" prop="name">
           <el-input 
             v-model="accountForm.name" 
-            placeholder="请輸入帳號名称" 
+            placeholder="請輸入帳號名稱" 
             :disabled="sseConnecting"
           />
         </el-form-item>
@@ -523,24 +523,24 @@ const getPlatformTagType = (platform) => {
     '快手': 'success',
     '抖音': 'danger',
     '影片號': 'warning',
-    '小红书': 'info'
+    '小紅書': 'info'
   }
   return typeMap[platform] || 'info'
 }
 
-// 判断状态是否可点击（异常状态可点击）
+// 判斷狀態是否可點擊（異常狀態可點擊）
 const isStatusClickable = (status) => {
-  return status === '异常'; // 只有异常状态可点击，验证中不可点击
+  return status === '異常'; // 只有異常狀態可點擊，驗證中不可點擊
 }
 
 // 获取状态标签类型
 const getStatusTagType = (status) => {
-  if (status === '验证中') {
-    return 'info'; // 验证中使用灰色
+  if (status === '驗證中') {
+    return 'info'; // 驗證中使用灰色
   } else if (status === '正常') {
-    return 'success'; // 正常使用绿色
+    return 'success'; // 正常使用綠色
   } else {
-    return 'danger'; // 无效使用红色
+    return 'danger'; // 無效使用紅色
   }
 }
 
@@ -574,7 +574,7 @@ const filteredChannelsAccounts = computed(() => {
 })
 
 const filteredXiaohongshuAccounts = computed(() => {
-  return filteredAccounts.value.filter(account => account.platform === '小红书')
+  return filteredAccounts.value.filter(account => account.platform === '小紅書')
 })
 
 // 搜索处理
@@ -783,7 +783,7 @@ const connectSSE = (platform, name) => {
 
   // 获取平台类型编号
   const platformTypeMap = {
-    '小红书': '1',
+    '小紅書': '1',
     '影片號': '2',
     '抖音': '3',
     '快手': '4'
@@ -880,7 +880,7 @@ const submitAccountForm = () => {
         try {
           // 将平台名称转换为类型数字
           const platformTypeMap = {
-            '小红书': 1,
+            '小紅書': 1,
             '影片號': 2,
             '抖音': 3,
             '快手': 4

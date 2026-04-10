@@ -7,8 +7,8 @@ export const useAccountStore = defineStore('account', () => {
   
   // 平台类型映射
   const platformTypes = {
-    1: '小红书',
-    2: '视频号',
+    1: '小紅書',
+    2: '影片號',
     3: '抖音',
     4: '快手'
   }
@@ -22,7 +22,7 @@ export const useAccountStore = defineStore('account', () => {
         type: item[1],
         filePath: item[2],
         name: item[3],
-        status: item[4] === -1 ? '驗證中' : (item[4] === 1 ? '正常' : '异常'),
+        status: item[4] === -1 ? '驗證中' : (item[4] === 1 ? '正常' : '異常'),
         platform: platformTypes[item[1]] || '未知平台'
       }
     })

@@ -305,11 +305,11 @@
             />
           </div>
 
-          <!-- 草稿选项 (仅在影片号可见) -->
+          <!-- 草稿選項（僅在影片號可見） -->
           <div v-if="tab.selectedPlatform === 2" class="draft-section">
             <el-checkbox
               v-model="tab.isDraft"
-              label="影片号仅保存草稿(用手机發佈)"
+              label="影片號僅儲存草稿（用手機發佈）"
               class="draft-checkbox"
             />
           </div>
@@ -321,7 +321,7 @@
               v-model="tab.productTitle"
               type="text"
               :rows="1"
-              placeholder="請輸入商品名称"
+              placeholder="請輸入商品名稱"
               maxlength="200"
               class="product-name-input"
             />
@@ -547,8 +547,8 @@ const PUBLISH_HANDOFF_STORAGE_KEY = 'sau-publish-handoff-drafts'
 const platforms = [
   { key: 3, name: '抖音' },
   { key: 4, name: '快手' },
-  { key: 2, name: '影片号' },
-  { key: 1, name: '小红书' }
+  { key: 2, name: '影片號' },
+  { key: 1, name: '小紅書' }
 ]
 
 const defaultTabInit = {

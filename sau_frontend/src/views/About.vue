@@ -2,43 +2,43 @@
   <div class="about">
     <el-card class="about-card">
       <div class="about-header">
-        <h1>自媒体自动化运营系統</h1>
+        <h1>自媒體自動化營運系統</h1>
         <p class="version">social-auto-upload</p>
       </div>
 
       <el-divider />
 
       <div class="about-section">
-        <h3>系統简介</h3>
+        <h3>系統簡介</h3>
         <p>
           本系統是一款強大的自動化工具，協助內容創作者與營運人員一鍵把影片內容高效率發佈到多個海內外主流社群平台。
-          支持视频上传、定时发布等功能。
+          支援影片上傳、定時發佈等功能。
         </p>
       </div>
 
       <div class="about-section">
-        <h3>支持平台</h3>
+        <h3>支援平台</h3>
         <div class="platform-tags">
           <el-tag type="danger">抖音</el-tag>
           <el-tag type="success">快手</el-tag>
           <el-tag type="warning">影片號</el-tag>
-          <el-tag type="info">小红书</el-tag>
+          <el-tag type="info">小紅書</el-tag>
         </div>
       </div>
 
       <div class="about-section">
         <h3>核心功能</h3>
         <ul class="feature-list">
-          <li>多平台账号管理与登录状态维护</li>
+          <li>多平台帳號管理與登入狀態維護</li>
           <li>影片素材上傳與管理</li>
-          <li>一键多平台发布</li>
-          <li>定时发布与批量发布</li>
+          <li>一鍵多平台發佈</li>
+          <li>定時發佈與批次發佈</li>
           <li>Cookie 导入导出</li>
         </ul>
       </div>
 
       <div class="about-section">
-        <h3>技术栈</h3>
+        <h3>技術棧</h3>
         <div class="tech-tags">
           <el-tag effect="plain">Vue 3</el-tag>
           <el-tag effect="plain">Element Plus</el-tag>
