@@ -11,12 +11,12 @@ LEGACY_PLATFORM_MAP = {
 }
 
 INTERNATIONAL_PLATFORM_MAP = {
-    "twitter": {"key": "twitter", "label": "X / Twitter", "supportsQrLogin": False, "supportsCookieUpload": False, "supportsValidation": False},
-    "threads": {"key": "threads", "label": "Threads", "supportsQrLogin": False, "supportsCookieUpload": False, "supportsValidation": False},
-    "facebook": {"key": "facebook", "label": "Facebook", "supportsQrLogin": False, "supportsCookieUpload": False, "supportsValidation": False},
-    "reddit": {"key": "reddit", "label": "Reddit", "supportsQrLogin": False, "supportsCookieUpload": False, "supportsValidation": False},
-    "tiktok": {"key": "tiktok", "label": "TikTok", "supportsQrLogin": False, "supportsCookieUpload": False, "supportsValidation": False},
-    "youtube": {"key": "youtube", "label": "YouTube", "supportsQrLogin": False, "supportsCookieUpload": False, "supportsValidation": False},
+    "twitter": {"key": "twitter", "label": "X / Twitter", "supportsQrLogin": False, "supportsCookieUpload": False, "supportsValidation": True},
+    "threads": {"key": "threads", "label": "Threads", "supportsQrLogin": False, "supportsCookieUpload": False, "supportsValidation": True},
+    "facebook": {"key": "facebook", "label": "Facebook", "supportsQrLogin": False, "supportsCookieUpload": False, "supportsValidation": True},
+    "reddit": {"key": "reddit", "label": "Reddit", "supportsQrLogin": False, "supportsCookieUpload": False, "supportsValidation": True},
+    "tiktok": {"key": "tiktok", "label": "TikTok", "supportsQrLogin": False, "supportsCookieUpload": False, "supportsValidation": True},
+    "youtube": {"key": "youtube", "label": "YouTube", "supportsQrLogin": False, "supportsCookieUpload": False, "supportsValidation": True},
 }
 
 PLATFORM_LABEL_TO_KEY = {
