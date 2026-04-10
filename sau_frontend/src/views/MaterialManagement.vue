@@ -47,7 +47,7 @@
       </div>
     </div>
     
-    <!-- 上传对话框 -->
+    <!-- 上傳對話框 -->
     <el-dialog
       v-model="uploadDialogVisible"
       title="上傳素材"
@@ -59,7 +59,7 @@
           <el-form-item label="檔案名稱:">
             <el-input
               v-model="customFilename"
-              placeholder="选填 (仅单个文件时生效)"
+              placeholder="選填（僅單一檔案時生效）"
               :disabled="customFilenameDisabled"
               clearable
             />
@@ -112,7 +112,7 @@
       </template>
     </el-dialog>
     
-    <!-- 預覽对话框 -->
+    <!-- 預覽對話框 -->
     <el-dialog
       v-model="previewDialogVisible"
       title="素材預覽"
@@ -246,7 +246,7 @@ const handleFileRemove = (file, uploadFileList) => {
 // 提交上传
 const submitUpload = async () => {
   if (fileList.value.length === 0) {
-    ElMessage.warning('请选择要上传的文件')
+    ElMessage.warning('請選擇要上傳的檔案')
     return
   }
   
@@ -254,9 +254,9 @@ const submitUpload = async () => {
   
   for (const file of fileList.value) {
     try {
-      // 确保文件对象存在
+      // 確保檔案物件存在
       if (!file || !file.raw) {
-        ElMessage.warning(`文件 ${file.name} 对象无效，已跳过`)
+        ElMessage.warning(`檔案 ${file.name} 物件無效，已略過`)
         continue
       }
       

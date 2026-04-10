@@ -74,7 +74,7 @@
             
             <!-- 已上傳文件列表 -->
             <div v-if="tab.fileList.length > 0" class="uploaded-files">
-              <h4>已上傳文件：</h4>
+              <h4>已上傳檔案：</h4>
               <div class="file-list">
                 <div v-for="(file, index) in tab.fileList" :key="index" class="file-item">
                   <el-link :href="file.url" target="_blank" type="primary">{{ file.name }}</el-link>
@@ -124,20 +124,20 @@
             >
               <el-icon class="el-icon--upload"><Upload /></el-icon>
               <div class="el-upload__text">
-                将影片文件拖到此处，或<em>点击上傳</em>
+                將影片檔案拖曳到此處，或<em>點擊上傳</em>
               </div>
               <template #tip>
                 <div class="el-upload__tip">
-                  支持MP4、AVI等影片格式，可上傳多个文件
+                  支援 MP4、AVI 等影片格式，可上傳多個檔案
                 </div>
               </template>
             </el-upload>
           </el-dialog>
 
-          <!-- 批次發佈进度对话框 -->
+          <!-- 批次發佈進度對話框 -->
           <el-dialog
             v-model="batchPublishDialogVisible"
-            title="批次發佈进度"
+            title="批次發佈進度"
             width="500px"
             :close-on-click-modal="false"
             :close-on-press-escape="false"

@@ -47,23 +47,23 @@ request.interceptors.response.use(
       const { status } = error.response
       switch (status) {
         case 401:
-          ElMessage.error('未授权，请重新登录')
+          ElMessage.error('未授權，請重新登入')
           // 可以在这里处理登录跳转
           break
         case 403:
-          ElMessage.error('拒绝访问')
+          ElMessage.error('拒絕存取')
           break
         case 404:
-          ElMessage.error('请求地址不存在')
+          ElMessage.error('請求網址不存在')
           break
         case 500:
-          ElMessage.error('服务器内部错误')
+          ElMessage.error('伺服器內部錯誤')
           break
         default:
-          ElMessage.error('网络错误')
+          ElMessage.error('網路錯誤')
       }
     } else {
-      ElMessage.error('网络连接失败')
+      ElMessage.error('網路連線失敗')
     }
     
     return Promise.reject(error)

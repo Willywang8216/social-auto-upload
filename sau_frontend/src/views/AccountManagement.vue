@@ -11,7 +11,7 @@
             <div class="account-search">
               <el-input
                 v-model="searchKeyword"
-                placeholder="輸入名称或帳號搜索"
+                placeholder="輸入名稱或帳號搜尋"
                 prefix-icon="Search"
                 clearable
                 @clear="handleSearch"
@@ -28,12 +28,12 @@
             
             <div v-if="filteredAccounts.length > 0" class="account-list">
               <el-table :data="filteredAccounts" style="width: 100%">
-                <el-table-column label="头像" width="80">
+                <el-table-column label="頭像" width="80">
                   <template #default="scope">
                     <el-avatar :src="getDefaultAvatar(scope.row.name)" :size="40" />
                   </template>
                 </el-table-column>
-                <el-table-column prop="name" label="名称" width="180" />
+                <el-table-column prop="name" label="名稱" width="180" />
                 <el-table-column prop="platform" label="平台">
                   <template #default="scope">
                     <el-tag
@@ -44,7 +44,7 @@
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column prop="status" label="状态">
+                <el-table-column prop="status" label="狀態">
                   <template #default="scope">
                     <el-tag
                       :type="getStatusTagType(scope.row.status)"
@@ -52,7 +52,7 @@
                       :class="{'clickable-status': isStatusClickable(scope.row.status)}"
                       @click="handleStatusClick(scope.row)"
                     >
-                      <el-icon :class="scope.row.status === '验证中' ? 'is-loading' : ''" v-if="scope.row.status === '验证中'">
+                      <el-icon :class="scope.row.status === '驗證中' ? 'is-loading' : ''" v-if="scope.row.status === '驗證中'">
                         <Loading />
                       </el-icon>
                       {{ scope.row.status }}
@@ -71,7 +71,7 @@
             </div>
             
             <div v-else class="empty-data">
-              <el-empty description="目前沒有帳號数据" />
+              <el-empty description="目前沒有帳號資料" />
             </div>
           </div>
         </el-tab-pane>
@@ -81,7 +81,7 @@
             <div class="account-search">
               <el-input
                 v-model="searchKeyword"
-                placeholder="輸入名称或帳號搜索"
+                placeholder="輸入名稱或帳號搜尋"
                 prefix-icon="Search"
                 clearable
                 @clear="handleSearch"
@@ -98,12 +98,12 @@
             
             <div v-if="filteredKuaishouAccounts.length > 0" class="account-list">
               <el-table :data="filteredKuaishouAccounts" style="width: 100%">
-                <el-table-column label="头像" width="80">
+                <el-table-column label="頭像" width="80">
                   <template #default="scope">
                     <el-avatar :src="getDefaultAvatar(scope.row.name)" :size="40" />
                   </template>
                 </el-table-column>
-                <el-table-column prop="name" label="名称" width="180" />
+                <el-table-column prop="name" label="名稱" width="180" />
                 <el-table-column prop="platform" label="平台">
                   <template #default="scope">
                     <el-tag
@@ -114,7 +114,7 @@
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column prop="status" label="状态">
+                <el-table-column prop="status" label="狀態">
                   <template #default="scope">
                     <el-tag
                       :type="getStatusTagType(scope.row.status)"
@@ -122,7 +122,7 @@
                       :class="{'clickable-status': isStatusClickable(scope.row.status)}"
                       @click="handleStatusClick(scope.row)"
                     >
-                      <el-icon :class="scope.row.status === '验证中' ? 'is-loading' : ''" v-if="scope.row.status === '验证中'">
+                      <el-icon :class="scope.row.status === '驗證中' ? 'is-loading' : ''" v-if="scope.row.status === '驗證中'">
                         <Loading />
                       </el-icon>
                       {{ scope.row.status }}
@@ -141,7 +141,7 @@
             </div>
             
             <div v-else class="empty-data">
-              <el-empty description="目前沒有快手帳號数据" />
+              <el-empty description="目前沒有快手帳號資料" />
             </div>
           </div>
         </el-tab-pane>
@@ -151,7 +151,7 @@
             <div class="account-search">
               <el-input
                 v-model="searchKeyword"
-                placeholder="輸入名称或帳號搜索"
+                placeholder="輸入名稱或帳號搜尋"
                 prefix-icon="Search"
                 clearable
                 @clear="handleSearch"
@@ -168,12 +168,12 @@
             
             <div v-if="filteredDouyinAccounts.length > 0" class="account-list">
               <el-table :data="filteredDouyinAccounts" style="width: 100%">
-                <el-table-column label="头像" width="80">
+                <el-table-column label="頭像" width="80">
                   <template #default="scope">
                     <el-avatar :src="getDefaultAvatar(scope.row.name)" :size="40" />
                   </template>
                 </el-table-column>
-                <el-table-column prop="name" label="名称" width="180" />
+                <el-table-column prop="name" label="名稱" width="180" />
                 <el-table-column prop="platform" label="平台">
                   <template #default="scope">
                     <el-tag
@@ -184,7 +184,7 @@
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column prop="status" label="状态">
+                <el-table-column prop="status" label="狀態">
                   <template #default="scope">
                     <el-tag
                       :type="getStatusTagType(scope.row.status)"
@@ -192,7 +192,7 @@
                       :class="{'clickable-status': isStatusClickable(scope.row.status)}"
                       @click="handleStatusClick(scope.row)"
                     >
-                      <el-icon :class="scope.row.status === '验证中' ? 'is-loading' : ''" v-if="scope.row.status === '验证中'">
+                      <el-icon :class="scope.row.status === '驗證中' ? 'is-loading' : ''" v-if="scope.row.status === '驗證中'">
                         <Loading />
                       </el-icon>
                       {{ scope.row.status }}
@@ -211,7 +211,7 @@
             </div>
             
             <div v-else class="empty-data">
-              <el-empty description="目前沒有抖音帳號数据" />
+              <el-empty description="目前沒有抖音帳號資料" />
             </div>
           </div>
         </el-tab-pane>
@@ -221,7 +221,7 @@
             <div class="account-search">
               <el-input
                 v-model="searchKeyword"
-                placeholder="輸入名称或帳號搜索"
+                placeholder="輸入名稱或帳號搜尋"
                 prefix-icon="Search"
                 clearable
                 @clear="handleSearch"
@@ -238,12 +238,12 @@
             
             <div v-if="filteredChannelsAccounts.length > 0" class="account-list">
               <el-table :data="filteredChannelsAccounts" style="width: 100%">
-                <el-table-column label="头像" width="80">
+                <el-table-column label="頭像" width="80">
                   <template #default="scope">
                     <el-avatar :src="getDefaultAvatar(scope.row.name)" :size="40" />
                   </template>
                 </el-table-column>
-                <el-table-column prop="name" label="名称" width="180" />
+                <el-table-column prop="name" label="名稱" width="180" />
                 <el-table-column prop="platform" label="平台">
                   <template #default="scope">
                     <el-tag
@@ -254,7 +254,7 @@
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column prop="status" label="状态">
+                <el-table-column prop="status" label="狀態">
                   <template #default="scope">
                     <el-tag
                       :type="getStatusTagType(scope.row.status)"
@@ -262,7 +262,7 @@
                       :class="{'clickable-status': isStatusClickable(scope.row.status)}"
                       @click="handleStatusClick(scope.row)"
                     >
-                      <el-icon :class="scope.row.status === '验证中' ? 'is-loading' : ''" v-if="scope.row.status === '验证中'">
+                      <el-icon :class="scope.row.status === '驗證中' ? 'is-loading' : ''" v-if="scope.row.status === '驗證中'">
                         <Loading />
                       </el-icon>
                       {{ scope.row.status }}
@@ -291,7 +291,7 @@
             <div class="account-search">
               <el-input
                 v-model="searchKeyword"
-                placeholder="輸入名称或帳號搜索"
+                placeholder="輸入名稱或帳號搜尋"
                 prefix-icon="Search"
                 clearable
                 @clear="handleSearch"
@@ -308,12 +308,12 @@
             
             <div v-if="filteredXiaohongshuAccounts.length > 0" class="account-list">
               <el-table :data="filteredXiaohongshuAccounts" style="width: 100%">
-                <el-table-column label="头像" width="80">
+                <el-table-column label="頭像" width="80">
                   <template #default="scope">
                     <el-avatar :src="getDefaultAvatar(scope.row.name)" :size="40" />
                   </template>
                 </el-table-column>
-                <el-table-column prop="name" label="名称" width="180" />
+                <el-table-column prop="name" label="名稱" width="180" />
                 <el-table-column prop="platform" label="平台">
                   <template #default="scope">
                     <el-tag
@@ -324,7 +324,7 @@
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column prop="status" label="状态">
+                <el-table-column prop="status" label="狀態">
                   <template #default="scope">
                     <el-tag
                       :type="getStatusTagType(scope.row.status)"
@@ -332,7 +332,7 @@
                       :class="{'clickable-status': isStatusClickable(scope.row.status)}"
                       @click="handleStatusClick(scope.row)"
                     >
-                      <el-icon :class="scope.row.status === '验证中' ? 'is-loading' : ''" v-if="scope.row.status === '验证中'">
+                      <el-icon :class="scope.row.status === '驗證中' ? 'is-loading' : ''" v-if="scope.row.status === '驗證中'">
                         <Loading />
                       </el-icon>
                       {{ scope.row.status }}
@@ -381,7 +381,7 @@
             <el-option label="小紅書" value="小紅書" />
           </el-select>
         </el-form-item>
-        <el-form-item label="名称" prop="name">
+        <el-form-item label="名稱" prop="name">
           <el-input 
             v-model="accountForm.name" 
             placeholder="請輸入帳號名稱" 
@@ -389,15 +389,15 @@
           />
         </el-form-item>
         
-        <!-- 二维码显示区域 -->
+        <!-- QR Code 顯示區域 -->
         <div v-if="sseConnecting" class="qrcode-container">
           <div v-if="qrCodeData && !loginStatus" class="qrcode-wrapper">
-            <p class="qrcode-tip">请使用对应平台APP扫描二维码登录</p>
-            <img :src="qrCodeData" alt="登录二维码" class="qrcode-image" />
+            <p class="qrcode-tip">請使用對應平台 App 掃描 QR Code 登入</p>
+            <img :src="qrCodeData" alt="登入 QR Code" class="qrcode-image" />
           </div>
           <div v-else-if="!qrCodeData && !loginStatus" class="loading-wrapper">
             <el-icon class="is-loading"><Refresh /></el-icon>
-            <span>请求中...</span>
+            <span>請求中...</span>
           </div>
           <div v-else-if="loginStatus === '200'" class="success-wrapper">
             <el-icon><CircleCheckFilled /></el-icon>
@@ -405,7 +405,7 @@
           </div>
           <div v-else-if="loginStatus === '500'" class="error-wrapper">
             <el-icon><CircleCloseFilled /></el-icon>
-            <span>新增失败，请稍后再试</span>
+            <span>新增失敗，請稍後再試</span>
           </div>
         </div>
       </el-form>
@@ -438,34 +438,34 @@ import { buildApiUrl } from '@/utils/apiBase'
 
 // 获取帳號状态管理
 const accountStore = useAccountStore()
-// 获取应用状态管理
+// 取得應用狀態管理
 const appStore = useAppStore()
 
-// 当前激活的标签页
+// 目前啟用的分頁
 const activeTab = ref('all')
 
-// 搜索关键词
+// 搜尋關鍵字
 const searchKeyword = ref('')
 
-// 获取帳號数据（快速，不验证）
+// 取得帳號資料（快速，不驗證）
 const fetchAccountsQuick = async () => {
   try {
     const res = await accountApi.getAccounts()
     if (res.code === 200 && res.data) {
-      // 将所有帳號的状态暂时设为"验证中"
+      // 將所有帳號的狀態暫時設為「驗證中」
       const accountsWithPendingStatus = res.data.map(account => {
         const updatedAccount = [...account];
-        updatedAccount[4] = -1; // -1 表示验证中的临时状态
+        updatedAccount[4] = -1; // -1 表示驗證中的暫時狀態
         return updatedAccount;
       });
       accountStore.setAccounts(accountsWithPendingStatus);
     }
   } catch (error) {
-    console.error('快速获取帳號数据失败:', error)
+    console.error('快速取得帳號資料失敗:', error)
   }
 }
 
-// 获取帳號数据（带验证）
+// 取得帳號資料（含驗證）
 const fetchAccounts = async () => {
   if (appStore.isAccountRefreshing) return
 
@@ -475,25 +475,25 @@ const fetchAccounts = async () => {
     const res = await accountApi.getValidAccounts()
     if (res.code === 200 && res.data) {
       accountStore.setAccounts(res.data)
-      ElMessage.success('帳號数据获取成功')
-      // 标记为已访问
+      ElMessage.success('帳號資料取得成功')
+      // 標記為已造訪
       if (appStore.isFirstTimeAccountManagement) {
         appStore.setAccountManagementVisited()
       }
     } else {
-      ElMessage.error('获取帳號数据失败')
+      ElMessage.error('取得帳號資料失敗')
     }
   } catch (error) {
-    console.error('获取帳號数据失败:', error)
-    ElMessage.error('获取帳號数据失败')
+    console.error('取得帳號資料失敗:', error)
+    ElMessage.error('取得帳號資料失敗')
   } finally {
     appStore.setAccountRefreshing(false)
   }
 }
 
-// 后台验证所有帳號（优化版本，使用setTimeout避免阻塞UI）
+// 背景驗證所有帳號（優化版本，使用 setTimeout 避免阻塞 UI）
 const validateAllAccountsInBackground = async () => {
-  // 使用setTimeout将验证过程放在下一个事件循环，避免阻塞UI
+  // 使用 setTimeout 將驗證流程放到下一個事件迴圈，避免阻塞 UI
   setTimeout(async () => {
     try {
       const res = await accountApi.getValidAccounts()
@@ -501,20 +501,20 @@ const validateAllAccountsInBackground = async () => {
         accountStore.setAccounts(res.data)
       }
     } catch (error) {
-      console.error('后台验证帳號失败:', error)
+      console.error('背景驗證帳號失敗:', error)
     }
   }, 0)
 }
 
-// 页面加载时获取帳號数据
+// 頁面載入時取得帳號資料
 onMounted(() => {
-  // 快速获取帳號列表（不验证），立即显示
+  // 快速取得帳號列表（不驗證），立即顯示
   fetchAccountsQuick()
 
-  // 在后台验证所有帳號
+  // 在背景驗證所有帳號
   setTimeout(() => {
     validateAllAccountsInBackground()
-  }, 100) // 稍微延迟一下，让用户看到快速加载的效果
+  }, 100) // 稍微延遲一下，讓使用者看到快速載入效果
 })
 
 // 获取平台标签类型
@@ -533,7 +533,7 @@ const isStatusClickable = (status) => {
   return status === '異常'; // 只有異常狀態可點擊，驗證中不可點擊
 }
 
-// 获取状态标签类型
+// 取得狀態標籤類型
 const getStatusTagType = (status) => {
   if (status === '驗證中') {
     return 'info'; // 驗證中使用灰色
@@ -544,15 +544,15 @@ const getStatusTagType = (status) => {
   }
 }
 
-// 处理状态点击事件
+// 處理狀態點擊事件
 const handleStatusClick = (row) => {
   if (isStatusClickable(row.status)) {
-    // 触发重新登录流程
+    // 觸發重新登入流程
     handleReLogin(row)
   }
 }
 
-// 过滤后的帳號列表
+// 篩選後的帳號列表
 const filteredAccounts = computed(() => {
   if (!searchKeyword.value) return accountStore.accounts
   return accountStore.accounts.filter(account =>
@@ -560,7 +560,7 @@ const filteredAccounts = computed(() => {
   )
 })
 
-// 按平台过滤的帳號列表
+// 依平台篩選的帳號列表
 const filteredKuaishouAccounts = computed(() => {
   return filteredAccounts.value.filter(account => account.platform === '快手')
 })
@@ -577,17 +577,17 @@ const filteredXiaohongshuAccounts = computed(() => {
   return filteredAccounts.value.filter(account => account.platform === '小紅書')
 })
 
-// 搜索处理
+// 搜尋處理
 const handleSearch = () => {
-  // 搜索逻辑已通过计算属性实现
+  // 搜尋邏輯已透過計算屬性實作
 }
 
-// 对话框相关
+// 對話框相關
 const dialogVisible = ref(false)
 const dialogType = ref('add') // 'add' 或 'edit'
 const accountFormRef = ref(null)
 
-// 帳號表单
+// 帳號表單
 const accountForm = reactive({
   id: null,
   name: '',
@@ -595,13 +595,13 @@ const accountForm = reactive({
   status: '正常'
 })
 
-// 表单验证规则
+// 表單驗證規則
 const rules = {
-  platform: [{ required: true, message: '请选择平台', trigger: 'change' }],
-  name: [{ required: true, message: '请輸入帳號名称', trigger: 'blur' }]
+  platform: [{ required: true, message: '請選擇平台', trigger: 'change' }],
+  name: [{ required: true, message: '請輸入帳號名稱', trigger: 'blur' }]
 }
 
-// SSE连接状态
+// SSE 連線狀態
 const sseConnecting = ref(false)
 const qrCodeData = ref('')
 const loginStatus = ref('')
@@ -720,7 +720,7 @@ const handleUploadCookie = (row) => {
       // 刷新帳號列表以显示更新
       fetchAccounts()
     } catch (error) {
-      ElMessage.error('Cookie文件上传失败')
+      ElMessage.error('Cookie 檔案上傳失敗')
     } finally {
       document.body.removeChild(input)
     }
@@ -729,9 +729,9 @@ const handleUploadCookie = (row) => {
   input.click()
 }
 
-// 重新登录帳號
+// 重新登入帳號
 const handleReLogin = (row) => {
-  // 设置表单信息
+  // 設定表單資訊
   dialogType.value = 'edit'
   Object.assign(accountForm, {
     id: row.id,
@@ -740,30 +740,30 @@ const handleReLogin = (row) => {
     status: row.status
   })
 
-  // 重置SSE状态
+  // 重置 SSE 狀態
   sseConnecting.value = false
   qrCodeData.value = ''
   loginStatus.value = ''
 
-  // 显示对话框
+  // 顯示對話框
   dialogVisible.value = true
 
-  // 立即开始登录流程
+  // 立即開始登入流程
   setTimeout(() => {
     connectSSE(row.platform, row.name)
   }, 300)
 }
 
-// 获取默认头像
+// 取得預設頭像
 const getDefaultAvatar = (name) => {
-  // 使用简单的默认头像，可以基于用户名生成不同的颜色
+  // 使用簡單的預設頭像，可依使用者名稱產生不同顏色
   return `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random`
 }
 
-// SSE事件源对象
+// SSE 事件來源物件
 let eventSource = null
 
-// 关闭SSE连接
+// 關閉 SSE 連線
 const closeSSEConnection = () => {
   if (eventSource) {
     eventSource.close()
@@ -771,17 +771,17 @@ const closeSSEConnection = () => {
   }
 }
 
-// 建立SSE连接
+// 建立 SSE 連線
 const connectSSE = (platform, name) => {
-  // 关闭可能存在的连接
+  // 關閉可能存在的連線
   closeSSEConnection()
 
-  // 设置连接状态
+  // 設定連線狀態
   sseConnecting.value = true
   qrCodeData.value = ''
   loginStatus.value = ''
 
-  // 获取平台类型编号
+  // 取得平台類型編號
   const platformTypeMap = {
     '小紅書': '1',
     '影片號': '2',
@@ -791,16 +791,16 @@ const connectSSE = (platform, name) => {
 
   const type = platformTypeMap[platform] || '1'
 
-  // 创建SSE连接
+  // 建立 SSE 連線
   const url = buildApiUrl(`/login?type=${type}&id=${encodeURIComponent(name)}`)
 
   eventSource = new EventSource(url)
 
-  // 监听消息
+  // 監聽訊息
   eventSource.onmessage = (event) => {
     const data = event.data
 
-    // 如果还没有二维码数据，且数据长度较长，认为是二维码
+    // 如果還沒有 QR Code 資料，且資料長度較長，視為 QR Code
     if (!qrCodeData.value && data.length > 100) {
       try {
         if (data.startsWith('data:image')) {
@@ -809,47 +809,47 @@ const connectSSE = (platform, name) => {
           qrCodeData.value = `data:image/png;base64,${data}`
         }
       } catch (error) {
-        // 处理二维码数据出错
+        // 處理 QR Code 資料出錯
       }
     }
-    // 如果收到状态码
+    // 如果收到狀態碼
     else if (data === '200' || data === '500') {
       loginStatus.value = data
 
-      // 如果登录成功
+      // 如果登入成功
       if (data === '200') {
         setTimeout(() => {
-          // 关闭连接
+          // 關閉連線
           closeSSEConnection()
 
-          // 1秒后关闭对话框并开始刷新
+          // 1 秒後關閉對話框並開始刷新
           setTimeout(() => {
             dialogVisible.value = false
             sseConnecting.value = false
 
-            // 根据是否是重新登录显示不同提示
-            ElMessage.success(dialogType.value === 'edit' ? '重新登录成功' : '帳號新增成功')
+            // 依是否為重新登入顯示不同提示
+            ElMessage.success(dialogType.value === 'edit' ? '重新登入成功' : '帳號新增成功')
 
-            // 显示更新帳號信息提示
+            // 顯示更新帳號資訊提示
             ElMessage({
               type: 'info',
-              message: '正在同步帳號信息...',
+              message: '正在同步帳號資訊...',
               duration: 0
             })
 
-            // 触发刷新操作
+            // 觸發刷新動作
             fetchAccounts().then(() => {
-              // 刷新完成后关闭提示
+              // 刷新完成後關閉提示
               ElMessage.closeAll()
-              ElMessage.success('帳號信息已更新')
+              ElMessage.success('帳號資訊已更新')
             })
           }, 1000)
         }, 1000)
       } else {
-        // 登录失败，关闭连接
+        // 登入失敗，關閉連線
         closeSSEConnection()
 
-        // 2秒后重置状态，允许重试
+        // 2 秒後重置狀態，允許重試
         setTimeout(() => {
           sseConnecting.value = false
           qrCodeData.value = ''
