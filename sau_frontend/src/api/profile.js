@@ -1,4 +1,5 @@
 import { http } from '@/utils/request'
+import { buildApiUrl } from '@/utils/apiBase'
 
 export const profileApi = {
   getProfiles() {
@@ -11,6 +12,20 @@ export const profileApi = {
 
   deleteProfile(id) {
     return http.get(`/deleteProfile?id=${id}`)
+  },
+
+  importProfilesYaml(file) {
+    const formData = new FormData()
+    formData.append('file', file)
+    return http.post('/importProfilesYaml', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      }
+    })
+  },
+
+  getExportProfilesYamlUrl() {
+    return buildApiUrl('/exportProfilesYaml')
   },
 
   generateContent(data) {

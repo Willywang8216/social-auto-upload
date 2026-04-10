@@ -10,8 +10,10 @@ from utils.profile_pipeline import (
     build_google_sheet_row_mappings,
     build_google_sheet_rows,
     ensure_profile_tables,
+    export_profiles_yaml,
     extract_json_payload,
     get_google_service_account_config,
+    import_profiles_yaml,
     list_profiles,
     resolve_google_sheet_worksheet_name,
     save_google_service_account_config,
@@ -21,6 +23,13 @@ from utils.profile_pipeline import (
 
 
 class ProfilePipelineTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            import yaml  # noqa: F401
+            self.yaml_available = True
+        except ImportError:
+            self.yaml_available = False
+
     def test_save_profile_persists_account_links_and_settings(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             db_path = Path(tmp_dir) / "database.db"
@@ -257,6 +266,145 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertTrue(result["configured"])
             self.assertEqual(result["source"], "stored_file")
             self.assertEqual(result["clientEmail"], "demo@demo-project.iam.gserviceaccount.com")
+
+    def test_export_profiles_yaml_serializes_profiles(self):
+        if not self.yaml_available:
+            self.skipTest("PyYAML not installed")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "database.db"
+            ensure_profile_tables(db_path)
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    CREATE TABLE user_info (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        type INTEGER NOT NULL,
+                        filePath TEXT NOT NULL,
+                        userName TEXT NOT NULL,
+                        status INTEGER DEFAULT 0
+                    )
+                    """
+                )
+                cursor.executemany(
+                    "INSERT INTO user_info (type, filePath, userName, status) VALUES (?, ?, ?, ?)",
+                    [
+                        (3, "x.json", "x-account", 1),
+                        (4, "k.json", "k-account", 1),
+                    ],
+                )
+                conn.commit()
+
+            save_profile(
+                db_path,
+                {
+                    "name": "Creator Alpha",
+                    "systemPrompt": "Write in Chinese.",
+                    "contactDetails": "Telegram: @alpha",
+                    "cta": "Join Patreon",
+                    "accountIds": [1, 2],
+                    "settings": {
+                        "storage": {"remoteName": "remote-a"},
+                        "contentAccounts": [
+                            {
+                                "id": "acct-twitter-main",
+                                "platform": "twitter",
+                                "name": "Alpha X",
+                            }
+                        ],
+                    },
+                },
+            )
+
+            yaml_text = export_profiles_yaml(db_path)
+
+            import yaml
+            payload = yaml.safe_load(yaml_text)
+            self.assertEqual(payload["version"], 1)
+            self.assertEqual(len(payload["profiles"]), 1)
+            self.assertEqual(payload["profiles"][0]["name"], "Creator Alpha")
+            self.assertEqual(payload["profiles"][0]["settings"]["storage"]["remoteName"], "remote-a")
+
+    def test_import_profiles_yaml_upserts_by_name(self):
+        if not self.yaml_available:
+            self.skipTest("PyYAML not installed")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "database.db"
+            ensure_profile_tables(db_path)
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    CREATE TABLE user_info (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        type INTEGER NOT NULL,
+                        filePath TEXT NOT NULL,
+                        userName TEXT NOT NULL,
+                        status INTEGER DEFAULT 0
+                    )
+                    """
+                )
+                cursor.executemany(
+                    "INSERT INTO user_info (type, filePath, userName, status) VALUES (?, ?, ?, ?)",
+                    [
+                        (3, "x.json", "x-account", 1),
+                        (4, "k.json", "k-account", 1),
+                    ],
+                )
+                conn.commit()
+
+            original = save_profile(
+                db_path,
+                {
+                    "name": "Creator Alpha",
+                    "systemPrompt": "Original prompt",
+                    "contactDetails": "Old contact",
+                    "cta": "Old CTA",
+                    "accountIds": [1],
+                    "settings": {
+                        "storage": {"remoteName": "remote-a"},
+                    },
+                },
+            )
+
+            result = import_profiles_yaml(
+                db_path,
+                """
+                version: 1
+                profiles:
+                  - name: "Creator Alpha"
+                    systemPrompt: "Updated prompt"
+                    contactDetails: "New contact"
+                    cta: "New CTA"
+                    accountIds: [1, 2, 2]
+                    settings:
+                      storage:
+                        remoteName: "remote-b"
+                      contentAccounts:
+                        - id: "acct-twitter-main"
+                          platform: "twitter"
+                          name: "Alpha X"
+                  - name: "Creator Beta"
+                    systemPrompt: "Beta prompt"
+                    contactDetails: ""
+                    cta: ""
+                    accountIds: []
+                    settings: {}
+                """,
+            )
+
+            self.assertEqual(result["created"], 1)
+            self.assertEqual(result["updated"], 1)
+
+            profiles = sorted(list_profiles(db_path), key=lambda item: item["name"])
+            self.assertEqual(len(profiles), 2)
+            self.assertEqual(profiles[0]["id"], original["id"])
+            self.assertEqual(profiles[0]["systemPrompt"], "Updated prompt")
+            self.assertEqual(profiles[0]["accountIds"], [1, 2])
+            self.assertEqual(profiles[0]["settings"]["storage"]["remoteName"], "remote-b")
+            self.assertEqual(profiles[1]["name"], "Creator Beta")
 
             loaded = get_google_service_account_config(base_dir)
             self.assertTrue(loaded["configured"])

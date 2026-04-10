@@ -2,20 +2,18 @@
 #
 # 用途：
 # - 這是一份「可批量編輯」的 Profile 設定範本
-# - 適合先在檔案裡整理好所有 Profile，再由後續匯入工具/API 讀取
+# - 現在可透過 Profile 設定頁面的「匯入 YAML」直接批量匯入
+# - 也可先從系統用「匯出 YAML」下載現有 profiles，再批量編輯後重新匯入
 #
 # 注意：
-# 1. 目前系統已支援在 UI 中逐一編輯 Profile，但「直接匯入這份 YAML」的功能還沒有實作。
-# 2. `accountIds` 對應的是帳號管理資料表中的帳號 ID，不是帳號名稱。
-# 3. Google service account JSON 不是每個 profile 各自保存；它是全域設定，需另外在系統中設定。
-# 4. `googleSheet.worksheetName` 目前僅保留相容欄位；實際匯出時會自動使用：
+# 1. `accountIds` 對應的是帳號管理資料表中的帳號 ID，不是帳號名稱。
+# 2. Google service account JSON 不是每個 profile 各自保存；它是全域設定，需另外在系統中設定。
+# 3. `googleSheet.worksheetName` 目前僅保留相容欄位；實際匯出時會自動使用：
 #    `YYYY-MM-DD-Profile名稱`
 #
 # 建議做法：
-# - 你可以先用這份檔案整理所有設定
-# - 下一步若你要，我可以再幫你實作：
-#   a. 從 YAML/JSON 匯入 profiles
-#   b. 匯出現有 profiles 成 YAML/JSON
+# - 先從系統匯出現有 YAML 作為基底
+# - 再批量修改後重新匯入
 
 version: 1
 

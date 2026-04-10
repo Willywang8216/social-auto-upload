@@ -52,6 +52,7 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 GOOGLE_SERVICE_ACCOUNT_FILENAME = "google_service_account.json"
+PROFILE_CONFIG_VERSION = 1
 
 
 def ensure_profile_tables(db_path: Path) -> None:
@@ -103,6 +104,64 @@ def list_profiles(db_path: Path) -> list[dict[str, Any]]:
         )
         rows = cursor.fetchall()
     return [_serialize_profile_row(row) for row in rows]
+
+
+def export_profiles_yaml(db_path: Path) -> str:
+    profiles = list_profiles(db_path)
+    payload = {
+        "version": PROFILE_CONFIG_VERSION,
+        "profiles": [_serialize_profile_export_item(profile) for profile in profiles],
+    }
+    yaml = _get_yaml_module()
+    return yaml.safe_dump(
+        payload,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+    )
+
+
+def import_profiles_yaml(db_path: Path, yaml_text: str) -> dict[str, Any]:
+    yaml = _get_yaml_module()
+    try:
+        payload = yaml.safe_load((yaml_text or "").strip())
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML: {exc}") from exc
+
+    profiles_payload = _extract_profiles_import_payload(payload)
+    if not profiles_payload:
+        raise ValueError("No profiles found in YAML")
+
+    existing_profiles_by_name = {
+        (item.get("name") or "").strip(): item
+        for item in list_profiles(db_path)
+        if (item.get("name") or "").strip()
+    }
+
+    created = 0
+    updated = 0
+    imported_profiles = []
+    for item in profiles_payload:
+        normalized_payload = _normalize_import_profile_payload(item)
+        existing_profile = existing_profiles_by_name.get(normalized_payload["name"])
+        if existing_profile and not normalized_payload.get("id"):
+            normalized_payload["id"] = existing_profile["id"]
+
+        saved_profile = save_profile(db_path, normalized_payload)
+        imported_profiles.append(saved_profile)
+        existing_profiles_by_name[saved_profile["name"]] = saved_profile
+
+        if existing_profile or normalized_payload.get("id"):
+            updated += 1
+        else:
+            created += 1
+
+    return {
+        "version": PROFILE_CONFIG_VERSION,
+        "created": created,
+        "updated": updated,
+        "profiles": imported_profiles,
+    }
 
 
 def save_profile(db_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1052,6 +1111,17 @@ def _serialize_profile_row(row: sqlite3.Row | None) -> dict[str, Any]:
     }
 
 
+def _serialize_profile_export_item(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": (profile.get("name") or "").strip(),
+        "systemPrompt": profile.get("systemPrompt") or "",
+        "contactDetails": profile.get("contactDetails") or "",
+        "cta": profile.get("cta") or "",
+        "accountIds": _normalize_account_ids(profile.get("accountIds")),
+        "settings": deepcopy(profile.get("settings") or {}),
+    }
+
+
 def _normalize_profile_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
     normalized = deepcopy(settings or {})
     normalized["contentAccounts"] = _normalize_content_accounts(normalized.get("contentAccounts"))
@@ -1101,6 +1171,44 @@ def _normalize_account_ids(values: Any) -> list[int]:
         except (TypeError, ValueError):
             continue
     return sorted(set(normalized))
+
+
+def _extract_profiles_import_payload(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        profiles_payload = payload
+    elif isinstance(payload, dict):
+        profiles_payload = payload.get("profiles")
+    else:
+        raise ValueError("YAML root must be an object with a profiles list or a profiles list directly")
+
+    if not isinstance(profiles_payload, list):
+        raise ValueError("profiles must be a list")
+
+    normalized = []
+    for item in profiles_payload:
+        if not isinstance(item, dict):
+            raise ValueError("each profile entry must be an object")
+        normalized.append(item)
+    return normalized
+
+
+def _normalize_import_profile_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise ValueError("profile name is required")
+
+    normalized_payload = {
+        "id": payload.get("id"),
+        "name": name,
+        "systemPrompt": str(payload.get("systemPrompt") or ""),
+        "contactDetails": str(payload.get("contactDetails") or ""),
+        "cta": str(payload.get("cta") or ""),
+        "accountIds": _normalize_account_ids(payload.get("accountIds")),
+        "settings": _normalize_profile_settings(payload.get("settings") or {}),
+    }
+    if not normalized_payload["id"]:
+        normalized_payload.pop("id")
+    return normalized_payload
 
 
 def _resolve_selected_account_ids(profile: dict[str, Any], values: Any) -> list[int]:
@@ -1197,6 +1305,14 @@ def _build_public_url(storage: dict[str, Any], relative_path: str, remote_spec: 
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "rclone link failed")
     return result.stdout.strip()
+
+
+def _get_yaml_module():
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("PyYAML is required for profile YAML import/export") from exc
+    return yaml
 
 
 def _load_google_service_account_data(base_dir: Path | None = None) -> dict[str, Any] | None:

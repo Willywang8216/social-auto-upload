@@ -14,6 +14,12 @@
         />
         <div class="action-buttons">
           <el-button type="primary" @click="openCreateDialog">新增 Profile</el-button>
+          <el-button type="primary" plain @click="triggerImportProfilesYaml" :loading="isImportingProfiles">
+            匯入 YAML
+          </el-button>
+          <el-button type="success" plain @click="exportProfilesYaml">
+            匯出 YAML
+          </el-button>
           <el-button type="warning" plain @click="openGoogleSheetDialog">Google 試算表連線</el-button>
           <el-button type="info" @click="fetchProfiles" :loading="isRefreshing">
             <el-icon :class="{ 'is-loading': isRefreshing }"><Refresh /></el-icon>
@@ -682,6 +688,14 @@
         </div>
       </template>
     </el-dialog>
+
+    <input
+      ref="profileYamlInputRef"
+      type="file"
+      accept=".yaml,.yml"
+      class="hidden-input"
+      @change="handleImportProfilesYaml"
+    >
   </div>
 </template>
 
@@ -706,6 +720,7 @@ const isSubmitting = ref(false)
 const isGenerating = ref(false)
 const isSavingGoogleSheet = ref(false)
 const isValidatingGoogleSheet = ref(false)
+const isImportingProfiles = ref(false)
 
 const profiles = ref([])
 const dialogVisible = ref(false)
@@ -725,6 +740,7 @@ const googleSheetConfig = ref({
   filePath: ''
 })
 const contentResultTabMap = ref({})
+const profileYamlInputRef = ref(null)
 
 const postLabels = {
   twitter: 'X / Twitter 貼文',
@@ -1048,6 +1064,45 @@ const openCreateDialog = () => {
   dialogType.value = 'create'
   profileForm.value = normalizeProfileForm(makeDefaultProfile())
   dialogVisible.value = true
+}
+
+const triggerImportProfilesYaml = () => {
+  if (!profileYamlInputRef.value) {
+    return
+  }
+  profileYamlInputRef.value.value = ''
+  profileYamlInputRef.value.click()
+}
+
+const handleImportProfilesYaml = async (event) => {
+  const file = event.target.files?.[0]
+  if (!file) {
+    return
+  }
+
+  isImportingProfiles.value = true
+  try {
+    const response = await profileApi.importProfilesYaml(file)
+    await fetchProfiles()
+    const summary = response.data || {}
+    ElMessage.success(`匯入完成：新增 ${summary.created || 0} 筆，更新 ${summary.updated || 0} 筆`)
+  } catch (error) {
+    ElMessage.error(error.message || '匯入 Profile YAML 失敗')
+  } finally {
+    isImportingProfiles.value = false
+    if (profileYamlInputRef.value) {
+      profileYamlInputRef.value.value = ''
+    }
+  }
+}
+
+const exportProfilesYaml = () => {
+  const link = document.createElement('a')
+  link.href = profileApi.getExportProfilesYamlUrl()
+  link.download = ''
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
 }
 
 const fetchGoogleSheetConfig = async () => {
@@ -1409,6 +1464,10 @@ onMounted(async () => {
 
   .empty-data {
     padding: 40px 0;
+  }
+
+  .hidden-input {
+    display: none;
   }
 
   .account-tags {

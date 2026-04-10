@@ -15,10 +15,12 @@ from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_
 from utils.profile_pipeline import (
     delete_profile as delete_profile_record,
     ensure_profile_tables,
+    export_profiles_yaml,
     generate_profile_batch_content,
     generate_profile_content,
     get_google_service_account_config,
     get_profile,
+    import_profiles_yaml,
     list_profiles,
     migrate_uploaded_asset,
     save_profile,
@@ -276,6 +278,67 @@ def delete_profile_route():
             "code": 200,
             "msg": "success",
             "data": None
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/exportProfilesYaml', methods=['GET'])
+def export_profiles_yaml_route():
+    try:
+        yaml_text = export_profiles_yaml(get_db_path())
+        filename = f"profiles-{time.strftime('%Y%m%d-%H%M%S')}.yaml"
+        response = Response(yaml_text, mimetype='application/x-yaml')
+        response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": str(e),
+            "data": None
+        }), 500
+
+
+@app.route('/importProfilesYaml', methods=['POST'])
+def import_profiles_yaml_route():
+    yaml_text = ''
+    if 'file' in request.files:
+        file = request.files['file']
+        if not file or not file.filename:
+            return jsonify({
+                "code": 400,
+                "msg": "YAML file is required",
+                "data": None
+            }), 400
+        try:
+            yaml_text = file.read().decode('utf-8')
+        except UnicodeDecodeError:
+            return jsonify({
+                "code": 400,
+                "msg": "YAML file must be UTF-8 encoded",
+                "data": None
+            }), 400
+    else:
+        data = request.get_json(silent=True) or {}
+        yaml_text = data.get('yamlContent', '')
+
+    if not str(yaml_text or '').strip():
+        return jsonify({
+            "code": 400,
+            "msg": "yamlContent is required",
+            "data": None
+        }), 400
+
+    try:
+        result = import_profiles_yaml(get_db_path(), yaml_text)
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": result
         }), 200
     except Exception as e:
         return jsonify({
