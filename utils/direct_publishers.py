@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import importlib
 import json
+import mimetypes
 import secrets
 import time
 import urllib.parse
@@ -163,6 +164,16 @@ def _normalize_target_config(platform: str, config: dict[str, Any]) -> dict[str,
             "accessToken": str(config.get("accessToken") or "").strip(),
             "privacyStatus": str(config.get("privacyStatus") or "").strip() or "private",
             "categoryId": str(config.get("categoryId") or "").strip() or "22",
+            "defaultLanguage": str(config.get("defaultLanguage") or "").strip(),
+            "notifySubscribers": bool(config.get("notifySubscribers", False)),
+            "thumbnailUrl": str(config.get("thumbnailUrl") or "").strip(),
+            "thumbnailPath": str(config.get("thumbnailPath") or "").strip(),
+            "captionsPath": str(config.get("captionsPath") or "").strip(),
+            "captionsLanguage": str(config.get("captionsLanguage") or "").strip() or "en",
+            "captionsName": str(config.get("captionsName") or "").strip() or "Default captions",
+            "captionIsDraft": bool(config.get("captionIsDraft", False)),
+            "publishAt": str(config.get("publishAt") or "").strip(),
+            "premiereAt": str(config.get("premiereAt") or "").strip(),
         }
     if platform == "tiktok":
         return {
@@ -454,23 +465,12 @@ def _publish_to_threads(job: dict[str, Any], target: dict[str, Any]) -> dict[str
     if not creation_id:
         raise RuntimeError(container_data.get("error", {}).get("message") or "threads container creation failed")
 
-    publish_response = requests.post(
-        f"https://graph.threads.net/v1.0/{user_id}/threads_publish",
-        data={
-            "creation_id": creation_id,
-            "access_token": access_token,
-        },
-        timeout=60,
-    )
-    _raise_for_http_error(publish_response)
-    publish_data = publish_response.json() or {}
-    thread_id = publish_data.get("id")
-    if not thread_id:
-        raise RuntimeError(publish_data.get("error", {}).get("message") or "threads publish failed")
     return {
         "platform": "threads",
-        "threadId": thread_id,
         "creationId": creation_id,
+        "details": {
+            "publishStage": "container_created",
+        },
         "finalStatus": "processing",
     }
 
@@ -486,6 +486,7 @@ def _publish_to_youtube(base_dir: Path, job: dict[str, Any], target: dict[str, A
     if media_path.suffix.lower() not in {".mp4", ".mov", ".m4v", ".avi", ".webm"}:
         raise ValueError("youtube direct upload requires a local video file")
 
+    options = _resolve_youtube_publish_options(base_dir, job, target)
     metadata = {
         "snippet": {
             "title": _truncate_text(str(job.get("title") or job.get("materialName") or "Untitled"), 100),
@@ -493,9 +494,14 @@ def _publish_to_youtube(base_dir: Path, job: dict[str, Any], target: dict[str, A
             "categoryId": str(config.get("categoryId") or "22"),
         },
         "status": {
-            "privacyStatus": str(config.get("privacyStatus") or "private"),
+            "privacyStatus": options["privacyStatus"],
         },
     }
+    if options["defaultLanguage"]:
+        metadata["snippet"]["defaultLanguage"] = options["defaultLanguage"]
+    if options["publishAt"]:
+        metadata["status"]["publishAt"] = options["publishAt"]
+    metadata["status"]["selfDeclaredMadeForKids"] = bool(options["selfDeclaredMadeForKids"])
     file_size = media_path.stat().st_size
     init_response = requests.post(
         "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
@@ -504,6 +510,9 @@ def _publish_to_youtube(base_dir: Path, job: dict[str, Any], target: dict[str, A
             "Content-Type": "application/json; charset=UTF-8",
             "X-Upload-Content-Type": "video/mp4",
             "X-Upload-Content-Length": str(file_size),
+        },
+        params={
+            "notifySubscribers": "true" if options["notifySubscribers"] else "false",
         },
         data=json.dumps(metadata, ensure_ascii=False),
         timeout=60,
@@ -528,10 +537,23 @@ def _publish_to_youtube(base_dir: Path, job: dict[str, Any], target: dict[str, A
     video_id = upload_data.get("id")
     if not video_id:
         raise RuntimeError(upload_data.get("error", {}).get("message") or "youtube upload failed")
+    enhancement_details = {}
+    thumbnail_details = _set_youtube_thumbnail(base_dir, access_token, requests, video_id, options)
+    if thumbnail_details:
+        enhancement_details["thumbnail"] = thumbnail_details
+    captions_details = _upload_youtube_captions(access_token, requests, video_id, options)
+    if captions_details:
+        enhancement_details["captions"] = captions_details
+    if options["premiereAt"]:
+        enhancement_details["premiereRequestedAt"] = options["premiereAt"]
+        enhancement_details["premiereMode"] = "scheduled_publish_fallback"
+    if options["publishAt"]:
+        enhancement_details["publishAt"] = options["publishAt"]
     return {
         "platform": "youtube",
         "videoId": video_id,
         "url": f"https://www.youtube.com/watch?v={video_id}",
+        "details": enhancement_details,
         "finalStatus": "processing",
     }
 
@@ -603,41 +625,118 @@ def _refresh_threads_status(job: dict[str, Any], target: dict[str, Any]) -> dict
     config = target["config"]
     access_token = str(config.get("accessToken") or "").strip()
     metadata = job.get("metadata") or {}
+    user_id = str(config.get("userId") or "").strip()
     thread_id = str(metadata.get("threadId") or metadata.get("publishId") or "").strip()
-    if not access_token or not thread_id:
-        raise ValueError("threads accessToken and threadId are required for status refresh")
+    creation_id = str(metadata.get("creationId") or "").strip()
+    if not access_token:
+        raise ValueError("threads accessToken is required for status refresh")
 
-    response = requests.get(
-        f"https://graph.threads.net/v1.0/{thread_id}",
+    if thread_id:
+        response = requests.get(
+            f"https://graph.threads.net/v1.0/{thread_id}",
+            params={
+                "fields": "id,permalink,shortcode,username,text,timestamp",
+                "access_token": access_token,
+            },
+            timeout=30,
+        )
+        _raise_for_http_error(response)
+        payload = response.json() or {}
+        if payload.get("error"):
+            raise RuntimeError(payload["error"].get("message") or "threads status refresh failed")
+        if payload.get("id"):
+            details = {
+                "publishStage": "published",
+                "permalink": payload.get("permalink") or "",
+                "shortcode": payload.get("shortcode") or "",
+                "username": payload.get("username") or "",
+                "text": payload.get("text") or "",
+                "timestamp": payload.get("timestamp") or "",
+            }
+            return {
+                "status": "published",
+                "platform": "threads",
+                "remoteId": payload.get("id"),
+                "threadId": payload.get("id"),
+                "creationId": creation_id,
+                "url": payload.get("permalink") or "",
+                "details": {key: value for key, value in details.items() if value},
+            }
+        return {
+            "status": "processing",
+            "platform": "threads",
+            "threadId": thread_id,
+            "creationId": creation_id,
+            "details": {
+                "publishStage": "published_pending_reconciliation",
+            },
+        }
+
+    if not user_id or not creation_id:
+        raise ValueError("threads userId and creationId are required before final publish reconciliation")
+
+    container_response = requests.get(
+        f"https://graph.threads.net/v1.0/{creation_id}",
         params={
-            "fields": "id,permalink,shortcode,username,text,timestamp",
+            "fields": "id,status,status_code,error_message",
             "access_token": access_token,
         },
         timeout=30,
     )
-    _raise_for_http_error(response)
-    payload = response.json() or {}
-    if payload.get("error"):
-        raise RuntimeError(payload["error"].get("message") or "threads status refresh failed")
-    if payload.get("id"):
-        details = {
-            "permalink": payload.get("permalink") or "",
-            "shortcode": payload.get("shortcode") or "",
-            "username": payload.get("username") or "",
-            "text": payload.get("text") or "",
-            "timestamp": payload.get("timestamp") or "",
-        }
+    _raise_for_http_error(container_response)
+    container_payload = container_response.json() or {}
+    if container_payload.get("error"):
+        raise RuntimeError(container_payload["error"].get("message") or "threads container status refresh failed")
+
+    status_code = str(container_payload.get("status_code") or "").strip().upper()
+    status_text = str(container_payload.get("status") or "").strip()
+    error_message = str(container_payload.get("error_message") or "").strip()
+    container_details = {
+        "publishStage": "container_processing",
+        "containerStatusCode": status_code,
+        "containerStatus": status_text,
+    }
+    if error_message:
+        container_details["containerError"] = error_message
+
+    if status_code in {"ERROR", "FAILED", "EXPIRED"}:
         return {
-            "status": "published",
+            "status": "failed",
             "platform": "threads",
-            "remoteId": payload.get("id"),
-            "url": payload.get("permalink") or "",
-            "details": {key: value for key, value in details.items() if value},
+            "creationId": creation_id,
+            "error": error_message or status_text or "threads media container failed",
+            "details": {key: value for key, value in container_details.items() if value},
         }
+
+    if status_code not in {"FINISHED", "READY", "COMPLETE"}:
+        return {
+            "status": "processing",
+            "platform": "threads",
+            "creationId": creation_id,
+            "details": {key: value for key, value in container_details.items() if value},
+        }
+
+    publish_response = requests.post(
+        f"https://graph.threads.net/v1.0/{user_id}/threads_publish",
+        data={
+            "creation_id": creation_id,
+            "access_token": access_token,
+        },
+        timeout=60,
+    )
+    _raise_for_http_error(publish_response)
+    publish_data = publish_response.json() or {}
+    thread_id = publish_data.get("id")
+    if not thread_id:
+        raise RuntimeError(publish_data.get("error", {}).get("message") or "threads publish failed")
+    container_details["publishStage"] = "publish_triggered"
     return {
         "status": "processing",
         "platform": "threads",
-        "details": {},
+        "remoteId": thread_id,
+        "threadId": thread_id,
+        "creationId": creation_id,
+        "details": {key: value for key, value in container_details.items() if value},
     }
 
 
@@ -729,39 +828,325 @@ def _refresh_tiktok_status(job: dict[str, Any], target: dict[str, Any]) -> dict[
     )
     _raise_for_http_error(response)
     payload = response.json() or {}
-    if payload.get("error"):
-        raise RuntimeError(payload["error"].get("message") or "tiktok status refresh failed")
+    error = _extract_tiktok_api_error(payload)
+    if error:
+        raise RuntimeError(error)
     data = payload.get("data") or {}
     raw_status = str(data.get("status") or payload.get("status") or "").strip()
-    upper_status = raw_status.upper()
+    raw_status_code = str(data.get("status_code") or payload.get("status_code") or "").strip()
+    normalized_state = _map_tiktok_publish_state(raw_status, raw_status_code, data)
+    public_post_id = data.get("publicaly_available_post_id") or data.get("publicly_available_post_id") or ""
+    remote_id = data.get("video_id") or public_post_id or publish_id
+    fail_reason = str(data.get("fail_reason") or "").strip()
     details = {
+        "publishId": publish_id,
         "status": raw_status,
+        "statusCode": raw_status_code,
         "failReason": data.get("fail_reason") or "",
         "uploadedBytes": data.get("downloaded_bytes"),
         "videoId": data.get("video_id") or "",
-        "publicalyAvailablePostId": data.get("publicaly_available_post_id") or "",
+        "publicalyAvailablePostId": public_post_id,
+        "logId": ((payload.get("error") or {}).get("log_id") or ""),
     }
-    if upper_status in {"PUBLISH_COMPLETE", "PUBLISHED", "SUCCESS", "SEND_TO_USER_INBOX"}:
+    if normalized_state == "published":
         return {
             "status": "published",
             "platform": "tiktok",
-            "remoteId": data.get("video_id") or publish_id,
+            "remoteId": remote_id,
+            "publishId": publish_id,
+            "videoId": data.get("video_id") or "",
             "details": {key: value for key, value in details.items() if value not in {"", None}},
         }
-    if "FAIL" in upper_status or "REJECT" in upper_status or "CANCEL" in upper_status or "DENY" in upper_status:
+    if normalized_state == "failed":
         return {
             "status": "failed",
             "platform": "tiktok",
-            "remoteId": data.get("video_id") or publish_id,
-            "error": data.get("fail_reason") or raw_status or "tiktok publish failed",
+            "remoteId": remote_id,
+            "publishId": publish_id,
+            "videoId": data.get("video_id") or "",
+            "error": fail_reason or raw_status_code or raw_status or "tiktok publish failed",
             "details": {key: value for key, value in details.items() if value not in {"", None}},
         }
     return {
         "status": "processing",
         "platform": "tiktok",
-        "remoteId": data.get("video_id") or publish_id,
+        "remoteId": remote_id,
+        "publishId": publish_id,
+        "videoId": data.get("video_id") or "",
         "details": {key: value for key, value in details.items() if value not in {"", None}},
     }
+
+
+def _extract_tiktok_api_error(payload: dict[str, Any]) -> str:
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return ""
+    code = str(error.get("code") or "").strip()
+    normalized_code = code.lower()
+    if normalized_code in {"", "ok", "success"}:
+        return ""
+    message = str(error.get("message") or "").strip()
+    log_id = str(error.get("log_id") or "").strip()
+    parts = [part for part in [code, message, f"log_id={log_id}" if log_id else ""] if part]
+    return " | ".join(parts) or "tiktok api request failed"
+
+
+def _map_tiktok_publish_state(raw_status: str, raw_status_code: str, data: dict[str, Any]) -> str:
+    normalized_tokens = {
+        str(raw_status or "").strip().upper(),
+        str(raw_status_code or "").strip().upper(),
+    }
+    normalized_tokens = {token for token in normalized_tokens if token}
+    fail_reason = str(data.get("fail_reason") or "").strip()
+    public_post_id = str(data.get("publicaly_available_post_id") or data.get("publicly_available_post_id") or "").strip()
+    video_id = str(data.get("video_id") or "").strip()
+
+    success_tokens = {
+        "PUBLISH_COMPLETE",
+        "PUBLISHED",
+        "SUCCESS",
+        "SEND_TO_USER_INBOX",
+        "POST_SENT_TO_USER_INBOX",
+    }
+    failure_tokens = {
+        "FAIL",
+        "FAILED",
+        "ERROR",
+        "EXPIRED",
+        "REJECTED",
+        "PUBLISH_FAILED",
+        "PUBLISH_REJECTED",
+        "CANCELLED",
+        "CANCELED",
+        "DENIED",
+    }
+    processing_tokens = {
+        "INIT",
+        "INITIALIZED",
+        "PENDING",
+        "PROCESSING",
+        "PROCESSING_DOWNLOAD",
+        "DOWNLOADING",
+        "UPLOADING",
+        "IN_PROGRESS",
+        "QUEUED",
+        "PUBLISHING",
+        "SCHEDULED",
+    }
+
+    if normalized_tokens & success_tokens:
+        return "published"
+    if normalized_tokens & failure_tokens:
+        return "failed"
+    if fail_reason:
+        return "failed"
+    if public_post_id or video_id:
+        return "published"
+    if normalized_tokens & processing_tokens:
+        return "processing"
+
+    for token in normalized_tokens:
+        if any(fragment in token for fragment in ["FAIL", "REJECT", "CANCEL", "DENY", "ERROR", "EXPIRE"]):
+            return "failed"
+        if any(fragment in token for fragment in ["PROCESS", "PENDING", "QUEUE", "UPLOAD", "DOWNLOAD", "PROGRESS"]):
+            return "processing"
+        if any(fragment in token for fragment in ["SUCCESS", "PUBLISH_COMPLETE", "PUBLISHED", "INBOX"]):
+            return "published"
+    return "processing"
+
+
+def _resolve_youtube_publish_options(base_dir: Path, job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    config = target["config"]
+    metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+    youtube_metadata = metadata.get("youtube") if isinstance(metadata.get("youtube"), dict) else {}
+    publish_at = _pick_first_non_empty(
+        youtube_metadata.get("publishAt"),
+        metadata.get("publishAt"),
+        config.get("publishAt"),
+    )
+    premiere_at = _pick_first_non_empty(
+        youtube_metadata.get("premiereAt"),
+        metadata.get("premiereAt"),
+        config.get("premiereAt"),
+    )
+    resolved_publish_at = publish_at or premiere_at
+    requested_privacy = _pick_first_non_empty(
+        youtube_metadata.get("privacyStatus"),
+        metadata.get("privacyStatus"),
+        config.get("privacyStatus"),
+        "private",
+    )
+    privacy_status = requested_privacy
+    if resolved_publish_at:
+        privacy_status = "private"
+
+    return {
+        "privacyStatus": privacy_status,
+        "requestedPrivacyStatus": requested_privacy,
+        "publishAt": resolved_publish_at,
+        "premiereAt": premiere_at,
+        "thumbnailUrl": _pick_first_non_empty(
+            youtube_metadata.get("thumbnailUrl"),
+            metadata.get("thumbnailUrl"),
+            config.get("thumbnailUrl"),
+        ),
+        "thumbnailPath": _pick_first_non_empty(
+            youtube_metadata.get("thumbnailPath"),
+            metadata.get("thumbnailPath"),
+            config.get("thumbnailPath"),
+        ),
+        "captionsPath": _pick_first_non_empty(
+            youtube_metadata.get("captionsPath"),
+            metadata.get("captionsPath"),
+            config.get("captionsPath"),
+        ),
+        "captionsLanguage": _pick_first_non_empty(
+            youtube_metadata.get("captionsLanguage"),
+            metadata.get("captionsLanguage"),
+            config.get("captionsLanguage"),
+            "en",
+        ),
+        "captionsName": _pick_first_non_empty(
+            youtube_metadata.get("captionsName"),
+            metadata.get("captionsName"),
+            config.get("captionsName"),
+            "Default captions",
+        ),
+        "captionIsDraft": bool(
+            youtube_metadata.get("captionIsDraft", metadata.get("captionIsDraft", config.get("captionIsDraft", False)))
+        ),
+        "defaultLanguage": _pick_first_non_empty(
+            youtube_metadata.get("defaultLanguage"),
+            metadata.get("defaultLanguage"),
+            config.get("defaultLanguage"),
+        ),
+        "notifySubscribers": bool(
+            youtube_metadata.get("notifySubscribers", metadata.get("notifySubscribers", config.get("notifySubscribers", False)))
+        ),
+        "selfDeclaredMadeForKids": bool(
+            youtube_metadata.get("selfDeclaredMadeForKids", metadata.get("selfDeclaredMadeForKids", False))
+        ),
+        "baseDir": base_dir,
+    }
+
+
+def _set_youtube_thumbnail(
+    base_dir: Path,
+    access_token: str,
+    requests: Any,
+    video_id: str,
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    thumbnail_url = str(options.get("thumbnailUrl") or "").strip()
+    thumbnail_path_value = str(options.get("thumbnailPath") or "").strip()
+    if not thumbnail_url and not thumbnail_path_value:
+        return {}
+
+    if thumbnail_url:
+        source = "url"
+        download_response = requests.get(thumbnail_url, timeout=60)
+        _raise_for_http_error(download_response)
+        content = download_response.content
+        content_type = download_response.headers.get("Content-Type") or "image/png"
+        source_name = thumbnail_url
+    else:
+        source = "file"
+        thumbnail_path = _resolve_optional_local_path(base_dir, thumbnail_path_value)
+        content = thumbnail_path.read_bytes()
+        content_type = mimetypes.guess_type(thumbnail_path.name)[0] or "application/octet-stream"
+        source_name = thumbnail_path.name
+
+    response = requests.post(
+        "https://www.googleapis.com/upload/youtube/v3/thumbnails/set",
+        params={"videoId": video_id},
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": content_type,
+        },
+        data=content,
+        timeout=120,
+    )
+    _raise_for_http_error(response)
+    payload = response.json() if hasattr(response, "json") else {}
+    return {
+        "source": source,
+        "sourceName": source_name,
+        "mimeType": content_type,
+        "etag": (payload or {}).get("etag") or "",
+    }
+
+
+def _upload_youtube_captions(
+    access_token: str,
+    requests: Any,
+    video_id: str,
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    captions_path_value = str(options.get("captionsPath") or "").strip()
+    if not captions_path_value:
+        return {}
+
+    captions_path = _resolve_optional_local_path(Path(options["baseDir"]), captions_path_value)
+    content = captions_path.read_bytes()
+    content_type = mimetypes.guess_type(captions_path.name)[0] or "application/octet-stream"
+    boundary = f"===============sau-{secrets.token_hex(8)}=="
+    snippet = {
+        "snippet": {
+            "videoId": video_id,
+            "language": str(options.get("captionsLanguage") or "en"),
+            "name": str(options.get("captionsName") or "Default captions"),
+            "isDraft": bool(options.get("captionIsDraft", False)),
+        }
+    }
+    body = (
+        f"--{boundary}\r\n"
+        "Content-Type: application/json; charset=UTF-8\r\n\r\n"
+        f"{json.dumps(snippet, ensure_ascii=False)}\r\n"
+        f"--{boundary}\r\n"
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode("utf-8") + content + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    response = requests.post(
+        "https://www.googleapis.com/upload/youtube/v3/captions",
+        params={
+            "part": "snippet",
+            "uploadType": "multipart",
+        },
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": f'multipart/related; boundary="{boundary}"',
+        },
+        data=body,
+        timeout=120,
+    )
+    _raise_for_http_error(response)
+    payload = response.json() or {}
+    caption_id = payload.get("id") or ""
+    return {
+        "captionId": caption_id,
+        "language": str(options.get("captionsLanguage") or "en"),
+        "name": str(options.get("captionsName") or "Default captions"),
+        "sourceName": captions_path.name,
+    }
+
+
+def _resolve_optional_local_path(base_dir: Path, path_value: str) -> Path:
+    normalized = str(path_value or "").strip()
+    if not normalized:
+        raise ValueError("path is required")
+    candidate = Path(normalized)
+    if not candidate.is_absolute():
+        candidate = base_dir / candidate
+    if not candidate.exists():
+        raise FileNotFoundError(f"file not found: {candidate}")
+    return candidate
+
+
+def _pick_first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _build_post_text(job: dict[str, Any], include_media_url: bool = True) -> str:

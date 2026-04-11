@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -205,14 +206,11 @@ class DirectPublishersTests(unittest.TestCase):
         self.assertEqual(requests_module_mock.return_value.post.call_args.kwargs["data"]["file_url"], "https://cdn.example.com/video.mp4")
 
     @patch("utils.direct_publishers._get_requests_module")
-    def test_publish_job_to_threads_creates_container_then_publishes(self, requests_module_mock):
+    def test_publish_job_to_threads_creates_container_and_returns_processing_receipt(self, requests_module_mock):
         container_response = Mock()
         container_response.ok = True
         container_response.json.return_value = {"id": "creation-1"}
-        publish_response = Mock()
-        publish_response.ok = True
-        publish_response.json.return_value = {"id": "thread-9"}
-        requests_module_mock.return_value.post.side_effect = [container_response, publish_response]
+        requests_module_mock.return_value.post.return_value = container_response
 
         result = publish_job_to_direct_target(
             Path("."),
@@ -232,13 +230,12 @@ class DirectPublishersTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(result["threadId"], "thread-9")
+        self.assertEqual(result["creationId"], "creation-1")
+        self.assertEqual(result["finalStatus"], "processing")
         first_call = requests_module_mock.return_value.post.call_args_list[0]
-        second_call = requests_module_mock.return_value.post.call_args_list[1]
         self.assertEqual(first_call.args[0], "https://graph.threads.net/v1.0/user-123/threads")
         self.assertEqual(first_call.kwargs["data"]["media_type"], "IMAGE")
-        self.assertEqual(second_call.args[0], "https://graph.threads.net/v1.0/user-123/threads_publish")
-        self.assertEqual(second_call.kwargs["data"]["creation_id"], "creation-1")
+        self.assertEqual(len(requests_module_mock.return_value.post.call_args_list), 1)
 
     @patch("utils.direct_publishers._get_requests_module")
     def test_publish_job_to_youtube_uses_resumable_upload(self, requests_module_mock):
@@ -284,6 +281,84 @@ class DirectPublishersTests(unittest.TestCase):
             "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
         )
         self.assertEqual(requests_module_mock.return_value.put.call_args.args[0], "https://upload.example/session")
+
+    @patch("utils.direct_publishers._get_requests_module")
+    def test_publish_job_to_youtube_applies_thumbnail_captions_and_premiere_fallback(self, requests_module_mock):
+        init_response = Mock()
+        init_response.ok = True
+        init_response.headers = {"Location": "https://upload.example/session"}
+        thumbnail_response = Mock()
+        thumbnail_response.ok = True
+        thumbnail_response.json.return_value = {"etag": "thumb-etag"}
+        captions_response = Mock()
+        captions_response.ok = True
+        captions_response.json.return_value = {"id": "caption-1"}
+        upload_response = Mock()
+        upload_response.ok = True
+        upload_response.json.return_value = {"id": "yt-video-9"}
+        thumbnail_download_response = Mock()
+        thumbnail_download_response.ok = True
+        thumbnail_download_response.content = b"png-bytes"
+        thumbnail_download_response.headers = {"Content-Type": "image/png"}
+
+        requests_module_mock.return_value.post.side_effect = [init_response, thumbnail_response, captions_response]
+        requests_module_mock.return_value.put.return_value = upload_response
+        requests_module_mock.return_value.get.return_value = thumbnail_download_response
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            media_dir = base_dir / "videoFile"
+            media_dir.mkdir(parents=True, exist_ok=True)
+            media_path = media_dir / "clip.mp4"
+            media_path.write_bytes(b"fake-mp4-bytes")
+            captions_path = base_dir / "captions.en.srt"
+            captions_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+
+            result = publish_job_to_direct_target(
+                base_dir,
+                {
+                    "platformKey": "youtube",
+                    "title": "YouTube title",
+                    "message": "YouTube description",
+                    "mediaPath": "videoFile/clip.mp4",
+                    "metadata": {
+                        "mediaKind": "video",
+                        "youtube": {
+                            "thumbnailUrl": "https://cdn.example.com/thumb.png",
+                            "captionsPath": "captions.en.srt",
+                            "captionsLanguage": "en",
+                            "captionsName": "English",
+                            "premiereAt": "2026-04-12T15:00:00Z",
+                            "notifySubscribers": True,
+                        },
+                    },
+                },
+                {
+                    "platform": "youtube",
+                    "enabled": True,
+                    "config": {
+                        "accessToken": "yt-token",
+                        "privacyStatus": "public",
+                        "categoryId": "22",
+                    },
+                },
+            )
+
+        init_call = requests_module_mock.return_value.post.call_args_list[0]
+        init_payload = json.loads(init_call.kwargs["data"])
+        self.assertEqual(init_payload["status"]["privacyStatus"], "private")
+        self.assertEqual(init_payload["status"]["publishAt"], "2026-04-12T15:00:00Z")
+        self.assertEqual(init_call.kwargs["params"]["notifySubscribers"], "true")
+
+        thumbnail_call = requests_module_mock.return_value.post.call_args_list[1]
+        self.assertEqual(thumbnail_call.args[0], "https://www.googleapis.com/upload/youtube/v3/thumbnails/set")
+        captions_call = requests_module_mock.return_value.post.call_args_list[2]
+        self.assertEqual(captions_call.args[0], "https://www.googleapis.com/upload/youtube/v3/captions")
+
+        self.assertEqual(result["videoId"], "yt-video-9")
+        self.assertEqual(result["details"]["thumbnail"]["source"], "url")
+        self.assertEqual(result["details"]["captions"]["captionId"], "caption-1")
+        self.assertEqual(result["details"]["premiereMode"], "scheduled_publish_fallback")
 
     @patch("utils.direct_publishers._get_requests_module")
     def test_publish_job_to_tiktok_initializes_pull_from_url_publish(self, requests_module_mock):
@@ -347,6 +422,67 @@ class DirectPublishersTests(unittest.TestCase):
         self.assertEqual(result["url"], "https://www.threads.net/@demo/post/abc")
 
     @patch("utils.direct_publishers._get_requests_module")
+    def test_refresh_threads_status_promotes_finished_container_to_publish_triggered(self, requests_module_mock):
+        container_response = Mock()
+        container_response.ok = True
+        container_response.json.return_value = {
+            "id": "creation-1",
+            "status": "Finished",
+            "status_code": "FINISHED",
+        }
+        publish_response = Mock()
+        publish_response.ok = True
+        publish_response.json.return_value = {"id": "thread-9"}
+        requests_module_mock.return_value.get.return_value = container_response
+        requests_module_mock.return_value.post.return_value = publish_response
+
+        result = refresh_direct_publish_job_status(
+            Path("."),
+            {
+                "platformKey": "threads",
+                "metadata": {"creationId": "creation-1"},
+            },
+            {
+                "platform": "threads",
+                "enabled": True,
+                "config": {"accessToken": "threads-token", "userId": "user-123"},
+            },
+        )
+
+        self.assertEqual(result["status"], "processing")
+        self.assertEqual(result["threadId"], "thread-9")
+        self.assertEqual(result["details"]["publishStage"], "publish_triggered")
+        self.assertEqual(requests_module_mock.return_value.post.call_args.args[0], "https://graph.threads.net/v1.0/user-123/threads_publish")
+
+    @patch("utils.direct_publishers._get_requests_module")
+    def test_refresh_threads_status_maps_container_error_to_failed(self, requests_module_mock):
+        container_response = Mock()
+        container_response.ok = True
+        container_response.json.return_value = {
+            "id": "creation-1",
+            "status": "Media upload has failed",
+            "status_code": "ERROR",
+            "error_message": "media fetch failed",
+        }
+        requests_module_mock.return_value.get.return_value = container_response
+
+        result = refresh_direct_publish_job_status(
+            Path("."),
+            {
+                "platformKey": "threads",
+                "metadata": {"creationId": "creation-1"},
+            },
+            {
+                "platform": "threads",
+                "enabled": True,
+                "config": {"accessToken": "threads-token", "userId": "user-123"},
+            },
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"], "media fetch failed")
+
+    @patch("utils.direct_publishers._get_requests_module")
     def test_refresh_youtube_status_returns_processing_until_processed(self, requests_module_mock):
         response = Mock()
         response.ok = True
@@ -382,6 +518,7 @@ class DirectPublishersTests(unittest.TestCase):
         response = Mock()
         response.ok = True
         response.json.return_value = {
+            "error": {"code": "ok", "message": "", "log_id": "log-1"},
             "data": {
                 "status": "PUBLISH_COMPLETE",
                 "video_id": "tt-video-1",
@@ -404,6 +541,62 @@ class DirectPublishersTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "published")
         self.assertEqual(result["remoteId"], "tt-video-1")
+
+    @patch("utils.direct_publishers._get_requests_module")
+    def test_refresh_tiktok_status_maps_fail_reason_to_failed(self, requests_module_mock):
+        response = Mock()
+        response.ok = True
+        response.json.return_value = {
+            "error": {"code": "ok", "message": "", "log_id": "log-2"},
+            "data": {
+                "status": "PROCESSING_DOWNLOAD",
+                "fail_reason": "video rejected by policy",
+            }
+        }
+        requests_module_mock.return_value.post.return_value = response
+
+        result = refresh_direct_publish_job_status(
+            Path("."),
+            {
+                "platformKey": "tiktok",
+                "metadata": {"publishId": "publish-2"},
+            },
+            {
+                "platform": "tiktok",
+                "enabled": True,
+                "config": {"accessToken": "tt-token"},
+            },
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"], "video rejected by policy")
+
+    @patch("utils.direct_publishers._get_requests_module")
+    def test_refresh_tiktok_status_raises_for_api_error_code(self, requests_module_mock):
+        response = Mock()
+        response.ok = True
+        response.json.return_value = {
+            "error": {
+                "code": "scope_permission_missed",
+                "message": "missing scope",
+                "log_id": "log-3",
+            }
+        }
+        requests_module_mock.return_value.post.return_value = response
+
+        with self.assertRaisesRegex(RuntimeError, "scope_permission_missed"):
+            refresh_direct_publish_job_status(
+                Path("."),
+                {
+                    "platformKey": "tiktok",
+                    "metadata": {"publishId": "publish-3"},
+                },
+                {
+                    "platform": "tiktok",
+                    "enabled": True,
+                    "config": {"accessToken": "tt-token"},
+                },
+            )
 
     def test_get_direct_publisher_target_raises_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

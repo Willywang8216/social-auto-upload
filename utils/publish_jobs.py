@@ -1270,6 +1270,7 @@ def _apply_publish_status_result(db_path: Path, job: dict[str, Any], status_resu
     status = str(status_result.get("status") or "processing").strip() or "processing"
     metadata = dict(job.get("metadata") or {})
     details = status_result.get("details") if isinstance(status_result.get("details"), dict) else {}
+    existing_details = metadata.get("publishDetails") if isinstance(metadata.get("publishDetails"), dict) else {}
     publish_status = {
         "platform": status_result.get("platform") or job.get("platformKey") or "",
         "status": status,
@@ -1277,12 +1278,20 @@ def _apply_publish_status_result(db_path: Path, job: dict[str, Any], status_resu
     }
     if status_result.get("remoteId"):
         publish_status["remoteId"] = status_result["remoteId"]
+    if status_result.get("creationId"):
+        metadata["creationId"] = status_result["creationId"]
+    if status_result.get("threadId"):
+        metadata["threadId"] = status_result["threadId"]
+    if status_result.get("videoId"):
+        metadata["videoId"] = status_result["videoId"]
+    if status_result.get("publishId"):
+        metadata["publishId"] = status_result["publishId"]
     if status_result.get("url"):
         publish_status["url"] = status_result["url"]
         metadata["publishedUrl"] = status_result["url"]
     if details:
         publish_status["details"] = details
-        metadata["publishDetails"] = details
+        metadata["publishDetails"] = {**existing_details, **details}
     if status_result.get("error"):
         publish_status["error"] = status_result["error"]
     metadata["publishStatus"] = publish_status

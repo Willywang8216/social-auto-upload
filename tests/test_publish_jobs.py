@@ -910,6 +910,68 @@ class PublishJobsTests(unittest.TestCase):
         self.assertEqual(job["status"], "published")
         self.assertEqual(job["metadata"]["publishedUrl"], "https://www.youtube.com/watch?v=yt-123")
 
+    def test_sync_publish_job_statuses_backfills_threads_thread_id_after_container_finishes(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO user_info (type, filePath, userName, status, platform_key, auth_mode, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    0,
+                    "",
+                    "Threads Direct",
+                    1,
+                    "threads",
+                    "manual",
+                    '{"accessToken":"threads-token","userId":"user-123"}',
+                ),
+            )
+            account_id = cursor.lastrowid
+            conn.commit()
+
+        saved = save_publish_jobs(
+            self.db_path,
+            {
+                "items": [
+                    {
+                        "profileId": self.profile["id"],
+                        "profileName": self.profile["name"],
+                        "targetKind": "managed_account",
+                        "accountId": account_id,
+                        "platformKey": "threads",
+                        "targetName": "Threads Direct",
+                        "deliveryMode": "direct_upload",
+                        "materialId": 1,
+                        "materialName": "clip.png",
+                        "mediaPath": "videoFile/clip.mp4",
+                        "mediaPublicUrl": "https://cdn.example.com/clip.png",
+                        "title": "Threads title",
+                        "message": "Threads body",
+                        "metadata": {"mediaKind": "image", "creationId": "creation-1"},
+                    }
+                ],
+                "mode": "now",
+            },
+        )
+        update_publish_job_content(self.db_path, {"jobId": saved["jobIds"][0], "status": "processing"})
+
+        with patch("utils.publish_jobs.refresh_direct_publish_job_status", return_value={
+            "status": "processing",
+            "platform": "threads",
+            "creationId": "creation-1",
+            "threadId": "thread-9",
+            "details": {"publishStage": "publish_triggered", "containerStatusCode": "FINISHED"},
+        }):
+            result = sync_publish_job_statuses(self.db_path, self.base_dir, job_ids=saved["jobIds"])
+
+        self.assertEqual(result["items"][0]["status"], "processing")
+        job = list_publish_jobs(self.db_path, {"jobId": saved["jobIds"][0]})[0]
+        self.assertEqual(job["status"], "processing")
+        self.assertEqual(job["metadata"]["creationId"], "creation-1")
+        self.assertEqual(job["metadata"]["threadId"], "thread-9")
+
     def test_get_publish_calendar_entries_groups_by_day(self):
         save_publish_jobs(
             self.db_path,
