@@ -13,6 +13,14 @@ export const accountApi = {
     return http.get('/getAccounts')
   },
 
+  validateAccount(accountId) {
+    return http.post('/validateAccount', { accountId })
+  },
+
+  getValidationResults() {
+    return http.get('/getValidationResults')
+  },
+
   // 添加账号
   addAccount(data) {
     return http.post('/account', data)

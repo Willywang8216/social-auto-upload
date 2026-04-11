@@ -47,6 +47,15 @@
               </el-tag>
             </template>
           </el-table-column>
+          <el-table-column label="驗證結果" min-width="260">
+            <template #default="scope">
+              <div class="cell-lines">
+                <div>{{ scope.row.validationMessage || '尚未驗證' }}</div>
+                <div v-if="scope.row.lastValidatedAt" class="muted-text">最後驗證：{{ formatValidationTime(scope.row.lastValidatedAt) }}</div>
+                <div v-if="scope.row.lastError" class="error-text">錯誤：{{ scope.row.lastError }}</div>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column label="Metadata" min-width="260">
             <template #default="scope">
               <div class="cell-lines">
@@ -76,6 +85,16 @@
                   @click="downloadCookie(scope.row)"
                 >
                   下載 Cookie
+                </el-button>
+                <el-button
+                  v-if="scope.row.supportsValidation"
+                  size="small"
+                  type="success"
+                  plain
+                  :loading="validatingAccountIds.includes(scope.row.id)"
+                  @click="handleValidateAccount(scope.row)"
+                >
+                  驗證
                 </el-button>
                 <el-button size="small" type="danger" @click="handleDelete(scope.row)">刪除</el-button>
               </div>
@@ -224,12 +243,12 @@ const authModeOptionGroups = {
 }
 
 const metadataHints = {
-  twitter: '建議欄位：handle、appId、clientId、notes。',
-  threads: '建議欄位：handle、userId、notes。',
-  facebook: '建議欄位：pageId、pageName、notes。',
-  reddit: '建議欄位：subreddit、username、notes。',
-  tiktok: '建議欄位：username、channelId、notes。',
-  youtube: '建議欄位：channelId、channelTitle、notes。',
+  twitter: '驗證建議欄位：apiKey、apiKeySecret、accessToken、accessTokenSecret。可另外加 handle、notes。',
+  threads: '驗證建議欄位：accessToken、userId。可另外加 handle、notes。',
+  facebook: '驗證建議欄位：accessToken。可另外加 pageId、pageName、notes。',
+  reddit: '驗證建議欄位：clientId、clientSecret、refreshToken。可另外加 subreddit、username、notes。',
+  tiktok: '驗證建議欄位：accessToken。可另外加 username、channelId、notes。',
+  youtube: '驗證建議欄位：accessToken。可另外加 channelId、channelTitle、notes。',
   xiaohongshu: '通常不需要額外 metadata，可留空或填 notes。',
   channels: '通常不需要額外 metadata，可留空或填 notes。',
   douyin: '通常不需要額外 metadata，可留空或填 notes。',
@@ -249,6 +268,7 @@ const searchKeyword = ref('')
 const platformFilter = ref('')
 const isRefreshing = ref(false)
 const isValidating = ref(false)
+const validatingAccountIds = ref([])
 const isSubmitting = ref(false)
 const dialogVisible = ref(false)
 const dialogType = ref('create')
@@ -307,6 +327,14 @@ const getMetadataSummary = (metadata) => {
   return entries.slice(0, 3).map(([key, value]) => `${key}: ${value}`).join('｜')
 }
 
+const formatValidationTime = (value) => {
+  const text = String(value || '').trim()
+  if (!text) {
+    return ''
+  }
+  return text.replace('T', ' ')
+}
+
 const parseMetadataJson = () => {
   if (!accountForm.value.metadataJson.trim()) {
     return {}
@@ -363,6 +391,25 @@ const refreshValidAccounts = async () => {
     ElMessage.error(error.message || '驗證帳號狀態失敗')
   } finally {
     isValidating.value = false
+  }
+}
+
+const handleValidateAccount = async (account) => {
+  if (validatingAccountIds.value.includes(account.id)) {
+    return
+  }
+
+  validatingAccountIds.value = [...validatingAccountIds.value, account.id]
+  try {
+    const response = await accountApi.validateAccount(account.id)
+    if (response.code === 200) {
+      accountStore.updateAccount(account.id, response.data)
+      ElMessage.success(`帳號「${account.name}」驗證完成`)
+    }
+  } catch (error) {
+    ElMessage.error(error.message || '單筆帳號驗證失敗')
+  } finally {
+    validatingAccountIds.value = validatingAccountIds.value.filter(id => id !== account.id)
   }
 }
 
@@ -603,6 +650,12 @@ onMounted(() => {
 
   .muted-text {
     color: #909399;
+    font-size: 13px;
+    margin-top: 8px;
+  }
+
+  .error-text {
+    color: #f56c6c;
     font-size: 13px;
     margin-top: 8px;
   }

@@ -1,4 +1,3 @@
-import asyncio
 import os
 import sqlite3
 import threading
@@ -7,7 +6,6 @@ import uuid
 from pathlib import Path
 from queue import Queue
 from flask_cors import CORS
-from myUtils.auth import check_cookie
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory
 from conf import BASE_DIR
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
@@ -34,6 +32,14 @@ from utils.profile_pipeline import (
     validate_google_sheet_connection,
 )
 from utils.direct_publishers import get_direct_publishers_config, save_direct_publishers_config
+from utils.account_validation import (
+    delete_validation_result,
+    get_validation_result,
+    get_validation_results,
+    merge_account_validation,
+    validate_account,
+    validate_accounts,
+)
 from utils.publish_jobs import ensure_publish_job_tables
 from utils.publish_jobs import (
     cancel_publish_job,
@@ -902,7 +908,13 @@ def getAccounts():
             cursor.execute('''
             SELECT * FROM user_info ORDER BY id DESC''')
             rows = cursor.fetchall()
-            rows_list = [serialize_account_row(row) for row in rows]
+            rows_list = [
+                merge_account_validation(
+                    serialize_account_row(row),
+                    get_validation_result(Path(BASE_DIR), row["id"]),
+                )
+                for row in rows
+            ]
 
             return jsonify(
                 {
@@ -920,48 +932,63 @@ def getAccounts():
 
 
 @app.route("/getValidAccounts",methods=['GET'])
-async def getValidAccounts():
-    with sqlite3.connect(get_db_path()) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute('''
-        SELECT * FROM user_info ORDER BY id DESC''')
-        rows = cursor.fetchall()
-        serialized_rows = []
-        for row in rows:
-            account = serialize_account_row(row)
-            if account["supportsValidation"] and row["filePath"]:
-                flag = await check_cookie(account["type"], row["filePath"])
-                if not flag:
-                    account["statusCode"] = 0
-                    account["status"] = "異常"
-                    cursor.execute(
-                        '''
-                        UPDATE user_info
-                        SET status = ?
-                        WHERE id = ?
-                        ''',
-                        (0, row["id"]),
-                    )
-                else:
-                    account["statusCode"] = 1
-                    account["status"] = "正常"
-                    cursor.execute(
-                        '''
-                        UPDATE user_info
-                        SET status = ?
-                        WHERE id = ?
-                        ''',
-                        (1, row["id"]),
-                    )
-                conn.commit()
-            serialized_rows.append(account)
+def getValidAccounts():
+    try:
+        results = validate_accounts(Path(BASE_DIR), get_db_path())
         return jsonify(
                         {
                             "code": 200,
                             "msg": None,
-                            "data": serialized_rows
+                            "data": results
                         }),200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": f"驗證帳號狀態失敗: {str(e)}",
+            "data": None
+        }), 500
+
+
+@app.route("/validateAccount", methods=['POST'])
+def validate_account_route():
+    data = request.get_json() or {}
+    account_id = data.get("accountId") or data.get("id")
+    if not account_id:
+        return jsonify({
+            "code": 400,
+            "msg": "accountId is required",
+            "data": None
+        }), 400
+
+    try:
+        result = validate_account(Path(BASE_DIR), get_db_path(), int(account_id))
+        return jsonify({
+            "code": 200,
+            "msg": "account validated",
+            "data": result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": f"account validation failed: {str(e)}",
+            "data": None
+        }), 500
+
+
+@app.route("/getValidationResults", methods=['GET'])
+def get_validation_results_route():
+    try:
+        return jsonify({
+            "code": 200,
+            "msg": None,
+            "data": get_validation_results(Path(BASE_DIR)).get("results", {})
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": f"failed to load validation results: {str(e)}",
+            "data": None
+        }), 500
 
 @app.route('/deleteFile', methods=['GET'])
 def delete_file():
@@ -1070,6 +1097,7 @@ def delete_account():
             # 删除数据库记录
             cursor.execute("DELETE FROM user_info WHERE id = ?", (account_id,))
             conn.commit()
+        delete_validation_result(Path(BASE_DIR), account_id)
 
         return jsonify({
             "code": 200,
@@ -1225,7 +1253,9 @@ def create_account():
                 (account_type, file_path, user_name, status, platform_key, resolved_auth_mode, metadata_json)
             )
             conn.commit()
-            cursor.execute('SELECT * FROM user_info WHERE id = ?', (cursor.lastrowid,))
+            account_id = cursor.lastrowid
+            delete_validation_result(Path(BASE_DIR), account_id)
+            cursor.execute('SELECT * FROM user_info WHERE id = ?', (account_id,))
             record = cursor.fetchone()
 
         return jsonify({
@@ -1318,6 +1348,7 @@ def updateUserinfo():
             conn.commit()
             cursor.execute('SELECT * FROM user_info WHERE id = ?', (user_id,))
             record = cursor.fetchone()
+        delete_validation_result(Path(BASE_DIR), user_id)
 
         return jsonify({
             "code": 200,
@@ -1437,6 +1468,7 @@ def upload_cookie():
         cookie_file_path.parent.mkdir(parents=True, exist_ok=True)
 
         file.save(str(cookie_file_path))
+        delete_validation_result(Path(BASE_DIR), account_id)
 
         # 更新数据库中的账号信息（可选，比如更新更新时间）
         # 这里可以根据需要添加额外的处理逻辑
