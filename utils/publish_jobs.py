@@ -9,7 +9,10 @@ from typing import Any
 from utils.account_registry import serialize_account_row
 from utils.direct_publishers import get_direct_publisher_target, publish_job_to_direct_target, refresh_direct_publish_job_status
 from utils.profile_pipeline import (
+    apply_intro_outro_if_needed,
+    apply_watermark_if_needed,
     append_rows_to_google_sheet,
+    build_media_packaging_preview,
     build_google_sheet_rows,
     delete_rows_from_google_sheet,
     generate_profile_batch_content,
@@ -18,6 +21,8 @@ from utils.profile_pipeline import (
     get_material_record,
     get_profile,
     infer_media_kind,
+    resolve_effective_intro_outro_settings,
+    upload_media,
 )
 
 DIRECT_UPLOAD_PLATFORMS = {"xiaohongshu", "channels", "douyin", "kuaishou", "twitter", "telegram", "reddit", "discord"}
@@ -113,8 +118,14 @@ def generate_publish_batch_drafts(db_path: Path, base_dir: Path, payload: dict[s
         },
     }
 
-
-def save_publish_jobs(db_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+def save_publish_jobs(
+    db_path: Path,
+    base_dir: Path | dict[str, Any],
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if payload is None:
+        payload = base_dir if isinstance(base_dir, dict) else {}
+        base_dir = Path(".")
     ensure_publish_job_tables(db_path)
     items = payload.get("items")
     if not isinstance(items, list) or not items:
@@ -127,8 +138,10 @@ def save_publish_jobs(db_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
+        prepared_media_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         for item in items:
             normalized_item = _normalize_job_item(item)
+            normalized_item = _prepare_job_media_assets(db_path, base_dir, normalized_item, prepared_media_cache)
             for schedule_at in _expand_schedule_values(scheduling):
                 status = _resolve_initial_status(scheduling["mode"], schedule_at)
                 metadata = dict(normalized_item["metadata"])
@@ -636,6 +649,7 @@ def _build_draft_items(db_path: Path, batch_result: dict[str, Any]) -> list[dict
             linked_content_result = _find_linked_content_account_result(content_account_results, account["id"], platform_key)
             linked_account = (linked_content_result or {}).get("account") or {}
             linked_message = str((linked_content_result or {}).get("content") or "").strip()
+            media_kind = storage.get("mediaKind") or infer_media_kind(Path(processed_media_path)) if processed_media_path else "file"
             items.append({
                 "profileId": profile.get("id"),
                 "profileName": profile.get("name") or "",
@@ -657,19 +671,21 @@ def _build_draft_items(db_path: Path, batch_result: dict[str, Any]) -> list[dict
                 "message": linked_message or posts.get(platform_key) or fallback_message,
                 "hashtags": [],
                 "metadata": {
-                    "mediaKind": storage.get("mediaKind") or infer_media_kind(Path(processed_media_path)) if processed_media_path else "file",
+                    "mediaKind": media_kind,
                     "transcript": transcript,
                     "contentAccountId": linked_account.get("id") or "",
                     "postPreset": linked_account.get("postPreset") or "",
                     "publisherTargetId": linked_account.get("publisherTargetId") or "",
                     "publishingAccountId": linked_account.get("publishingAccountId") or str(account["id"]),
                     "source": "linked_content_account_generation" if linked_message else "managed_account_generation",
+                    "brandingPreview": build_media_packaging_preview(profile, media_kind, linked_account or None),
                 },
             })
 
         for content_result in content_account_results:
             account = content_result.get("account") or {}
             platform_key = str(account.get("platform") or "").strip().lower()
+            media_kind = storage.get("mediaKind") or infer_media_kind(Path(processed_media_path)) if processed_media_path else "file"
             items.append({
                 "profileId": profile.get("id"),
                 "profileName": profile.get("name") or "",
@@ -694,12 +710,13 @@ def _build_draft_items(db_path: Path, batch_result: dict[str, Any]) -> list[dict
                 "message": str(content_result.get("content") or "").strip(),
                 "hashtags": [],
                 "metadata": {
-                    "mediaKind": storage.get("mediaKind") or infer_media_kind(Path(processed_media_path)) if processed_media_path else "file",
+                    "mediaKind": media_kind,
                     "transcript": transcript,
                     "postPreset": account.get("postPreset") or "",
                     "publishingAccountId": account.get("publishingAccountId") or "",
                     "publisherTargetId": account.get("publisherTargetId") or "",
                     "source": "content_account_generation",
+                    "brandingPreview": build_media_packaging_preview(profile, media_kind, account),
                 },
             })
 
@@ -740,6 +757,60 @@ def _normalize_scheduling(payload: dict[str, Any]) -> dict[str, Any]:
         "frequencyValue": max(1, interval_value),
         "frequencyUnit": interval_unit,
     }
+
+
+def _prepare_job_media_assets(
+    db_path: Path,
+    base_dir: Path,
+    item: dict[str, Any],
+    cache: dict[tuple[Any, ...], dict[str, Any]],
+) -> dict[str, Any]:
+    profile_id = item.get("profileId")
+    material_id = item.get("materialId")
+    if not profile_id or not material_id:
+        return item
+
+    profile = get_profile(db_path, int(profile_id))
+    material = get_material_record(db_path, int(material_id))
+    if not material:
+        return item
+
+    raw_file_path = str(material.get("file_path") or "").strip()
+    source_path = base_dir / raw_file_path
+    if not source_path.exists():
+        source_path = base_dir / "videoFile" / Path(raw_file_path).name
+    if not source_path.exists():
+        return item
+
+    content_account_id = str(item.get("contentAccountId") or (item.get("metadata") or {}).get("contentAccountId") or "").strip()
+    cache_key = (profile_id, material_id, content_account_id or "__profile__")
+    if cache_key in cache:
+        prepared = cache[cache_key]
+    else:
+        runtime_profile = deepcopy(profile)
+        content_account = _find_content_account(profile, content_account_id) if content_account_id else None
+        if content_account:
+            runtime_profile.setdefault("settings", {})["introOutro"] = resolve_effective_intro_outro_settings(profile, content_account)
+        media_path = apply_intro_outro_if_needed(source_path, runtime_profile, base_dir)
+        media_path = apply_watermark_if_needed(media_path, runtime_profile, base_dir)
+        upload_result = upload_media(media_path, runtime_profile)
+        media_kind = upload_result.get("mediaKind") or infer_media_kind(media_path)
+        prepared = {
+            "mediaPath": str(media_path),
+            "mediaPublicUrl": upload_result.get("publicUrl") or "",
+            "mediaKind": media_kind,
+            "brandingPreview": build_media_packaging_preview(profile, media_kind, content_account),
+        }
+        cache[cache_key] = prepared
+
+    normalized = dict(item)
+    normalized["mediaPath"] = prepared["mediaPath"]
+    normalized["mediaPublicUrl"] = prepared["mediaPublicUrl"]
+    metadata = dict(normalized.get("metadata") or {})
+    metadata["mediaKind"] = prepared["mediaKind"]
+    metadata["brandingPreview"] = prepared["brandingPreview"]
+    normalized["metadata"] = metadata
+    return normalized
 
 
 def _expand_schedule_values(scheduling: dict[str, Any]) -> list[str | None]:

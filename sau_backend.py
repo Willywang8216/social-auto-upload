@@ -624,7 +624,7 @@ def generate_publish_batch_drafts_route():
 def save_publish_jobs_route():
     data = request.get_json() or {}
     try:
-        result = save_publish_jobs(get_db_path(), data)
+        result = save_publish_jobs(get_db_path(), Path(BASE_DIR), data)
         return jsonify({
             "code": 200,
             "msg": "success",

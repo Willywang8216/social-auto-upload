@@ -1052,6 +1052,7 @@ def generate_content_account_posts(
                 "postPreset": account.get("postPreset", ""),
                 "publishingAccountId": account.get("publishingAccountId") or "",
                 "publisherTargetId": account.get("publisherTargetId") or "",
+                "introOutroOverride": deepcopy(account.get("introOutroOverride") or {}),
             },
             "content": content,
         })
@@ -1445,9 +1446,111 @@ def _normalize_intro_outro_settings(settings: dict[str, Any] | None) -> dict[str
         "imageIntroTitle": str(settings.get("imageIntroTitle") or "").strip(),
         "imageIntroBody": str(settings.get("imageIntroBody") or "").strip(),
         "imageThankYouPath": str(settings.get("imageThankYouPath") or settings.get("imageOutroPath") or "").strip(),
+        "imageThankYouTitle": str(settings.get("imageThankYouTitle") or "").strip(),
+        "imageThankYouBody": str(settings.get("imageThankYouBody") or "").strip(),
         "backgroundColor": background_color,
         "textColor": text_color,
         "imagePanelRatio": image_panel_ratio,
+    }
+
+
+def _normalize_intro_outro_override_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
+    settings = deepcopy(settings or {})
+    normalized = {}
+
+    if "videoEnabled" in settings:
+        normalized["videoEnabled"] = bool(settings.get("videoEnabled"))
+    if "imageEnabled" in settings:
+        normalized["imageEnabled"] = bool(settings.get("imageEnabled"))
+
+    for key in [
+        "videoIntroPath",
+        "videoOutroPath",
+        "imageIntroPath",
+        "imageIntroTitle",
+        "imageIntroBody",
+        "imageThankYouPath",
+        "imageThankYouTitle",
+        "imageThankYouBody",
+    ]:
+        if key in settings:
+            normalized[key] = str(settings.get(key) or "").strip()
+
+    if "backgroundColor" in settings:
+        color = str(settings.get("backgroundColor") or "").strip().upper()
+        normalized["backgroundColor"] = color if re.fullmatch(r"#[0-9A-F]{6}", color) else "#000000"
+    if "textColor" in settings:
+        color = str(settings.get("textColor") or "").strip().upper()
+        normalized["textColor"] = color if re.fullmatch(r"#[0-9A-F]{6}", color) else "#FFFFFF"
+    if "imagePanelRatio" in settings:
+        ratio = _coerce_float(settings.get("imagePanelRatio"), 0.22)
+        normalized["imagePanelRatio"] = min(max(ratio, 0.08), 0.45)
+
+    return normalized
+
+
+def resolve_effective_intro_outro_settings(
+    profile: dict[str, Any],
+    content_account: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    base_settings = _normalize_intro_outro_settings(((profile.get("settings") or {}).get("introOutro")) or {})
+    override_settings = _normalize_intro_outro_override_settings((content_account or {}).get("introOutroOverride"))
+    merged = dict(base_settings)
+    merged.update(override_settings)
+    return merged
+
+
+def build_media_packaging_preview(
+    profile: dict[str, Any],
+    media_kind: str,
+    content_account: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    intro_outro = resolve_effective_intro_outro_settings(profile, content_account)
+    watermark = _normalize_watermark_settings(((profile.get("settings") or {}).get("watermark")) or {})
+    lines = []
+    summary = "原始素材"
+
+    if media_kind == "video":
+        if intro_outro.get("videoEnabled") and (intro_outro.get("videoIntroPath") or intro_outro.get("videoOutroPath")):
+            intro_label = Path(intro_outro.get("videoIntroPath") or "").name or "未設定片頭"
+            outro_label = Path(intro_outro.get("videoOutroPath") or "").name or "未設定片尾"
+            lines.append(f"影片包裝：{intro_label} → 主影片 → {outro_label}")
+            summary = "影片自動串接片頭片尾"
+        else:
+            lines.append("影片包裝：不加片頭 / 片尾")
+            summary = "影片維持主素材"
+    elif media_kind == "image":
+        image_intro_mode = "背景圖" if intro_outro.get("imageIntroPath") else ("文字介紹卡" if (intro_outro.get("imageIntroTitle") or intro_outro.get("imageIntroBody")) else "無")
+        image_thank_you_mode = (
+            "感謝圖"
+            if intro_outro.get("imageThankYouPath")
+            else ("文字感謝卡" if (intro_outro.get("imageThankYouTitle") or intro_outro.get("imageThankYouBody")) else "無")
+        )
+        if intro_outro.get("imageEnabled") and (image_intro_mode != "無" or image_thank_you_mode != "無"):
+            lines.append(f"圖片包裝：{image_intro_mode} → 主圖 → {image_thank_you_mode}")
+            summary = "圖片輸出三段式版面"
+        else:
+            lines.append("圖片包裝：維持原圖")
+            summary = "圖片維持主素材"
+    else:
+        lines.append("這個素材類型不套用片頭 / 片尾規則")
+
+    if watermark.get("enabled"):
+        watermark_label = "圖片浮水印" if watermark.get("type") == "image" else "文字浮水印"
+        lines.append(f"浮水印：{watermark_label}（{watermark.get('mode') or 'static'}）")
+    else:
+        lines.append("浮水印：停用")
+
+    override_name = str((content_account or {}).get("name") or "").strip()
+    if override_name and _normalize_intro_outro_override_settings((content_account or {}).get("introOutroOverride")):
+        lines.append(f"已套用內容帳號覆寫：{override_name}")
+
+    return {
+        "summary": summary,
+        "lines": lines,
+        "mediaKind": media_kind,
+        "introOutro": intro_outro,
+        "watermarkEnabled": watermark.get("enabled"),
     }
 
 
@@ -1479,6 +1582,7 @@ def _normalize_content_accounts(values: Any) -> list[dict[str, str]]:
             "postPreset": str(item.get("postPreset") or "").strip(),
             "publishingAccountId": str(item.get("publishingAccountId") or "").strip(),
             "publisherTargetId": str(item.get("publisherTargetId") or "").strip(),
+            "introOutroOverride": _normalize_intro_outro_override_settings(item.get("introOutroOverride")),
         })
 
     return normalized
@@ -2003,7 +2107,7 @@ def _apply_image_intro_outro(
     background_color = intro_outro.get("backgroundColor") or "#000000"
     panel_ratio = float(intro_outro.get("imagePanelRatio") or 0.22)
     intro_panel = _build_image_intro_panel(base.width, base.height, intro_outro, profile, panel_ratio)
-    outro_panel = _build_image_branding_panel(intro_outro.get("imageThankYouPath"), base.width, base.height, panel_ratio)
+    outro_panel = _build_image_thank_you_panel(base.width, base.height, intro_outro, profile, panel_ratio)
 
     total_height = base.height
     if intro_panel is not None:
@@ -2302,6 +2406,45 @@ def _build_image_intro_panel(
     max_text_width = max(base_width - (left_margin * 2), 40)
 
     current_y = top_margin
+    if title:
+        current_y = _draw_wrapped_text_block(draw, title, title_font, left_margin, current_y, max_text_width, text_color)
+    if body:
+        current_y += max(10, target_height // 18)
+        _draw_wrapped_text_block(draw, body, body_font, left_margin, current_y, max_text_width, text_color)
+    return canvas
+
+
+def _build_image_thank_you_panel(
+    base_width: int,
+    base_height: int,
+    intro_outro: dict[str, Any],
+    profile: dict[str, Any],
+    panel_ratio: float,
+):
+    image_path = intro_outro.get("imageThankYouPath")
+    if image_path:
+        return _build_image_branding_panel(image_path, base_width, base_height, panel_ratio)
+
+    title = (intro_outro.get("imageThankYouTitle") or "").strip()
+    body = (intro_outro.get("imageThankYouBody") or profile.get("cta") or "").strip()
+    if not title and not body:
+        return None
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required for image intro/outro rendering") from exc
+
+    target_height = max(96, int(base_height * panel_ratio))
+    canvas = Image.new("RGB", (base_width, target_height), _hex_to_rgb_tuple(intro_outro.get("backgroundColor") or "#000000"))
+    draw = ImageDraw.Draw(canvas)
+    title_font = _load_watermark_font(ImageFont, max(22, target_height // 4))
+    body_font = _load_watermark_font(ImageFont, max(16, target_height // 7))
+    text_color = _hex_to_rgb_tuple(intro_outro.get("textColor") or "#FFFFFF")
+    left_margin = max(24, base_width // 20)
+    max_text_width = max(base_width - (left_margin * 2), 40)
+    current_y = max(18, target_height // 8)
+
     if title:
         current_y = _draw_wrapped_text_block(draw, title, title_font, left_margin, current_y, max_text_width, text_color)
     if body:

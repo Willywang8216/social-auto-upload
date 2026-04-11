@@ -205,6 +205,94 @@
                   />
                 </el-form-item>
 
+                <el-divider content-position="left">媒體包裝覆寫</el-divider>
+
+                <el-form-item label="影片自動包裝" label-width="120px">
+                  <el-select
+                    v-model="contentAccount.introOutroOverride.videoEnabled"
+                    clearable
+                    placeholder="留空則沿用 Profile"
+                    style="width: 100%"
+                  >
+                    <el-option label="沿用 Profile" :value="null" />
+                    <el-option label="強制開啟" :value="true" />
+                    <el-option label="強制關閉" :value="false" />
+                  </el-select>
+                </el-form-item>
+
+                <el-form-item label="影片片頭覆寫" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.introOutroOverride.videoIntroPath"
+                    placeholder="留空則沿用 Profile"
+                  />
+                </el-form-item>
+
+                <el-form-item label="影片片尾覆寫" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.introOutroOverride.videoOutroPath"
+                    placeholder="留空則沿用 Profile"
+                  />
+                </el-form-item>
+
+                <el-form-item label="圖片自動包裝" label-width="120px">
+                  <el-select
+                    v-model="contentAccount.introOutroOverride.imageEnabled"
+                    clearable
+                    placeholder="留空則沿用 Profile"
+                    style="width: 100%"
+                  >
+                    <el-option label="沿用 Profile" :value="null" />
+                    <el-option label="強制開啟" :value="true" />
+                    <el-option label="強制關閉" :value="false" />
+                  </el-select>
+                </el-form-item>
+
+                <el-form-item label="圖片介紹卡背景圖" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.introOutroOverride.imageIntroPath"
+                    placeholder="留空則沿用 Profile"
+                  />
+                </el-form-item>
+
+                <el-form-item label="圖片介紹卡標題" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.introOutroOverride.imageIntroTitle"
+                    placeholder="留空則沿用 Profile"
+                  />
+                </el-form-item>
+
+                <el-form-item label="圖片介紹卡內容" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.introOutroOverride.imageIntroBody"
+                    type="textarea"
+                    :rows="2"
+                    placeholder="留空則沿用 Profile"
+                  />
+                </el-form-item>
+
+                <el-form-item label="Thank-you 圖覆寫" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.introOutroOverride.imageThankYouPath"
+                    placeholder="留空則沿用 Profile"
+                  />
+                </el-form-item>
+
+                <el-form-item label="Thank-you 標題" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.introOutroOverride.imageThankYouTitle"
+                    placeholder="留空則沿用 Profile"
+                  />
+                </el-form-item>
+
+                <el-form-item label="Thank-you 內容" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.introOutroOverride.imageThankYouBody"
+                    type="textarea"
+                    :rows="2"
+                    placeholder="留空則沿用 Profile"
+                  />
+                </el-form-item>
+
                 <el-form-item label="綁定發佈帳號" label-width="120px">
                   <el-select
                     v-model="contentAccount.publishingAccountId"
@@ -497,6 +585,22 @@
           />
         </el-form-item>
 
+        <el-form-item label="Thank-you 標題">
+          <el-input
+            v-model="profileForm.settings.introOutro.imageThankYouTitle"
+            placeholder="例如：Thank you for watching"
+          />
+        </el-form-item>
+
+        <el-form-item label="Thank-you 內容">
+          <el-input
+            v-model="profileForm.settings.introOutro.imageThankYouBody"
+            type="textarea"
+            :rows="2"
+            placeholder="可填 CTA、感謝語或下一步行動；留空時會回退使用 profile 的 CTA"
+          />
+        </el-form-item>
+
         <el-form-item label="圖片片頭 / 片尾高度比例">
           <el-slider
             v-model="profileForm.settings.introOutro.imagePanelRatio"
@@ -517,7 +621,7 @@
 
         <el-form-item label="使用方式說明">
           <div class="muted-text">
-            影片預設會依序串接為「片頭 → 主影片 → 片尾」，可用上方開關關閉。圖片預設會輸出成「介紹卡 / 主圖 / thank-you 圖」三段式；介紹卡可用文字生成，也可直接指定一張背景圖。
+            影片預設會依序串接為「片頭 → 主影片 → 片尾」，可用上方開關關閉。圖片預設會輸出成「介紹卡 / 主圖 / thank-you 圖」三段式；介紹卡與 thank-you 都可用文字生成，也可直接指定圖片素材。
           </div>
         </el-form-item>
 
@@ -1323,7 +1427,22 @@ const createContentAccount = () => ({
   cta: '',
   postPreset: '',
   publishingAccountId: '',
-  publisherTargetId: ''
+  publisherTargetId: '',
+  introOutroOverride: {
+    videoEnabled: null,
+    videoIntroPath: '',
+    videoOutroPath: '',
+    imageEnabled: null,
+    imageIntroPath: '',
+    imageIntroTitle: '',
+    imageIntroBody: '',
+    imageThankYouPath: '',
+    imageThankYouTitle: '',
+    imageThankYouBody: '',
+    backgroundColor: '',
+    textColor: '',
+    imagePanelRatio: ''
+  }
 })
 
 const normalizeDirectPublisherConfig = (platform, config = {}) => {
@@ -1419,6 +1538,8 @@ const normalizeIntroOutroFormSettings = (introOutro = {}) => ({
   imageIntroTitle: introOutro.imageIntroTitle || '',
   imageIntroBody: introOutro.imageIntroBody || '',
   imageThankYouPath: introOutro.imageThankYouPath || introOutro.imageOutroPath || '',
+  imageThankYouTitle: introOutro.imageThankYouTitle || '',
+  imageThankYouBody: introOutro.imageThankYouBody || '',
   backgroundColor: /^#[0-9A-Fa-f]{6}$/.test(introOutro.backgroundColor || '') ? introOutro.backgroundColor : '#000000',
   textColor: /^#[0-9A-Fa-f]{6}$/.test(introOutro.textColor || '') ? introOutro.textColor : '#FFFFFF',
   imagePanelRatio: Math.min(Math.max(Number(introOutro.imagePanelRatio) || 0.22, 0.08), 0.45)
@@ -1439,7 +1560,11 @@ const normalizeContentAccounts = (values = []) => {
       cta: item.cta || '',
       postPreset: item.postPreset || '',
       publishingAccountId: item.publishingAccountId || '',
-      publisherTargetId: item.publisherTargetId || ''
+      publisherTargetId: item.publisherTargetId || '',
+      introOutroOverride: {
+        ...createContentAccount().introOutroOverride,
+        ...(item.introOutroOverride || {})
+      }
     }))
 }
 
@@ -1529,6 +1654,8 @@ const makeDefaultProfile = () => ({
       imageIntroTitle: '',
       imageIntroBody: '',
       imageThankYouPath: '',
+      imageThankYouTitle: '',
+      imageThankYouBody: '',
       backgroundColor: '#000000',
       textColor: '#FFFFFF',
       imagePanelRatio: 0.22

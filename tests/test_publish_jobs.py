@@ -202,6 +202,77 @@ class PublishJobsTests(unittest.TestCase):
         self.assertEqual(managed_item["message"], "Persona tweet")
         self.assertEqual(managed_item["metadata"]["contentAccountId"], "acct-twitter-linked")
         self.assertEqual(managed_item["metadata"]["publishingAccountId"], str(twitter_account_id))
+        self.assertEqual(managed_item["metadata"]["brandingPreview"]["summary"], "影片維持主素材")
+
+    def test_generate_publish_batch_drafts_includes_branding_preview_for_text_thank_you(self):
+        profile = save_profile(
+            self.db_path,
+            {
+                "name": "Creator Branding",
+                "settings": {
+                    "introOutro": {
+                        "imageEnabled": True,
+                        "imageIntroTitle": "Intro card",
+                        "imageThankYouTitle": "Thanks card",
+                    },
+                    "contentAccounts": [
+                        {
+                            "id": "acct-instagram-main",
+                            "platform": "instagram",
+                            "name": "IG Persona",
+                            "introOutroOverride": {
+                                "imageThankYouTitle": "Persona thanks",
+                            },
+                        }
+                    ],
+                },
+            },
+        )
+
+        fake_batch_result = {
+            "profile": profile,
+            "selectedAccountIds": [],
+            "results": [
+                {
+                    "material": {"id": 1, "filename": "cover.jpg"},
+                    "processedMediaPath": str(self.base_dir / "videoFile" / "cover.jpg"),
+                    "storage": {
+                        "publicUrl": "https://cdn.example.com/cover.jpg",
+                        "mediaKind": "image",
+                    },
+                    "transcript": "transcript body",
+                    "posts": {},
+                    "contentAccountResults": [
+                        {
+                            "account": {
+                                "id": "acct-instagram-main",
+                                "platform": "instagram",
+                                "name": "IG Persona",
+                                "introOutroOverride": {
+                                    "imageThankYouTitle": "Persona thanks",
+                                },
+                            },
+                            "content": "IG copy",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with patch("utils.publish_jobs.generate_profile_batch_content", return_value=fake_batch_result):
+            result = generate_publish_batch_drafts(
+                self.db_path,
+                self.base_dir,
+                {
+                    "profileId": profile["id"],
+                    "materialIds": [1],
+                    "selectedContentAccountIds": ["acct-instagram-main"],
+                },
+            )
+
+        item = result["items"][0]
+        self.assertEqual(item["metadata"]["brandingPreview"]["summary"], "圖片輸出三段式版面")
+        self.assertIn("圖片包裝：文字介紹卡 → 主圖 → 文字感謝卡", item["metadata"]["brandingPreview"]["lines"])
 
     def test_generate_publish_batch_drafts_marks_managed_facebook_and_bound_persona_as_direct_upload(self):
         with sqlite3.connect(self.db_path) as conn:
@@ -318,6 +389,70 @@ class PublishJobsTests(unittest.TestCase):
             "2026-05-01T22:00:00",
         ])
         self.assertTrue(all(job["status"] == "scheduled" for job in jobs))
+
+    def test_save_publish_jobs_applies_content_account_intro_outro_override_when_preparing_media(self):
+        source_dir = self.base_dir / "videoFile"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        source_path = source_dir / "clip.mp4"
+        source_path.write_bytes(b"video")
+
+        profile = save_profile(
+            self.db_path,
+            {
+                "name": "Creator Media Override",
+                "settings": {
+                    "introOutro": {
+                        "videoEnabled": True,
+                        "videoIntroPath": "profile-intro.mp4",
+                    },
+                    "contentAccounts": [
+                        {
+                            "id": "acct-twitter-main",
+                            "platform": "twitter",
+                            "name": "X 主帳",
+                            "introOutroOverride": {
+                                "videoEnabled": False,
+                                "imageThankYouTitle": "Persona thanks",
+                            },
+                        }
+                    ],
+                },
+            },
+        )
+
+        with patch("utils.publish_jobs.apply_intro_outro_if_needed", return_value=source_path) as intro_mock, \
+             patch("utils.publish_jobs.apply_watermark_if_needed", return_value=source_path), \
+             patch("utils.publish_jobs.upload_media", return_value={"publicUrl": "https://cdn.example.com/final.mp4", "mediaKind": "video"}):
+            saved = save_publish_jobs(
+                self.db_path,
+                self.base_dir,
+                {
+                    "items": [
+                        {
+                            "profileId": profile["id"],
+                            "profileName": profile["name"],
+                            "targetKind": "content_account",
+                            "contentAccountId": "acct-twitter-main",
+                            "platformKey": "twitter",
+                            "targetName": "X 主帳",
+                            "deliveryMode": "direct_upload",
+                            "materialId": 1,
+                            "materialName": "clip.mp4",
+                            "message": "Tweet body",
+                            "metadata": {
+                                "mediaKind": "video",
+                            },
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(saved["count"], 1)
+        runtime_profile = intro_mock.call_args.args[1]
+        self.assertFalse(runtime_profile["settings"]["introOutro"]["videoEnabled"])
+        jobs = list_publish_jobs(self.db_path)
+        self.assertEqual(jobs[0]["mediaPublicUrl"], "https://cdn.example.com/final.mp4")
+        self.assertIn("已套用內容帳號覆寫", "\n".join(jobs[0]["metadata"]["brandingPreview"]["lines"]))
 
     def test_update_publish_job_content_appends_revision(self):
         saved = save_publish_jobs(

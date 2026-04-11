@@ -221,6 +221,21 @@
               <span v-else class="muted-text">未附帶媒體資訊</span>
             </div>
 
+            <div v-if="getBrandingPreview(row)" class="branding-preview-block">
+              <div class="media-label">最終包裝規則</div>
+              <div class="branding-preview-summary">
+                {{ getBrandingPreview(row).summary }}
+              </div>
+              <ul class="branding-preview-list">
+                <li
+                  v-for="(line, index) in getBrandingPreview(row).lines || []"
+                  :key="`${getRowKey(row)}-branding-${index}`"
+                >
+                  {{ line }}
+                </li>
+              </ul>
+            </div>
+
             <el-form label-position="top">
               <el-form-item label="標題">
                 <el-input v-model="row.title" maxlength="120" show-word-limit />
@@ -704,6 +719,11 @@ const getDriverPublishingAccountLabel = (row) => {
 const getDriverPublishingAccountId = (row) => {
   const metadata = row.metadata || {}
   return Number(metadata.publishingAccountId || row.accountId || 0)
+}
+
+const getBrandingPreview = (row) => {
+  const brandingPreview = (row.metadata || {}).brandingPreview
+  return brandingPreview && typeof brandingPreview === 'object' ? brandingPreview : null
 }
 
 const getDriverSourceLabel = (row) => {
@@ -1257,6 +1277,32 @@ onMounted(async () => {
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .branding-preview-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 14px;
+    border: 1px solid $border-light;
+    border-radius: 10px;
+    background: $border-extra-light;
+  }
+
+  .branding-preview-summary {
+    font-size: 13px;
+    font-weight: 600;
+    color: $text-primary;
+  }
+
+  .branding-preview-list {
+    margin: 0;
+    padding-left: 18px;
+    color: $text-secondary;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
 
   .media-label {

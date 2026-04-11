@@ -10,6 +10,7 @@ from utils.profile_pipeline import (
     SHEET_COLUMNS,
     apply_intro_outro_if_needed,
     apply_watermark_if_needed,
+    build_media_packaging_preview,
     build_google_sheet_row_mappings,
     build_google_sheet_rows,
     ensure_profile_tables,
@@ -23,6 +24,7 @@ from utils.profile_pipeline import (
     resolve_google_sheet_worksheet_name,
     run_profile_backup,
     run_scheduled_profile_backup_if_due,
+    resolve_effective_intro_outro_settings,
     save_google_service_account_config,
     save_profile_backup_config,
     save_profile,
@@ -87,6 +89,10 @@ class ProfilePipelineTests(unittest.TestCase):
                                 "postPreset": "X Main Preset",
                                 "publishingAccountId": 1,
                                 "publisherTargetId": "publisher-x-main",
+                                "introOutroOverride": {
+                                    "videoEnabled": False,
+                                    "imageThankYouTitle": "Thanks from X",
+                                },
                             },
                             {
                                 "platform": "discord",
@@ -106,6 +112,8 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertTrue(saved["settings"]["contentAccounts"][1]["id"])
             self.assertEqual(saved["settings"]["contentAccounts"][0]["publishingAccountId"], "1")
             self.assertEqual(saved["settings"]["contentAccounts"][0]["publisherTargetId"], "publisher-x-main")
+            self.assertFalse(saved["settings"]["contentAccounts"][0]["introOutroOverride"]["videoEnabled"])
+            self.assertEqual(saved["settings"]["contentAccounts"][0]["introOutroOverride"]["imageThankYouTitle"], "Thanks from X")
             self.assertEqual(saved["settings"]["contentAccounts"][1]["platform"], "discord")
 
             profiles = list_profiles(db_path)
@@ -334,6 +342,8 @@ class ProfilePipelineTests(unittest.TestCase):
                             "imageIntroTitle": "Regional intro",
                             "imageIntroBody": "Contact us",
                             "imageOutroPath": "outro.png",
+                            "imageThankYouTitle": "Thanks",
+                            "imageThankYouBody": "Follow for more",
                             "backgroundColor": "bad-color",
                             "textColor": "also-bad",
                             "imagePanelRatio": 9,
@@ -351,9 +361,54 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertEqual(intro_outro["imageIntroTitle"], "Regional intro")
             self.assertEqual(intro_outro["imageIntroBody"], "Contact us")
             self.assertEqual(intro_outro["imageThankYouPath"], "outro.png")
+            self.assertEqual(intro_outro["imageThankYouTitle"], "Thanks")
+            self.assertEqual(intro_outro["imageThankYouBody"], "Follow for more")
             self.assertEqual(intro_outro["backgroundColor"], "#000000")
             self.assertEqual(intro_outro["textColor"], "#FFFFFF")
             self.assertEqual(intro_outro["imagePanelRatio"], 0.45)
+
+    def test_resolve_effective_intro_outro_settings_applies_content_account_override(self):
+        profile = {
+            "settings": {
+                "introOutro": {
+                    "videoEnabled": True,
+                    "videoIntroPath": "intro.mp4",
+                    "imageThankYouTitle": "Profile thanks",
+                }
+            }
+        }
+        content_account = {
+            "introOutroOverride": {
+                "videoEnabled": False,
+                "imageThankYouTitle": "Persona thanks",
+            }
+        }
+
+        resolved = resolve_effective_intro_outro_settings(profile, content_account)
+
+        self.assertFalse(resolved["videoEnabled"])
+        self.assertEqual(resolved["videoIntroPath"], "intro.mp4")
+        self.assertEqual(resolved["imageThankYouTitle"], "Persona thanks")
+
+    def test_build_media_packaging_preview_reports_text_thank_you_cards(self):
+        preview = build_media_packaging_preview(
+            {
+                "settings": {
+                    "introOutro": {
+                        "imageEnabled": True,
+                        "imageIntroTitle": "Intro title",
+                        "imageThankYouTitle": "Thanks title",
+                    },
+                    "watermark": {
+                        "enabled": False,
+                    },
+                }
+            },
+            "image",
+        )
+
+        self.assertEqual(preview["summary"], "圖片輸出三段式版面")
+        self.assertIn("圖片包裝：文字介紹卡 → 主圖 → 文字感謝卡", preview["lines"])
 
     def test_apply_intro_outro_if_needed_stacks_image_intro_card_and_thank_you_image(self):
         try:
@@ -391,6 +446,40 @@ class ProfilePipelineTests(unittest.TestCase):
 
             self.assertTrue(result_path.exists())
             self.assertNotEqual(result_path, source_path)
+            output_image = Image.open(result_path)
+            self.assertEqual(output_image.width, 640)
+            self.assertEqual(output_image.height, 360 + 72 + 72)
+
+    def test_apply_intro_outro_if_needed_stacks_text_generated_thank_you_card(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow not installed")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+
+            source_path = base_dir / "image.jpg"
+            Image.new("RGB", (640, 360), "navy").save(source_path)
+
+            result_path = apply_intro_outro_if_needed(
+                source_path,
+                {
+                    "cta": "Join Patreon",
+                    "settings": {
+                        "introOutro": {
+                            "imageIntroTitle": "Hong Kong 廣東話內容",
+                            "imageThankYouTitle": "多謝收看",
+                            "imageThankYouBody": "Join Patreon",
+                            "backgroundColor": "#112233",
+                            "textColor": "#FFFFFF",
+                            "imagePanelRatio": 0.2,
+                        }
+                    }
+                },
+                base_dir,
+            )
+
             output_image = Image.open(result_path)
             self.assertEqual(output_image.width, 640)
             self.assertEqual(output_image.height, 360 + 72 + 72)
