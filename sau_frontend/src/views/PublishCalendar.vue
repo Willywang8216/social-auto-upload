@@ -60,14 +60,21 @@
 
       <el-calendar v-model="calendarDate">
         <template #date-cell="{ data }">
-          <div class="calendar-cell" @click="openDayDrawer(data.day)">
+          <div
+            class="calendar-cell"
+            :class="`lifecycle-${getDayLifecycleState(entriesMap[data.day] || [])}`"
+            @click="openDayDrawer(data.day)"
+          >
             <div class="cell-date">{{ data.day.split('-')[2] }}</div>
             <div v-if="entriesMap[data.day]?.length" class="cell-events">
-              <el-tag size="small" type="primary">{{ entriesMap[data.day].length }} 筆</el-tag>
+              <el-tag size="small" :type="getLifecycleTagType(getDayLifecycleState(entriesMap[data.day] || []))">
+                {{ entriesMap[data.day].length }} 筆
+              </el-tag>
               <div
                 v-for="job in entriesMap[data.day].slice(0, 2)"
                 :key="job.id"
                 class="cell-job"
+                :class="`lifecycle-${getJobLifecycleState(job)}`"
               >
                 {{ job.targetName || job.platformKey }}
               </div>
@@ -88,6 +95,7 @@
           v-for="job in selectedDateJobs"
           :key="job.id"
           class="drawer-job-card"
+          :class="`lifecycle-${getJobLifecycleState(job)}`"
           shadow="never"
         >
           <div class="drawer-job-header">
@@ -97,7 +105,7 @@
                 {{ job.profileName || '未命名 Profile' }} · {{ job.platformKey }} · {{ formatDeliveryMode(job.deliveryMode) }}
               </div>
             </div>
-            <el-tag>{{ job.status }}</el-tag>
+            <el-tag :type="getLifecycleTagType(getJobLifecycleState(job))">{{ job.status }}</el-tag>
           </div>
 
           <div class="drawer-job-body">
@@ -192,7 +200,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { profileApi } from '@/api/profile'
 import { publishApi } from '@/api/publish'
-import { getLifecycleLines, getLifecycleTags } from '@/utils/publishLifecycle'
+import { getLifecycleLines, getLifecycleTags, getLifecycleVisualState } from '@/utils/publishLifecycle'
 
 const profiles = ref([])
 const calendarDate = ref(new Date())
@@ -319,6 +327,48 @@ const formatDeliveryMode = (value) => {
     return '手動完成'
   }
   return value || '未設定'
+}
+
+const lifecyclePriority = {
+  failed: 4,
+  'publish-triggered': 3,
+  'container-processing': 2,
+  published: 1,
+  default: 0
+}
+
+const getJobLifecycleState = (job) => getLifecycleVisualState(job)
+
+const getDayLifecycleState = (jobs = []) => {
+  let selectedState = 'default'
+  let selectedPriority = -1
+
+  ;(jobs || []).forEach((job) => {
+    const state = getJobLifecycleState(job)
+    const priority = lifecyclePriority[state] ?? 0
+    if (priority > selectedPriority) {
+      selectedState = state
+      selectedPriority = priority
+    }
+  })
+
+  return selectedState
+}
+
+const getLifecycleTagType = (state) => {
+  if (state === 'failed') {
+    return 'danger'
+  }
+  if (state === 'published') {
+    return 'success'
+  }
+  if (state === 'publish-triggered') {
+    return 'primary'
+  }
+  if (state === 'container-processing') {
+    return 'warning'
+  }
+  return 'info'
 }
 
 const openDayDrawer = (date) => {
@@ -462,6 +512,29 @@ onMounted(async () => {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+  }
+
+  .calendar-cell.lifecycle-container-processing {
+    background: rgba(230, 162, 60, 0.10);
+    border-color: rgba(230, 162, 60, 0.35);
+  }
+
+  .calendar-cell.lifecycle-publish-triggered {
+    background: rgba(64, 158, 255, 0.10);
+    border-color: rgba(64, 158, 255, 0.35);
+  }
+
+  .calendar-cell.lifecycle-published {
+    background: rgba(103, 194, 58, 0.10);
+    border-color: rgba(103, 194, 58, 0.35);
+  }
+
+  .calendar-cell.lifecycle-failed {
+    background: rgba(245, 108, 108, 0.10);
+    border-color: rgba(245, 108, 108, 0.35);
   }
 
   .cell-date {
@@ -481,6 +554,35 @@ onMounted(async () => {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    padding-left: 8px;
+    position: relative;
+  }
+
+  .cell-job::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 6px;
+    width: 5px;
+    height: 5px;
+    border-radius: 999px;
+    background: #c0c4cc;
+  }
+
+  .cell-job.lifecycle-container-processing::before {
+    background: #e6a23c;
+  }
+
+  .cell-job.lifecycle-publish-triggered::before {
+    background: #409eff;
+  }
+
+  .cell-job.lifecycle-published::before {
+    background: #67c23a;
+  }
+
+  .cell-job.lifecycle-failed::before {
+    background: #f56c6c;
   }
 
   .drawer-job-list {
@@ -491,6 +593,23 @@ onMounted(async () => {
 
   .drawer-job-card {
     border: 1px solid #ebeef5;
+    border-left-width: 4px;
+  }
+
+  .drawer-job-card.lifecycle-container-processing {
+    border-left-color: #e6a23c;
+  }
+
+  .drawer-job-card.lifecycle-publish-triggered {
+    border-left-color: #409eff;
+  }
+
+  .drawer-job-card.lifecycle-published {
+    border-left-color: #67c23a;
+  }
+
+  .drawer-job-card.lifecycle-failed {
+    border-left-color: #f56c6c;
   }
 
   .drawer-job-header,

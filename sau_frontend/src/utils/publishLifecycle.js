@@ -94,3 +94,38 @@ export const createDefaultYoutubeMetadata = (youtube = {}) => ({
   captionsName: youtube.captionsName || 'Default captions',
   premiereAt: youtube.premiereAt || ''
 })
+
+export const getLifecycleVisualState = (job) => {
+  const metadata = normalizeObject(job?.metadata)
+  const details = getMergedPublishDetails(job)
+  const publishStage = pickFirstText(details.publishStage).toLowerCase()
+  const containerStatusCode = pickFirstText(details.containerStatusCode).toUpperCase()
+  const jobStatus = pickFirstText(job?.status).toLowerCase()
+
+  if (
+    ['failed', 'cancelled'].includes(jobStatus) ||
+    containerStatusCode === 'ERROR' ||
+    details.containerError ||
+    details.failReason ||
+    metadata.lastStatusSyncError
+  ) {
+    return 'failed'
+  }
+
+  if (publishStage === 'publish_triggered' || publishStage === 'published_pending_reconciliation') {
+    return 'publish-triggered'
+  }
+
+  if (
+    ['processing', 'queued', 'scheduled'].includes(jobStatus) ||
+    ['container_created', 'container_processing'].includes(publishStage)
+  ) {
+    return 'container-processing'
+  }
+
+  if (['published', 'exported', 'manual_done'].includes(jobStatus) || publishStage === 'published') {
+    return 'published'
+  }
+
+  return 'default'
+}
