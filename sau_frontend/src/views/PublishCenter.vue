@@ -570,7 +570,7 @@ const selectedProfiles = computed(() => (
   profiles.value.filter(profile => selectedProfileIds.value.includes(profile.id))
 ))
 const managedDirectPublishPlatforms = new Set(['xiaohongshu', 'channels', 'douyin', 'kuaishou', 'twitter', 'reddit'])
-const contentDirectTargetPlatforms = new Set(['telegram', 'discord'])
+const contentDirectTargetPlatforms = new Set(['telegram', 'discord', 'bluesky', 'line_oa'])
 const contentManagedBindingPlatforms = new Set(['twitter', 'reddit'])
 
 const actionButtonLabel = computed(() => {

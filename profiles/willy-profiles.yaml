@@ -1,0 +1,569 @@
+version: 1
+
+profiles:
+  - name: "威威知識分享"
+    systemPrompt: >
+      你是「威威知識分享」的社群內容策略助手。
+      威威是前亞馬遜資料科學家、德國數學碩士，現在在台灣從事數學與英文創新教育。
+      內容目標是把數學的邏輯訓練與英文的世界視野結合，幫助學生、家長與教育工作者建立更完整的學習方法。
+      文案語氣要謙虛、委婉、真誠，但維持專業可信，不浮誇、不油、不過度銷售。
+      讓讀者感受到這是一位真的有產業經驗，也願意陪伴學習者一起摸索的人。
+      若素材是中文，優先輸出繁體中文；若素材是英文，優先輸出英文。
+      Twitter、Bluesky、Threads 需要 emoji 與剛好 3 個 hashtags。
+    contactDetails: |
+      Website: https://iamwillywang.com
+      Facebook: https://www.facebook.com/share/1B7TxSiUcf/
+      Threads: https://www.threads.com/@supercool_bd
+      Instagram: https://www.instagram.com/supercool_bd
+      LINE: https://line.me/ti/p/XMNSTqpm_f
+      YouTube: https://www.youtube.com/@威威-n2n
+      TikTok: https://www.tiktok.com/@weiwei_wang0
+      Pinterest: https://www.pinterest.com/iamwillywang/
+      LinkedIn: https://www.linkedin.com/in/威威-王-765974377
+      Email: will@iamwillywang.com
+      X: @weiwei_wang0
+      Reddit: https://www.reddit.com/u/knowlegesharer/s/SW0PjbnUPO
+    cta: "如果你也關心數學、英文與學習方法，歡迎追蹤、留言，或到網站了解更多內容與合作方式。"
+    accountIds: []
+    settings:
+      llm:
+        apiBaseUrl: "https://llmapi.iamwillywang.com/"
+        transcriptionModel: "Audio-Speech-Group"
+        generationModel: "reasoning"
+      storage:
+        remoteName: "Onedrive-Yahooforsub-Tao"
+        remotePath: "Scripts-ssh-ssl-keys/SocialUpload/weiwei"
+        publicUrlTemplate: ""
+      watermark:
+        enabled: true
+        templateName: "Weiwei Education Watermark"
+        type: "text"
+        mode: "dynamic"
+        pattern: "repeat-slanted"
+        repeatLines: 3
+        angle: -24
+        spacing: 220
+        fontSize: 26
+        color: "#FFFFFF"
+        text: "@weiwei_wang0"
+        imagePath: ""
+        position: "bottom-right"
+        opacity: 0.32
+      introOutro:
+        videoEnabled: false
+        videoIntroPath: ""
+        videoOutroPath: ""
+        imageEnabled: true
+        imageIntroPath: ""
+        imageIntroTitle: "威威知識分享"
+        imageIntroBody: "數學 × 英文 × 學習方法 × 教育觀察"
+        imageThankYouPath: ""
+        imageThankYouTitle: "謝謝你的閱讀"
+        imageThankYouBody: "歡迎追蹤、留言，或到網站了解更多教學內容。"
+        backgroundColor: "#0F172A"
+        textColor: "#FFFFFF"
+        imagePanelRatio: 0.22
+      googleSheet:
+        spreadsheetId: "TODO_WEIWEI_GOOGLE_SHEET_ID"
+        worksheetName: "Sheet1"
+      socialImport:
+        defaultLink: "https://iamwillywang.com"
+        category: "Weiwei Education"
+        watermarkName: ""
+        hashtagGroup: ""
+        videoThumbnailUrl: ""
+        ctaGroup: ""
+        firstComment: "更多內容與教學資源：https://iamwillywang.com"
+        story: false
+        pinterestBoard: "iamwillywang"
+        altText: "威威知識分享教學內容封面"
+        pinTitle: "威威知識分享"
+      postPresets:
+        twitter: ""
+        threads: ""
+        instagram: ""
+        facebook: ""
+        youtube: ""
+        tiktok: ""
+      contentAccounts:
+        - id: "weiwei-twitter-main"
+          platform: "twitter"
+          name: "威威 X 主帳"
+          prompt: >
+            寫成適合 X 的短文。
+            先用一句能引發共鳴的 hook，再補 1 到 3 句價值內容。
+            必須有 emoji，必須剛好 3 個 hashtags。
+            語氣保持專業、友善、謙虛，不要像硬銷。
+          contactDetails: ""
+          cta: "更多學習方法與教學內容可到網站看看。"
+          postPreset: ""
+          publisherTargetId: "publisher-weiwei-x"
+        - id: "weiwei-bluesky-main"
+          platform: "bluesky"
+          name: "威威 Bluesky"
+          prompt: >
+            寫成適合 Bluesky 的短文。
+            可以比 X 再自然一點，但仍維持專業、真誠與教育觀察感。
+            必須有 emoji，必須剛好 3 個 hashtags。
+          contactDetails: ""
+          cta: "若你對學習方法有興趣，歡迎追蹤。"
+          postPreset: ""
+          publisherTargetId: "publisher-weiwei-bluesky"
+        - id: "weiwei-threads-main"
+          platform: "threads"
+          name: "威威 Threads 主帳"
+          prompt: >
+            比 X 更口語、更像在和家長、學生與教育工作者對話。
+            可以有一點日常感，但仍要有知識含量。
+            必須有 emoji，必須剛好 3 個 hashtags。
+          contactDetails: ""
+          cta: "如果你對這類主題有興趣，歡迎留言交流。"
+          postPreset: ""
+        - id: "weiwei-instagram-longform"
+          platform: "instagram"
+          name: "威威 Instagram 長文"
+          prompt: >
+            寫成有溫度、可讀性高的長 caption。
+            第一段先抓注意力，中段分享觀察或方法，結尾自然引導追蹤或了解更多。
+          contactDetails: ""
+          cta: "想看更多教學想法與資源，歡迎追蹤。"
+          postPreset: ""
+        - id: "weiwei-facebook-longform"
+          platform: "facebook"
+          name: "威威 Facebook 長文"
+          prompt: >
+            寫成適合 Facebook 的長文貼文。
+            重視敘事與思考，不要只有結論。
+            讓家長、學生與教育工作者感受到你真正在做教育。
+          contactDetails: ""
+          cta: "若你對這樣的教學方式有興趣，歡迎追蹤粉專。"
+          postPreset: ""
+        - id: "weiwei-youtube-community"
+          platform: "youtube"
+          name: "威威 YouTube 社群"
+          prompt: >
+            用 YouTube 社群貼文口吻。
+            開頭先有簡短 hook，再補 2 到 4 句說明，保持清楚、真誠。
+          contactDetails: ""
+          cta: "歡迎訂閱頻道，之後我會分享更多教學與觀察。"
+          postPreset: ""
+          publisherTargetId: "publisher-weiwei-youtube"
+        - id: "weiwei-tiktok-caption"
+          platform: "tiktok"
+          name: "威威 TikTok Caption"
+          prompt: >
+            句子短、清楚、好懂。
+            適合短影音 caption，仍要有 emoji 與剛好 3 個 hashtags。
+          contactDetails: ""
+          cta: "喜歡這類內容，歡迎追蹤。"
+          postPreset: ""
+        - id: "weiwei-line-oa"
+          platform: "line_oa"
+          name: "威威 LINE OA"
+          prompt: >
+            寫成 LINE 官方帳號推播訊息。
+            要精簡、清楚、有溫度，適合家長與學生快速讀懂。
+            結尾要有清楚 CTA。
+          contactDetails: "Website: https://iamwillywang.com"
+          cta: "想看完整內容可到網站。"
+          postPreset: ""
+          publisherTargetId: "publisher-weiwei-line-oa"
+        - id: "weiwei-telegram-main"
+          platform: "telegram"
+          name: "威威 Telegram"
+          prompt: >
+            寫成簡潔的頻道更新通知，清楚告知這則內容的重點與價值。
+          contactDetails: "Website: https://iamwillywang.com"
+          cta: "想看完整內容可到網站。"
+          postPreset: ""
+          publisherTargetId: "publisher-weiwei-telegram"
+        - id: "weiwei-reddit-main"
+          platform: "reddit"
+          name: "威威 Reddit"
+          prompt: >
+            口吻要像社群討論，不要像廣告。
+            多用觀察、問題意識、學習反思，引導大家願意互動。
+          contactDetails: ""
+          cta: "如果你想看更完整背景，我可以再分享。"
+          postPreset: ""
+          publisherTargetId: "publisher-weiwei-reddit"
+
+  - name: "Sexualwill"
+    systemPrompt: >
+      你是「Sexualwill」的社群內容策略助手。
+      內容定位是 sex-positive、自我探索、身體自主、性健康與成人品牌導流。
+      語氣要自信、坦率、友善，但不要低俗、不要羞辱、不要物化。
+      在主流平台上，應優先用平台安全的方式描述 sensuality、sexuality、confidence、body autonomy、sexual wellness。
+      在成人導流類內容裡，可以更直接說明是成人內容，但仍保持成熟、尊重與品牌感。
+      Twitter、Bluesky、Threads 需要 emoji 與剛好 3 個 hashtags。
+    contactDetails: |
+      Linktree: https://linktr.ee/sexualwill
+      Contact hub: https://contacts.sexualwill.com
+      Facebook: https://www.facebook.com/profile.php?id=61557856140452
+      Instagram: https://www.instagram.com/sexualwill8/
+      YouTube: https://www.youtube.com/@Sexualwill
+      X: https://twitter.com/will_sexual
+      X 中文: @nudeweiwei
+      Fansly: https://fansly.com/Nakedwill_sexual/posts
+      OnlyFans: https://onlyfans.com/sexualwill
+      Pornhub: https://cn.pornhub.com/users/sexualwill1234
+      xHamster: https://xhamster.com/users/sexualwill
+    cta: "更多平台、聯絡方式與訂閱入口請見：https://contacts.sexualwill.com"
+    accountIds: []
+    settings:
+      llm:
+        apiBaseUrl: "https://llmapi.iamwillywang.com/"
+        transcriptionModel: "Audio-Speech-Group"
+        generationModel: "reasoning"
+      storage:
+        remoteName: "Onedrive-Yahooforsub-Tao"
+        remotePath: "Scripts-ssh-ssl-keys/SocialUpload/sexualwill"
+        publicUrlTemplate: ""
+      watermark:
+        enabled: true
+        templateName: "Sexualwill Main Watermark"
+        type: "text"
+        mode: "dynamic"
+        pattern: "repeat-slanted"
+        repeatLines: 3
+        angle: -30
+        spacing: 240
+        fontSize: 26
+        color: "#FFFFFF"
+        text: "@will_sexual"
+        imagePath: ""
+        position: "bottom-right"
+        opacity: 0.30
+      introOutro:
+        videoEnabled: false
+        videoIntroPath: ""
+        videoOutroPath: ""
+        imageEnabled: true
+        imageIntroPath: ""
+        imageIntroTitle: "Sexualwill"
+        imageIntroBody: "Sex-positive • Body autonomy • Sexuality • Confidence"
+        imageThankYouPath: ""
+        imageThankYouTitle: "Thanks for being here"
+        imageThankYouBody: "更多平台、完整入口與聯絡方式請見 contacts.sexualwill.com"
+        backgroundColor: "#111827"
+        textColor: "#FFFFFF"
+        imagePanelRatio: 0.22
+      googleSheet:
+        spreadsheetId: "TODO_SEXUALWILL_GOOGLE_SHEET_ID"
+        worksheetName: "Sheet1"
+      socialImport:
+        defaultLink: "https://contacts.sexualwill.com"
+        category: "Sexualwill"
+        watermarkName: ""
+        hashtagGroup: ""
+        videoThumbnailUrl: ""
+        ctaGroup: ""
+        firstComment: "更多平台與入口：https://contacts.sexualwill.com"
+        story: false
+        pinterestBoard: ""
+        altText: "Sexualwill 品牌內容封面"
+        pinTitle: "Sexualwill"
+      postPresets:
+        twitter: ""
+        threads: ""
+        instagram: ""
+        facebook: ""
+        youtube: ""
+        tiktok: ""
+      contentAccounts:
+        - id: "sexualwill-twitter-en"
+          platform: "twitter"
+          name: "Sexualwill X EN"
+          prompt: >
+            以英文寫成 sex-positive、平台安全的 X 貼文。
+            強調 self-expression、body autonomy、sexuality、confidence、sexual wellness。
+            必須有 emoji，必須剛好 3 個 hashtags。
+          contactDetails: "Contacts: https://contacts.sexualwill.com"
+          cta: "Find all my links and platforms here: https://contacts.sexualwill.com"
+          postPreset: ""
+          publisherTargetId: "publisher-sexualwill-x"
+        - id: "sexualwill-twitter-zh"
+          platform: "twitter"
+          name: "Sexualwill X 中文"
+          prompt: >
+            用繁體中文寫成成熟但不低俗的短文。
+            重點放在身體自主、性正向、真實自我與平台安全表述。
+            必須有 emoji，必須剛好 3 個 hashtags。
+          contactDetails: "更多連結：https://contacts.sexualwill.com"
+          cta: "更多平台與內容入口可見聯絡頁。"
+          postPreset: ""
+          publisherTargetId: "publisher-sexualwill-x-zh"
+        - id: "sexualwill-bluesky-main"
+          platform: "bluesky"
+          name: "Sexualwill Bluesky"
+          prompt: >
+            寫成適合 Bluesky 的短文。
+            語氣坦率、有自我風格，但維持成熟與平台安全，不要過度露骨。
+            必須有 emoji，必須剛好 3 個 hashtags。
+          contactDetails: "Contacts: https://contacts.sexualwill.com"
+          cta: "More links and platforms: https://contacts.sexualwill.com"
+          postPreset: ""
+          publisherTargetId: "publisher-sexualwill-bluesky"
+        - id: "sexualwill-instagram-main"
+          platform: "instagram"
+          name: "Sexualwill Instagram"
+          prompt: >
+            寫成適合 Instagram 的 caption。
+            以自我表達、身體自主、性感與自信為主軸，但避免過度露骨。
+            第一段要吸引人，結尾自然導向連結頁。
+          contactDetails: ""
+          cta: "更多入口與完整平台在我的 contact page。"
+          postPreset: ""
+        - id: "sexualwill-facebook-main"
+          platform: "facebook"
+          name: "Sexualwill Facebook"
+          prompt: >
+            寫成適合 Facebook 的中長文。
+            可以帶觀點、個人反思與性正向立場，保持坦率但不低俗。
+          contactDetails: ""
+          cta: "想看更多平台與內容，請到聯絡頁。"
+          postPreset: ""
+        - id: "sexualwill-youtube-main"
+          platform: "youtube"
+          name: "Sexualwill YouTube"
+          prompt: >
+            用 YouTube 社群或影片描述口吻。
+            介紹這支內容想談的主題，例如 sexuality、confidence、sexual health、body freedom。
+          contactDetails: ""
+          cta: "歡迎訂閱，也可從聯絡頁找到其他平台。"
+          postPreset: ""
+          publisherTargetId: "publisher-sexualwill-youtube"
+        - id: "sexualwill-line-oa"
+          platform: "line_oa"
+          name: "Sexualwill LINE OA"
+          prompt: >
+            寫成 LINE 官方帳號推播訊息。
+            風格成熟、簡潔、像品牌更新通知，適合快速閱讀並導向聯絡頁。
+          contactDetails: "Contacts: https://contacts.sexualwill.com"
+          cta: "完整入口與聯絡方式都在聯絡頁。"
+          postPreset: ""
+          publisherTargetId: "publisher-sexualwill-line-oa"
+        - id: "sexualwill-reddit-main"
+          platform: "reddit"
+          name: "Sexualwill Reddit"
+          prompt: >
+            用討論型社群口吻，避免商業感。
+            可從性健康、性觀點、自我探索、fetish understanding、關係溝通切入。
+          contactDetails: ""
+          cta: "如果你想看我整理更多相關主題，也可以告訴我。"
+          postPreset: ""
+          publisherTargetId: "publisher-sexualwill-reddit"
+        - id: "sexualwill-telegram-main"
+          platform: "telegram"
+          name: "Sexualwill Telegram"
+          prompt: >
+            寫成精簡的頻道更新通知，說清楚這次內容的主題與價值。
+          contactDetails: "Contacts: https://contacts.sexualwill.com"
+          cta: "完整入口與聯絡方式都在聯絡頁。"
+          postPreset: ""
+          publisherTargetId: "publisher-sexualwill-telegram"
+        - id: "sexualwill-patreon-style"
+          platform: "patreon"
+          name: "Sexualwill 訂閱長文"
+          prompt: >
+            寫成訂閱導向的長文摘要。
+            突出會員價值、幕後內容、延伸閱讀或完整版本，但避免空泛推銷。
+          contactDetails: "Contacts: https://contacts.sexualwill.com"
+          cta: "想看完整內容與更多平台入口，請到聯絡頁。"
+          postPreset: ""
+
+  - name: "NakedWill"
+    systemPrompt: >
+      你是「NakedWill」的社群內容策略助手。
+      核心定位是 nudism、naturism、artistic nudity、authentic living。
+      文案要強調真實、自由、自然、平等、身體自在、去污名化與生活方式探索。
+      可以談裸體與性之間的界線，也可以談身體表達、自我接納與生活觀點；
+      但在主流平台上，避免過度露骨，保持溫和、真誠、有個人感。
+      Twitter、Bluesky、Threads 需要 emoji 與剛好 3 個 hashtags。
+    contactDetails: |
+      Website: https://nakedwill.com
+      Contacts: https://contacts.nakedwill.com
+      Linktree: https://linktr.ee/nakedwill
+      Question box: https://peing.net/en/nakedwill
+      Email: will@nakedwill.com
+      Instagram: https://www.instagram.com/nakedwill8/
+      Instagram 2: https://www.instagram.com/nakedwill_nudism_promotion/
+      Facebook: https://www.facebook.com/profile.php?id=100092994647150
+      Facebook 2: https://www.facebook.com/profile.php?id=61557488481092
+      Reddit: https://www.reddit.com/user/ryanbossom
+      X: https://twitter.com/model_will
+      YouTube: https://www.youtube.com/channel/UCVxvsa4My9rQAlbPdOPrk9A
+      TikTok 1: https://www.tiktok.com/@nakedwill
+      TikTok 2: https://www.tiktok.com/@nakedwill_backup
+      TikTok 3: https://www.tiktok.com/@nudist_will
+      ModelMayhem: https://www.modelmayhem.com/4251167
+      Amazon Wishlist: https://www.amazon.com/hz/wishlist/ls/19JIT3XBI8FRP
+      Medium: https://medium.com/@nakedwillbackup
+      Blogger: https://nakedwill.blogspot.com
+      Pornhub: https://www.pornhub.com/model/nudity_not_sin
+      xHamster: https://xhamster.com/users/nudity_is_not_a_sin
+      XVideos: https://www.xvideos.com/profiles/nakedwill
+      Redgifs: https://www.redgifs.com/users/nakedwill2
+    cta: "想看更多平台、網站與聯絡方式，歡迎到我的網站或 contacts 頁面。"
+    accountIds: []
+    settings:
+      llm:
+        apiBaseUrl: "https://llmapi.iamwillywang.com/"
+        transcriptionModel: "Audio-Speech-Group"
+        generationModel: "reasoning"
+      storage:
+        remoteName: "Onedrive-Yahooforsub-Tao"
+        remotePath: "Scripts-ssh-ssl-keys/SocialUpload/nakedwill"
+        publicUrlTemplate: ""
+      watermark:
+        enabled: true
+        templateName: "NakedWill Main Watermark"
+        type: "text"
+        mode: "dynamic"
+        pattern: "repeat-slanted"
+        repeatLines: 3
+        angle: -28
+        spacing: 230
+        fontSize: 26
+        color: "#FFFFFF"
+        text: "@model_will"
+        imagePath: ""
+        position: "bottom-right"
+        opacity: 0.32
+      introOutro:
+        videoEnabled: false
+        videoIntroPath: ""
+        videoOutroPath: ""
+        imageEnabled: true
+        imageIntroPath: ""
+        imageIntroTitle: "NakedWill"
+        imageIntroBody: "Nudism • Naturism • Artistic nudity • Authentic living"
+        imageThankYouPath: ""
+        imageThankYouTitle: "Thanks for visiting"
+        imageThankYouBody: "更多平台、網站與聯絡方式請見 nakedwill.com / contacts.nakedwill.com"
+        backgroundColor: "#111827"
+        textColor: "#FFFFFF"
+        imagePanelRatio: 0.22
+      googleSheet:
+        spreadsheetId: "TODO_NAKEDWILL_GOOGLE_SHEET_ID"
+        worksheetName: "Sheet1"
+      socialImport:
+        defaultLink: "https://contacts.nakedwill.com"
+        category: "NakedWill"
+        watermarkName: ""
+        hashtagGroup: ""
+        videoThumbnailUrl: ""
+        ctaGroup: ""
+        firstComment: "更多平台與聯絡方式：https://contacts.nakedwill.com"
+        story: false
+        pinterestBoard: ""
+        altText: "NakedWill 品牌內容封面"
+        pinTitle: "NakedWill"
+      postPresets:
+        twitter: ""
+        threads: ""
+        instagram: ""
+        facebook: ""
+        youtube: ""
+        tiktok: ""
+      contentAccounts:
+        - id: "nakedwill-twitter-main"
+          platform: "twitter"
+          name: "NakedWill X 主帳"
+          prompt: >
+            寫成適合 X 的短文。
+            主題圍繞 nudism、naturism、body freedom、authenticity、artistic nudity。
+            用詞要乾淨、尊重、平台安全。
+            必須有 emoji，必須剛好 3 個 hashtags。
+          contactDetails: "Contacts: https://contacts.nakedwill.com"
+          cta: "更多平台與聯絡方式都在聯絡頁。"
+          postPreset: ""
+          publisherTargetId: "publisher-nakedwill-x"
+        - id: "nakedwill-bluesky-main"
+          platform: "bluesky"
+          name: "NakedWill Bluesky"
+          prompt: >
+            寫成適合 Bluesky 的短文。
+            以真實、自然、身體自在與生活方式觀點為主，不要過度成人化。
+            必須有 emoji，必須剛好 3 個 hashtags。
+          contactDetails: "Contacts: https://contacts.nakedwill.com"
+          cta: "If this resonates with you, feel free to follow."
+          postPreset: ""
+          publisherTargetId: "publisher-nakedwill-bluesky"
+        - id: "nakedwill-instagram-main"
+          platform: "instagram"
+          name: "NakedWill Instagram 主帳"
+          prompt: >
+            寫成適合 Instagram 的 caption。
+            可以偏生活感、個人感、旅程感，讓人感受到自然、自由與真實。
+            避免過度露骨。
+          contactDetails: ""
+          cta: "想看更多平台與內容，歡迎到我的網站或聯絡頁。"
+          postPreset: ""
+        - id: "nakedwill-instagram-promo"
+          platform: "instagram"
+          name: "NakedWill Instagram 推廣帳"
+          prompt: >
+            這個帳號偏向 nudism / naturism 推廣。
+            文字更重視理念與生活方式，不要過度成人化。
+          contactDetails: ""
+          cta: "如果你也對 naturism 有興趣，歡迎追蹤。"
+          postPreset: ""
+        - id: "nakedwill-facebook-main"
+          platform: "facebook"
+          name: "NakedWill Facebook 主帳"
+          prompt: >
+            寫成 Facebook 長文。
+            用故事、反思與價值觀表達對裸體、自然與真實生活的理解。
+          contactDetails: ""
+          cta: "更多文章與平台資訊可到網站查看。"
+          postPreset: ""
+        - id: "nakedwill-youtube-main"
+          platform: "youtube"
+          name: "NakedWill YouTube"
+          prompt: >
+            用 YouTube 社群 / 描述欄口吻。
+            介紹這支內容的背景、想法與你想傳達的核心觀點。
+          contactDetails: ""
+          cta: "歡迎訂閱，也可從聯絡頁找到我其他平台。"
+          postPreset: ""
+          publisherTargetId: "publisher-nakedwill-youtube"
+        - id: "nakedwill-line-oa"
+          platform: "line_oa"
+          name: "NakedWill LINE OA"
+          prompt: >
+            寫成 LINE 官方帳號推播訊息。
+            用簡潔、自然、友善的方式介紹本次內容，結尾附上清楚 CTA。
+          contactDetails: "Contacts: https://contacts.nakedwill.com"
+          cta: "更多連結與聯絡方式可到聯絡頁。"
+          postPreset: ""
+          publisherTargetId: "publisher-nakedwill-line-oa"
+        - id: "nakedwill-reddit-main"
+          platform: "reddit"
+          name: "NakedWill Reddit"
+          prompt: >
+            用社群討論語氣寫作，不要像銷售文。
+            適合談 naturism、body acceptance、artistic nudity、social stigma、community norms。
+          contactDetails: ""
+          cta: "如果你有類似經驗或觀點，也歡迎交流。"
+          postPreset: ""
+          publisherTargetId: "publisher-nakedwill-reddit"
+        - id: "nakedwill-tiktok-main"
+          platform: "tiktok"
+          name: "NakedWill TikTok 主帳"
+          prompt: >
+            寫成短影音 caption。
+            簡短、清楚、有記憶點，維持平台安全與自然風格。
+            必須有 emoji，必須剛好 3 個 hashtags。
+          contactDetails: ""
+          cta: "想看更多可到網站與聯絡頁。"
+          postPreset: ""
+        - id: "nakedwill-telegram-main"
+          platform: "telegram"
+          name: "NakedWill Telegram"
+          prompt: >
+            寫成簡短更新通知，讓讀者知道這則內容在談什麼、為什麼值得看。
+          contactDetails: "Contacts: https://contacts.nakedwill.com"
+          cta: "更多連結與聯絡方式可到聯絡頁。"
+          postPreset: ""
+          publisherTargetId: "publisher-nakedwill-telegram"

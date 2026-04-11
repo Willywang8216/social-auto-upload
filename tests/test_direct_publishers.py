@@ -248,6 +248,83 @@ class DirectPublishersTests(unittest.TestCase):
         self.assertIn("Authorization", requests_module_mock.return_value.post.call_args.kwargs["headers"])
 
     @patch("utils.direct_publishers._get_requests_module")
+    def test_publish_job_to_bluesky_creates_session_then_record(self, requests_module_mock):
+        session_response = Mock()
+        session_response.ok = True
+        session_response.json.return_value = {
+            "accessJwt": "jwt-token",
+            "did": "did:plc:demo123",
+            "handle": "demo.bsky.social",
+        }
+        record_response = Mock()
+        record_response.ok = True
+        record_response.json.return_value = {
+            "uri": "at://did:plc:demo123/app.bsky.feed.post/abc123",
+            "cid": "cid-1",
+        }
+        requests_module_mock.return_value.post.side_effect = [session_response, record_response]
+
+        result = publish_job_to_direct_target(
+            Path("."),
+            {
+                "platformKey": "bluesky",
+                "message": "Hello Bluesky",
+                "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                "metadata": {"mediaKind": "video"},
+            },
+            {
+                "platform": "bluesky",
+                "enabled": True,
+                "config": {
+                    "identifier": "demo.bsky.social",
+                    "appPassword": "app-password",
+                    "serviceUrl": "https://bsky.social",
+                },
+            },
+        )
+
+        self.assertEqual(result["uri"], "at://did:plc:demo123/app.bsky.feed.post/abc123")
+        self.assertEqual(requests_module_mock.return_value.post.call_args_list[0].args[0], "https://bsky.social/xrpc/com.atproto.server.createSession")
+        create_record_call = requests_module_mock.return_value.post.call_args_list[1]
+        self.assertEqual(create_record_call.args[0], "https://bsky.social/xrpc/com.atproto.repo.createRecord")
+        self.assertIn("Authorization", create_record_call.kwargs["headers"])
+        self.assertIn("https://cdn.example.com/clip.mp4", create_record_call.kwargs["data"])
+
+    @patch("utils.direct_publishers._get_requests_module")
+    def test_publish_job_to_line_oa_pushes_text_and_image_messages(self, requests_module_mock):
+        response = Mock()
+        response.ok = True
+        response.json.return_value = {}
+        requests_module_mock.return_value.post.return_value = response
+
+        result = publish_job_to_direct_target(
+            Path("."),
+            {
+                "platformKey": "line_oa",
+                "message": "LINE update",
+                "mediaPublicUrl": "https://cdn.example.com/image.png",
+                "metadata": {"mediaKind": "image"},
+            },
+            {
+                "platform": "line_oa",
+                "enabled": True,
+                "config": {
+                    "channelAccessToken": "line-token",
+                    "to": "U1234567890",
+                    "notificationDisabled": True,
+                },
+            },
+        )
+
+        self.assertEqual(result["platform"], "line_oa")
+        self.assertEqual(requests_module_mock.return_value.post.call_args.args[0], "https://api.line.me/v2/bot/message/push")
+        payload = json.loads(requests_module_mock.return_value.post.call_args.kwargs["data"])
+        self.assertEqual(payload["to"], "U1234567890")
+        self.assertTrue(payload["notificationDisabled"])
+        self.assertEqual(payload["messages"][0]["type"], "text")
+        self.assertEqual(payload["messages"][1]["type"], "image")
+
+    @patch("utils.direct_publishers._get_requests_module")
     def test_publish_job_to_facebook_posts_video_to_page_videos(self, requests_module_mock):
         response = Mock()
         response.ok = True

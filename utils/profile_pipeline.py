@@ -40,16 +40,18 @@ SHEET_COLUMNS = [
 
 PLATFORM_LIMITS = {
     "twitter": 280,
+    "bluesky": 300,
     "threads": 500,
     "instagram": 2200,
     "facebook": 63206,
     "tiktok": 150,
     "youtube": 1400,
+    "line_oa": 5000,
 }
 
 EXPORT_PLATFORMS = ["twitter", "threads", "instagram", "facebook", "youtube", "tiktok"]
-NON_SHEET_PLATFORMS = ["telegram", "discord", "patreon"]
-CONTENT_ACCOUNT_PLATFORMS = EXPORT_PLATFORMS + NON_SHEET_PLATFORMS + ["reddit"]
+NON_SHEET_PLATFORMS = ["telegram", "discord", "patreon", "reddit", "bluesky", "line_oa"]
+CONTENT_ACCOUNT_PLATFORMS = EXPORT_PLATFORMS + NON_SHEET_PLATFORMS
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
@@ -1122,15 +1124,17 @@ def build_generation_system_prompt(profile: dict[str, Any]) -> str:
     custom_prompt = (profile.get("systemPrompt") or "").strip()
     return (
         "You are a social media content strategist. "
-        "Return valid JSON only with these keys: twitter, threads, instagram, facebook, youtube, tiktok, telegram, discord, patreon. "
+        "Return valid JSON only with these keys: twitter, bluesky, threads, instagram, facebook, youtube, tiktok, telegram, discord, patreon, reddit, line_oa. "
         "Do not wrap the JSON in markdown. "
-        "Requirements: twitter and threads must include emoji and exactly 3 hashtags, plus natural contact details and a CTA. "
+        "Requirements: twitter, bluesky, and threads must include emoji and exactly 3 hashtags, plus natural contact details and a CTA. "
         "instagram and facebook should be long-form posts with contact details and a CTA woven naturally into the copy. "
         "youtube should be a post with a strong hook plus a useful description-style body. "
         "tiktok should be short, direct, and include a description-ready CTA. "
         "telegram should be concise and readable. "
         "discord should be community-friendly, readable in one screen, and include a soft CTA. "
         "patreon should be long-form and membership-oriented. "
+        "reddit should read like a genuine community post instead of ad copy. "
+        "line_oa should read like a concise official account push message with a clear CTA. "
         "Keep each platform within its typical character constraints. "
         f"{custom_prompt}"
     )
@@ -1140,6 +1144,7 @@ def build_content_account_system_prompt(profile: dict[str, Any], content_account
     platform = (content_account.get("platform") or "").strip().lower()
     platform_rules = {
         "twitter": "Write one X / Twitter post with emoji and exactly 3 hashtags. Keep it concise and under 280 characters.",
+        "bluesky": "Write one Bluesky post with emoji and exactly 3 hashtags. Keep it concise and under 300 characters.",
         "threads": "Write one Threads post with emoji and exactly 3 hashtags. It can be slightly more conversational than Twitter.",
         "instagram": "Write one Instagram long-form caption with a strong hook, natural CTA, and exactly 3 hashtags.",
         "facebook": "Write one Facebook long-form post with a natural CTA and exactly 3 hashtags.",
@@ -1149,6 +1154,7 @@ def build_content_account_system_prompt(profile: dict[str, Any], content_account
         "discord": "Write one Discord announcement-style post that feels natural for a server channel and includes a soft CTA.",
         "patreon": "Write one Patreon-oriented long-form post that emphasizes membership value and CTA.",
         "reddit": "Write one Reddit post title plus body in a natural community tone without sounding promotional. Keep it readable and specific.",
+        "line_oa": "Write one concise LINE Official Account push message with a clear CTA. Keep it readable in one screen.",
     }.get(platform, "Write one platform-native social media post.")
     custom_prompt = "\n".join(
         [

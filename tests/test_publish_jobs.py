@@ -204,6 +204,85 @@ class PublishJobsTests(unittest.TestCase):
         self.assertEqual(managed_item["metadata"]["publishingAccountId"], str(twitter_account_id))
         self.assertEqual(managed_item["metadata"]["brandingPreview"]["summary"], "影片維持主素材")
 
+    def test_generate_publish_batch_drafts_marks_bluesky_and_line_oa_content_accounts_as_direct_upload(self):
+        profile = save_profile(
+            self.db_path,
+            {
+                "name": "Creator International",
+                "settings": {
+                    "contentAccounts": [
+                        {
+                            "id": "acct-bluesky-main",
+                            "platform": "bluesky",
+                            "name": "Bluesky Persona",
+                            "publisherTargetId": "publisher-bsky-main",
+                        },
+                        {
+                            "id": "acct-line-oa-main",
+                            "platform": "line_oa",
+                            "name": "LINE OA Persona",
+                            "publisherTargetId": "publisher-line-main",
+                        },
+                    ]
+                },
+            },
+        )
+
+        fake_batch_result = {
+            "profile": {"id": profile["id"], "name": profile["name"]},
+            "selectedAccountIds": [],
+            "results": [
+                {
+                    "material": {"id": 1, "filename": "clip.mp4"},
+                    "processedMediaPath": str(self.base_dir / "videoFile" / "clip.mp4"),
+                    "storage": {
+                        "publicUrl": "https://cdn.example.com/clip.mp4",
+                        "mediaKind": "video",
+                    },
+                    "transcript": "transcript body",
+                    "posts": {},
+                    "contentAccountResults": [
+                        {
+                            "account": {
+                                "id": "acct-bluesky-main",
+                                "platform": "bluesky",
+                                "name": "Bluesky Persona",
+                                "publisherTargetId": "publisher-bsky-main",
+                            },
+                            "content": "Bluesky copy",
+                        },
+                        {
+                            "account": {
+                                "id": "acct-line-oa-main",
+                                "platform": "line_oa",
+                                "name": "LINE OA Persona",
+                                "publisherTargetId": "publisher-line-main",
+                            },
+                            "content": "LINE copy",
+                        },
+                    ],
+                }
+            ],
+        }
+
+        with patch("utils.publish_jobs.generate_profile_batch_content", return_value=fake_batch_result):
+            result = generate_publish_batch_drafts(
+                self.db_path,
+                self.base_dir,
+                {
+                    "profileId": profile["id"],
+                    "materialIds": [1],
+                    "selectedAccountIds": [],
+                    "selectedContentAccountIds": ["acct-bluesky-main", "acct-line-oa-main"],
+                },
+            )
+
+        items_by_platform = {item["platformKey"]: item for item in result["items"]}
+        self.assertEqual(items_by_platform["bluesky"]["deliveryMode"], "direct_upload")
+        self.assertEqual(items_by_platform["bluesky"]["metadata"]["publisherTargetId"], "publisher-bsky-main")
+        self.assertEqual(items_by_platform["line_oa"]["deliveryMode"], "direct_upload")
+        self.assertEqual(items_by_platform["line_oa"]["metadata"]["publisherTargetId"], "publisher-line-main")
+
     def test_generate_publish_batch_drafts_includes_branding_preview_for_text_thank_you(self):
         profile = save_profile(
             self.db_path,

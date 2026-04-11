@@ -1,0 +1,244 @@
+{
+  "targets": [
+    {
+      "id": "publisher-weiwei-x",
+      "platform": "twitter",
+      "name": "威威 X 主帳",
+      "enabled": true,
+      "config": {
+        "apiKey": "TODO_WEIWEI_X_API_KEY",
+        "apiKeySecret": "TODO_WEIWEI_X_API_KEY_SECRET",
+        "accessToken": "TODO_WEIWEI_X_ACCESS_TOKEN",
+        "accessTokenSecret": "TODO_WEIWEI_X_ACCESS_TOKEN_SECRET"
+      }
+    },
+    {
+      "id": "publisher-weiwei-bluesky",
+      "platform": "bluesky",
+      "name": "威威 Bluesky",
+      "enabled": true,
+      "config": {
+        "identifier": "will@iamwillywang.com",
+        "appPassword": "TODO_WEIWEI_BLUESKY_APP_PASSWORD",
+        "serviceUrl": "https://bsky.social"
+      }
+    },
+    {
+      "id": "publisher-weiwei-line-oa",
+      "platform": "line_oa",
+      "name": "威威 LINE OA",
+      "enabled": true,
+      "config": {
+        "channelAccessToken": "TODO_WEIWEI_LINE_OA_CHANNEL_ACCESS_TOKEN",
+        "to": "TODO_WEIWEI_LINE_OA_TO",
+        "defaultVideoPreviewUrl": "",
+        "notificationDisabled": false
+      }
+    },
+    {
+      "id": "publisher-weiwei-telegram",
+      "platform": "telegram",
+      "name": "威威 Telegram",
+      "enabled": true,
+      "config": {
+        "botToken": "TODO_WEIWEI_TELEGRAM_BOT_TOKEN",
+        "chatId": "TODO_WEIWEI_TELEGRAM_CHAT_ID",
+        "parseMode": "HTML",
+        "disableWebPagePreview": false
+      }
+    },
+    {
+      "id": "publisher-weiwei-reddit",
+      "platform": "reddit",
+      "name": "威威 Reddit",
+      "enabled": true,
+      "config": {
+        "clientId": "TODO_WEIWEI_REDDIT_CLIENT_ID",
+        "clientSecret": "TODO_WEIWEI_REDDIT_CLIENT_SECRET",
+        "refreshToken": "TODO_WEIWEI_REDDIT_REFRESH_TOKEN",
+        "subreddit": "TODO_WEIWEI_SUBREDDIT"
+      }
+    },
+    {
+      "id": "publisher-weiwei-youtube",
+      "platform": "youtube",
+      "name": "威威 YouTube",
+      "enabled": true,
+      "config": {
+        "accessToken": "TODO_WEIWEI_YOUTUBE_ACCESS_TOKEN",
+        "privacyStatus": "private",
+        "categoryId": "22",
+        "thumbnailUrl": "",
+        "thumbnailPath": "",
+        "captionsPath": "",
+        "captionsLanguage": "zh-TW",
+        "captionsName": "繁體中文",
+        "premiereAt": ""
+      }
+    },
+    {
+      "id": "publisher-sexualwill-x",
+      "platform": "twitter",
+      "name": "Sexualwill X EN",
+      "enabled": true,
+      "config": {
+        "apiKey": "TODO_SEXUALWILL_X_API_KEY",
+        "apiKeySecret": "TODO_SEXUALWILL_X_API_KEY_SECRET",
+        "accessToken": "TODO_SEXUALWILL_X_ACCESS_TOKEN",
+        "accessTokenSecret": "TODO_SEXUALWILL_X_ACCESS_TOKEN_SECRET"
+      }
+    },
+    {
+      "id": "publisher-sexualwill-x-zh",
+      "platform": "twitter",
+      "name": "Sexualwill X 中文",
+      "enabled": true,
+      "config": {
+        "apiKey": "TODO_SEXUALWILL_X_ZH_API_KEY",
+        "apiKeySecret": "TODO_SEXUALWILL_X_ZH_API_KEY_SECRET",
+        "accessToken": "TODO_SEXUALWILL_X_ZH_ACCESS_TOKEN",
+        "accessTokenSecret": "TODO_SEXUALWILL_X_ZH_ACCESS_TOKEN_SECRET"
+      }
+    },
+    {
+      "id": "publisher-sexualwill-bluesky",
+      "platform": "bluesky",
+      "name": "Sexualwill Bluesky",
+      "enabled": true,
+      "config": {
+        "identifier": "TODO_SEXUALWILL_BLUESKY_IDENTIFIER",
+        "appPassword": "TODO_SEXUALWILL_BLUESKY_APP_PASSWORD",
+        "serviceUrl": "https://bsky.social"
+      }
+    },
+    {
+      "id": "publisher-sexualwill-line-oa",
+      "platform": "line_oa",
+      "name": "Sexualwill LINE OA",
+      "enabled": true,
+      "config": {
+        "channelAccessToken": "TODO_SEXUALWILL_LINE_OA_CHANNEL_ACCESS_TOKEN",
+        "to": "TODO_SEXUALWILL_LINE_OA_TO",
+        "defaultVideoPreviewUrl": "",
+        "notificationDisabled": false
+      }
+    },
+    {
+      "id": "publisher-sexualwill-telegram",
+      "platform": "telegram",
+      "name": "Sexualwill Telegram",
+      "enabled": true,
+      "config": {
+        "botToken": "TODO_SEXUALWILL_TELEGRAM_BOT_TOKEN",
+        "chatId": "TODO_SEXUALWILL_TELEGRAM_CHAT_ID",
+        "parseMode": "HTML",
+        "disableWebPagePreview": false
+      }
+    },
+    {
+      "id": "publisher-sexualwill-reddit",
+      "platform": "reddit",
+      "name": "Sexualwill Reddit",
+      "enabled": true,
+      "config": {
+        "clientId": "TODO_SEXUALWILL_REDDIT_CLIENT_ID",
+        "clientSecret": "TODO_SEXUALWILL_REDDIT_CLIENT_SECRET",
+        "refreshToken": "TODO_SEXUALWILL_REDDIT_REFRESH_TOKEN",
+        "subreddit": "TODO_SEXUALWILL_SUBREDDIT"
+      }
+    },
+    {
+      "id": "publisher-sexualwill-youtube",
+      "platform": "youtube",
+      "name": "Sexualwill YouTube",
+      "enabled": true,
+      "config": {
+        "accessToken": "TODO_SEXUALWILL_YOUTUBE_ACCESS_TOKEN",
+        "privacyStatus": "private",
+        "categoryId": "22",
+        "thumbnailUrl": "",
+        "thumbnailPath": "",
+        "captionsPath": "",
+        "captionsLanguage": "en",
+        "captionsName": "English",
+        "premiereAt": ""
+      }
+    },
+    {
+      "id": "publisher-nakedwill-x",
+      "platform": "twitter",
+      "name": "NakedWill X 主帳",
+      "enabled": true,
+      "config": {
+        "apiKey": "TODO_NAKEDWILL_X_API_KEY",
+        "apiKeySecret": "TODO_NAKEDWILL_X_API_KEY_SECRET",
+        "accessToken": "TODO_NAKEDWILL_X_ACCESS_TOKEN",
+        "accessTokenSecret": "TODO_NAKEDWILL_X_ACCESS_TOKEN_SECRET"
+      }
+    },
+    {
+      "id": "publisher-nakedwill-bluesky",
+      "platform": "bluesky",
+      "name": "NakedWill Bluesky",
+      "enabled": true,
+      "config": {
+        "identifier": "TODO_NAKEDWILL_BLUESKY_IDENTIFIER",
+        "appPassword": "TODO_NAKEDWILL_BLUESKY_APP_PASSWORD",
+        "serviceUrl": "https://bsky.social"
+      }
+    },
+    {
+      "id": "publisher-nakedwill-line-oa",
+      "platform": "line_oa",
+      "name": "NakedWill LINE OA",
+      "enabled": true,
+      "config": {
+        "channelAccessToken": "TODO_NAKEDWILL_LINE_OA_CHANNEL_ACCESS_TOKEN",
+        "to": "TODO_NAKEDWILL_LINE_OA_TO",
+        "defaultVideoPreviewUrl": "",
+        "notificationDisabled": false
+      }
+    },
+    {
+      "id": "publisher-nakedwill-telegram",
+      "platform": "telegram",
+      "name": "NakedWill Telegram",
+      "enabled": true,
+      "config": {
+        "botToken": "TODO_NAKEDWILL_TELEGRAM_BOT_TOKEN",
+        "chatId": "TODO_NAKEDWILL_TELEGRAM_CHAT_ID",
+        "parseMode": "HTML",
+        "disableWebPagePreview": false
+      }
+    },
+    {
+      "id": "publisher-nakedwill-reddit",
+      "platform": "reddit",
+      "name": "NakedWill Reddit",
+      "enabled": true,
+      "config": {
+        "clientId": "TODO_NAKEDWILL_REDDIT_CLIENT_ID",
+        "clientSecret": "TODO_NAKEDWILL_REDDIT_CLIENT_SECRET",
+        "refreshToken": "TODO_NAKEDWILL_REDDIT_REFRESH_TOKEN",
+        "subreddit": "TODO_NAKEDWILL_SUBREDDIT"
+      }
+    },
+    {
+      "id": "publisher-nakedwill-youtube",
+      "platform": "youtube",
+      "name": "NakedWill YouTube",
+      "enabled": true,
+      "config": {
+        "accessToken": "TODO_NAKEDWILL_YOUTUBE_ACCESS_TOKEN",
+        "privacyStatus": "private",
+        "categoryId": "22",
+        "thumbnailUrl": "",
+        "thumbnailPath": "",
+        "captionsPath": "",
+        "captionsLanguage": "en",
+        "captionsName": "English",
+        "premiereAt": ""
+      }
+    }
+  ]
+}

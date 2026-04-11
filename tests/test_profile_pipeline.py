@@ -796,6 +796,38 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertEqual(actions["Creator Stable"]["action"], "unchanged")
             self.assertEqual(actions["Creator Beta"]["action"], "create")
 
+    def test_save_profile_accepts_bluesky_and_line_oa_content_accounts(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "database.db"
+            ensure_profile_tables(db_path)
+
+            saved = save_profile(
+                db_path,
+                {
+                    "name": "Creator International",
+                    "settings": {
+                        "contentAccounts": [
+                            {
+                                "id": "acct-bsky-main",
+                                "platform": "bluesky",
+                                "name": "Bluesky Persona",
+                                "publisherTargetId": "publisher-bsky-main",
+                            },
+                            {
+                                "id": "acct-line-main",
+                                "platform": "line_oa",
+                                "name": "LINE OA Persona",
+                                "publisherTargetId": "publisher-line-main",
+                            },
+                        ]
+                    },
+                },
+            )
+
+            platforms = [item["platform"] for item in saved["settings"]["contentAccounts"]]
+            self.assertEqual(platforms, ["bluesky", "line_oa"])
+            self.assertEqual(saved["settings"]["contentAccounts"][0]["publisherTargetId"], "publisher-bsky-main")
+
     def test_save_profile_backup_config_normalizes_and_persists(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             base_dir = Path(tmp_dir)

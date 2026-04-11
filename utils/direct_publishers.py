@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 DIRECT_PUBLISHERS_FILENAME = "direct_publishers.json"
-DIRECT_PUBLISHER_PLATFORMS = {"telegram", "discord", "reddit", "twitter", "facebook", "threads", "youtube", "tiktok"}
+DIRECT_PUBLISHER_PLATFORMS = {"telegram", "discord", "reddit", "twitter", "facebook", "threads", "youtube", "tiktok", "bluesky", "line_oa"}
 ASYNC_DIRECT_PUBLISH_PLATFORMS = {"threads", "youtube", "tiktok"}
 MASKED_SECRET_VALUE = "********"
 DIRECT_PUBLISHER_SECRET_FIELDS = {
@@ -23,6 +23,8 @@ DIRECT_PUBLISHER_SECRET_FIELDS = {
     "threads": {"accessToken"},
     "youtube": {"accessToken"},
     "tiktok": {"accessToken"},
+    "bluesky": {"appPassword"},
+    "line_oa": {"channelAccessToken"},
 }
 
 
@@ -108,6 +110,10 @@ def publish_job_to_direct_target(base_dir: Path, job: dict[str, Any], target: di
         return _publish_to_youtube(base_dir, job, target)
     if platform == "tiktok":
         return _publish_to_tiktok(job, target)
+    if platform == "bluesky":
+        return _publish_to_bluesky(job, target)
+    if platform == "line_oa":
+        return _publish_to_line_oa(job, target)
     raise ValueError(f"unsupported direct publisher platform: {platform}")
 
 
@@ -240,6 +246,20 @@ def _normalize_target_config(platform: str, config: dict[str, Any]) -> dict[str,
             "disableDuet": bool(config.get("disableDuet", False)),
             "disableStitch": bool(config.get("disableStitch", False)),
         }
+    if platform == "bluesky":
+        service_url = str(config.get("serviceUrl") or "").strip() or "https://bsky.social"
+        return {
+            "identifier": str(config.get("identifier") or "").strip(),
+            "appPassword": str(config.get("appPassword") or "").strip(),
+            "serviceUrl": service_url.rstrip("/"),
+        }
+    if platform == "line_oa":
+        return {
+            "channelAccessToken": str(config.get("channelAccessToken") or "").strip(),
+            "to": str(config.get("to") or "").strip(),
+            "defaultVideoPreviewUrl": str(config.get("defaultVideoPreviewUrl") or "").strip(),
+            "notificationDisabled": bool(config.get("notificationDisabled", False)),
+        }
     return {}
 
 
@@ -259,6 +279,10 @@ def _default_target_name(platform: str, config: dict[str, Any]) -> str:
         return "YouTube"
     if platform == "tiktok":
         return "TikTok"
+    if platform == "bluesky":
+        return str(config.get("identifier") or "").strip() or "Bluesky"
+    if platform == "line_oa":
+        return str(config.get("to") or "").strip() or "LINE OA"
     return "X"
 
 
@@ -662,6 +686,127 @@ def _publish_to_tiktok(job: dict[str, Any], target: dict[str, Any]) -> dict[str,
         "platform": "tiktok",
         "publishId": publish_id,
         "finalStatus": "processing",
+    }
+
+
+def _publish_to_bluesky(job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    requests = _get_requests_module()
+    config = target["config"]
+    identifier = str(config.get("identifier") or "").strip()
+    app_password = str(config.get("appPassword") or "").strip()
+    service_url = str(config.get("serviceUrl") or "https://bsky.social").strip().rstrip("/")
+    if not identifier or not app_password:
+        raise ValueError("bluesky identifier and appPassword are required")
+
+    session_response = requests.post(
+        f"{service_url}/xrpc/com.atproto.server.createSession",
+        json={
+            "identifier": identifier,
+            "password": app_password,
+        },
+        timeout=30,
+    )
+    _raise_for_http_error(session_response)
+    session_payload = session_response.json() or {}
+    access_jwt = str(session_payload.get("accessJwt") or "").strip()
+    did = str(session_payload.get("did") or "").strip()
+    handle = str(session_payload.get("handle") or "").strip()
+    if not access_jwt or not did:
+        raise RuntimeError("bluesky session did not return accessJwt and did")
+
+    response = requests.post(
+        f"{service_url}/xrpc/com.atproto.repo.createRecord",
+        headers={
+            "Authorization": f"Bearer {access_jwt}",
+            "Content-Type": "application/json",
+        },
+        data=json.dumps(
+            {
+                "repo": did,
+                "collection": "app.bsky.feed.post",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": _truncate_text(_build_post_text(job), 300),
+                    "createdAt": _utc_now_iso(),
+                },
+            },
+            ensure_ascii=False,
+        ),
+        timeout=30,
+    )
+    _raise_for_http_error(response)
+    payload = response.json() or {}
+    uri = str(payload.get("uri") or "").strip()
+    if not uri:
+        raise RuntimeError("bluesky publish did not return a uri")
+    return {
+        "platform": "bluesky",
+        "uri": uri,
+        "cid": str(payload.get("cid") or "").strip(),
+        "handle": handle,
+        "finalStatus": "published",
+    }
+
+
+def _publish_to_line_oa(job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    requests = _get_requests_module()
+    config = target["config"]
+    channel_access_token = str(config.get("channelAccessToken") or "").strip()
+    to = str(config.get("to") or "").strip()
+    if not channel_access_token or not to:
+        raise ValueError("line_oa channelAccessToken and to are required")
+
+    media_kind = str((job.get("metadata") or {}).get("mediaKind") or "").strip().lower()
+    media_url = str(job.get("mediaPublicUrl") or "").strip()
+    messages: list[dict[str, Any]] = []
+    text = _truncate_text(_build_post_text(job), 5000)
+    if text:
+        messages.append({"type": "text", "text": text})
+    if media_kind == "image" and media_url:
+        messages.append({
+            "type": "image",
+            "originalContentUrl": media_url,
+            "previewImageUrl": media_url,
+        })
+    elif media_kind == "video" and media_url:
+        preview_image_url = _pick_first_non_empty(
+            ((job.get("metadata") or {}).get("lineOa") or {}).get("previewImageUrl"),
+            (job.get("metadata") or {}).get("videoThumbnailUrl"),
+            config.get("defaultVideoPreviewUrl"),
+        )
+        if preview_image_url:
+            messages.append({
+                "type": "video",
+                "originalContentUrl": media_url,
+                "previewImageUrl": preview_image_url,
+            })
+        elif not text:
+            messages.append({"type": "text", "text": media_url})
+    if not messages:
+        raise ValueError("line_oa requires message text or mediaPublicUrl")
+
+    response = requests.post(
+        "https://api.line.me/v2/bot/message/push",
+        headers={
+            "Authorization": f"Bearer {channel_access_token}",
+            "Content-Type": "application/json",
+        },
+        data=json.dumps(
+            {
+                "to": to,
+                "messages": messages[:5],
+                "notificationDisabled": bool(config.get("notificationDisabled", False)),
+            },
+            ensure_ascii=False,
+        ),
+        timeout=30,
+    )
+    _raise_for_http_error(response)
+    return {
+        "platform": "line_oa",
+        "to": to,
+        "messageCount": min(len(messages), 5),
+        "finalStatus": "published",
     }
 
 
@@ -1204,6 +1349,10 @@ def _pick_first_non_empty(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _utc_now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
 
 
 def _build_post_text(job: dict[str, Any], include_media_url: bool = True) -> str:

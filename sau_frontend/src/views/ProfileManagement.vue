@@ -992,7 +992,7 @@
       width="900px"
     >
       <el-alert
-        title="這裡管理 Telegram / Discord / Reddit / X / YouTube 的直發目標。內容帳號會用 target id 綁到這裡的設定。"
+        title="這裡管理 Telegram / LINE OA / Discord / Reddit / X / Bluesky / YouTube 的直發目標。內容帳號會用 target id 綁到這裡的設定。"
         type="info"
         :closable="false"
         show-icon
@@ -1000,7 +1000,7 @@
 
       <div class="content-account-toolbar direct-target-toolbar">
         <div class="muted-text">
-          Telegram 使用 Bot Token + Chat ID；Discord 使用 Webhook；Reddit 使用 refresh token；X 使用 API key + access token；YouTube 可設定預設縮圖、字幕與首映時間。
+          Telegram 使用 Bot Token + Chat ID；LINE OA 使用 Channel Access Token + 收件對象 ID；Discord 使用 Webhook；Reddit 使用 refresh token；X 使用 API key + access token；Bluesky 使用 handle + app password；YouTube 可設定預設縮圖、字幕與首映時間。
         </div>
         <el-button type="primary" plain @click="addDirectPublisherTarget">新增 target</el-button>
       </div>
@@ -1020,9 +1020,11 @@
             <el-form-item label="平台">
               <el-select v-model="target.platform" style="width: 100%" @change="handleDirectPublisherPlatformChange(target)">
                 <el-option label="Telegram" value="telegram" />
+                <el-option label="LINE OA" value="line_oa" />
                 <el-option label="Discord" value="discord" />
                 <el-option label="Reddit" value="reddit" />
                 <el-option label="X / Twitter" value="twitter" />
+                <el-option label="Bluesky" value="bluesky" />
                 <el-option label="YouTube" value="youtube" />
               </el-select>
             </el-form-item>
@@ -1041,6 +1043,21 @@
               </el-form-item>
               <el-form-item label="Chat ID">
                 <el-input v-model="target.config.chatId" placeholder="@channel 或 -100..." />
+              </el-form-item>
+            </template>
+
+            <template v-else-if="target.platform === 'line_oa'">
+              <el-form-item label="Channel Token">
+                <el-input v-model="target.config.channelAccessToken" type="password" show-password />
+              </el-form-item>
+              <el-form-item label="To">
+                <el-input v-model="target.config.to" placeholder="userId / groupId / roomId" />
+              </el-form-item>
+              <el-form-item label="Video Preview URL">
+                <el-input v-model="target.config.defaultVideoPreviewUrl" placeholder="選填：LINE 視訊訊息預設預覽圖網址" />
+              </el-form-item>
+              <el-form-item label="Disable Notification">
+                <el-switch v-model="target.config.notificationDisabled" />
               </el-form-item>
             </template>
 
@@ -1080,6 +1097,18 @@
               </el-form-item>
               <el-form-item label="Access Token Secret">
                 <el-input v-model="target.config.accessTokenSecret" type="password" show-password />
+              </el-form-item>
+            </template>
+
+            <template v-else-if="target.platform === 'bluesky'">
+              <el-form-item label="Identifier">
+                <el-input v-model="target.config.identifier" placeholder="例如：your-handle.bsky.social" />
+              </el-form-item>
+              <el-form-item label="App Password">
+                <el-input v-model="target.config.appPassword" type="password" show-password />
+              </el-form-item>
+              <el-form-item label="Service URL">
+                <el-input v-model="target.config.serviceUrl" placeholder="預設：https://bsky.social" />
               </el-form-item>
             </template>
 
@@ -1596,11 +1625,13 @@ const postLabels = {
 const PUBLISH_HANDOFF_STORAGE_KEY = 'sau-publish-handoff-drafts'
 const contentAccountPlatformOptions = [
   { label: 'X / Twitter', value: 'twitter' },
+  { label: 'Bluesky', value: 'bluesky' },
   { label: 'Threads', value: 'threads' },
   { label: 'Instagram', value: 'instagram' },
   { label: 'Facebook', value: 'facebook' },
   { label: 'YouTube', value: 'youtube' },
   { label: 'TikTok', value: 'tiktok' },
+  { label: 'LINE OA', value: 'line_oa' },
   { label: 'Telegram', value: 'telegram' },
   { label: 'Discord', value: 'discord' },
   { label: 'Patreon', value: 'patreon' },
@@ -1675,6 +1706,14 @@ const normalizeDirectPublisherConfig = (platform, config = {}) => {
       disableWebPagePreview: Boolean(config.disableWebPagePreview)
     }
   }
+  if (platform === 'line_oa') {
+    return {
+      channelAccessToken: config.channelAccessToken || '',
+      to: config.to || '',
+      defaultVideoPreviewUrl: config.defaultVideoPreviewUrl || '',
+      notificationDisabled: Boolean(config.notificationDisabled)
+    }
+  }
   if (platform === 'discord') {
     return {
       webhookUrl: config.webhookUrl || '',
@@ -1700,6 +1739,13 @@ const normalizeDirectPublisherConfig = (platform, config = {}) => {
       captionsLanguage: config.captionsLanguage || 'en',
       captionsName: config.captionsName || 'Default captions',
       premiereAt: config.premiereAt || ''
+    }
+  }
+  if (platform === 'bluesky') {
+    return {
+      identifier: config.identifier || '',
+      appPassword: config.appPassword || '',
+      serviceUrl: config.serviceUrl || 'https://bsky.social'
     }
   }
   return {
@@ -2148,7 +2194,7 @@ const getAvailablePublishingAccounts = (platform) => (
   currentProfileAccounts.value.filter(item => item.platformKey === platform)
 )
 
-const supportsDirectPublisherTarget = (platform) => ['telegram', 'discord', 'reddit', 'twitter', 'youtube'].includes(platform)
+const supportsDirectPublisherTarget = (platform) => ['telegram', 'discord', 'reddit', 'twitter', 'youtube', 'bluesky', 'line_oa'].includes(platform)
 
 const getAvailableDirectPublisherTargets = (platform) => (
   directPublisherTargetOptions.value.filter(item => item.platform === platform)

@@ -26,7 +26,7 @@ from utils.profile_pipeline import (
     upload_media,
 )
 
-DIRECT_UPLOAD_PLATFORMS = {"xiaohongshu", "channels", "douyin", "kuaishou", "twitter", "telegram", "reddit", "discord"}
+DIRECT_UPLOAD_PLATFORMS = {"xiaohongshu", "channels", "douyin", "kuaishou", "twitter", "telegram", "reddit", "discord", "bluesky", "line_oa"}
 MANAGED_DIRECT_UPLOAD_PLATFORMS = {"facebook", "threads", "youtube", "tiktok"}
 SHEET_EXPORT_PLATFORMS = {"threads", "instagram", "facebook", "youtube", "tiktok"}
 MANUAL_ONLY_PLATFORMS = {"patreon"}
@@ -1503,12 +1503,14 @@ def _should_create_scheduler_sheet_copy(job: dict[str, Any]) -> bool:
 def _pick_primary_message(posts: dict[str, Any]) -> str:
     ordered_platforms = [
         "twitter",
+        "bluesky",
         "threads",
         "instagram",
         "facebook",
         "youtube",
         "tiktok",
         "telegram",
+        "line_oa",
         "patreon",
         "reddit",
     ]
