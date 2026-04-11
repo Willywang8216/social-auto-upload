@@ -124,6 +124,84 @@ class PublishJobsTests(unittest.TestCase):
         content_item = next(item for item in result["items"] if item["targetKind"] == "content_account")
         self.assertEqual(content_item["contentAccountId"], "acct-twitter-main")
 
+    def test_generate_publish_batch_drafts_uses_linked_content_persona_for_managed_account(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO user_info (type, filePath, userName, status, platform_key, auth_mode, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (0, "", "X 發佈帳", 1, "twitter", "manual", '{"accessToken":"token"}'),
+            )
+            twitter_account_id = cursor.lastrowid
+            conn.commit()
+
+        profile = save_profile(
+            self.db_path,
+            {
+                "name": "Creator Linked",
+                "accountIds": [twitter_account_id],
+                "settings": {
+                    "contentAccounts": [
+                        {
+                            "id": "acct-twitter-linked",
+                            "platform": "twitter",
+                            "name": "X Persona",
+                            "postPreset": "Preset Linked",
+                            "publishingAccountId": twitter_account_id,
+                        }
+                    ]
+                },
+            },
+        )
+
+        fake_batch_result = {
+            "profile": {"id": profile["id"], "name": profile["name"]},
+            "selectedAccountIds": [twitter_account_id],
+            "results": [
+                {
+                    "material": {"id": 1, "filename": "clip.mp4"},
+                    "processedMediaPath": str(self.base_dir / "videoFile" / "clip.mp4"),
+                    "storage": {
+                        "publicUrl": "https://cdn.example.com/clip.mp4",
+                        "mediaKind": "video",
+                    },
+                    "transcript": "transcript body",
+                    "posts": {"twitter": "Generic tweet"},
+                    "contentAccountResults": [
+                        {
+                            "account": {
+                                "id": "acct-twitter-linked",
+                                "platform": "twitter",
+                                "name": "X Persona",
+                                "postPreset": "Preset Linked",
+                                "publishingAccountId": str(twitter_account_id),
+                            },
+                            "content": "Persona tweet",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with patch("utils.publish_jobs.generate_profile_batch_content", return_value=fake_batch_result):
+            result = generate_publish_batch_drafts(
+                self.db_path,
+                self.base_dir,
+                {
+                    "profileId": profile["id"],
+                    "materialIds": [1],
+                    "selectedAccountIds": [twitter_account_id],
+                    "selectedContentAccountIds": ["acct-twitter-linked"],
+                },
+            )
+
+        managed_item = next(item for item in result["items"] if item["targetKind"] == "managed_account")
+        self.assertEqual(managed_item["message"], "Persona tweet")
+        self.assertEqual(managed_item["metadata"]["contentAccountId"], "acct-twitter-linked")
+        self.assertEqual(managed_item["metadata"]["publishingAccountId"], str(twitter_account_id))
+
     def test_save_publish_jobs_expands_fixed_frequency_queue(self):
         result = save_publish_jobs(
             self.db_path,
@@ -525,6 +603,63 @@ class PublishJobsTests(unittest.TestCase):
         self.assertEqual(scheduler_sheet["state"], "retry_active")
         self.assertEqual(scheduler_sheet["retryCount"], 1)
         delete_rows_mock.assert_called()
+
+    def test_execute_due_publish_jobs_builds_direct_target_from_managed_twitter_account(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO user_info (type, filePath, userName, status, platform_key, auth_mode, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    0,
+                    "",
+                    "X Direct",
+                    1,
+                    "twitter",
+                    "manual",
+                    '{"apiKey":"key","apiKeySecret":"secret","accessToken":"token","accessTokenSecret":"token-secret"}',
+                ),
+            )
+            twitter_account_id = cursor.lastrowid
+            conn.commit()
+
+        saved = save_publish_jobs(
+            self.db_path,
+            {
+                "items": [
+                    {
+                        "profileId": self.profile["id"],
+                        "profileName": self.profile["name"],
+                        "targetKind": "managed_account",
+                        "accountId": twitter_account_id,
+                        "platformKey": "twitter",
+                        "targetName": "X Direct",
+                        "deliveryMode": "direct_upload",
+                        "materialId": 1,
+                        "materialName": "clip.mp4",
+                        "mediaPath": "videoFile/clip.mp4",
+                        "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                        "title": "Tweet title",
+                        "message": "Tweet body",
+                        "metadata": {"mediaKind": "video"},
+                    }
+                ],
+                "mode": "now",
+            },
+        )
+
+        with patch("utils.publish_jobs.publish_job_to_direct_target") as publish_mock:
+            result = execute_due_publish_jobs(self.db_path, self.base_dir, job_ids=saved["jobIds"])
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(publish_mock.call_count, 1)
+        _, job_payload, target = publish_mock.call_args[0]
+        self.assertEqual(job_payload["platformKey"], "twitter")
+        self.assertEqual(target["platform"], "twitter")
+        self.assertEqual(target["config"]["apiKey"], "key")
+        self.assertEqual(target["config"]["accessTokenSecret"], "token-secret")
 
     def test_get_publish_calendar_entries_groups_by_day(self):
         save_publish_jobs(

@@ -419,9 +419,17 @@ def generate_profile_content(db_path: Path, base_dir: Path, payload: dict[str, A
 
     runtime_profile = deepcopy(profile)
     runtime_profile["selectedAccountIds"] = _resolve_selected_account_ids(runtime_profile, payload.get("selectedAccountIds"))
-    runtime_profile["selectedContentAccountIds"] = _resolve_selected_content_account_ids(
+    explicit_content_account_ids = _resolve_selected_content_account_ids(
         runtime_profile,
         payload.get("selectedContentAccountIds"),
+    )
+    linked_content_account_ids = _resolve_linked_content_account_ids(
+        runtime_profile,
+        runtime_profile["selectedAccountIds"],
+    )
+    runtime_profile["selectedContentAccountIds"] = _merge_content_account_ids(
+        explicit_content_account_ids,
+        linked_content_account_ids,
     )
     runtime_social_settings = (((runtime_profile.get("settings") or {}).get("socialImport")) or {})
     if payload.get("link"):
@@ -1040,6 +1048,8 @@ def generate_content_account_posts(
                 "name": account.get("name", ""),
                 "platform": account.get("platform", ""),
                 "postPreset": account.get("postPreset", ""),
+                "publishingAccountId": account.get("publishingAccountId") or "",
+                "publisherTargetId": account.get("publisherTargetId") or "",
             },
             "content": content,
         })
@@ -1409,6 +1419,7 @@ def _normalize_content_accounts(values: Any) -> list[dict[str, str]]:
             "contactDetails": str(item.get("contactDetails") or "").strip(),
             "cta": str(item.get("cta") or "").strip(),
             "postPreset": str(item.get("postPreset") or "").strip(),
+            "publishingAccountId": str(item.get("publishingAccountId") or "").strip(),
             "publisherTargetId": str(item.get("publisherTargetId") or "").strip(),
         })
 
@@ -1537,6 +1548,31 @@ def _get_selected_content_accounts(profile: dict[str, Any]) -> list[dict[str, st
     if not selected_ids:
         return content_accounts
     return [account for account in content_accounts if account.get("id") in selected_ids]
+
+
+def _resolve_linked_content_account_ids(profile: dict[str, Any], selected_account_ids: list[int]) -> list[str]:
+    if not selected_account_ids:
+        return []
+    selected_ids = {str(account_id) for account_id in selected_account_ids}
+    linked_ids = []
+    for account in _get_profile_content_accounts(profile):
+        publishing_account_id = str(account.get("publishingAccountId") or "").strip()
+        if publishing_account_id and publishing_account_id in selected_ids:
+            linked_ids.append(str(account.get("id") or "").strip())
+    return linked_ids
+
+
+def _merge_content_account_ids(*groups: list[str]) -> list[str]:
+    merged = []
+    seen = set()
+    for group in groups:
+        for account_id in group or []:
+            normalized = str(account_id or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            merged.append(normalized)
+    return merged
 
 
 def aggregate_account_posts(content_account_results: list[dict[str, Any]]) -> dict[str, str]:

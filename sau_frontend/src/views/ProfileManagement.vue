@@ -205,6 +205,26 @@
                   />
                 </el-form-item>
 
+                <el-form-item label="綁定發佈帳號" label-width="120px">
+                  <el-select
+                    v-model="contentAccount.publishingAccountId"
+                    clearable
+                    filterable
+                    placeholder="選擇這個 persona 對應的 publishing account"
+                    style="width: 100%"
+                  >
+                    <el-option
+                      v-for="account in getAvailablePublishingAccounts(contentAccount.platform)"
+                      :key="account.id"
+                      :label="`${account.name}（${account.platform}）`"
+                      :value="account.id"
+                    />
+                  </el-select>
+                  <div class="muted-text">
+                    綁定後，發佈工作台選到該 publishing account 時，會優先使用這個 persona 的文案與投遞設定。
+                  </div>
+                </el-form-item>
+
                 <el-form-item
                   v-if="supportsDirectPublisherTarget(contentAccount.platform)"
                   label="Direct Target"
@@ -1188,6 +1208,7 @@ const createContentAccount = () => ({
   contactDetails: '',
   cta: '',
   postPreset: '',
+  publishingAccountId: '',
   publisherTargetId: ''
 })
 
@@ -1276,6 +1297,7 @@ const normalizeContentAccounts = (values = []) => {
       contactDetails: item.contactDetails || '',
       cta: item.cta || '',
       postPreset: item.postPreset || '',
+      publishingAccountId: item.publishingAccountId || '',
       publisherTargetId: item.publisherTargetId || ''
     }))
 }
@@ -1485,6 +1507,10 @@ const getContentAccountDisplayName = (contentAccount) => {
   const platformLabel = getContentAccountPlatformLabel(contentAccount.platform)
   return name ? `${name}（${platformLabel}）` : platformLabel
 }
+
+const getAvailablePublishingAccounts = (platform) => (
+  currentProfileAccounts.value.filter(item => item.platformKey === platform)
+)
 
 const supportsDirectPublisherTarget = (platform) => ['telegram', 'discord', 'reddit', 'twitter'].includes(platform)
 

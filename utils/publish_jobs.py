@@ -594,6 +594,9 @@ def _build_draft_items(db_path: Path, batch_result: dict[str, Any]) -> list[dict
 
         for account in selected_accounts:
             platform_key = account["platformKey"]
+            linked_content_result = _find_linked_content_account_result(content_account_results, account["id"], platform_key)
+            linked_account = (linked_content_result or {}).get("account") or {}
+            linked_message = str((linked_content_result or {}).get("content") or "").strip()
             items.append({
                 "profileId": profile.get("id"),
                 "profileName": profile.get("name") or "",
@@ -607,13 +610,17 @@ def _build_draft_items(db_path: Path, batch_result: dict[str, Any]) -> list[dict
                 "materialName": material.get("filename") or "",
                 "mediaPath": processed_media_path,
                 "mediaPublicUrl": storage.get("publicUrl") or "",
-                "title": _build_job_title(material, fallback_message),
-                "message": posts.get(platform_key) or fallback_message,
+                "title": _build_job_title(material, linked_message or posts.get(platform_key) or fallback_message),
+                "message": linked_message or posts.get(platform_key) or fallback_message,
                 "hashtags": [],
                 "metadata": {
                     "mediaKind": storage.get("mediaKind") or infer_media_kind(Path(processed_media_path)) if processed_media_path else "file",
                     "transcript": transcript,
-                    "source": "managed_account_generation",
+                    "contentAccountId": linked_account.get("id") or "",
+                    "postPreset": linked_account.get("postPreset") or "",
+                    "publisherTargetId": linked_account.get("publisherTargetId") or "",
+                    "publishingAccountId": linked_account.get("publishingAccountId") or str(account["id"]),
+                    "source": "linked_content_account_generation" if linked_message else "managed_account_generation",
                 },
             })
 
@@ -640,6 +647,7 @@ def _build_draft_items(db_path: Path, batch_result: dict[str, Any]) -> list[dict
                     "mediaKind": storage.get("mediaKind") or infer_media_kind(Path(processed_media_path)) if processed_media_path else "file",
                     "transcript": transcript,
                     "postPreset": account.get("postPreset") or "",
+                    "publishingAccountId": account.get("publishingAccountId") or "",
                     "publisherTargetId": account.get("publisherTargetId") or "",
                     "source": "content_account_generation",
                 },
@@ -879,11 +887,11 @@ def _serialize_job_row_with_native_fields(row: sqlite3.Row | dict[str, Any]) -> 
 
 
 def _execute_direct_upload_job(db_path: Path, job: dict[str, Any], base_dir: Path | None = None) -> None:
-    from myUtils.postVideo import post_video_DouYin, post_video_ks, post_video_tencent, post_video_xhs
-
     platform_key = job["platformKey"]
 
     if platform_key in {"xiaohongshu", "channels", "douyin", "kuaishou"}:
+        from myUtils.postVideo import post_video_DouYin, post_video_ks, post_video_tencent, post_video_xhs
+
         account = _get_account_by_id(db_path, job["accountId"])
         account_file = account["filePath"]
         media_path = job["mediaPath"]
@@ -905,10 +913,7 @@ def _execute_direct_upload_job(db_path: Path, job: dict[str, Any], base_dir: Pat
     if platform_key in {"twitter", "telegram", "reddit", "discord"}:
         if base_dir is None:
             raise ValueError("base_dir is required for direct publisher targets")
-        target_id = str((job.get("metadata") or {}).get("publisherTargetId") or "").strip()
-        if not target_id:
-            raise ValueError(f"{platform_key} direct upload job requires publisherTargetId")
-        target = get_direct_publisher_target(base_dir, target_id)
+        target = _resolve_direct_upload_target(db_path, job, base_dir)
         publish_job_to_direct_target(base_dir, job, target)
         return
     raise ValueError(f"unsupported direct upload platform: {platform_key}")
@@ -1268,6 +1273,69 @@ def _find_content_account(profile: dict[str, Any], content_account_id: str) -> d
         if str(item.get("id") or "").strip() == str(content_account_id or "").strip():
             return item
     raise ValueError("content account not found")
+
+
+def _find_linked_content_account_result(
+    content_account_results: list[dict[str, Any]],
+    publishing_account_id: int | str,
+    platform_key: str,
+) -> dict[str, Any] | None:
+    publishing_account_id = str(publishing_account_id or "").strip()
+    normalized_platform = str(platform_key or "").strip().lower()
+    if not publishing_account_id:
+        return None
+
+    for result in content_account_results or []:
+        account = result.get("account") or {}
+        if (
+            str(account.get("publishingAccountId") or "").strip() == publishing_account_id
+            and str(account.get("platform") or "").strip().lower() == normalized_platform
+        ):
+            return result
+    return None
+
+
+def _resolve_direct_upload_target(db_path: Path, job: dict[str, Any], base_dir: Path) -> dict[str, Any]:
+    target_id = str((job.get("metadata") or {}).get("publisherTargetId") or "").strip()
+    if target_id:
+        return get_direct_publisher_target(base_dir, target_id)
+
+    if job.get("targetKind") == "managed_account" and job.get("accountId"):
+        account = _get_account_by_id(db_path, job["accountId"])
+        return _build_direct_target_from_account(account)
+
+    raise ValueError(f"{job['platformKey']} direct upload job requires publisherTargetId or managed account credentials")
+
+
+def _build_direct_target_from_account(account: dict[str, Any]) -> dict[str, Any]:
+    platform = str(account.get("platformKey") or "").strip().lower()
+    metadata = account.get("metadata") or {}
+
+    if platform == "twitter":
+        return {
+            "platform": "twitter",
+            "enabled": True,
+            "config": {
+                "apiKey": str(metadata.get("apiKey") or "").strip(),
+                "apiKeySecret": str(metadata.get("apiKeySecret") or "").strip(),
+                "accessToken": str(metadata.get("accessToken") or "").strip(),
+                "accessTokenSecret": str(metadata.get("accessTokenSecret") or "").strip(),
+            },
+        }
+
+    if platform == "reddit":
+        return {
+            "platform": "reddit",
+            "enabled": True,
+            "config": {
+                "clientId": str(metadata.get("clientId") or "").strip(),
+                "clientSecret": str(metadata.get("clientSecret") or "").strip(),
+                "refreshToken": str(metadata.get("refreshToken") or "").strip(),
+                "subreddit": str(metadata.get("subreddit") or "").strip(),
+            },
+        }
+
+    raise ValueError(f"managed account direct upload is not implemented for {platform}")
 
 
 def _merge_instruction(existing_text: Any, instruction_text: str) -> str:

@@ -92,8 +92,17 @@
                 v-for="account in getManagedAccounts(profile)"
                 :key="account.id"
                 :label="account.id"
+                :disabled="!getManagedAccountSelectionState(account).selectable"
               >
-                {{ account.name }} · {{ account.platform }}
+                <div class="selection-item">
+                  <div class="selection-title selection-title-inline">
+                    <span>{{ account.name }} · {{ account.platform }}</span>
+                    <el-tag size="small" :type="getValidationStatusTagType(account)">
+                      {{ getManagedAccountSelectionState(account).label }}
+                    </el-tag>
+                  </div>
+                  <div class="selection-meta">{{ getManagedAccountSelectionState(account).reason }}</div>
+                </div>
               </el-checkbox>
             </el-checkbox-group>
             <el-empty
@@ -109,8 +118,23 @@
                 v-for="account in getContentAccounts(profile)"
                 :key="account.id"
                 :label="account.id"
+                :disabled="!getContentAccountSelectionState(profile, account).selectable"
               >
-                {{ account.name || account.platform }} · {{ account.platform }}
+                <div class="selection-item">
+                  <div class="selection-title">{{ account.name || account.platform }} · {{ account.platform }}</div>
+                  <div class="selection-meta">
+                    <span v-if="account.publishingAccountId">
+                      綁定發佈帳號：{{ getPublishingAccountLabel(profile, account.publishingAccountId) }}
+                    </span>
+                    <span v-else-if="account.publisherTargetId">
+                      Direct Target：{{ account.publisherTargetId }}
+                    </span>
+                    <span v-else>
+                      尚未綁定發佈帳號
+                    </span>
+                  </div>
+                  <div class="muted-text">{{ getContentAccountSelectionState(profile, account).reason }}</div>
+                </div>
               </el-checkbox>
             </el-checkbox-group>
             <el-empty
@@ -376,6 +400,9 @@ const materials = computed(() => appStore.materials || [])
 const selectedProfiles = computed(() => (
   profiles.value.filter(profile => selectedProfileIds.value.includes(profile.id))
 ))
+const managedDirectPublishPlatforms = new Set(['xiaohongshu', 'channels', 'douyin', 'kuaishou', 'twitter', 'reddit'])
+const contentDirectTargetPlatforms = new Set(['telegram', 'discord'])
+const contentManagedBindingPlatforms = new Set(['twitter', 'reddit'])
 
 const actionButtonLabel = computed(() => {
   if (deliveryMode.value === 'schedule') {
@@ -422,14 +449,24 @@ const syncProfileSelectionState = () => {
   })
 
   selectedProfiles.value.forEach((profile) => {
+    const selectableAccountIds = getSelectableManagedAccountIds(profile)
+    const selectableContentAccountIds = getSelectableContentAccountIds(profile)
     if (!profileSelectionState[profile.id]) {
       profileSelectionState[profile.id] = {
         profileId: profile.id,
-        selectedAccountIds: [...(profile.accountIds || [])],
-        selectedContentAccountIds: getContentAccounts(profile).map(item => item.id),
+        selectedAccountIds: selectableAccountIds,
+        selectedContentAccountIds: selectableContentAccountIds,
         link: profile.settings?.socialImport?.defaultLink || ''
       }
+      return
     }
+
+    profileSelectionState[profile.id].selectedAccountIds = (
+      profileSelectionState[profile.id].selectedAccountIds || []
+    ).filter(id => selectableAccountIds.includes(id))
+    profileSelectionState[profile.id].selectedContentAccountIds = (
+      profileSelectionState[profile.id].selectedContentAccountIds || []
+    ).filter(id => selectableContentAccountIds.includes(id))
   })
 }
 
@@ -439,6 +476,104 @@ const getManagedAccounts = (profile) => {
 }
 
 const getContentAccounts = (profile) => profile.settings?.contentAccounts || []
+
+const isAccountValidated = (account) => {
+  if (!account?.supportsValidation) {
+    return true
+  }
+  return account.status === '正常'
+}
+
+const getValidationStatusTagType = (account) => {
+  if (account.status === '正常') {
+    return 'success'
+  }
+  if (account.status === '驗證中') {
+    return 'warning'
+  }
+  return 'danger'
+}
+
+const formatValidationTime = (value) => {
+  const text = String(value || '').trim()
+  if (!text) {
+    return ''
+  }
+  return text.replace('T', ' ')
+}
+
+const getManagedAccountSelectionState = (account) => {
+  if (!account) {
+    return { selectable: false, label: '不可用', reason: '找不到帳號資料。' }
+  }
+  if (!managedDirectPublishPlatforms.has(account.platformKey)) {
+    return { selectable: true, label: '可使用', reason: '這個平台可用於產稿、匯出或手動交付流程。' }
+  }
+  if (isAccountValidated(account)) {
+    return {
+      selectable: true,
+      label: account.validationMessage || '已驗證',
+      reason: account.lastValidatedAt ? `最後驗證：${formatValidationTime(account.lastValidatedAt)}` : '已通過驗證，可直接投遞。'
+    }
+  }
+  return {
+    selectable: false,
+    label: account.validationMessage || '未驗證',
+    reason: account.lastError || '這個 publishing account 尚未驗證通過，暫時不能在發佈工作台選取。'
+  }
+}
+
+const getPublishingAccount = (profile, accountId) => (
+  getManagedAccounts(profile).find(item => item.id === Number(accountId))
+)
+
+const getPublishingAccountLabel = (profile, accountId) => {
+  const account = getPublishingAccount(profile, accountId)
+  return account ? `${account.name}（${account.platform}）` : `帳號 ${accountId}`
+}
+
+const getContentAccountSelectionState = (profile, contentAccount) => {
+  const platformKey = String(contentAccount?.platform || '').trim().toLowerCase()
+  const publishingAccountId = Number(contentAccount?.publishingAccountId || 0)
+  if (publishingAccountId) {
+    const publishingAccount = getPublishingAccount(profile, publishingAccountId)
+    if (!publishingAccount) {
+      return { selectable: false, reason: '綁定的發佈帳號不在這個 Profile 內。' }
+    }
+    if (!isAccountValidated(publishingAccount)) {
+      return { selectable: false, reason: `綁定帳號尚未驗證通過：${publishingAccount.name}` }
+    }
+    return { selectable: true, reason: `會沿用 ${publishingAccount.name} 的憑證做實際投遞。` }
+  }
+
+  if (contentDirectTargetPlatforms.has(platformKey)) {
+    if (contentAccount?.publisherTargetId) {
+      return { selectable: true, reason: '將透過 Direct Target 執行實際投遞。' }
+    }
+    return { selectable: false, reason: '這個平台需要先設定 Direct Target。' }
+  }
+
+  if (contentManagedBindingPlatforms.has(platformKey)) {
+    if (contentAccount?.publisherTargetId) {
+      return { selectable: true, reason: '將透過 Direct Target 執行實際投遞。' }
+    }
+    return { selectable: false, reason: '請先綁定已驗證的 publishing account，或指定 Direct Target。' }
+  }
+
+  return { selectable: true, reason: '未綁定發佈帳號時，將走 Google Sheet 或手動流程。' }
+}
+
+const getSelectableManagedAccountIds = (profile) => (
+  getManagedAccounts(profile)
+    .filter(account => getManagedAccountSelectionState(account).selectable)
+    .map(account => account.id)
+)
+
+const getSelectableContentAccountIds = (profile) => (
+  getContentAccounts(profile)
+    .filter(account => getContentAccountSelectionState(profile, account).selectable)
+    .map(account => account.id)
+)
 
 const getRowKey = (row) => row.id || row.tempKey
 
@@ -469,8 +604,10 @@ const buildProfileSelectionsPayload = () => (
   selectedProfiles.value.map((profile) => ({
     profileId: profile.id,
     materialIds: [...selectionForm.materialIds],
-    selectedAccountIds: [...(profileSelectionState[profile.id]?.selectedAccountIds || [])],
-    selectedContentAccountIds: [...(profileSelectionState[profile.id]?.selectedContentAccountIds || [])],
+    selectedAccountIds: [...(profileSelectionState[profile.id]?.selectedAccountIds || [])]
+      .filter(id => getSelectableManagedAccountIds(profile).includes(id)),
+    selectedContentAccountIds: [...(profileSelectionState[profile.id]?.selectedContentAccountIds || [])]
+      .filter(id => getSelectableContentAccountIds(profile).includes(id)),
     link: profileSelectionState[profile.id]?.link || ''
   }))
 )
@@ -869,6 +1006,13 @@ onMounted(async () => {
     font-size: 14px;
     color: $text-primary;
     word-break: break-word;
+  }
+
+  .selection-title-inline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
   }
 
   .card-header,

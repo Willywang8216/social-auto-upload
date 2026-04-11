@@ -84,6 +84,7 @@ class ProfilePipelineTests(unittest.TestCase):
                                 "contactDetails": "@guang_main",
                                 "cta": "追蹤主帳",
                                 "postPreset": "X Main Preset",
+                                "publishingAccountId": 1,
                                 "publisherTargetId": "publisher-x-main",
                             },
                             {
@@ -102,6 +103,7 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertEqual(len(saved["settings"]["contentAccounts"]), 2)
             self.assertEqual(saved["settings"]["contentAccounts"][0]["platform"], "twitter")
             self.assertTrue(saved["settings"]["contentAccounts"][1]["id"])
+            self.assertEqual(saved["settings"]["contentAccounts"][0]["publishingAccountId"], "1")
             self.assertEqual(saved["settings"]["contentAccounts"][0]["publisherTargetId"], "publisher-x-main")
             self.assertEqual(saved["settings"]["contentAccounts"][1]["platform"], "discord")
 
@@ -109,6 +111,7 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertEqual(len(profiles), 1)
             self.assertEqual(profiles[0]["accountIds"], [1, 2])
             self.assertEqual(profiles[0]["settings"]["contentAccounts"][0]["postPreset"], "X Main Preset")
+            self.assertEqual(profiles[0]["settings"]["contentAccounts"][0]["publishingAccountId"], "1")
             self.assertEqual(profiles[0]["settings"]["contentAccounts"][1]["publisherTargetId"], "publisher-discord-main")
 
     def test_build_google_sheet_rows_maps_platform_presets_and_schedule(self):
