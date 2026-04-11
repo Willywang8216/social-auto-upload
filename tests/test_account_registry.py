@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from utils.account_registry import ensure_account_tables, serialize_account_row
+from utils.account_registry import ensure_account_tables, merge_sensitive_account_metadata, serialize_account_row
 
 
 class AccountRegistryTests(unittest.TestCase):
@@ -60,6 +60,35 @@ class AccountRegistryTests(unittest.TestCase):
         self.assertEqual(serialized["authMode"], "oauth_token")
         self.assertEqual(serialized["metadata"]["handle"], "@guang")
         self.assertTrue(serialized["isInternational"])
+
+    def test_serialize_account_row_masks_sensitive_metadata_when_requested(self):
+        row = {
+            "id": 100,
+            "type": 0,
+            "platform_key": "twitter",
+            "filePath": "",
+            "userName": "X Main",
+            "status": 0,
+            "auth_mode": "oauth_token",
+            "metadata_json": '{"handle":"@guang","apiKey":"key","accessToken":"token"}',
+        }
+
+        serialized = serialize_account_row(row, include_sensitive=False)
+
+        self.assertEqual(serialized["metadata"]["handle"], "@guang")
+        self.assertEqual(serialized["metadata"]["apiKey"], "********")
+        self.assertEqual(serialized["metadata"]["accessToken"], "********")
+
+    def test_merge_sensitive_account_metadata_preserves_existing_secrets_when_masked(self):
+        merged = merge_sensitive_account_metadata(
+            "twitter",
+            {"handle": "@new", "apiKey": "********", "accessToken": ""},
+            {"handle": "@old", "apiKey": "stored-key", "accessToken": "stored-token"},
+        )
+
+        self.assertEqual(merged["handle"], "@new")
+        self.assertEqual(merged["apiKey"], "stored-key")
+        self.assertEqual(merged["accessToken"], "stored-token")
 
 
 if __name__ == "__main__":

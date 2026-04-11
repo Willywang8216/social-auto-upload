@@ -13,13 +13,24 @@ from typing import Any
 DIRECT_PUBLISHERS_FILENAME = "direct_publishers.json"
 DIRECT_PUBLISHER_PLATFORMS = {"telegram", "discord", "reddit", "twitter", "facebook", "threads", "youtube", "tiktok"}
 ASYNC_DIRECT_PUBLISH_PLATFORMS = {"threads", "youtube", "tiktok"}
+MASKED_SECRET_VALUE = "********"
+DIRECT_PUBLISHER_SECRET_FIELDS = {
+    "telegram": {"botToken"},
+    "discord": {"webhookUrl"},
+    "reddit": {"clientId", "clientSecret", "refreshToken"},
+    "twitter": {"apiKey", "apiKeySecret", "accessToken", "accessTokenSecret"},
+    "facebook": {"accessToken"},
+    "threads": {"accessToken"},
+    "youtube": {"accessToken"},
+    "tiktok": {"accessToken"},
+}
 
 
 def get_direct_publishers_storage_path(base_dir: Path) -> Path:
     return base_dir / "db" / DIRECT_PUBLISHERS_FILENAME
 
 
-def get_direct_publishers_config(base_dir: Path) -> dict[str, Any]:
+def get_direct_publishers_config(base_dir: Path, include_sensitive: bool = True) -> dict[str, Any]:
     path = get_direct_publishers_storage_path(base_dir)
     if not path.exists():
         return {"targets": []}
@@ -30,17 +41,36 @@ def get_direct_publishers_config(base_dir: Path) -> dict[str, Any]:
         return {"targets": []}
 
     targets = raw_data.get("targets") if isinstance(raw_data, dict) else []
-    return {"targets": _normalize_direct_publisher_targets(targets)}
+    return {"targets": _sanitize_direct_publisher_targets(_normalize_direct_publisher_targets(targets), include_sensitive)}
 
 
 def save_direct_publishers_config(base_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
-    current = get_direct_publishers_config(base_dir)
+    current = get_direct_publishers_config(base_dir, include_sensitive=True)
     targets = payload.get("targets", current.get("targets", []))
-    normalized = {"targets": _normalize_direct_publisher_targets(targets)}
+    normalized_targets = _normalize_direct_publisher_targets(targets)
+    current_by_id = {
+        str(item.get("id") or "").strip(): item
+        for item in current.get("targets", [])
+        if str(item.get("id") or "").strip()
+    }
+    merged_targets = []
+    for item in normalized_targets:
+        existing = current_by_id.get(str(item.get("id") or "").strip(), {})
+        merged_targets.append(
+            {
+                **item,
+                "config": _merge_secret_config_fields(
+                    item.get("platform") or "",
+                    item.get("config") or {},
+                    existing.get("config") or {},
+                ),
+            }
+        )
+    normalized = {"targets": merged_targets}
     path = get_direct_publishers_storage_path(base_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    return normalized
+    return {"targets": _sanitize_direct_publisher_targets(normalized["targets"], include_sensitive=False)}
 
 
 def get_direct_publisher_target(base_dir: Path, target_id: str) -> dict[str, Any]:
@@ -48,7 +78,7 @@ def get_direct_publisher_target(base_dir: Path, target_id: str) -> dict[str, Any
     if not target_id:
         raise ValueError("direct publisher target id is required")
 
-    config = get_direct_publishers_config(base_dir)
+    config = get_direct_publishers_config(base_dir, include_sensitive=True)
     for target in config.get("targets", []):
         if target.get("id") == target_id:
             return target
@@ -119,6 +149,33 @@ def _normalize_direct_publisher_targets(targets: Any) -> list[dict[str, Any]]:
                 "config": _normalize_target_config(platform, config),
             }
         )
+    return normalized
+
+
+def _sanitize_direct_publisher_targets(targets: list[dict[str, Any]], include_sensitive: bool) -> list[dict[str, Any]]:
+    if include_sensitive:
+        return targets
+    sanitized = []
+    for item in targets:
+        sanitized_item = dict(item)
+        config = dict(item.get("config") or {})
+        for field in DIRECT_PUBLISHER_SECRET_FIELDS.get(str(item.get("platform") or "").strip().lower(), set()):
+            if config.get(field):
+                config[field] = MASKED_SECRET_VALUE
+        sanitized_item["config"] = config
+        sanitized.append(sanitized_item)
+    return sanitized
+
+
+def _merge_secret_config_fields(platform: str, incoming: dict[str, Any], existing: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(incoming or {})
+    current = dict(existing or {})
+    for field in DIRECT_PUBLISHER_SECRET_FIELDS.get(str(platform or "").strip().lower(), set()):
+        incoming_value = normalized.get(field)
+        if incoming_value in (None, "", MASKED_SECRET_VALUE):
+            existing_value = current.get(field)
+            if existing_value not in (None, ""):
+                normalized[field] = existing_value
     return normalized
 
 

@@ -50,6 +50,81 @@ class DirectPublishersTests(unittest.TestCase):
             loaded = get_direct_publishers_config(base_dir)
             self.assertEqual(loaded["targets"][1]["id"], "x-main")
 
+    def test_get_direct_publishers_config_masks_sensitive_fields_for_public_reads(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            save_direct_publishers_config(
+                base_dir,
+                {
+                    "targets": [
+                        {
+                            "id": "yt-main",
+                            "platform": "youtube",
+                            "name": "YT Main",
+                            "config": {
+                                "accessToken": "secret-token",
+                                "thumbnailUrl": "https://cdn.example.com/thumb.png",
+                            },
+                        }
+                    ]
+                },
+            )
+
+            loaded = get_direct_publishers_config(base_dir, include_sensitive=False)
+
+            self.assertEqual(loaded["targets"][0]["config"]["accessToken"], "********")
+            self.assertEqual(
+                loaded["targets"][0]["config"]["thumbnailUrl"],
+                "https://cdn.example.com/thumb.png",
+            )
+
+    def test_save_direct_publishers_config_preserves_existing_secret_when_masked(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            save_direct_publishers_config(
+                base_dir,
+                {
+                    "targets": [
+                        {
+                            "id": "x-main",
+                            "platform": "twitter",
+                            "name": "X Main",
+                            "config": {
+                                "apiKey": "stored-key",
+                                "apiKeySecret": "stored-secret",
+                                "accessToken": "stored-token",
+                                "accessTokenSecret": "stored-token-secret",
+                            },
+                        }
+                    ]
+                },
+            )
+
+            save_direct_publishers_config(
+                base_dir,
+                {
+                    "targets": [
+                        {
+                            "id": "x-main",
+                            "platform": "twitter",
+                            "name": "X Main Renamed",
+                            "config": {
+                                "apiKey": "********",
+                                "apiKeySecret": "",
+                                "accessToken": "********",
+                                "accessTokenSecret": "",
+                            },
+                        }
+                    ]
+                },
+            )
+
+            loaded = get_direct_publishers_config(base_dir)
+
+            self.assertEqual(loaded["targets"][0]["name"], "X Main Renamed")
+            self.assertEqual(loaded["targets"][0]["config"]["apiKey"], "stored-key")
+            self.assertEqual(loaded["targets"][0]["config"]["accessTokenSecret"], "stored-token-secret")
+
     @patch("utils.direct_publishers._get_requests_module")
     def test_publish_job_to_telegram_uses_send_video_for_video_jobs(self, requests_module_mock):
         response = Mock()

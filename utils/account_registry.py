@@ -2,6 +2,16 @@ import json
 import sqlite3
 from pathlib import Path
 
+MASKED_SECRET_VALUE = "********"
+
+ACCOUNT_SECRET_FIELDS = {
+    "twitter": {"apiKey", "apiKeySecret", "accessToken", "accessTokenSecret"},
+    "threads": {"accessToken"},
+    "facebook": {"accessToken"},
+    "reddit": {"clientId", "clientSecret", "refreshToken"},
+    "tiktok": {"accessToken"},
+    "youtube": {"accessToken"},
+}
 
 LEGACY_PLATFORM_MAP = {
     1: {"key": "xiaohongshu", "label": "小紅書", "supportsQrLogin": True, "supportsCookieUpload": True, "supportsValidation": True},
@@ -77,7 +87,11 @@ def ensure_account_tables(db_path: Path) -> None:
         conn.commit()
 
 
-def serialize_account_row(row: sqlite3.Row | dict, pending_validation: bool = False) -> dict:
+def serialize_account_row(
+    row: sqlite3.Row | dict,
+    pending_validation: bool = False,
+    include_sensitive: bool = True,
+) -> dict:
     account_type = _coerce_int(row["type"], 0)
     platform_key = normalize_platform_key(row["platform_key"] if "platform_key" in row.keys() else None) or platform_key_from_type(account_type)
     platform_config = get_platform_config(platform_key, account_type)
@@ -96,7 +110,11 @@ def serialize_account_row(row: sqlite3.Row | dict, pending_validation: bool = Fa
         "statusCode": status_code,
         "status": status_label_from_code(status_code),
         "authMode": (row["auth_mode"] if "auth_mode" in row.keys() else "") or default_auth_mode_for_platform(platform_key, account_type),
-        "metadata": parse_metadata(row["metadata_json"] if "metadata_json" in row.keys() else "{}"),
+        "metadata": sanitize_account_metadata(
+            parse_metadata(row["metadata_json"] if "metadata_json" in row.keys() else "{}"),
+            platform_key,
+            include_sensitive=include_sensitive,
+        ),
         "supportsQrLogin": platform_config["supportsQrLogin"],
         "supportsCookieUpload": platform_config["supportsCookieUpload"],
         "supportsValidation": platform_config["supportsValidation"],
@@ -112,6 +130,30 @@ def parse_metadata(raw_value) -> dict:
     except (TypeError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def sanitize_account_metadata(metadata: dict, platform_key: str, include_sensitive: bool = True) -> dict:
+    metadata = parse_metadata(metadata)
+    if include_sensitive:
+        return metadata
+    sanitized = dict(metadata)
+    for field in ACCOUNT_SECRET_FIELDS.get(normalize_platform_key(platform_key), set()):
+        if sanitized.get(field):
+            sanitized[field] = MASKED_SECRET_VALUE
+    return sanitized
+
+
+def merge_sensitive_account_metadata(platform_key: str, incoming: dict | None, existing: dict | None) -> dict:
+    normalized_key = normalize_platform_key(platform_key)
+    merged = parse_metadata(incoming)
+    current = parse_metadata(existing)
+    for field in ACCOUNT_SECRET_FIELDS.get(normalized_key, set()):
+        incoming_value = merged.get(field)
+        if incoming_value in (None, "", MASKED_SECRET_VALUE):
+            existing_value = current.get(field)
+            if existing_value not in (None, ""):
+                merged[field] = existing_value
+    return merged
 
 
 def normalize_platform_key(value) -> str:

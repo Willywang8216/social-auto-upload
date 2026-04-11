@@ -1,12 +1,14 @@
+import json
 import os
 import sqlite3
 import threading
 import time
 import uuid
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 from flask_cors import CORS
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory
+from werkzeug.utils import secure_filename
 from conf import BASE_DIR
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
@@ -58,10 +60,12 @@ from utils.account_registry import (
     default_auth_mode_for_platform,
     ensure_account_tables,
     get_platform_config,
+    merge_sensitive_account_metadata,
     normalize_platform_key,
     parse_metadata,
     platform_key_from_type,
     platform_type_from_key,
+    sanitize_account_metadata,
     serialize_account_row,
 )
 
@@ -86,6 +90,39 @@ def get_db_path():
     ensure_profile_tables(db_path)
     ensure_publish_job_tables(db_path)
     return db_path
+
+
+def _sanitize_storage_leaf_name(value: str, *, suffix: str | None = None, default_stem: str = "upload") -> str:
+    raw_name = Path(str(value or "").strip()).name
+    safe_name = secure_filename(raw_name)
+    if suffix:
+        normalized_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+        if Path(safe_name).suffix.lower() != normalized_suffix.lower():
+            safe_name = f"{Path(safe_name).stem or default_stem}{normalized_suffix}"
+    if not safe_name:
+        fallback_suffix = suffix or ""
+        safe_name = f"{default_stem}{fallback_suffix}"
+    return safe_name
+
+
+def _resolve_safe_child_path(base_dir: Path, relative_name: str) -> Path:
+    candidate = (base_dir / _sanitize_storage_leaf_name(relative_name, default_stem="file")).resolve()
+    base_path = base_dir.resolve()
+    if not candidate.is_relative_to(base_path):
+        raise ValueError("非法檔案路徑")
+    return candidate
+
+
+def _sanitize_account_response(account: dict) -> dict:
+    if not isinstance(account, dict):
+        return account
+    sanitized = dict(account)
+    sanitized["metadata"] = sanitize_account_metadata(
+        sanitized.get("metadata") or {},
+        sanitized.get("platformKey") or "",
+        include_sensitive=False,
+    )
+    return sanitized
 
 
 def start_profile_backup_scheduler() -> None:
@@ -210,11 +247,13 @@ def upload_save():
         }), 400
 
     # 获取表单中的自定义文件名（可选）
+    original_name = _sanitize_storage_leaf_name(file.filename, default_stem="upload")
     custom_filename = request.form.get('filename', None)
     if custom_filename:
-        filename = custom_filename + "." + file.filename.split('.')[-1]
+        extension = Path(original_name).suffix
+        filename = _sanitize_storage_leaf_name(custom_filename, suffix=extension or None, default_stem="upload")
     else:
-        filename = file.filename
+        filename = original_name
 
     try:
         # 生成 UUID v1
@@ -223,7 +262,7 @@ def upload_save():
 
         # 构造文件名和路径
         final_filename = f"{uuid_v1}_{filename}"
-        filepath = Path(BASE_DIR / "videoFile" / f"{uuid_v1}_{filename}")
+        filepath = _resolve_safe_child_path(Path(BASE_DIR / "videoFile"), f"{uuid_v1}_{filename}")
 
         # 保存文件
         file.save(filepath)
@@ -791,7 +830,7 @@ def get_google_sheet_config_route():
 @app.route('/getDirectPublishersConfig', methods=['GET'])
 def get_direct_publishers_config_route():
     try:
-        result = get_direct_publishers_config(Path(BASE_DIR))
+        result = get_direct_publishers_config(Path(BASE_DIR), include_sensitive=False)
         return jsonify({
             "code": 200,
             "msg": "success",
@@ -913,9 +952,11 @@ def getAccounts():
             SELECT * FROM user_info ORDER BY id DESC''')
             rows = cursor.fetchall()
             rows_list = [
-                merge_account_validation(
-                    serialize_account_row(row),
-                    get_validation_result(Path(BASE_DIR), row["id"]),
+                _sanitize_account_response(
+                    merge_account_validation(
+                        serialize_account_row(row),
+                        get_validation_result(Path(BASE_DIR), row["id"]),
+                    )
                 )
                 for row in rows
             ]
@@ -938,7 +979,7 @@ def getAccounts():
 @app.route("/getValidAccounts",methods=['GET'])
 def getValidAccounts():
     try:
-        results = validate_accounts(Path(BASE_DIR), get_db_path())
+        results = [_sanitize_account_response(item) for item in validate_accounts(Path(BASE_DIR), get_db_path())]
         return jsonify(
                         {
                             "code": 200,
@@ -965,7 +1006,7 @@ def validate_account_route():
         }), 400
 
     try:
-        result = validate_account(Path(BASE_DIR), get_db_path(), int(account_id))
+        result = _sanitize_account_response(validate_account(Path(BASE_DIR), get_db_path(), int(account_id)))
         return jsonify({
             "code": 200,
             "msg": "account validated",
@@ -1090,7 +1131,7 @@ def delete_account():
 
             # 删除关联的cookie文件
             if record.get('filePath'):
-                cookie_file_path = Path(BASE_DIR / "cookiesFile" / record['filePath'])
+                cookie_file_path = _resolve_safe_child_path(Path(BASE_DIR / "cookiesFile"), record['filePath'])
                 if cookie_file_path.exists():
                     try:
                         cookie_file_path.unlink()
@@ -1128,14 +1169,10 @@ def login():
     # 模拟一个用于异步通信的队列
     status_queue = Queue()
     active_queues[id] = status_queue
-
-    def on_close():
-        print(f"清理队列: {id}")
-        del active_queues[id]
     # 启动异步任务线程
     thread = threading.Thread(target=run_async_function, args=(type,id,status_queue), daemon=True)
     thread.start()
-    response = Response(sse_stream(status_queue,), mimetype='text/event-stream')
+    response = Response(sse_stream(status_queue, id), mimetype='text/event-stream')
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['X-Accel-Buffering'] = 'no'  # 关键：禁用 Nginx 缓冲
     response.headers['Content-Type'] = 'text/event-stream'
@@ -1223,7 +1260,12 @@ def create_account():
     user_name = (data.get('userName') or data.get('name') or '').strip()
     platform_key = normalize_platform_key(data.get('platformKey') or data.get('platform'))
     auth_mode = (data.get('authMode') or '').strip()
-    metadata_json = json.dumps(parse_metadata(data.get('metadata') or data.get('metadataJson') or {}), ensure_ascii=False)
+    metadata = merge_sensitive_account_metadata(
+        platform_key,
+        parse_metadata(data.get('metadata') or data.get('metadataJson') or {}),
+        {},
+    )
+    metadata_json = json.dumps(metadata, ensure_ascii=False)
 
     if not user_name:
         return jsonify({
@@ -1240,7 +1282,7 @@ def create_account():
 
     account_type = platform_type_from_key(platform_key)
     resolved_auth_mode = auth_mode or default_auth_mode_for_platform(platform_key, account_type)
-    file_path = (data.get('filePath') or '').strip()
+    file_path = _sanitize_storage_leaf_name(data.get('filePath') or '', suffix=".json", default_stem=platform_key or "cookie") if data.get('filePath') else ''
     if not file_path and get_platform_config(platform_key, account_type)["supportsCookieUpload"]:
         file_path = build_cookie_storage_name(platform_key)
     status = int(data.get('status', 0))
@@ -1265,7 +1307,7 @@ def create_account():
         return jsonify({
             "code": 200,
             "msg": "account created successfully",
-            "data": serialize_account_row(record)
+            "data": _sanitize_account_response(serialize_account_row(record))
         }), 200
     except Exception as e:
         return jsonify({
@@ -1286,7 +1328,7 @@ def updateUserinfo():
     userName = (data.get('userName') or data.get('name') or '').strip()
     platform_key = normalize_platform_key(data.get('platformKey') or data.get('platform')) or platform_key_from_type(type)
     auth_mode = (data.get('authMode') or '').strip()
-    metadata_json = json.dumps(parse_metadata(data.get('metadata') or data.get('metadataJson') or {}), ensure_ascii=False)
+    incoming_metadata = parse_metadata(data.get('metadata') or data.get('metadataJson') or {})
     file_path = data.get('filePath')
 
     if not user_id or not userName or not platform_key:
@@ -1313,12 +1355,20 @@ def updateUserinfo():
                 }), 404
 
             resolved_file_path = (
-                str(file_path).strip()
+                _sanitize_storage_leaf_name(file_path, suffix=".json", default_stem=platform_key or "cookie")
                 if file_path is not None
                 else str(existing_record["filePath"] or "").strip()
             )
             if not resolved_file_path and get_platform_config(platform_key, account_type)["supportsCookieUpload"]:
                 resolved_file_path = build_cookie_storage_name(platform_key)
+            metadata_json = json.dumps(
+                merge_sensitive_account_metadata(
+                    platform_key,
+                    incoming_metadata,
+                    parse_metadata(existing_record["metadata_json"] or "{}"),
+                ),
+                ensure_ascii=False,
+            )
 
             # 更新数据库记录
             if file_path is None:
@@ -1357,7 +1407,7 @@ def updateUserinfo():
         return jsonify({
             "code": 200,
             "msg": "account update successfully",
-            "data": serialize_account_row(record) if record else None
+            "data": _sanitize_account_response(serialize_account_row(record)) if record else None
         }), 200
 
     except Exception as e:
@@ -1468,7 +1518,7 @@ def upload_cookie():
             }), 404
 
         # 保存上传的Cookie文件到对应路径
-        cookie_file_path = Path(BASE_DIR / "cookiesFile" / result['filePath'])
+        cookie_file_path = _resolve_safe_child_path(Path(BASE_DIR / "cookiesFile"), result['filePath'])
         cookie_file_path.parent.mkdir(parents=True, exist_ok=True)
 
         file.save(str(cookie_file_path))
@@ -1505,7 +1555,7 @@ def download_cookie():
             }), 400
 
         # 验证文件路径的安全性，防止路径遍历攻击
-        cookie_file_path = Path(BASE_DIR / "cookiesFile" / file_path).resolve()
+        cookie_file_path = _resolve_safe_child_path(Path(BASE_DIR / "cookiesFile"), file_path)
         base_path = Path(BASE_DIR / "cookiesFile").resolve()
 
         if not cookie_file_path.is_relative_to(base_path):
@@ -1563,14 +1613,18 @@ def run_async_function(type,id,status_queue):
             loop.close()
 
 # SSE 流生成器函数
-def sse_stream(status_queue):
-    while True:
-        if not status_queue.empty():
-            msg = status_queue.get()
+def sse_stream(status_queue, queue_id):
+    try:
+        while True:
+            try:
+                msg = status_queue.get(timeout=0.5)
+            except Empty:
+                continue
             yield f"data: {msg}\n\n"
-        else:
-            # 避免 CPU 占满
-            time.sleep(0.1)
+            if msg in {'200', '500'}:
+                break
+    finally:
+        active_queues.pop(queue_id, None)
 
 if __name__ == '__main__':
     start_profile_backup_scheduler()
