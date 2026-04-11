@@ -1053,6 +1053,7 @@ def generate_content_account_posts(
                 "publishingAccountId": account.get("publishingAccountId") or "",
                 "publisherTargetId": account.get("publisherTargetId") or "",
                 "introOutroOverride": deepcopy(account.get("introOutroOverride") or {}),
+                "watermarkOverride": deepcopy(account.get("watermarkOverride") or {}),
             },
             "content": content,
         })
@@ -1424,6 +1425,52 @@ def _normalize_watermark_settings(settings: dict[str, Any] | None) -> dict[str, 
     }
 
 
+def _normalize_watermark_override_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
+    settings = deepcopy(settings or {})
+    normalized = {}
+
+    enabled = settings.get("enabled")
+    if isinstance(enabled, bool):
+        normalized["enabled"] = enabled
+
+    watermark_type = str(settings.get("type") or "").strip()
+    if watermark_type:
+        normalized["type"] = watermark_type if watermark_type in {"text", "image"} else "text"
+
+    mode = str(settings.get("mode") or "").strip()
+    if mode:
+        normalized["mode"] = mode if mode in {"static", "dynamic"} else "static"
+
+    pattern = str(settings.get("pattern") or "").strip()
+    if pattern:
+        normalized["pattern"] = pattern if pattern in {"single", "repeat-slanted"} else "single"
+
+    position = str(settings.get("position") or "").strip()
+    if position:
+        normalized["position"] = position if position in {"top-left", "top-right", "bottom-left", "bottom-right", "center"} else "bottom-right"
+
+    for key in ["templateName", "text", "imagePath"]:
+        value = str(settings.get(key) or "").strip()
+        if value:
+            normalized[key] = value
+
+    if settings.get("repeatLines") not in (None, ""):
+        normalized["repeatLines"] = min(max(_coerce_int(settings.get("repeatLines"), 3), 2), 5)
+    if settings.get("fontSize") not in (None, ""):
+        normalized["fontSize"] = min(max(_coerce_int(settings.get("fontSize"), 28), 12), 120)
+    if settings.get("spacing") not in (None, ""):
+        normalized["spacing"] = min(max(_coerce_int(settings.get("spacing"), 220), 40), 600)
+    if settings.get("angle") not in (None, ""):
+        normalized["angle"] = min(max(_coerce_float(settings.get("angle"), -30.0), -85.0), 85.0)
+    if settings.get("opacity") not in (None, ""):
+        normalized["opacity"] = min(max(_coerce_float(settings.get("opacity"), 0.45), 0.1), 1.0)
+    if settings.get("color") not in (None, ""):
+        color = str(settings.get("color") or "").strip().upper()
+        normalized["color"] = color if re.fullmatch(r"#[0-9A-F]{6}", color) else "#FFFFFF"
+
+    return normalized
+
+
 def _normalize_intro_outro_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
     settings = deepcopy(settings or {})
     background_color = str(settings.get("backgroundColor") or "#000000").strip().upper() or "#000000"
@@ -1458,10 +1505,12 @@ def _normalize_intro_outro_override_settings(settings: dict[str, Any] | None) ->
     settings = deepcopy(settings or {})
     normalized = {}
 
-    if "videoEnabled" in settings:
-        normalized["videoEnabled"] = bool(settings.get("videoEnabled"))
-    if "imageEnabled" in settings:
-        normalized["imageEnabled"] = bool(settings.get("imageEnabled"))
+    video_enabled = settings.get("videoEnabled")
+    if isinstance(video_enabled, bool):
+        normalized["videoEnabled"] = video_enabled
+    image_enabled = settings.get("imageEnabled")
+    if isinstance(image_enabled, bool):
+        normalized["imageEnabled"] = image_enabled
 
     for key in [
         "videoIntroPath",
@@ -1473,16 +1522,17 @@ def _normalize_intro_outro_override_settings(settings: dict[str, Any] | None) ->
         "imageThankYouTitle",
         "imageThankYouBody",
     ]:
-        if key in settings:
-            normalized[key] = str(settings.get(key) or "").strip()
+        value = str(settings.get(key) or "").strip()
+        if value:
+            normalized[key] = value
 
-    if "backgroundColor" in settings:
+    if settings.get("backgroundColor") not in (None, ""):
         color = str(settings.get("backgroundColor") or "").strip().upper()
         normalized["backgroundColor"] = color if re.fullmatch(r"#[0-9A-F]{6}", color) else "#000000"
-    if "textColor" in settings:
+    if settings.get("textColor") not in (None, ""):
         color = str(settings.get("textColor") or "").strip().upper()
         normalized["textColor"] = color if re.fullmatch(r"#[0-9A-F]{6}", color) else "#FFFFFF"
-    if "imagePanelRatio" in settings:
+    if settings.get("imagePanelRatio") not in (None, ""):
         ratio = _coerce_float(settings.get("imagePanelRatio"), 0.22)
         normalized["imagePanelRatio"] = min(max(ratio, 0.08), 0.45)
 
@@ -1500,13 +1550,24 @@ def resolve_effective_intro_outro_settings(
     return merged
 
 
+def resolve_effective_watermark_settings(
+    profile: dict[str, Any],
+    content_account: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    base_settings = _normalize_watermark_settings(((profile.get("settings") or {}).get("watermark")) or {})
+    override_settings = _normalize_watermark_override_settings((content_account or {}).get("watermarkOverride"))
+    merged = dict(base_settings)
+    merged.update(override_settings)
+    return merged
+
+
 def build_media_packaging_preview(
     profile: dict[str, Any],
     media_kind: str,
     content_account: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     intro_outro = resolve_effective_intro_outro_settings(profile, content_account)
-    watermark = _normalize_watermark_settings(((profile.get("settings") or {}).get("watermark")) or {})
+    watermark = resolve_effective_watermark_settings(profile, content_account)
     lines = []
     summary = "原始素材"
 
@@ -1542,7 +1603,9 @@ def build_media_packaging_preview(
         lines.append("浮水印：停用")
 
     override_name = str((content_account or {}).get("name") or "").strip()
-    if override_name and _normalize_intro_outro_override_settings((content_account or {}).get("introOutroOverride")):
+    has_intro_override = bool(_normalize_intro_outro_override_settings((content_account or {}).get("introOutroOverride")))
+    has_watermark_override = bool(_normalize_watermark_override_settings((content_account or {}).get("watermarkOverride")))
+    if override_name and (has_intro_override or has_watermark_override):
         lines.append(f"已套用內容帳號覆寫：{override_name}")
 
     return {
@@ -1551,6 +1614,7 @@ def build_media_packaging_preview(
         "mediaKind": media_kind,
         "introOutro": intro_outro,
         "watermarkEnabled": watermark.get("enabled"),
+        "watermark": watermark,
     }
 
 
@@ -1583,6 +1647,7 @@ def _normalize_content_accounts(values: Any) -> list[dict[str, str]]:
             "publishingAccountId": str(item.get("publishingAccountId") or "").strip(),
             "publisherTargetId": str(item.get("publisherTargetId") or "").strip(),
             "introOutroOverride": _normalize_intro_outro_override_settings(item.get("introOutroOverride")),
+            "watermarkOverride": _normalize_watermark_override_settings(item.get("watermarkOverride")),
         })
 
     return normalized

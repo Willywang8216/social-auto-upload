@@ -293,6 +293,211 @@
                   />
                 </el-form-item>
 
+                <el-divider content-position="left">浮水印覆寫</el-divider>
+
+                <el-form-item label="啟用浮水印" label-width="120px">
+                  <el-select
+                    v-model="contentAccount.watermarkOverride.enabled"
+                    clearable
+                    placeholder="留空則沿用 Profile"
+                    style="width: 100%"
+                  >
+                    <el-option label="沿用 Profile" :value="null" />
+                    <el-option label="強制開啟" :value="true" />
+                    <el-option label="強制關閉" :value="false" />
+                  </el-select>
+                </el-form-item>
+
+                <el-form-item label="浮水印類型" label-width="120px">
+                  <el-select
+                    v-model="contentAccount.watermarkOverride.type"
+                    clearable
+                    placeholder="留空則沿用 Profile"
+                    style="width: 100%"
+                  >
+                    <el-option label="沿用 Profile" value="" />
+                    <el-option label="文字" value="text" />
+                    <el-option label="圖片" value="image" />
+                  </el-select>
+                </el-form-item>
+
+                <el-form-item label="浮水印模式" label-width="120px">
+                  <el-select
+                    v-model="contentAccount.watermarkOverride.mode"
+                    clearable
+                    placeholder="留空則沿用 Profile"
+                    style="width: 100%"
+                  >
+                    <el-option label="沿用 Profile" value="" />
+                    <el-option label="固定" value="static" />
+                    <el-option label="隨機" value="dynamic" />
+                  </el-select>
+                </el-form-item>
+
+                <el-form-item label="模板樣式" label-width="120px">
+                  <el-select
+                    v-model="contentAccount.watermarkOverride.pattern"
+                    clearable
+                    placeholder="留空則沿用 Profile"
+                    style="width: 100%"
+                  >
+                    <el-option label="沿用 Profile" value="" />
+                    <el-option label="單一位置" value="single" />
+                    <el-option label="重複斜線" value="repeat-slanted" />
+                  </el-select>
+                </el-form-item>
+
+                <el-form-item label="浮水印文字" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.watermarkOverride.text"
+                    placeholder="留空則沿用 Profile"
+                  />
+                </el-form-item>
+
+                <el-form-item label="浮水印圖片路徑" label-width="120px">
+                  <el-input
+                    v-model="contentAccount.watermarkOverride.imagePath"
+                    placeholder="留空則沿用 Profile"
+                  />
+                </el-form-item>
+
+                <div class="content-account-watermark-grid">
+                  <el-form-item label="重複行數" label-width="120px">
+                    <el-input-number
+                      v-model="contentAccount.watermarkOverride.repeatLines"
+                      :min="2"
+                      :max="5"
+                      controls-position="right"
+                    />
+                  </el-form-item>
+
+                  <el-form-item label="角度" label-width="120px">
+                    <el-input-number
+                      v-model="contentAccount.watermarkOverride.angle"
+                      :min="-80"
+                      :max="80"
+                      controls-position="right"
+                    />
+                  </el-form-item>
+
+                  <el-form-item label="間距" label-width="120px">
+                    <el-input-number
+                      v-model="contentAccount.watermarkOverride.spacing"
+                      :min="40"
+                      :max="600"
+                      controls-position="right"
+                    />
+                  </el-form-item>
+
+                  <el-form-item label="字體大小" label-width="120px">
+                    <el-input-number
+                      v-model="contentAccount.watermarkOverride.fontSize"
+                      :min="12"
+                      :max="80"
+                      controls-position="right"
+                    />
+                  </el-form-item>
+                </div>
+
+                <div class="content-account-watermark-grid">
+                  <el-form-item label="位置" label-width="120px">
+                    <el-select
+                      v-model="contentAccount.watermarkOverride.position"
+                      clearable
+                      placeholder="留空則沿用 Profile"
+                      style="width: 100%"
+                    >
+                      <el-option label="沿用 Profile" value="" />
+                      <el-option label="左上" value="top-left" />
+                      <el-option label="右上" value="top-right" />
+                      <el-option label="左下" value="bottom-left" />
+                      <el-option label="右下" value="bottom-right" />
+                      <el-option label="中央" value="center" />
+                    </el-select>
+                  </el-form-item>
+
+                  <el-form-item label="透明度" label-width="120px">
+                    <el-input-number
+                      v-model="contentAccount.watermarkOverride.opacity"
+                      :min="0.1"
+                      :max="1"
+                      :step="0.05"
+                      controls-position="right"
+                    />
+                  </el-form-item>
+
+                  <el-form-item label="文字顏色" label-width="120px">
+                    <el-color-picker v-model="contentAccount.watermarkOverride.color" />
+                  </el-form-item>
+                </div>
+
+                <div class="content-account-branding-preview">
+                  <div class="content-account-branding-preview-title">包裝預覽</div>
+                  <div class="content-account-branding-preview-grid">
+                    <div class="content-account-branding-preview-card">
+                      <div class="content-account-branding-preview-label">圖片</div>
+                      <div class="content-branding-thumbnail content-branding-thumbnail-image">
+                        <div
+                          v-if="getContentAccountImageIntroLabel(contentAccount)"
+                          class="content-branding-panel content-branding-panel-top"
+                          :style="getContentAccountPanelStyle(contentAccount)"
+                        >
+                          {{ getContentAccountImageIntroLabel(contentAccount) }}
+                        </div>
+                        <div class="content-branding-main-panel">
+                          <span>主圖</span>
+                          <div
+                            v-if="isContentAccountWatermarkEnabled(contentAccount)"
+                            class="content-branding-watermark"
+                            :class="{ 'content-branding-watermark-repeat': isContentAccountRepeatedWatermark(contentAccount) }"
+                            :style="getContentAccountWatermarkStyle(contentAccount)"
+                          >
+                            {{ getContentAccountWatermarkText(contentAccount) }}
+                          </div>
+                        </div>
+                        <div
+                          v-if="getContentAccountImageThankYouLabel(contentAccount)"
+                          class="content-branding-panel content-branding-panel-bottom"
+                          :style="getContentAccountPanelStyle(contentAccount)"
+                        >
+                          {{ getContentAccountImageThankYouLabel(contentAccount) }}
+                        </div>
+                      </div>
+                      <div class="muted-text">{{ getContentAccountBrandingSummary(contentAccount, 'image') }}</div>
+                    </div>
+
+                    <div class="content-account-branding-preview-card">
+                      <div class="content-account-branding-preview-label">影片</div>
+                      <div class="content-branding-thumbnail content-branding-thumbnail-video">
+                        <div
+                          v-if="getContentAccountVideoIntroLabel(contentAccount)"
+                          class="content-branding-video-segment content-branding-video-segment-side"
+                        >
+                          {{ getContentAccountVideoIntroLabel(contentAccount) }}
+                        </div>
+                        <div class="content-branding-video-segment content-branding-video-segment-main">
+                          <span>主影片</span>
+                          <div
+                            v-if="isContentAccountWatermarkEnabled(contentAccount)"
+                            class="content-branding-watermark"
+                            :class="{ 'content-branding-watermark-repeat': isContentAccountRepeatedWatermark(contentAccount) }"
+                            :style="getContentAccountWatermarkStyle(contentAccount)"
+                          >
+                            {{ getContentAccountWatermarkText(contentAccount) }}
+                          </div>
+                        </div>
+                        <div
+                          v-if="getContentAccountVideoOutroLabel(contentAccount)"
+                          class="content-branding-video-segment content-branding-video-segment-side"
+                        >
+                          {{ getContentAccountVideoOutroLabel(contentAccount) }}
+                        </div>
+                      </div>
+                      <div class="muted-text">{{ getContentAccountBrandingSummary(contentAccount, 'video') }}</div>
+                    </div>
+                  </div>
+                </div>
+
                 <el-form-item label="綁定發佈帳號" label-width="120px">
                   <el-select
                     v-model="contentAccount.publishingAccountId"
@@ -1442,6 +1647,22 @@ const createContentAccount = () => ({
     backgroundColor: '',
     textColor: '',
     imagePanelRatio: ''
+  },
+  watermarkOverride: {
+    enabled: null,
+    type: '',
+    mode: '',
+    pattern: '',
+    templateName: '',
+    repeatLines: '',
+    angle: '',
+    spacing: '',
+    fontSize: '',
+    color: '',
+    text: '',
+    imagePath: '',
+    position: '',
+    opacity: ''
   }
 })
 
@@ -1564,6 +1785,10 @@ const normalizeContentAccounts = (values = []) => {
       introOutroOverride: {
         ...createContentAccount().introOutroOverride,
         ...(item.introOutroOverride || {})
+      },
+      watermarkOverride: {
+        ...createContentAccount().watermarkOverride,
+        ...(item.watermarkOverride || {})
       }
     }))
 }
@@ -1751,6 +1976,132 @@ const watermarkSinglePreviewStyle = computed(() => {
     fontSize: `${Math.max(Number(watermark.fontSize) || 28, 12)}px`
   }
 })
+
+const hasOverrideValue = (value) => !(value === null || value === undefined || value === '')
+
+const getEffectiveContentAccountIntroOutro = (contentAccount) => {
+  const merged = {
+    ...normalizeIntroOutroFormSettings(profileForm.value.settings.introOutro || {})
+  }
+  const override = contentAccount?.introOutroOverride || {}
+  Object.entries(override).forEach(([key, value]) => {
+    if (hasOverrideValue(value)) {
+      merged[key] = value
+    }
+  })
+  return merged
+}
+
+const getEffectiveContentAccountWatermark = (contentAccount) => {
+  const merged = {
+    ...normalizeWatermarkFormSettings(profileForm.value.settings.watermark || {})
+  }
+  const override = contentAccount?.watermarkOverride || {}
+  Object.entries(override).forEach(([key, value]) => {
+    if (hasOverrideValue(value)) {
+      merged[key] = value
+    }
+  })
+  return merged
+}
+
+const getContentAccountImageIntroLabel = (contentAccount) => {
+  const introOutro = getEffectiveContentAccountIntroOutro(contentAccount)
+  if (!introOutro.imageEnabled) {
+    return ''
+  }
+  if (introOutro.imageIntroPath) {
+    return '介紹卡背景圖'
+  }
+  if (introOutro.imageIntroTitle || introOutro.imageIntroBody) {
+    return introOutro.imageIntroTitle || '文字介紹卡'
+  }
+  return ''
+}
+
+const getContentAccountImageThankYouLabel = (contentAccount) => {
+  const introOutro = getEffectiveContentAccountIntroOutro(contentAccount)
+  if (!introOutro.imageEnabled) {
+    return ''
+  }
+  if (introOutro.imageThankYouPath) {
+    return 'Thank-you 圖'
+  }
+  if (introOutro.imageThankYouTitle || introOutro.imageThankYouBody || profileForm.value.cta) {
+    return introOutro.imageThankYouTitle || '文字感謝卡'
+  }
+  return ''
+}
+
+const getContentAccountVideoIntroLabel = (contentAccount) => {
+  const introOutro = getEffectiveContentAccountIntroOutro(contentAccount)
+  if (!introOutro.videoEnabled || !introOutro.videoIntroPath) {
+    return ''
+  }
+  return '片頭'
+}
+
+const getContentAccountVideoOutroLabel = (contentAccount) => {
+  const introOutro = getEffectiveContentAccountIntroOutro(contentAccount)
+  if (!introOutro.videoEnabled || !introOutro.videoOutroPath) {
+    return ''
+  }
+  return '片尾'
+}
+
+const getContentAccountBrandingSummary = (contentAccount, mediaKind) => {
+  const introOutro = getEffectiveContentAccountIntroOutro(contentAccount)
+  if (mediaKind === 'image') {
+    const hasIntro = Boolean(getContentAccountImageIntroLabel(contentAccount))
+    const hasThankYou = Boolean(getContentAccountImageThankYouLabel(contentAccount))
+    return hasIntro || hasThankYou ? '圖片會輸出成介紹卡 / 主圖 / thank-you 三段式' : '圖片維持原圖'
+  }
+  const hasVideoSegments = introOutro.videoEnabled && (introOutro.videoIntroPath || introOutro.videoOutroPath)
+  return hasVideoSegments ? '影片會串接片頭 / 主影片 / 片尾' : '影片維持主素材'
+}
+
+const isContentAccountWatermarkEnabled = (contentAccount) => (
+  Boolean(getEffectiveContentAccountWatermark(contentAccount).enabled)
+)
+
+const isContentAccountRepeatedWatermark = (contentAccount) => {
+  const watermark = getEffectiveContentAccountWatermark(contentAccount)
+  return watermark.type === 'text' && watermark.pattern === 'repeat-slanted'
+}
+
+const getContentAccountWatermarkText = (contentAccount) => {
+  const watermark = getEffectiveContentAccountWatermark(contentAccount)
+  if (watermark.type === 'image') {
+    return 'LOGO'
+  }
+  return watermark.text || '@brandname'
+}
+
+const getContentAccountWatermarkStyle = (contentAccount) => {
+  const watermark = getEffectiveContentAccountWatermark(contentAccount)
+  const positionMap = {
+    'top-left': { top: '12px', left: '12px' },
+    'top-right': { top: '12px', right: '12px' },
+    'bottom-left': { bottom: '12px', left: '12px' },
+    'bottom-right': { bottom: '12px', right: '12px' },
+    center: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }
+  }
+  return {
+    ...positionMap[watermark.position || 'bottom-right'],
+    opacity: watermark.opacity || 0.45,
+    color: watermark.color || '#FFFFFF',
+    fontSize: `${Math.max(Number(watermark.fontSize) || 20, 12)}px`
+  }
+}
+
+const getContentAccountPanelStyle = (contentAccount) => {
+  const introOutro = getEffectiveContentAccountIntroOutro(contentAccount)
+  return {
+    background: introOutro.backgroundColor || '#000000',
+    color: introOutro.textColor || '#FFFFFF',
+    minHeight: `${Math.max(Math.round((Number(introOutro.imagePanelRatio) || 0.22) * 160), 42)}px`
+  }
+}
 const currentProfileAccounts = computed(() => {
   if (!currentProfile.value) {
     return []
@@ -2597,6 +2948,122 @@ onMounted(async () => {
     border-radius: 10px;
     padding: 16px;
     background-color: #f8fafc;
+  }
+
+  .content-account-watermark-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 12px;
+  }
+
+  .content-account-branding-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid #e5eaf3;
+    border-radius: 10px;
+    background: #fff;
+    margin-bottom: 12px;
+  }
+
+  .content-account-branding-preview-title {
+    font-weight: 600;
+    color: $text-primary;
+  }
+
+  .content-account-branding-preview-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .content-account-branding-preview-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .content-account-branding-preview-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: $text-regular;
+  }
+
+  .content-branding-thumbnail {
+    position: relative;
+    overflow: hidden;
+    border-radius: 12px;
+    border: 1px solid #e5eaf3;
+    background: linear-gradient(135deg, #1f2937, #334155 55%, #475569);
+    min-height: 170px;
+  }
+
+  .content-branding-thumbnail-image {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .content-branding-panel,
+  .content-branding-main-panel,
+  .content-branding-video-segment {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 12px;
+    position: relative;
+  }
+
+  .content-branding-panel {
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .content-branding-main-panel {
+    flex: 1;
+    color: #fff;
+    font-weight: 600;
+    min-height: 84px;
+  }
+
+  .content-branding-thumbnail-video {
+    display: grid;
+    grid-template-columns: minmax(64px, 0.8fr) minmax(0, 1.4fr) minmax(64px, 0.8fr);
+  }
+
+  .content-branding-video-segment {
+    color: #fff;
+    font-weight: 600;
+    min-height: 170px;
+  }
+
+  .content-branding-video-segment-side {
+    background: rgba(15, 23, 42, 0.72);
+    font-size: 13px;
+  }
+
+  .content-branding-video-segment-main {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.24), rgba(15, 23, 42, 0.18));
+  }
+
+  .content-branding-watermark {
+    position: absolute;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.22);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    font-weight: 600;
+    line-height: 1;
+    max-width: calc(100% - 24px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .content-branding-watermark-repeat {
+    transform: rotate(-18deg);
+    border-radius: 10px;
   }
 
   .content-account-card-header {

@@ -22,6 +22,7 @@ from utils.profile_pipeline import (
     get_profile,
     infer_media_kind,
     resolve_effective_intro_outro_settings,
+    resolve_effective_watermark_settings,
     upload_media,
 )
 
@@ -791,6 +792,7 @@ def _prepare_job_media_assets(
         content_account = _find_content_account(profile, content_account_id) if content_account_id else None
         if content_account:
             runtime_profile.setdefault("settings", {})["introOutro"] = resolve_effective_intro_outro_settings(profile, content_account)
+            runtime_profile.setdefault("settings", {})["watermark"] = resolve_effective_watermark_settings(profile, content_account)
         media_path = apply_intro_outro_if_needed(source_path, runtime_profile, base_dir)
         media_path = apply_watermark_if_needed(media_path, runtime_profile, base_dir)
         upload_result = upload_media(media_path, runtime_profile)

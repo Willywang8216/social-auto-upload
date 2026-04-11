@@ -25,6 +25,7 @@ from utils.profile_pipeline import (
     run_profile_backup,
     run_scheduled_profile_backup_if_due,
     resolve_effective_intro_outro_settings,
+    resolve_effective_watermark_settings,
     save_google_service_account_config,
     save_profile_backup_config,
     save_profile,
@@ -93,6 +94,10 @@ class ProfilePipelineTests(unittest.TestCase):
                                     "videoEnabled": False,
                                     "imageThankYouTitle": "Thanks from X",
                                 },
+                                "watermarkOverride": {
+                                    "enabled": True,
+                                    "text": "@persona",
+                                },
                             },
                             {
                                 "platform": "discord",
@@ -114,6 +119,8 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertEqual(saved["settings"]["contentAccounts"][0]["publisherTargetId"], "publisher-x-main")
             self.assertFalse(saved["settings"]["contentAccounts"][0]["introOutroOverride"]["videoEnabled"])
             self.assertEqual(saved["settings"]["contentAccounts"][0]["introOutroOverride"]["imageThankYouTitle"], "Thanks from X")
+            self.assertTrue(saved["settings"]["contentAccounts"][0]["watermarkOverride"]["enabled"])
+            self.assertEqual(saved["settings"]["contentAccounts"][0]["watermarkOverride"]["text"], "@persona")
             self.assertEqual(saved["settings"]["contentAccounts"][1]["platform"], "discord")
 
             profiles = list_profiles(db_path)
@@ -367,6 +374,39 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertEqual(intro_outro["textColor"], "#FFFFFF")
             self.assertEqual(intro_outro["imagePanelRatio"], 0.45)
 
+    def test_save_profile_ignores_empty_content_account_branding_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "database.db"
+            ensure_profile_tables(db_path)
+
+            saved = save_profile(
+                db_path,
+                {
+                    "name": "Override Cleanup",
+                    "settings": {
+                        "contentAccounts": [
+                            {
+                                "id": "acct-twitter-main",
+                                "platform": "twitter",
+                                "name": "X Persona",
+                                "introOutroOverride": {
+                                    "videoEnabled": None,
+                                    "videoIntroPath": "",
+                                },
+                                "watermarkOverride": {
+                                    "enabled": None,
+                                    "text": "",
+                                },
+                            }
+                        ]
+                    },
+                },
+            )
+
+            content_account = saved["settings"]["contentAccounts"][0]
+            self.assertEqual(content_account["introOutroOverride"], {})
+            self.assertEqual(content_account["watermarkOverride"], {})
+
     def test_resolve_effective_intro_outro_settings_applies_content_account_override(self):
         profile = {
             "settings": {
@@ -389,6 +429,29 @@ class ProfilePipelineTests(unittest.TestCase):
         self.assertFalse(resolved["videoEnabled"])
         self.assertEqual(resolved["videoIntroPath"], "intro.mp4")
         self.assertEqual(resolved["imageThankYouTitle"], "Persona thanks")
+
+    def test_resolve_effective_watermark_settings_applies_content_account_override(self):
+        profile = {
+            "settings": {
+                "watermark": {
+                    "enabled": True,
+                    "text": "@profile",
+                    "opacity": 0.45,
+                }
+            }
+        }
+        content_account = {
+            "watermarkOverride": {
+                "text": "@persona",
+                "opacity": 0.7,
+            }
+        }
+
+        resolved = resolve_effective_watermark_settings(profile, content_account)
+
+        self.assertTrue(resolved["enabled"])
+        self.assertEqual(resolved["text"], "@persona")
+        self.assertEqual(resolved["opacity"], 0.7)
 
     def test_build_media_packaging_preview_reports_text_thank_you_cards(self):
         preview = build_media_packaging_preview(

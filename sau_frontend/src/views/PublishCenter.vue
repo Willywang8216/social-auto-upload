@@ -223,6 +223,64 @@
 
             <div v-if="getBrandingPreview(row)" class="branding-preview-block">
               <div class="media-label">最終包裝規則</div>
+              <div
+                v-if="getBrandingPreview(row).mediaKind === 'image'"
+                class="branding-thumbnail branding-thumbnail-image"
+              >
+                <div
+                  v-if="getImageIntroLabel(getBrandingPreview(row))"
+                  class="branding-panel branding-panel-top"
+                  :style="getBrandingPanelStyle(getBrandingPreview(row))"
+                >
+                  {{ getImageIntroLabel(getBrandingPreview(row)) }}
+                </div>
+                <div class="branding-main-panel">
+                  <span>主圖</span>
+                  <div
+                    v-if="isBrandingWatermarkEnabled(getBrandingPreview(row))"
+                    class="branding-watermark-overlay"
+                    :class="{ 'branding-watermark-overlay-repeat': isBrandingRepeatedWatermark(getBrandingPreview(row)) }"
+                    :style="getBrandingWatermarkStyle(getBrandingPreview(row))"
+                  >
+                    {{ getBrandingWatermarkText(getBrandingPreview(row)) }}
+                  </div>
+                </div>
+                <div
+                  v-if="getImageThankYouLabel(getBrandingPreview(row))"
+                  class="branding-panel branding-panel-bottom"
+                  :style="getBrandingPanelStyle(getBrandingPreview(row))"
+                >
+                  {{ getImageThankYouLabel(getBrandingPreview(row)) }}
+                </div>
+              </div>
+              <div
+                v-else-if="getBrandingPreview(row).mediaKind === 'video'"
+                class="branding-thumbnail branding-thumbnail-video"
+              >
+                <div
+                  v-if="getVideoIntroLabel(getBrandingPreview(row))"
+                  class="branding-video-segment branding-video-segment-side"
+                >
+                  {{ getVideoIntroLabel(getBrandingPreview(row)) }}
+                </div>
+                <div class="branding-video-segment branding-video-segment-main">
+                  <span>主影片</span>
+                  <div
+                    v-if="isBrandingWatermarkEnabled(getBrandingPreview(row))"
+                    class="branding-watermark-overlay"
+                    :class="{ 'branding-watermark-overlay-repeat': isBrandingRepeatedWatermark(getBrandingPreview(row)) }"
+                    :style="getBrandingWatermarkStyle(getBrandingPreview(row))"
+                  >
+                    {{ getBrandingWatermarkText(getBrandingPreview(row)) }}
+                  </div>
+                </div>
+                <div
+                  v-if="getVideoOutroLabel(getBrandingPreview(row))"
+                  class="branding-video-segment branding-video-segment-side"
+                >
+                  {{ getVideoOutroLabel(getBrandingPreview(row)) }}
+                </div>
+              </div>
               <div class="branding-preview-summary">
                 {{ getBrandingPreview(row).summary }}
               </div>
@@ -724,6 +782,93 @@ const getDriverPublishingAccountId = (row) => {
 const getBrandingPreview = (row) => {
   const brandingPreview = (row.metadata || {}).brandingPreview
   return brandingPreview && typeof brandingPreview === 'object' ? brandingPreview : null
+}
+
+const getBrandingIntroOutro = (brandingPreview) => (
+  brandingPreview?.introOutro && typeof brandingPreview.introOutro === 'object' ? brandingPreview.introOutro : {}
+)
+
+const getBrandingWatermark = (brandingPreview) => (
+  brandingPreview?.watermark && typeof brandingPreview.watermark === 'object' ? brandingPreview.watermark : {}
+)
+
+const getImageIntroLabel = (brandingPreview) => {
+  const introOutro = getBrandingIntroOutro(brandingPreview)
+  if (!introOutro.imageEnabled) {
+    return ''
+  }
+  if (introOutro.imageIntroPath) {
+    return '介紹卡背景圖'
+  }
+  if (introOutro.imageIntroTitle || introOutro.imageIntroBody) {
+    return introOutro.imageIntroTitle || '文字介紹卡'
+  }
+  return ''
+}
+
+const getImageThankYouLabel = (brandingPreview) => {
+  const introOutro = getBrandingIntroOutro(brandingPreview)
+  if (!introOutro.imageEnabled) {
+    return ''
+  }
+  if (introOutro.imageThankYouPath) {
+    return 'Thank-you 圖'
+  }
+  if (introOutro.imageThankYouTitle || introOutro.imageThankYouBody) {
+    return introOutro.imageThankYouTitle || '文字感謝卡'
+  }
+  return ''
+}
+
+const getVideoIntroLabel = (brandingPreview) => {
+  const introOutro = getBrandingIntroOutro(brandingPreview)
+  return introOutro.videoEnabled && introOutro.videoIntroPath ? '片頭' : ''
+}
+
+const getVideoOutroLabel = (brandingPreview) => {
+  const introOutro = getBrandingIntroOutro(brandingPreview)
+  return introOutro.videoEnabled && introOutro.videoOutroPath ? '片尾' : ''
+}
+
+const isBrandingWatermarkEnabled = (brandingPreview) => Boolean(getBrandingWatermark(brandingPreview).enabled)
+
+const isBrandingRepeatedWatermark = (brandingPreview) => {
+  const watermark = getBrandingWatermark(brandingPreview)
+  return watermark.type === 'text' && watermark.pattern === 'repeat-slanted'
+}
+
+const getBrandingWatermarkText = (brandingPreview) => {
+  const watermark = getBrandingWatermark(brandingPreview)
+  if (watermark.type === 'image') {
+    return 'LOGO'
+  }
+  return watermark.text || '@brandname'
+}
+
+const getBrandingWatermarkStyle = (brandingPreview) => {
+  const watermark = getBrandingWatermark(brandingPreview)
+  const positionMap = {
+    'top-left': { top: '12px', left: '12px' },
+    'top-right': { top: '12px', right: '12px' },
+    'bottom-left': { bottom: '12px', left: '12px' },
+    'bottom-right': { bottom: '12px', right: '12px' },
+    center: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }
+  }
+  return {
+    ...positionMap[watermark.position || 'bottom-right'],
+    opacity: watermark.opacity || 0.45,
+    color: watermark.color || '#FFFFFF',
+    fontSize: `${Math.max(Number(watermark.fontSize) || 20, 12)}px`
+  }
+}
+
+const getBrandingPanelStyle = (brandingPreview) => {
+  const introOutro = getBrandingIntroOutro(brandingPreview)
+  return {
+    background: introOutro.backgroundColor || '#000000',
+    color: introOutro.textColor || '#FFFFFF',
+    minHeight: `${Math.max(Math.round((Number(introOutro.imagePanelRatio) || 0.22) * 160), 42)}px`
+  }
 }
 
 const getDriverSourceLabel = (row) => {
@@ -1287,6 +1432,82 @@ onMounted(async () => {
     border: 1px solid $border-light;
     border-radius: 10px;
     background: $border-extra-light;
+  }
+
+  .branding-thumbnail {
+    position: relative;
+    overflow: hidden;
+    border-radius: 12px;
+    border: 1px solid $border-light;
+    background: linear-gradient(135deg, #1f2937, #334155 55%, #475569);
+    min-height: 190px;
+  }
+
+  .branding-thumbnail-image {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .branding-panel,
+  .branding-main-panel,
+  .branding-video-segment {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 12px;
+    position: relative;
+  }
+
+  .branding-panel {
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .branding-main-panel {
+    flex: 1;
+    min-height: 88px;
+    color: #fff;
+    font-weight: 600;
+  }
+
+  .branding-thumbnail-video {
+    display: grid;
+    grid-template-columns: minmax(72px, 0.8fr) minmax(0, 1.4fr) minmax(72px, 0.8fr);
+  }
+
+  .branding-video-segment {
+    min-height: 190px;
+    color: #fff;
+    font-weight: 600;
+  }
+
+  .branding-video-segment-side {
+    background: rgba(15, 23, 42, 0.72);
+    font-size: 13px;
+  }
+
+  .branding-video-segment-main {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.24), rgba(15, 23, 42, 0.18));
+  }
+
+  .branding-watermark-overlay {
+    position: absolute;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.22);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    font-weight: 600;
+    line-height: 1;
+    max-width: calc(100% - 24px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .branding-watermark-overlay-repeat {
+    transform: rotate(-18deg);
+    border-radius: 10px;
   }
 
   .branding-preview-summary {

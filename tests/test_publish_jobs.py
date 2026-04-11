@@ -454,6 +454,68 @@ class PublishJobsTests(unittest.TestCase):
         self.assertEqual(jobs[0]["mediaPublicUrl"], "https://cdn.example.com/final.mp4")
         self.assertIn("已套用內容帳號覆寫", "\n".join(jobs[0]["metadata"]["brandingPreview"]["lines"]))
 
+    def test_save_publish_jobs_applies_content_account_watermark_override_when_preparing_media(self):
+        source_dir = self.base_dir / "videoFile"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        source_path = source_dir / "clip.mp4"
+        source_path.write_bytes(b"video")
+
+        profile = save_profile(
+            self.db_path,
+            {
+                "name": "Creator Watermark Override",
+                "settings": {
+                    "watermark": {
+                        "enabled": True,
+                        "text": "@profile",
+                        "opacity": 0.45,
+                    },
+                    "contentAccounts": [
+                        {
+                            "id": "acct-twitter-main",
+                            "platform": "twitter",
+                            "name": "X 主帳",
+                            "watermarkOverride": {
+                                "text": "@persona",
+                                "opacity": 0.75,
+                            },
+                        }
+                    ],
+                },
+            },
+        )
+
+        with patch("utils.publish_jobs.apply_intro_outro_if_needed", return_value=source_path), \
+             patch("utils.publish_jobs.apply_watermark_if_needed", return_value=source_path) as watermark_mock, \
+             patch("utils.publish_jobs.upload_media", return_value={"publicUrl": "https://cdn.example.com/final.mp4", "mediaKind": "video"}):
+            save_publish_jobs(
+                self.db_path,
+                self.base_dir,
+                {
+                    "items": [
+                        {
+                            "profileId": profile["id"],
+                            "profileName": profile["name"],
+                            "targetKind": "content_account",
+                            "contentAccountId": "acct-twitter-main",
+                            "platformKey": "twitter",
+                            "targetName": "X 主帳",
+                            "deliveryMode": "direct_upload",
+                            "materialId": 1,
+                            "materialName": "clip.mp4",
+                            "message": "Tweet body",
+                            "metadata": {
+                                "mediaKind": "video",
+                            },
+                        }
+                    ]
+                },
+            )
+
+        runtime_profile = watermark_mock.call_args.args[1]
+        self.assertEqual(runtime_profile["settings"]["watermark"]["text"], "@persona")
+        self.assertEqual(runtime_profile["settings"]["watermark"]["opacity"], 0.75)
+
     def test_update_publish_job_content_appends_revision(self):
         saved = save_publish_jobs(
             self.db_path,
