@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from utils.profile_pipeline import (
     SHEET_COLUMNS,
+    apply_intro_outro_if_needed,
     apply_watermark_if_needed,
     build_google_sheet_row_mappings,
     build_google_sheet_rows,
@@ -314,6 +315,72 @@ class ProfilePipelineTests(unittest.TestCase):
             self.assertTrue(result_path.exists())
             self.assertNotEqual(result_path, source_path)
             self.assertEqual(result_path.suffix.lower(), ".png")
+
+    def test_save_profile_normalizes_intro_outro_settings(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "database.db"
+            ensure_profile_tables(db_path)
+
+            saved = save_profile(
+                db_path,
+                {
+                    "name": "Intro Outro Profile",
+                    "settings": {
+                        "introOutro": {
+                            "videoIntroPath": " intro.mp4 ",
+                            "videoOutroPath": "outro.mp4",
+                            "imageIntroPath": "intro.png",
+                            "imageOutroPath": "outro.png",
+                            "backgroundColor": "bad-color",
+                            "imagePanelRatio": 9,
+                        }
+                    },
+                },
+            )
+
+            intro_outro = saved["settings"]["introOutro"]
+            self.assertEqual(intro_outro["videoIntroPath"], "intro.mp4")
+            self.assertEqual(intro_outro["videoOutroPath"], "outro.mp4")
+            self.assertEqual(intro_outro["imageIntroPath"], "intro.png")
+            self.assertEqual(intro_outro["imageOutroPath"], "outro.png")
+            self.assertEqual(intro_outro["backgroundColor"], "#000000")
+            self.assertEqual(intro_outro["imagePanelRatio"], 0.45)
+
+    def test_apply_intro_outro_if_needed_stacks_image_intro_and_outro(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow not installed")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            source_path = base_dir / "sample.png"
+            intro_path = base_dir / "intro.png"
+            outro_path = base_dir / "outro.png"
+            Image.new("RGB", (640, 360), (20, 30, 40)).save(source_path)
+            Image.new("RGB", (800, 200), (220, 20, 20)).save(intro_path)
+            Image.new("RGB", (800, 180), (20, 20, 220)).save(outro_path)
+
+            result_path = apply_intro_outro_if_needed(
+                source_path,
+                {
+                    "settings": {
+                        "introOutro": {
+                            "imageIntroPath": str(intro_path),
+                            "imageOutroPath": str(outro_path),
+                            "backgroundColor": "#112233",
+                            "imagePanelRatio": 0.2,
+                        }
+                    }
+                },
+                base_dir,
+            )
+
+            self.assertTrue(result_path.exists())
+            self.assertNotEqual(result_path, source_path)
+            output_image = Image.open(result_path)
+            self.assertEqual(output_image.width, 640)
+            self.assertEqual(output_image.height, 360 + 72 + 72)
 
     def test_extract_json_payload_accepts_fenced_json(self):
         payload = extract_json_payload(

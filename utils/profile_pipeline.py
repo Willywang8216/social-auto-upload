@@ -436,9 +436,11 @@ def generate_profile_content(db_path: Path, base_dir: Path, payload: dict[str, A
         runtime_social_settings["defaultLink"] = payload.get("link")
         runtime_profile.setdefault("settings", {})["socialImport"] = runtime_social_settings
 
-    processed_media_path = apply_watermark_if_needed(source_path, runtime_profile, base_dir)
+    branded_media_path = apply_intro_outro_if_needed(source_path, runtime_profile, base_dir)
+    processed_media_path = apply_watermark_if_needed(branded_media_path, runtime_profile, base_dir)
     upload_result = upload_media(processed_media_path, profile)
-    transcript = transcribe_media(processed_media_path, runtime_profile)
+    transcript_source_path = source_path if infer_media_kind(source_path) in {"video", "audio"} else processed_media_path
+    transcript = transcribe_media(transcript_source_path, runtime_profile)
     content_account_results = generate_content_account_posts(runtime_profile, transcript, material, upload_result["publicUrl"])
     if content_account_results:
         normalized_posts = aggregate_account_posts(content_account_results)
@@ -1242,6 +1244,28 @@ def apply_watermark_if_needed(source_path: Path, profile: dict[str, Any], base_d
     return source_path
 
 
+def apply_intro_outro_if_needed(source_path: Path, profile: dict[str, Any], base_dir: Path) -> Path:
+    settings = profile.get("settings") or {}
+    intro_outro = _normalize_intro_outro_settings(settings.get("introOutro"))
+    media_kind = infer_media_kind(source_path)
+    has_video_branding = bool(intro_outro.get("videoIntroPath") or intro_outro.get("videoOutroPath"))
+    has_image_branding = bool(intro_outro.get("imageIntroPath") or intro_outro.get("imageOutroPath"))
+
+    if media_kind == "video" and has_video_branding:
+        output_dir = base_dir / "generated_media"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{uuid.uuid4().hex}_{source_path.name}"
+        return _apply_video_intro_outro(source_path, output_path, intro_outro)
+
+    if media_kind == "image" and has_image_branding:
+        output_dir = base_dir / "generated_media"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{uuid.uuid4().hex}_{source_path.name}"
+        return _apply_image_intro_outro(source_path, output_path, intro_outro)
+
+    return source_path
+
+
 def infer_media_kind(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix in IMAGE_EXTENSIONS:
@@ -1334,6 +1358,7 @@ def _serialize_profile_export_item(profile: dict[str, Any]) -> dict[str, Any]:
 def _normalize_profile_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
     normalized = deepcopy(settings or {})
     normalized["watermark"] = _normalize_watermark_settings(normalized.get("watermark"))
+    normalized["introOutro"] = _normalize_intro_outro_settings(normalized.get("introOutro"))
     normalized["contentAccounts"] = _normalize_content_accounts(normalized.get("contentAccounts"))
     return normalized
 
@@ -1390,6 +1415,25 @@ def _normalize_watermark_settings(settings: dict[str, Any] | None) -> dict[str, 
         "imagePath": str(settings.get("imagePath") or "").strip(),
         "position": position,
         "opacity": opacity,
+    }
+
+
+def _normalize_intro_outro_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
+    settings = deepcopy(settings or {})
+    background_color = str(settings.get("backgroundColor") or "#000000").strip().upper() or "#000000"
+    if not re.fullmatch(r"#[0-9A-F]{6}", background_color):
+        background_color = "#000000"
+
+    image_panel_ratio = _coerce_float(settings.get("imagePanelRatio"), 0.22)
+    image_panel_ratio = min(max(image_panel_ratio, 0.08), 0.45)
+
+    return {
+        "videoIntroPath": str(settings.get("videoIntroPath") or "").strip(),
+        "videoOutroPath": str(settings.get("videoOutroPath") or "").strip(),
+        "imageIntroPath": str(settings.get("imageIntroPath") or "").strip(),
+        "imageOutroPath": str(settings.get("imageOutroPath") or "").strip(),
+        "backgroundColor": background_color,
+        "imagePanelRatio": image_panel_ratio,
     }
 
 
@@ -1930,6 +1974,38 @@ def _apply_image_watermark(source_path: Path, output_path: Path, watermark: dict
     return output_path
 
 
+def _apply_image_intro_outro(source_path: Path, output_path: Path, intro_outro: dict[str, Any]) -> Path:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required for image intro/outro rendering") from exc
+
+    base = Image.open(source_path).convert("RGB")
+    background_color = intro_outro.get("backgroundColor") or "#000000"
+    panel_ratio = float(intro_outro.get("imagePanelRatio") or 0.22)
+    intro_panel = _build_image_branding_panel(intro_outro.get("imageIntroPath"), base.width, base.height, panel_ratio)
+    outro_panel = _build_image_branding_panel(intro_outro.get("imageOutroPath"), base.width, base.height, panel_ratio)
+
+    total_height = base.height
+    if intro_panel is not None:
+        total_height += intro_panel.height
+    if outro_panel is not None:
+        total_height += outro_panel.height
+
+    canvas = Image.new("RGB", (base.width, total_height), _hex_to_rgb_tuple(background_color))
+    current_y = 0
+    if intro_panel is not None:
+        canvas.paste(intro_panel, (0, current_y))
+        current_y += intro_panel.height
+    canvas.paste(base, (0, current_y))
+    current_y += base.height
+    if outro_panel is not None:
+        canvas.paste(outro_panel, (0, current_y))
+
+    canvas.save(output_path)
+    return output_path
+
+
 def _apply_video_watermark(source_path: Path, output_path: Path, watermark: dict[str, Any]) -> Path:
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
@@ -2010,6 +2086,80 @@ def _apply_video_watermark(source_path: Path, output_path: Path, watermark: dict
     return output_path
 
 
+def _apply_video_intro_outro(source_path: Path, output_path: Path, intro_outro: dict[str, Any]) -> Path:
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        raise RuntimeError("ffmpeg is required for video intro/outro processing")
+
+    source_width, source_height = _get_video_frame_size(source_path)
+    segment_paths = []
+    intro_path = str(intro_outro.get("videoIntroPath") or "").strip()
+    outro_path = str(intro_outro.get("videoOutroPath") or "").strip()
+    if intro_path:
+        segment_paths.append(Path(intro_path))
+    segment_paths.append(source_path)
+    if outro_path:
+        segment_paths.append(Path(outro_path))
+
+    for segment_path in segment_paths:
+        if not segment_path.exists():
+            raise RuntimeError(f"intro/outro video not found: {segment_path}")
+        if infer_media_kind(segment_path) != "video":
+            raise RuntimeError(f"intro/outro asset must be a video: {segment_path}")
+
+    command = [ffmpeg_bin, "-y"]
+    for segment_path in segment_paths:
+        command.extend(["-i", str(segment_path)])
+
+    filter_parts = []
+    concat_inputs = []
+    for index, segment_path in enumerate(segment_paths):
+        filter_parts.append(
+            f"[{index}:v]scale={source_width}:{source_height}:force_original_aspect_ratio=decrease,"
+            f"pad={source_width}:{source_height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v{index}]"
+        )
+        if _video_has_audio_stream(segment_path):
+            filter_parts.append(
+                f"[{index}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a{index}]"
+            )
+        else:
+            duration = _get_video_duration_seconds(segment_path)
+            filter_parts.append(
+                "anullsrc=channel_layout=stereo:sample_rate=48000,"
+                f"atrim=duration={duration:.3f},asetpts=N/SR/TB[a{index}]"
+            )
+        concat_inputs.extend([f"[v{index}]", f"[a{index}]"])
+
+    filter_parts.append(
+        f"{''.join(concat_inputs)}concat=n={len(segment_paths)}:v=1:a=1[vout][aout]"
+    )
+    command.extend([
+        "-filter_complex",
+        ";".join(filter_parts),
+        "-map",
+        "[vout]",
+        "-map",
+        "[aout]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ])
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "ffmpeg intro/outro failed")
+    return output_path
+
+
 def profile_default_watermark_text(source_path: Path) -> str:
     return source_path.stem.replace("_", " ")
 
@@ -2073,6 +2223,34 @@ def _build_repeated_text_overlay(base_size: tuple[int, int], text: str, watermar
     return rotated.crop((left, top, left + width, top + height))
 
 
+def _build_image_branding_panel(image_path: str | None, base_width: int, base_height: int, panel_ratio: float):
+    if not image_path:
+        return None
+
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required for image intro/outro rendering") from exc
+
+    panel_source_path = Path(str(image_path).strip())
+    if not panel_source_path.exists():
+        raise RuntimeError(f"intro/outro image not found: {panel_source_path}")
+    if infer_media_kind(panel_source_path) != "image":
+        raise RuntimeError(f"intro/outro asset must be an image: {panel_source_path}")
+
+    panel = Image.open(panel_source_path).convert("RGB")
+    target_height = max(48, int(base_height * panel_ratio))
+    scale_ratio = min(base_width / max(panel.width, 1), target_height / max(panel.height, 1))
+    resized_width = max(1, int(panel.width * scale_ratio))
+    resized_height = max(1, int(panel.height * scale_ratio))
+    resized_panel = panel.resize((resized_width, resized_height), Image.LANCZOS)
+    canvas = Image.new("RGB", (base_width, target_height), (0, 0, 0))
+    x_offset = max((base_width - resized_panel.width) // 2, 0)
+    y_offset = max((target_height - resized_panel.height) // 2, 0)
+    canvas.paste(resized_panel, (x_offset, y_offset))
+    return canvas
+
+
 def _load_watermark_font(image_font_module, font_size: int):
     candidate_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -2099,6 +2277,16 @@ def _color_to_rgba(color: str, opacity: float) -> tuple[int, int, int, int]:
     except ValueError:
         red, green, blue = 255, 255, 255
     return red, green, blue, int(255 * max(0.0, min(opacity, 1.0)))
+
+
+def _hex_to_rgb_tuple(color: str) -> tuple[int, int, int]:
+    normalized = str(color or "#000000").strip().lstrip("#")
+    if len(normalized) != 6:
+        normalized = "000000"
+    try:
+        return int(normalized[0:2], 16), int(normalized[2:4], 16), int(normalized[4:6], 16)
+    except ValueError:
+        return 0, 0, 0
 
 
 def _apply_video_text_template_watermark(
@@ -2246,6 +2434,33 @@ def _get_video_frame_size(source_path: Path) -> tuple[int, int]:
         return max(int(width_text), 1), max(int(height_text), 1)
     except ValueError as exc:
         raise RuntimeError("unable to read video size") from exc
+
+
+def _video_has_audio_stream(source_path: Path) -> bool:
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        raise RuntimeError("ffprobe is required for video intro/outro processing")
+
+    result = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(source_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "ffprobe failed")
+    return bool(result.stdout.strip())
 
 
 def _get_video_duration_seconds(source_path: Path) -> float:

@@ -443,6 +443,56 @@
           </div>
         </el-form-item>
 
+        <el-divider>片頭 / 片尾素材</el-divider>
+
+        <el-form-item label="影片片頭路徑">
+          <el-input
+            v-model="profileForm.settings.introOutro.videoIntroPath"
+            placeholder="本機可存取影片路徑，例如：C:/branding/intro.mp4"
+          />
+        </el-form-item>
+
+        <el-form-item label="影片片尾路徑">
+          <el-input
+            v-model="profileForm.settings.introOutro.videoOutroPath"
+            placeholder="本機可存取影片路徑，例如：C:/branding/outro.mp4"
+          />
+        </el-form-item>
+
+        <el-form-item label="圖片片頭路徑">
+          <el-input
+            v-model="profileForm.settings.introOutro.imageIntroPath"
+            placeholder="本機可存取圖片路徑，例如：C:/branding/image-intro.png"
+          />
+        </el-form-item>
+
+        <el-form-item label="圖片片尾路徑">
+          <el-input
+            v-model="profileForm.settings.introOutro.imageOutroPath"
+            placeholder="本機可存取圖片路徑，例如：C:/branding/image-outro.png"
+          />
+        </el-form-item>
+
+        <el-form-item label="圖片片頭 / 片尾高度比例">
+          <el-slider
+            v-model="profileForm.settings.introOutro.imagePanelRatio"
+            :min="0.08"
+            :max="0.45"
+            :step="0.01"
+            show-input
+          />
+        </el-form-item>
+
+        <el-form-item label="背景顏色">
+          <el-color-picker v-model="profileForm.settings.introOutro.backgroundColor" />
+        </el-form-item>
+
+        <el-form-item label="使用方式說明">
+          <div class="muted-text">
+            影片素材會依序串接為「片頭 → 主影片 → 片尾」。圖片素材會把圖片片頭加在上方、圖片片尾加在下方，輸出成同一張圖片。
+          </div>
+        </el-form-item>
+
         <el-divider>Google 試算表</el-divider>
 
         <el-form-item label="Spreadsheet ID">
@@ -1332,6 +1382,15 @@ const normalizeWatermarkFormSettings = (watermark = {}) => ({
   opacity: Math.min(Math.max(Number(watermark.opacity) || 0.45, 0.1), 1)
 })
 
+const normalizeIntroOutroFormSettings = (introOutro = {}) => ({
+  videoIntroPath: introOutro.videoIntroPath || '',
+  videoOutroPath: introOutro.videoOutroPath || '',
+  imageIntroPath: introOutro.imageIntroPath || '',
+  imageOutroPath: introOutro.imageOutroPath || '',
+  backgroundColor: /^#[0-9A-Fa-f]{6}$/.test(introOutro.backgroundColor || '') ? introOutro.backgroundColor : '#000000',
+  imagePanelRatio: Math.min(Math.max(Number(introOutro.imagePanelRatio) || 0.22, 0.08), 0.45)
+})
+
 const normalizeContentAccounts = (values = []) => {
   if (!Array.isArray(values)) {
     return []
@@ -1370,6 +1429,10 @@ const normalizeProfileForm = (profile = {}) => {
       watermark: normalizeWatermarkFormSettings({
         ...base.settings.watermark,
         ...((profile.settings || {}).watermark || {})
+      }),
+      introOutro: normalizeIntroOutroFormSettings({
+        ...base.settings.introOutro,
+        ...((profile.settings || {}).introOutro || {})
       }),
       googleSheet: {
         ...base.settings.googleSheet,
@@ -1423,6 +1486,14 @@ const makeDefaultProfile = () => ({
       imagePath: '',
       position: 'bottom-right',
       opacity: 0.45
+    },
+    introOutro: {
+      videoIntroPath: '',
+      videoOutroPath: '',
+      imageIntroPath: '',
+      imageOutroPath: '',
+      backgroundColor: '#000000',
+      imagePanelRatio: 0.22
     },
     googleSheet: {
       spreadsheetId: '',
