@@ -235,6 +235,51 @@
                 />
               </el-form-item>
 
+              <template v-if="row.platformKey === 'youtube'">
+                <el-divider content-position="left">YouTube 進階設定</el-divider>
+                <el-form-item label="Thumbnail URL">
+                  <el-input
+                    v-model="row.metadata.youtube.thumbnailUrl"
+                    placeholder="可選：縮圖網址"
+                  />
+                </el-form-item>
+                <el-form-item label="Thumbnail Path">
+                  <el-input
+                    v-model="row.metadata.youtube.thumbnailPath"
+                    placeholder="可選：本機縮圖路徑"
+                  />
+                </el-form-item>
+                <el-form-item label="Captions Path">
+                  <el-input
+                    v-model="row.metadata.youtube.captionsPath"
+                    placeholder="可選：字幕檔路徑（.srt/.vtt）"
+                  />
+                </el-form-item>
+                <div class="youtube-inline-fields">
+                  <el-form-item label="Captions Language">
+                    <el-input
+                      v-model="row.metadata.youtube.captionsLanguage"
+                      placeholder="例如：en / zh-TW"
+                    />
+                  </el-form-item>
+                  <el-form-item label="Captions Name">
+                    <el-input
+                      v-model="row.metadata.youtube.captionsName"
+                      placeholder="例如：English / 繁體中文"
+                    />
+                  </el-form-item>
+                </div>
+                <el-form-item label="Premiere At">
+                  <el-date-picker
+                    v-model="row.metadata.youtube.premiereAt"
+                    type="datetime"
+                    value-format="YYYY-MM-DDTHH:mm:ss[Z]"
+                    placeholder="可選：首映需求時間（後端會走 scheduled publish fallback）"
+                    style="width: 100%"
+                  />
+                </el-form-item>
+              </template>
+
               <el-form-item label="給 LLM 的補充指示">
                 <div class="instruction-row">
                   <el-input
@@ -338,6 +383,37 @@
         </el-table-column>
         <el-table-column prop="status" label="狀態" width="120" />
         <el-table-column prop="scheduledAt" label="排程時間" min-width="180" />
+        <el-table-column label="生命週期" min-width="260">
+          <template #default="{ row }">
+            <div class="lifecycle-cell">
+              <div v-if="getLifecycleTags(row).length" class="lifecycle-tag-list">
+                <el-tag
+                  v-for="tag in getLifecycleTags(row)"
+                  :key="tag.key"
+                  size="small"
+                  :type="tag.type"
+                >
+                  {{ tag.label }}
+                </el-tag>
+              </div>
+              <div
+                v-for="(line, index) in getLifecycleLines(row)"
+                :key="`${row.id || row.tempKey}-lifecycle-${index}`"
+                class="lifecycle-line"
+              >
+                {{ line }}
+              </div>
+              <el-link
+                v-if="row.metadata?.publishedUrl"
+                :href="row.metadata.publishedUrl"
+                target="_blank"
+                type="primary"
+              >
+                開啟已發布內容
+              </el-link>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="操作" min-width="220" fixed="right">
           <template #default="{ row }">
             <div class="saved-job-actions">
@@ -373,6 +449,7 @@ import { profileApi } from '@/api/profile'
 import { publishApi } from '@/api/publish'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
+import { createDefaultYoutubeMetadata, getLifecycleLines, getLifecycleTags } from '@/utils/publishLifecycle'
 
 const PUBLISH_HANDOFF_STORAGE_KEY = 'sau-publish-handoff-drafts'
 
@@ -687,9 +764,18 @@ const formatDeliveryMode = (value) => {
   return value || '未設定'
 }
 
+const normalizeRowMetadata = (metadata, platformKey) => {
+  const normalized = { ...(metadata || {}) }
+  if (platformKey === 'youtube') {
+    normalized.youtube = createDefaultYoutubeMetadata(normalized.youtube || {})
+  }
+  return normalized
+}
+
 const normalizeReviewRows = (items) => (
   (items || []).map((item, index) => ({
     ...item,
+    metadata: normalizeRowMetadata(item.metadata || {}, item.platformKey),
     tempKey: item.tempKey || `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
     instructionText: item.instructionText || ''
   }))
@@ -770,7 +856,7 @@ const serializeReviewRow = (row) => ({
   title: row.title || '',
   message: row.message || '',
   hashtags: row.hashtags || [],
-  metadata: row.metadata || {}
+  metadata: normalizeRowMetadata(row.metadata || {}, row.platformKey)
 })
 
 const regenerateRow = async (row) => {
@@ -1186,6 +1272,12 @@ onMounted(async () => {
     align-items: start;
   }
 
+  .youtube-inline-fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
   .delivery-panel {
     display: flex;
     flex-direction: column;
@@ -1216,6 +1308,25 @@ onMounted(async () => {
     gap: 4px 10px;
   }
 
+  .lifecycle-cell,
+  .lifecycle-tag-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .lifecycle-cell {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .lifecycle-line {
+    color: $text-secondary;
+    font-size: 12px;
+    line-height: 1.5;
+    word-break: break-word;
+  }
+
   @media (max-width: 1100px) {
     .selection-grid,
     .profile-config-body {
@@ -1229,7 +1340,8 @@ onMounted(async () => {
   }
 
   @media (max-width: 768px) {
-    .instruction-row {
+    .instruction-row,
+    .youtube-inline-fields {
       grid-template-columns: 1fr;
     }
   }

@@ -103,6 +103,29 @@
           <div class="drawer-job-body">
             <div class="drawer-line"><strong>排程：</strong>{{ job.scheduledAt || '立即 / 無指定' }}</div>
             <div class="drawer-line"><strong>素材：</strong>{{ job.materialName || '-' }}</div>
+            <div v-if="getLifecycleTags(job).length" class="drawer-tag-list">
+              <el-tag
+                v-for="tag in getLifecycleTags(job)"
+                :key="tag.key"
+                size="small"
+                :type="tag.type"
+              >
+                {{ tag.label }}
+              </el-tag>
+            </div>
+            <div
+              v-for="(line, index) in getLifecycleLines(job)"
+              :key="`${job.id}-lifecycle-${index}`"
+              class="drawer-line"
+            >
+              <strong>生命週期：</strong>{{ line }}
+            </div>
+            <div v-if="job.metadata?.publishedUrl" class="drawer-line">
+              <strong>連結：</strong>
+              <el-link :href="job.metadata.publishedUrl" target="_blank" type="primary">
+                開啟已發布內容
+              </el-link>
+            </div>
             <div class="drawer-message">{{ job.message || '這筆任務目前沒有文案內容' }}</div>
           </div>
 
@@ -169,6 +192,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { profileApi } from '@/api/profile'
 import { publishApi } from '@/api/publish'
+import { getLifecycleLines, getLifecycleTags } from '@/utils/publishLifecycle'
 
 const profiles = ref([])
 const calendarDate = ref(new Date())
@@ -494,6 +518,13 @@ onMounted(async () => {
 
   .drawer-job-body {
     margin: 12px 0;
+  }
+
+  .drawer-tag-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0 10px;
   }
 
   .drawer-message {

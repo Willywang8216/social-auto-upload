@@ -605,7 +605,7 @@
       width="900px"
     >
       <el-alert
-        title="這裡管理 Telegram / Discord / Reddit / X 的直發目標。內容帳號會用 target id 綁到這裡的設定。"
+        title="這裡管理 Telegram / Discord / Reddit / X / YouTube 的直發目標。內容帳號會用 target id 綁到這裡的設定。"
         type="info"
         :closable="false"
         show-icon
@@ -613,7 +613,7 @@
 
       <div class="content-account-toolbar direct-target-toolbar">
         <div class="muted-text">
-          Telegram 使用 Bot Token + Chat ID；Discord 使用 Webhook；Reddit 使用 refresh token；X 使用 API key + access token。
+          Telegram 使用 Bot Token + Chat ID；Discord 使用 Webhook；Reddit 使用 refresh token；X 使用 API key + access token；YouTube 可設定預設縮圖、字幕與首映時間。
         </div>
         <el-button type="primary" plain @click="addDirectPublisherTarget">新增 target</el-button>
       </div>
@@ -636,6 +636,7 @@
                 <el-option label="Discord" value="discord" />
                 <el-option label="Reddit" value="reddit" />
                 <el-option label="X / Twitter" value="twitter" />
+                <el-option label="YouTube" value="youtube" />
               </el-select>
             </el-form-item>
 
@@ -692,6 +693,40 @@
               </el-form-item>
               <el-form-item label="Access Token Secret">
                 <el-input v-model="target.config.accessTokenSecret" type="password" show-password />
+              </el-form-item>
+            </template>
+
+            <template v-else-if="target.platform === 'youtube'">
+              <el-form-item label="Access Token">
+                <el-input v-model="target.config.accessToken" type="password" show-password />
+              </el-form-item>
+              <el-form-item label="Privacy Status">
+                <el-select v-model="target.config.privacyStatus" style="width: 100%">
+                  <el-option label="private" value="private" />
+                  <el-option label="unlisted" value="unlisted" />
+                  <el-option label="public" value="public" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="Category ID">
+                <el-input v-model="target.config.categoryId" placeholder="預設 22" />
+              </el-form-item>
+              <el-form-item label="Thumbnail URL">
+                <el-input v-model="target.config.thumbnailUrl" placeholder="可選：預設縮圖網址" />
+              </el-form-item>
+              <el-form-item label="Thumbnail Path">
+                <el-input v-model="target.config.thumbnailPath" placeholder="可選：本機縮圖路徑" />
+              </el-form-item>
+              <el-form-item label="Captions Path">
+                <el-input v-model="target.config.captionsPath" placeholder="可選：本機字幕檔路徑（.srt/.vtt）" />
+              </el-form-item>
+              <el-form-item label="Captions Language">
+                <el-input v-model="target.config.captionsLanguage" placeholder="例如：en / zh-TW" />
+              </el-form-item>
+              <el-form-item label="Captions Name">
+                <el-input v-model="target.config.captionsName" placeholder="例如：English / 繁體中文" />
+              </el-form-item>
+              <el-form-item label="Premiere At">
+                <el-input v-model="target.config.premiereAt" placeholder="可選：ISO 時間，會轉為 scheduled publish fallback" />
               </el-form-item>
             </template>
           </el-form>
@@ -1236,6 +1271,19 @@ const normalizeDirectPublisherConfig = (platform, config = {}) => {
       subreddit: config.subreddit || ''
     }
   }
+  if (platform === 'youtube') {
+    return {
+      accessToken: config.accessToken || '',
+      privacyStatus: config.privacyStatus || 'private',
+      categoryId: config.categoryId || '22',
+      thumbnailUrl: config.thumbnailUrl || '',
+      thumbnailPath: config.thumbnailPath || '',
+      captionsPath: config.captionsPath || '',
+      captionsLanguage: config.captionsLanguage || 'en',
+      captionsName: config.captionsName || 'Default captions',
+      premiereAt: config.premiereAt || ''
+    }
+  }
   return {
     apiKey: config.apiKey || '',
     apiKeySecret: config.apiKeySecret || '',
@@ -1513,7 +1561,7 @@ const getAvailablePublishingAccounts = (platform) => (
   currentProfileAccounts.value.filter(item => item.platformKey === platform)
 )
 
-const supportsDirectPublisherTarget = (platform) => ['telegram', 'discord', 'reddit', 'twitter'].includes(platform)
+const supportsDirectPublisherTarget = (platform) => ['telegram', 'discord', 'reddit', 'twitter', 'youtube'].includes(platform)
 
 const getAvailableDirectPublisherTargets = (platform) => (
   directPublisherTargetOptions.value.filter(item => item.platform === platform)
