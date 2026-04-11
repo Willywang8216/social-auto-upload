@@ -13,6 +13,25 @@
     </div>
 
     <el-card class="filter-card">
+      <div class="legend-row">
+        <div class="legend-item">
+          <span class="legend-swatch lifecycle-container-processing"></span>
+          <span>Container processing</span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-swatch lifecycle-publish-triggered"></span>
+          <span>Publish triggered</span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-swatch lifecycle-published"></span>
+          <span>Published</span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-swatch lifecycle-failed"></span>
+          <span>Failed</span>
+        </div>
+      </div>
+
       <div class="filter-row">
         <el-select v-model="filters.profileId" clearable placeholder="全部 Profiles">
           <el-option
@@ -503,6 +522,50 @@ onMounted(async () => {
 
   .filter-row {
     flex-wrap: wrap;
+  }
+
+  .legend-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-bottom: 16px;
+    color: $text-secondary;
+    font-size: 13px;
+  }
+
+  .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .legend-swatch {
+    display: inline-flex;
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    flex-shrink: 0;
+  }
+
+  .legend-swatch.lifecycle-container-processing {
+    background: rgba(230, 162, 60, 0.18);
+    border-color: rgba(230, 162, 60, 0.5);
+  }
+
+  .legend-swatch.lifecycle-publish-triggered {
+    background: rgba(64, 158, 255, 0.18);
+    border-color: rgba(64, 158, 255, 0.5);
+  }
+
+  .legend-swatch.lifecycle-published {
+    background: rgba(103, 194, 58, 0.18);
+    border-color: rgba(103, 194, 58, 0.5);
+  }
+
+  .legend-swatch.lifecycle-failed {
+    background: rgba(245, 108, 108, 0.18);
+    border-color: rgba(245, 108, 108, 0.5);
   }
 
   .calendar-cell {
