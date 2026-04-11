@@ -245,10 +245,10 @@ const authModeOptionGroups = {
 const metadataHints = {
   twitter: '驗證建議欄位：apiKey、apiKeySecret、accessToken、accessTokenSecret。可另外加 handle、notes。',
   threads: '驗證建議欄位：accessToken、userId。可另外加 handle、notes。',
-  facebook: '驗證建議欄位：accessToken。可另外加 pageId、pageName、notes。',
+  facebook: '驗證建議欄位：accessToken、pageId。可另外加 pageName、notes。',
   reddit: '驗證建議欄位：clientId、clientSecret、refreshToken。可另外加 subreddit、username、notes。',
-  tiktok: '驗證建議欄位：accessToken。可另外加 username、channelId、notes。',
-  youtube: '驗證建議欄位：accessToken。可另外加 channelId、channelTitle、notes。',
+  tiktok: '驗證建議欄位：accessToken。可另外加 privacyLevel、disableComment、disableDuet、disableStitch、username、notes。',
+  youtube: '驗證建議欄位：accessToken。可另外加 privacyStatus、categoryId、channelId、channelTitle、notes。',
   xiaohongshu: '通常不需要額外 metadata，可留空或填 notes。',
   channels: '通常不需要額外 metadata，可留空或填 notes。',
   douyin: '通常不需要額外 metadata，可留空或填 notes。',

@@ -170,6 +170,154 @@ class DirectPublishersTests(unittest.TestCase):
         self.assertEqual(requests_module_mock.return_value.post.call_args.args[0], "https://api.x.com/2/tweets")
         self.assertIn("Authorization", requests_module_mock.return_value.post.call_args.kwargs["headers"])
 
+    @patch("utils.direct_publishers._get_requests_module")
+    def test_publish_job_to_facebook_posts_video_to_page_videos(self, requests_module_mock):
+        response = Mock()
+        response.ok = True
+        response.json.return_value = {"id": "fb-video-1"}
+        requests_module_mock.return_value.post.return_value = response
+
+        result = publish_job_to_direct_target(
+            Path("."),
+            {
+                "platformKey": "facebook",
+                "title": "Video title",
+                "message": "Facebook body",
+                "mediaPublicUrl": "https://cdn.example.com/video.mp4",
+                "metadata": {"mediaKind": "video"},
+            },
+            {
+                "platform": "facebook",
+                "enabled": True,
+                "config": {
+                    "accessToken": "fb-token",
+                    "pageId": "page-123",
+                },
+            },
+        )
+
+        self.assertEqual(result["postId"], "fb-video-1")
+        self.assertEqual(
+            requests_module_mock.return_value.post.call_args.args[0],
+            "https://graph.facebook.com/v25.0/page-123/videos",
+        )
+        self.assertEqual(requests_module_mock.return_value.post.call_args.kwargs["data"]["file_url"], "https://cdn.example.com/video.mp4")
+
+    @patch("utils.direct_publishers._get_requests_module")
+    def test_publish_job_to_threads_creates_container_then_publishes(self, requests_module_mock):
+        container_response = Mock()
+        container_response.ok = True
+        container_response.json.return_value = {"id": "creation-1"}
+        publish_response = Mock()
+        publish_response.ok = True
+        publish_response.json.return_value = {"id": "thread-9"}
+        requests_module_mock.return_value.post.side_effect = [container_response, publish_response]
+
+        result = publish_job_to_direct_target(
+            Path("."),
+            {
+                "platformKey": "threads",
+                "message": "Threads post",
+                "mediaPublicUrl": "https://cdn.example.com/image.png",
+                "metadata": {"mediaKind": "image"},
+            },
+            {
+                "platform": "threads",
+                "enabled": True,
+                "config": {
+                    "accessToken": "threads-token",
+                    "userId": "user-123",
+                },
+            },
+        )
+
+        self.assertEqual(result["threadId"], "thread-9")
+        first_call = requests_module_mock.return_value.post.call_args_list[0]
+        second_call = requests_module_mock.return_value.post.call_args_list[1]
+        self.assertEqual(first_call.args[0], "https://graph.threads.net/v1.0/user-123/threads")
+        self.assertEqual(first_call.kwargs["data"]["media_type"], "IMAGE")
+        self.assertEqual(second_call.args[0], "https://graph.threads.net/v1.0/user-123/threads_publish")
+        self.assertEqual(second_call.kwargs["data"]["creation_id"], "creation-1")
+
+    @patch("utils.direct_publishers._get_requests_module")
+    def test_publish_job_to_youtube_uses_resumable_upload(self, requests_module_mock):
+        init_response = Mock()
+        init_response.ok = True
+        init_response.headers = {"Location": "https://upload.example/session"}
+        upload_response = Mock()
+        upload_response.ok = True
+        upload_response.json.return_value = {"id": "yt-video-7"}
+        requests_module_mock.return_value.post.return_value = init_response
+        requests_module_mock.return_value.put.return_value = upload_response
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            media_dir = base_dir / "videoFile"
+            media_dir.mkdir(parents=True, exist_ok=True)
+            media_path = media_dir / "clip.mp4"
+            media_path.write_bytes(b"fake-mp4-bytes")
+
+            result = publish_job_to_direct_target(
+                base_dir,
+                {
+                    "platformKey": "youtube",
+                    "title": "YouTube title",
+                    "message": "YouTube description",
+                    "mediaPath": "videoFile/clip.mp4",
+                    "metadata": {"mediaKind": "video"},
+                },
+                {
+                    "platform": "youtube",
+                    "enabled": True,
+                    "config": {
+                        "accessToken": "yt-token",
+                        "privacyStatus": "public",
+                        "categoryId": "22",
+                    },
+                },
+            )
+
+        self.assertEqual(result["videoId"], "yt-video-7")
+        self.assertEqual(
+            requests_module_mock.return_value.post.call_args.args[0],
+            "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
+        )
+        self.assertEqual(requests_module_mock.return_value.put.call_args.args[0], "https://upload.example/session")
+
+    @patch("utils.direct_publishers._get_requests_module")
+    def test_publish_job_to_tiktok_initializes_pull_from_url_publish(self, requests_module_mock):
+        response = Mock()
+        response.ok = True
+        response.json.return_value = {"data": {"publish_id": "tt-publish-1"}}
+        requests_module_mock.return_value.post.return_value = response
+
+        result = publish_job_to_direct_target(
+            Path("."),
+            {
+                "platformKey": "tiktok",
+                "title": "TikTok title",
+                "message": "TikTok caption",
+                "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                "metadata": {"mediaKind": "video"},
+            },
+            {
+                "platform": "tiktok",
+                "enabled": True,
+                "config": {
+                    "accessToken": "tt-token",
+                    "privacyLevel": "PUBLIC_TO_EVERYONE",
+                    "disableComment": True,
+                    "disableDuet": False,
+                    "disableStitch": True,
+                },
+            },
+        )
+
+        self.assertEqual(result["publishId"], "tt-publish-1")
+        payload = requests_module_mock.return_value.post.call_args.kwargs["data"]
+        self.assertIn('"source": "PULL_FROM_URL"', payload)
+        self.assertIn('"privacy_level": "PUBLIC_TO_EVERYONE"', payload)
+
     def test_get_direct_publisher_target_raises_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             with self.assertRaises(ValueError):

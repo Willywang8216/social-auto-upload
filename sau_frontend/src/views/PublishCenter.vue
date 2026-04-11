@@ -185,6 +185,15 @@
                 <el-tag size="small" type="success">{{ row.platformKey }}</el-tag>
                 <el-tag size="small" type="warning">{{ formatDeliveryMode(row.deliveryMode) }}</el-tag>
                 <el-tag v-if="row.materialName" size="small" type="info">{{ row.materialName }}</el-tag>
+                <el-tag v-if="getDriverPersonaLabel(row)" size="small" type="primary">
+                  Persona：{{ getDriverPersonaLabel(row) }}
+                </el-tag>
+                <el-tag v-if="getDriverPublishingAccountLabel(row)" size="small" type="danger">
+                  發佈帳號：{{ getDriverPublishingAccountLabel(row) }}
+                </el-tag>
+                <el-tag size="small" type="info">
+                  {{ getDriverSourceLabel(row) }}
+                </el-tag>
               </div>
             </div>
             <el-button text type="danger" @click="removeReviewRow(row)">移除</el-button>
@@ -477,6 +486,13 @@ const getManagedAccounts = (profile) => {
 
 const getContentAccounts = (profile) => profile.settings?.contentAccounts || []
 
+const getProfileById = (profileId) => profiles.value.find(item => item.id === Number(profileId))
+
+const getContentAccountById = (profileId, contentAccountId) => {
+  const profile = getProfileById(profileId)
+  return getContentAccounts(profile || {}).find(item => item.id === contentAccountId)
+}
+
 const isAccountValidated = (account) => {
   if (!account?.supportsValidation) {
     return true
@@ -574,6 +590,43 @@ const getSelectableContentAccountIds = (profile) => (
     .filter(account => getContentAccountSelectionState(profile, account).selectable)
     .map(account => account.id)
 )
+
+const getDriverPersonaLabel = (row) => {
+  const metadata = row.metadata || {}
+  const contentAccountId = row.contentAccountId || metadata.contentAccountId || ''
+  if (!contentAccountId || !row.profileId) {
+    return ''
+  }
+  const account = getContentAccountById(row.profileId, contentAccountId)
+  return account?.name || account?.platform || contentAccountId
+}
+
+const getDriverPublishingAccountLabel = (row) => {
+  const metadata = row.metadata || {}
+  const publishingAccountId = metadata.publishingAccountId || row.accountId || ''
+  if (!publishingAccountId || !row.profileId) {
+    return ''
+  }
+  const profile = getProfileById(row.profileId)
+  if (!profile) {
+    return String(publishingAccountId)
+  }
+  return getPublishingAccountLabel(profile, publishingAccountId)
+}
+
+const getDriverSourceLabel = (row) => {
+  const source = String((row.metadata || {}).source || '').trim()
+  if (source === 'linked_content_account_generation') {
+    return '綁定 Persona 驅動'
+  }
+  if (source === 'content_account_generation') {
+    return 'Persona 直出'
+  }
+  if (source === 'managed_account_generation') {
+    return '平台預設文案'
+  }
+  return '草稿來源未標記'
+}
 
 const getRowKey = (row) => row.id || row.tempKey
 

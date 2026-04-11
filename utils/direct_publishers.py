@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 DIRECT_PUBLISHERS_FILENAME = "direct_publishers.json"
-DIRECT_PUBLISHER_PLATFORMS = {"telegram", "discord", "reddit", "twitter"}
+DIRECT_PUBLISHER_PLATFORMS = {"telegram", "discord", "reddit", "twitter", "facebook", "threads", "youtube", "tiktok"}
 
 
 def get_direct_publishers_storage_path(base_dir: Path) -> Path:
@@ -68,6 +68,14 @@ def publish_job_to_direct_target(base_dir: Path, job: dict[str, Any], target: di
         return _publish_to_reddit(job, target)
     if platform == "twitter":
         return _publish_to_x(job, target)
+    if platform == "facebook":
+        return _publish_to_facebook(job, target)
+    if platform == "threads":
+        return _publish_to_threads(job, target)
+    if platform == "youtube":
+        return _publish_to_youtube(base_dir, job, target)
+    if platform == "tiktok":
+        return _publish_to_tiktok(job, target)
     raise ValueError(f"unsupported direct publisher platform: {platform}")
 
 
@@ -122,6 +130,30 @@ def _normalize_target_config(platform: str, config: dict[str, Any]) -> dict[str,
             "accessToken": str(config.get("accessToken") or "").strip(),
             "accessTokenSecret": str(config.get("accessTokenSecret") or "").strip(),
         }
+    if platform == "facebook":
+        return {
+            "accessToken": str(config.get("accessToken") or "").strip(),
+            "pageId": str(config.get("pageId") or "").strip(),
+        }
+    if platform == "threads":
+        return {
+            "accessToken": str(config.get("accessToken") or "").strip(),
+            "userId": str(config.get("userId") or "").strip(),
+        }
+    if platform == "youtube":
+        return {
+            "accessToken": str(config.get("accessToken") or "").strip(),
+            "privacyStatus": str(config.get("privacyStatus") or "").strip() or "private",
+            "categoryId": str(config.get("categoryId") or "").strip() or "22",
+        }
+    if platform == "tiktok":
+        return {
+            "accessToken": str(config.get("accessToken") or "").strip(),
+            "privacyLevel": str(config.get("privacyLevel") or "").strip() or "SELF_ONLY",
+            "disableComment": bool(config.get("disableComment", False)),
+            "disableDuet": bool(config.get("disableDuet", False)),
+            "disableStitch": bool(config.get("disableStitch", False)),
+        }
     return {}
 
 
@@ -133,6 +165,14 @@ def _default_target_name(platform: str, config: dict[str, Any]) -> str:
     if platform == "reddit":
         subreddit = str(config.get("subreddit") or "").strip()
         return f"r/{subreddit}" if subreddit else "Reddit"
+    if platform == "facebook":
+        return str(config.get("pageId") or "").strip() or "Facebook"
+    if platform == "threads":
+        return str(config.get("userId") or "").strip() or "Threads"
+    if platform == "youtube":
+        return "YouTube"
+    if platform == "tiktok":
+        return "TikTok"
     return "X"
 
 
@@ -297,6 +337,233 @@ def _publish_to_x(job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]
     if not tweet_id:
         raise RuntimeError(payload.get("detail") or "x publish failed")
     return {"platform": "twitter", "tweetId": tweet_id}
+
+
+def _publish_to_facebook(job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    requests = _get_requests_module()
+    config = target["config"]
+    access_token = str(config.get("accessToken") or "").strip()
+    page_id = str(config.get("pageId") or "").strip()
+    if not access_token or not page_id:
+        raise ValueError("facebook accessToken and pageId are required")
+
+    media_kind = str((job.get("metadata") or {}).get("mediaKind") or "").strip().lower()
+    media_url = str(job.get("mediaPublicUrl") or "").strip()
+    title = str(job.get("title") or job.get("materialName") or "Untitled").strip()
+    message = _build_post_text(job, include_media_url=False)
+
+    if media_kind == "image" and media_url:
+        response = requests.post(
+            f"https://graph.facebook.com/v25.0/{page_id}/photos",
+            data={
+                "url": media_url,
+                "caption": _truncate_text(message, 2200),
+                "access_token": access_token,
+            },
+            timeout=60,
+        )
+    elif media_kind == "video" and media_url:
+        response = requests.post(
+            f"https://graph.facebook.com/v25.0/{page_id}/videos",
+            data={
+                "file_url": media_url,
+                "title": _truncate_text(title, 255),
+                "description": _truncate_text(message, 63206),
+                "access_token": access_token,
+            },
+            timeout=120,
+        )
+    else:
+        payload = {
+            "message": _truncate_text(_build_post_text(job), 63206),
+            "access_token": access_token,
+        }
+        response = requests.post(
+            f"https://graph.facebook.com/v25.0/{page_id}/feed",
+            data=payload,
+            timeout=60,
+        )
+
+    _raise_for_http_error(response)
+    data = response.json() or {}
+    if data.get("error"):
+        raise RuntimeError(data["error"].get("message") or "facebook publish failed")
+    post_id = data.get("post_id") or data.get("id")
+    if not post_id:
+        raise RuntimeError("facebook publish did not return a post id")
+    return {"platform": "facebook", "postId": post_id}
+
+
+def _publish_to_threads(job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    requests = _get_requests_module()
+    config = target["config"]
+    access_token = str(config.get("accessToken") or "").strip()
+    user_id = str(config.get("userId") or "").strip()
+    if not access_token or not user_id:
+        raise ValueError("threads accessToken and userId are required")
+
+    media_kind = str((job.get("metadata") or {}).get("mediaKind") or "").strip().lower()
+    media_url = str(job.get("mediaPublicUrl") or "").strip()
+    text = _truncate_text(_build_post_text(job, include_media_url=False), 500)
+    container_payload = {
+        "access_token": access_token,
+    }
+    if media_kind == "image" and media_url:
+        container_payload.update({
+            "media_type": "IMAGE",
+            "image_url": media_url,
+            "text": text,
+        })
+    elif media_kind == "video" and media_url:
+        container_payload.update({
+            "media_type": "VIDEO",
+            "video_url": media_url,
+            "text": text,
+        })
+    else:
+        container_payload.update({
+            "media_type": "TEXT",
+            "text": text,
+        })
+    container_response = requests.post(
+        f"https://graph.threads.net/v1.0/{user_id}/threads",
+        data=container_payload,
+        timeout=60,
+    )
+    _raise_for_http_error(container_response)
+    container_data = container_response.json() or {}
+    creation_id = container_data.get("id")
+    if not creation_id:
+        raise RuntimeError(container_data.get("error", {}).get("message") or "threads container creation failed")
+
+    publish_response = requests.post(
+        f"https://graph.threads.net/v1.0/{user_id}/threads_publish",
+        data={
+            "creation_id": creation_id,
+            "access_token": access_token,
+        },
+        timeout=60,
+    )
+    _raise_for_http_error(publish_response)
+    publish_data = publish_response.json() or {}
+    thread_id = publish_data.get("id")
+    if not thread_id:
+        raise RuntimeError(publish_data.get("error", {}).get("message") or "threads publish failed")
+    return {"platform": "threads", "threadId": thread_id, "creationId": creation_id}
+
+
+def _publish_to_youtube(base_dir: Path, job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    requests = _get_requests_module()
+    config = target["config"]
+    access_token = str(config.get("accessToken") or "").strip()
+    if not access_token:
+        raise ValueError("youtube accessToken is required")
+
+    media_path = _resolve_media_path(base_dir, job)
+    if media_path.suffix.lower() not in {".mp4", ".mov", ".m4v", ".avi", ".webm"}:
+        raise ValueError("youtube direct upload requires a local video file")
+
+    metadata = {
+        "snippet": {
+            "title": _truncate_text(str(job.get("title") or job.get("materialName") or "Untitled"), 100),
+            "description": _truncate_text(str(job.get("message") or ""), 5000),
+            "categoryId": str(config.get("categoryId") or "22"),
+        },
+        "status": {
+            "privacyStatus": str(config.get("privacyStatus") or "private"),
+        },
+    }
+    file_size = media_path.stat().st_size
+    init_response = requests.post(
+        "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=UTF-8",
+            "X-Upload-Content-Type": "video/mp4",
+            "X-Upload-Content-Length": str(file_size),
+        },
+        data=json.dumps(metadata, ensure_ascii=False),
+        timeout=60,
+    )
+    _raise_for_http_error(init_response)
+    upload_url = init_response.headers.get("Location") or init_response.headers.get("location")
+    if not upload_url:
+        raise RuntimeError("youtube upload session location was not returned")
+
+    upload_response = requests.put(
+        upload_url,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Length": str(file_size),
+            "Content-Type": "video/mp4",
+        },
+        data=media_path.read_bytes(),
+        timeout=600,
+    )
+    _raise_for_http_error(upload_response)
+    upload_data = upload_response.json() or {}
+    video_id = upload_data.get("id")
+    if not video_id:
+        raise RuntimeError(upload_data.get("error", {}).get("message") or "youtube upload failed")
+    return {"platform": "youtube", "videoId": video_id}
+
+
+def _publish_to_tiktok(job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    requests = _get_requests_module()
+    config = target["config"]
+    access_token = str(config.get("accessToken") or "").strip()
+    media_url = str(job.get("mediaPublicUrl") or "").strip()
+    if not access_token:
+        raise ValueError("tiktok accessToken is required")
+    if not media_url:
+        raise ValueError("tiktok direct upload requires mediaPublicUrl")
+
+    title = _truncate_text(str(job.get("message") or job.get("title") or ""), 2200)
+    response = requests.post(
+        "https://open.tiktokapis.com/v2/post/publish/video/init/",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        data=json.dumps(
+            {
+                "post_info": {
+                    "title": title,
+                    "privacy_level": str(config.get("privacyLevel") or "SELF_ONLY"),
+                    "disable_comment": bool(config.get("disableComment", False)),
+                    "disable_duet": bool(config.get("disableDuet", False)),
+                    "disable_stitch": bool(config.get("disableStitch", False)),
+                },
+                "source_info": {
+                    "source": "PULL_FROM_URL",
+                    "video_url": media_url,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        timeout=60,
+    )
+    _raise_for_http_error(response)
+    payload = response.json() or {}
+    data = payload.get("data") or {}
+    publish_id = data.get("publish_id") or payload.get("publish_id")
+    if payload.get("error"):
+        raise RuntimeError(payload["error"].get("message") or "tiktok publish init failed")
+    if not publish_id:
+        raise RuntimeError("tiktok publish id was not returned")
+    return {"platform": "tiktok", "publishId": publish_id}
+
+
+def _resolve_media_path(base_dir: Path, job: dict[str, Any]) -> Path:
+    media_path_value = str(job.get("mediaPath") or "").strip()
+    if not media_path_value:
+        raise ValueError("mediaPath is required")
+    media_path = Path(media_path_value)
+    if not media_path.is_absolute():
+        media_path = base_dir / media_path
+    if not media_path.exists():
+        raise FileNotFoundError(f"media file not found: {media_path}")
+    return media_path
 
 
 def _build_post_text(job: dict[str, Any], include_media_url: bool = True) -> str:

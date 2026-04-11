@@ -21,6 +21,7 @@ from utils.profile_pipeline import (
 )
 
 DIRECT_UPLOAD_PLATFORMS = {"xiaohongshu", "channels", "douyin", "kuaishou", "twitter", "telegram", "reddit", "discord"}
+MANAGED_DIRECT_UPLOAD_PLATFORMS = {"facebook", "threads", "youtube", "tiktok"}
 SHEET_EXPORT_PLATFORMS = {"threads", "instagram", "facebook", "youtube", "tiktok"}
 MANUAL_ONLY_PLATFORMS = {"patreon"}
 ACTIVE_JOB_STATUSES = {"queued", "scheduled"}
@@ -605,7 +606,11 @@ def _build_draft_items(db_path: Path, batch_result: dict[str, Any]) -> list[dict
                 "contentAccountId": "",
                 "platformKey": platform_key,
                 "targetName": account["name"],
-                "deliveryMode": _delivery_mode_for_platform(platform_key),
+                "deliveryMode": _resolve_draft_delivery_mode(
+                    platform_key,
+                    "managed_account",
+                    {"accountId": account["id"], "contentAccountId": linked_account.get("id") or ""},
+                ),
                 "materialId": material.get("id"),
                 "materialName": material.get("filename") or "",
                 "mediaPath": processed_media_path,
@@ -635,7 +640,14 @@ def _build_draft_items(db_path: Path, batch_result: dict[str, Any]) -> list[dict
                 "contentAccountId": account.get("id") or "",
                 "platformKey": platform_key,
                 "targetName": account.get("name") or "",
-                "deliveryMode": _delivery_mode_for_platform(platform_key),
+                "deliveryMode": _resolve_draft_delivery_mode(
+                    platform_key,
+                    "content_account",
+                    {
+                        "publishingAccountId": account.get("publishingAccountId") or "",
+                        "publisherTargetId": account.get("publisherTargetId") or "",
+                    },
+                ),
                 "materialId": material.get("id"),
                 "materialName": material.get("filename") or "",
                 "mediaPath": processed_media_path,
@@ -910,7 +922,7 @@ def _execute_direct_upload_job(db_path: Path, job: dict[str, Any], base_dir: Pat
     if platform_key == "kuaishou":
         post_video_ks(title, [media_path], "", [account_file], None, False, 1, None, 0, message)
         return
-    if platform_key in {"twitter", "telegram", "reddit", "discord"}:
+    if platform_key in {"twitter", "telegram", "reddit", "discord", "facebook", "threads", "youtube", "tiktok"}:
         if base_dir is None:
             raise ValueError("base_dir is required for direct publisher targets")
         target = _resolve_direct_upload_target(db_path, job, base_dir)
@@ -1238,6 +1250,19 @@ def _delivery_mode_for_platform(platform_key: str) -> str:
     return "manual_only"
 
 
+def _resolve_draft_delivery_mode(platform_key: str, target_kind: str, metadata: dict[str, Any] | None = None) -> str:
+    normalized = str(platform_key or "").strip().lower()
+    metadata = metadata or {}
+    if normalized in DIRECT_UPLOAD_PLATFORMS:
+        return "direct_upload"
+    if normalized in MANAGED_DIRECT_UPLOAD_PLATFORMS:
+        if target_kind == "managed_account":
+            return "direct_upload"
+        if str(metadata.get("publishingAccountId") or "").strip() or str(metadata.get("publisherTargetId") or "").strip():
+            return "direct_upload"
+    return _delivery_mode_for_platform(normalized)
+
+
 def _should_create_scheduler_sheet_copy(job: dict[str, Any]) -> bool:
     platform_key = str(job.get("platformKey") or "").strip().lower()
     return (
@@ -1332,6 +1357,50 @@ def _build_direct_target_from_account(account: dict[str, Any]) -> dict[str, Any]
                 "clientSecret": str(metadata.get("clientSecret") or "").strip(),
                 "refreshToken": str(metadata.get("refreshToken") or "").strip(),
                 "subreddit": str(metadata.get("subreddit") or "").strip(),
+            },
+        }
+
+    if platform == "facebook":
+        return {
+            "platform": "facebook",
+            "enabled": True,
+            "config": {
+                "accessToken": str(metadata.get("accessToken") or "").strip(),
+                "pageId": str(metadata.get("pageId") or "").strip(),
+            },
+        }
+
+    if platform == "threads":
+        return {
+            "platform": "threads",
+            "enabled": True,
+            "config": {
+                "accessToken": str(metadata.get("accessToken") or "").strip(),
+                "userId": str(metadata.get("userId") or "").strip(),
+            },
+        }
+
+    if platform == "youtube":
+        return {
+            "platform": "youtube",
+            "enabled": True,
+            "config": {
+                "accessToken": str(metadata.get("accessToken") or "").strip(),
+                "privacyStatus": str(metadata.get("privacyStatus") or "").strip() or "private",
+                "categoryId": str(metadata.get("categoryId") or "").strip() or "22",
+            },
+        }
+
+    if platform == "tiktok":
+        return {
+            "platform": "tiktok",
+            "enabled": True,
+            "config": {
+                "accessToken": str(metadata.get("accessToken") or "").strip(),
+                "privacyLevel": str(metadata.get("privacyLevel") or "").strip() or "SELF_ONLY",
+                "disableComment": bool(metadata.get("disableComment", False)),
+                "disableDuet": bool(metadata.get("disableDuet", False)),
+                "disableStitch": bool(metadata.get("disableStitch", False)),
             },
         }
 
