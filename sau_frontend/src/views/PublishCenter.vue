@@ -195,6 +195,14 @@
                   {{ getDriverSourceLabel(row) }}
                 </el-tag>
               </div>
+              <div class="review-shortcuts">
+                <el-button v-if="row.profileId" link type="primary" @click="goToProfile(row)">
+                  前往 Profile
+                </el-button>
+                <el-button v-if="getDriverPublishingAccountId(row)" link type="primary" @click="goToPublishingAccount(row)">
+                  前往發佈帳號
+                </el-button>
+              </div>
             </div>
             <el-button text type="danger" @click="removeReviewRow(row)">移除</el-button>
           </div>
@@ -358,6 +366,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
 import { accountApi } from '@/api/account'
 import { materialApi } from '@/api/material'
 import { profileApi } from '@/api/profile'
@@ -376,6 +385,7 @@ const legacyPlatformMap = {
 
 const accountStore = useAccountStore()
 const appStore = useAppStore()
+const router = useRouter()
 
 const profiles = ref([])
 const selectedProfileIds = ref([])
@@ -614,6 +624,11 @@ const getDriverPublishingAccountLabel = (row) => {
   return getPublishingAccountLabel(profile, publishingAccountId)
 }
 
+const getDriverPublishingAccountId = (row) => {
+  const metadata = row.metadata || {}
+  return Number(metadata.publishingAccountId || row.accountId || 0)
+}
+
 const getDriverSourceLabel = (row) => {
   const source = String((row.metadata || {}).source || '').trim()
   if (source === 'linked_content_account_generation') {
@@ -626,6 +641,33 @@ const getDriverSourceLabel = (row) => {
     return '平台預設文案'
   }
   return '草稿來源未標記'
+}
+
+const goToProfile = async (row) => {
+  if (!row.profileId) {
+    return
+  }
+  await router.push({
+    path: '/profile-management',
+    query: {
+      focusProfileId: String(row.profileId)
+    }
+  })
+}
+
+const goToPublishingAccount = async (row) => {
+  const accountId = getDriverPublishingAccountId(row)
+  if (!accountId) {
+    return
+  }
+  await router.push({
+    path: '/account-management',
+    query: {
+      focusAccountId: String(accountId),
+      platformKey: row.platformKey || undefined,
+      accountName: getDriverPublishingAccountLabel(row) || row.targetName || undefined
+    }
+  })
 }
 
 const getRowKey = (row) => row.id || row.tempKey
@@ -1108,6 +1150,12 @@ onMounted(async () => {
   }
 
   .review-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .review-shortcuts {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;

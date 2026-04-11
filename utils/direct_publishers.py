@@ -11,6 +11,7 @@ from typing import Any
 
 DIRECT_PUBLISHERS_FILENAME = "direct_publishers.json"
 DIRECT_PUBLISHER_PLATFORMS = {"telegram", "discord", "reddit", "twitter", "facebook", "threads", "youtube", "tiktok"}
+ASYNC_DIRECT_PUBLISH_PLATFORMS = {"threads", "youtube", "tiktok"}
 
 
 def get_direct_publishers_storage_path(base_dir: Path) -> Path:
@@ -77,6 +78,23 @@ def publish_job_to_direct_target(base_dir: Path, job: dict[str, Any], target: di
     if platform == "tiktok":
         return _publish_to_tiktok(job, target)
     raise ValueError(f"unsupported direct publisher platform: {platform}")
+
+
+def refresh_direct_publish_job_status(base_dir: Path, job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    platform = str(target.get("platform") or "").strip().lower()
+    if platform != str(job.get("platformKey") or "").strip().lower():
+        raise ValueError("direct publisher target platform does not match job platform")
+    if platform == "threads":
+        return _refresh_threads_status(job, target)
+    if platform == "youtube":
+        return _refresh_youtube_status(job, target)
+    if platform == "tiktok":
+        return _refresh_tiktok_status(job, target)
+    return {
+        "status": "published",
+        "platform": platform,
+        "details": {},
+    }
 
 
 def _normalize_direct_publisher_targets(targets: Any) -> list[dict[str, Any]]:
@@ -391,7 +409,7 @@ def _publish_to_facebook(job: dict[str, Any], target: dict[str, Any]) -> dict[st
     post_id = data.get("post_id") or data.get("id")
     if not post_id:
         raise RuntimeError("facebook publish did not return a post id")
-    return {"platform": "facebook", "postId": post_id}
+    return {"platform": "facebook", "postId": post_id, "finalStatus": "published"}
 
 
 def _publish_to_threads(job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
@@ -449,7 +467,12 @@ def _publish_to_threads(job: dict[str, Any], target: dict[str, Any]) -> dict[str
     thread_id = publish_data.get("id")
     if not thread_id:
         raise RuntimeError(publish_data.get("error", {}).get("message") or "threads publish failed")
-    return {"platform": "threads", "threadId": thread_id, "creationId": creation_id}
+    return {
+        "platform": "threads",
+        "threadId": thread_id,
+        "creationId": creation_id,
+        "finalStatus": "processing",
+    }
 
 
 def _publish_to_youtube(base_dir: Path, job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
@@ -505,7 +528,12 @@ def _publish_to_youtube(base_dir: Path, job: dict[str, Any], target: dict[str, A
     video_id = upload_data.get("id")
     if not video_id:
         raise RuntimeError(upload_data.get("error", {}).get("message") or "youtube upload failed")
-    return {"platform": "youtube", "videoId": video_id}
+    return {
+        "platform": "youtube",
+        "videoId": video_id,
+        "url": f"https://www.youtube.com/watch?v={video_id}",
+        "finalStatus": "processing",
+    }
 
 
 def _publish_to_tiktok(job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
@@ -551,7 +579,11 @@ def _publish_to_tiktok(job: dict[str, Any], target: dict[str, Any]) -> dict[str,
         raise RuntimeError(payload["error"].get("message") or "tiktok publish init failed")
     if not publish_id:
         raise RuntimeError("tiktok publish id was not returned")
-    return {"platform": "tiktok", "publishId": publish_id}
+    return {
+        "platform": "tiktok",
+        "publishId": publish_id,
+        "finalStatus": "processing",
+    }
 
 
 def _resolve_media_path(base_dir: Path, job: dict[str, Any]) -> Path:
@@ -564,6 +596,172 @@ def _resolve_media_path(base_dir: Path, job: dict[str, Any]) -> Path:
     if not media_path.exists():
         raise FileNotFoundError(f"media file not found: {media_path}")
     return media_path
+
+
+def _refresh_threads_status(job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    requests = _get_requests_module()
+    config = target["config"]
+    access_token = str(config.get("accessToken") or "").strip()
+    metadata = job.get("metadata") or {}
+    thread_id = str(metadata.get("threadId") or metadata.get("publishId") or "").strip()
+    if not access_token or not thread_id:
+        raise ValueError("threads accessToken and threadId are required for status refresh")
+
+    response = requests.get(
+        f"https://graph.threads.net/v1.0/{thread_id}",
+        params={
+            "fields": "id,permalink,shortcode,username,text,timestamp",
+            "access_token": access_token,
+        },
+        timeout=30,
+    )
+    _raise_for_http_error(response)
+    payload = response.json() or {}
+    if payload.get("error"):
+        raise RuntimeError(payload["error"].get("message") or "threads status refresh failed")
+    if payload.get("id"):
+        details = {
+            "permalink": payload.get("permalink") or "",
+            "shortcode": payload.get("shortcode") or "",
+            "username": payload.get("username") or "",
+            "text": payload.get("text") or "",
+            "timestamp": payload.get("timestamp") or "",
+        }
+        return {
+            "status": "published",
+            "platform": "threads",
+            "remoteId": payload.get("id"),
+            "url": payload.get("permalink") or "",
+            "details": {key: value for key, value in details.items() if value},
+        }
+    return {
+        "status": "processing",
+        "platform": "threads",
+        "details": {},
+    }
+
+
+def _refresh_youtube_status(job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    requests = _get_requests_module()
+    config = target["config"]
+    access_token = str(config.get("accessToken") or "").strip()
+    metadata = job.get("metadata") or {}
+    video_id = str(metadata.get("videoId") or "").strip()
+    if not access_token or not video_id:
+        raise ValueError("youtube accessToken and videoId are required for status refresh")
+
+    response = requests.get(
+        "https://www.googleapis.com/youtube/v3/videos",
+        params={
+            "part": "status,processingDetails,snippet",
+            "id": video_id,
+        },
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+    )
+    _raise_for_http_error(response)
+    payload = response.json() or {}
+    items = payload.get("items") or []
+    if not items:
+        return {
+            "status": "processing",
+            "platform": "youtube",
+            "details": {"reason": "video_not_visible_yet"},
+        }
+
+    video = items[0] or {}
+    status = video.get("status") or {}
+    processing = video.get("processingDetails") or {}
+    upload_status = str(status.get("uploadStatus") or "").strip().lower()
+    processing_status = str(processing.get("processingStatus") or "").strip().lower()
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    details = {
+        "uploadStatus": upload_status,
+        "processingStatus": processing_status,
+        "privacyStatus": status.get("privacyStatus") or "",
+        "embeddable": status.get("embeddable"),
+        "license": status.get("license") or "",
+        "channelTitle": ((video.get("snippet") or {}).get("channelTitle") or ""),
+    }
+    if upload_status in {"rejected", "failed", "deleted"} or processing_status in {"failed", "terminated"}:
+        return {
+            "status": "failed",
+            "platform": "youtube",
+            "remoteId": video_id,
+            "url": url,
+            "error": processing.get("processingFailureReason") or upload_status or processing_status or "youtube processing failed",
+            "details": {key: value for key, value in details.items() if value not in {"", None}},
+        }
+    if upload_status == "processed" and processing_status in {"", "succeeded"}:
+        return {
+            "status": "published",
+            "platform": "youtube",
+            "remoteId": video_id,
+            "url": url,
+            "details": {key: value for key, value in details.items() if value not in {"", None}},
+        }
+    return {
+        "status": "processing",
+        "platform": "youtube",
+        "remoteId": video_id,
+        "url": url,
+        "details": {key: value for key, value in details.items() if value not in {"", None}},
+    }
+
+
+def _refresh_tiktok_status(job: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    requests = _get_requests_module()
+    config = target["config"]
+    access_token = str(config.get("accessToken") or "").strip()
+    metadata = job.get("metadata") or {}
+    publish_id = str(metadata.get("publishId") or "").strip()
+    if not access_token or not publish_id:
+        raise ValueError("tiktok accessToken and publishId are required for status refresh")
+
+    response = requests.post(
+        "https://open.tiktokapis.com/v2/post/publish/status/fetch/",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        data=json.dumps({"publish_id": publish_id}, ensure_ascii=False),
+        timeout=30,
+    )
+    _raise_for_http_error(response)
+    payload = response.json() or {}
+    if payload.get("error"):
+        raise RuntimeError(payload["error"].get("message") or "tiktok status refresh failed")
+    data = payload.get("data") or {}
+    raw_status = str(data.get("status") or payload.get("status") or "").strip()
+    upper_status = raw_status.upper()
+    details = {
+        "status": raw_status,
+        "failReason": data.get("fail_reason") or "",
+        "uploadedBytes": data.get("downloaded_bytes"),
+        "videoId": data.get("video_id") or "",
+        "publicalyAvailablePostId": data.get("publicaly_available_post_id") or "",
+    }
+    if upper_status in {"PUBLISH_COMPLETE", "PUBLISHED", "SUCCESS", "SEND_TO_USER_INBOX"}:
+        return {
+            "status": "published",
+            "platform": "tiktok",
+            "remoteId": data.get("video_id") or publish_id,
+            "details": {key: value for key, value in details.items() if value not in {"", None}},
+        }
+    if "FAIL" in upper_status or "REJECT" in upper_status or "CANCEL" in upper_status or "DENY" in upper_status:
+        return {
+            "status": "failed",
+            "platform": "tiktok",
+            "remoteId": data.get("video_id") or publish_id,
+            "error": data.get("fail_reason") or raw_status or "tiktok publish failed",
+            "details": {key: value for key, value in details.items() if value not in {"", None}},
+        }
+    return {
+        "status": "processing",
+        "platform": "tiktok",
+        "remoteId": data.get("video_id") or publish_id,
+        "details": {key: value for key, value in details.items() if value not in {"", None}},
+    }
 
 
 def _build_post_text(job: dict[str, Any], include_media_url: bool = True) -> str:

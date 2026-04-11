@@ -14,6 +14,7 @@ from utils.publish_jobs import (
     list_publish_jobs,
     regenerate_publish_job_content,
     save_publish_jobs,
+    sync_publish_job_statuses,
     update_publish_job_content,
 )
 
@@ -793,6 +794,121 @@ class PublishJobsTests(unittest.TestCase):
         self.assertEqual(target["platform"], "facebook")
         self.assertEqual(target["config"]["pageId"], "page-123")
         self.assertEqual(target["config"]["accessToken"], "fb-token")
+
+    def test_execute_due_publish_jobs_keeps_tiktok_job_in_processing_with_publish_id(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO user_info (type, filePath, userName, status, platform_key, auth_mode, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    0,
+                    "",
+                    "TikTok Direct",
+                    1,
+                    "tiktok",
+                    "manual",
+                    '{"accessToken":"tt-token","privacyLevel":"SELF_ONLY"}',
+                ),
+            )
+            tiktok_account_id = cursor.lastrowid
+            conn.commit()
+
+        saved = save_publish_jobs(
+            self.db_path,
+            {
+                "items": [
+                    {
+                        "profileId": self.profile["id"],
+                        "profileName": self.profile["name"],
+                        "targetKind": "managed_account",
+                        "accountId": tiktok_account_id,
+                        "platformKey": "tiktok",
+                        "targetName": "TikTok Direct",
+                        "deliveryMode": "direct_upload",
+                        "materialId": 1,
+                        "materialName": "clip.mp4",
+                        "mediaPath": "videoFile/clip.mp4",
+                        "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                        "title": "TikTok title",
+                        "message": "TikTok body",
+                        "metadata": {"mediaKind": "video"},
+                    }
+                ],
+                "mode": "now",
+            },
+        )
+
+        with patch("utils.publish_jobs.publish_job_to_direct_target", return_value={"platform": "tiktok", "publishId": "publish-1", "finalStatus": "processing"}):
+            result = execute_due_publish_jobs(self.db_path, self.base_dir, job_ids=saved["jobIds"])
+
+        self.assertEqual(result["items"][0]["status"], "processing")
+        job = list_publish_jobs(self.db_path, {"jobId": saved["jobIds"][0]})[0]
+        self.assertEqual(job["status"], "processing")
+        self.assertEqual(job["metadata"]["publishId"], "publish-1")
+
+    def test_sync_publish_job_statuses_marks_youtube_job_published_and_backfills_url(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO user_info (type, filePath, userName, status, platform_key, auth_mode, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    0,
+                    "",
+                    "YouTube Direct",
+                    1,
+                    "youtube",
+                    "manual",
+                    '{"accessToken":"yt-token","privacyStatus":"private","categoryId":"22"}',
+                ),
+            )
+            youtube_account_id = cursor.lastrowid
+            conn.commit()
+
+        saved = save_publish_jobs(
+            self.db_path,
+            {
+                "items": [
+                    {
+                        "profileId": self.profile["id"],
+                        "profileName": self.profile["name"],
+                        "targetKind": "managed_account",
+                        "accountId": youtube_account_id,
+                        "platformKey": "youtube",
+                        "targetName": "YouTube Direct",
+                        "deliveryMode": "direct_upload",
+                        "materialId": 1,
+                        "materialName": "clip.mp4",
+                        "mediaPath": "videoFile/clip.mp4",
+                        "mediaPublicUrl": "https://cdn.example.com/clip.mp4",
+                        "title": "YT title",
+                        "message": "YT body",
+                        "metadata": {"mediaKind": "video", "videoId": "yt-123"},
+                    }
+                ],
+                "mode": "now",
+            },
+        )
+        update_publish_job_content(self.db_path, {"jobId": saved["jobIds"][0], "status": "processing"})
+
+        with patch("utils.publish_jobs.refresh_direct_publish_job_status", return_value={
+            "status": "published",
+            "platform": "youtube",
+            "remoteId": "yt-123",
+            "url": "https://www.youtube.com/watch?v=yt-123",
+            "details": {"uploadStatus": "processed", "processingStatus": "succeeded"},
+        }):
+            result = sync_publish_job_statuses(self.db_path, self.base_dir, job_ids=saved["jobIds"])
+
+        self.assertEqual(result["items"][0]["status"], "published")
+        job = list_publish_jobs(self.db_path, {"jobId": saved["jobIds"][0]})[0]
+        self.assertEqual(job["status"], "published")
+        self.assertEqual(job["metadata"]["publishedUrl"], "https://www.youtube.com/watch?v=yt-123")
 
     def test_get_publish_calendar_entries_groups_by_day(self):
         save_publish_jobs(

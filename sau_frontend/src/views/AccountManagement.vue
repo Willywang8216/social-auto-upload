@@ -212,11 +212,14 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRoute, useRouter } from 'vue-router'
 import { accountApi } from '@/api/account'
 import { buildApiUrl } from '@/utils/apiBase'
 import { useAccountStore } from '@/stores/account'
 
 const accountStore = useAccountStore()
+const route = useRoute()
+const router = useRouter()
 
 const platformOptions = [
   { key: 'xiaohongshu', label: '小紅書', legacyType: 1, supportsQrLogin: true, supportsCookieUpload: true },
@@ -593,8 +596,44 @@ const handleDialogClosed = () => {
   resetQrState()
 }
 
-onMounted(() => {
-  fetchAccounts()
+const clearConsumedQueryParams = async (keys) => {
+  const nextQuery = { ...route.query }
+  keys.forEach((key) => {
+    delete nextQuery[key]
+  })
+  await router.replace({ query: nextQuery })
+}
+
+const focusAccountFromRoute = async () => {
+  const focusAccountId = Number(route.query.focusAccountId || 0)
+  const platformKey = String(route.query.platformKey || '').trim()
+  const accountName = String(route.query.accountName || '').trim()
+
+  if (!focusAccountId) {
+    return
+  }
+
+  if (platformKey) {
+    platformFilter.value = platformKey
+  }
+
+  const account = accountStore.accounts.find(item => item.id === focusAccountId)
+  if (account) {
+    searchKeyword.value = account.name || accountName
+    openEditDialog(account)
+    await clearConsumedQueryParams(['focusAccountId', 'platformKey', 'accountName'])
+    return
+  }
+
+  if (accountName) {
+    searchKeyword.value = accountName
+  }
+  await clearConsumedQueryParams(['focusAccountId', 'platformKey', 'accountName'])
+}
+
+onMounted(async () => {
+  await fetchAccounts()
+  await focusAccountFromRoute()
 })
 </script>
 

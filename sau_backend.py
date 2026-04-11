@@ -51,6 +51,7 @@ from utils.publish_jobs import (
     regenerate_publish_job_content,
     run_publish_job_now,
     save_publish_jobs,
+    sync_publish_job_statuses,
     update_publish_job_content,
 )
 from utils.account_registry import (
@@ -114,6 +115,7 @@ def start_publish_scheduler() -> None:
         while True:
             try:
                 execute_due_publish_jobs(get_db_path(), Path(BASE_DIR))
+                sync_publish_job_statuses(get_db_path(), Path(BASE_DIR), limit=20)
             except Exception as exc:
                 print(f"排程發布失敗: {exc}")
             time.sleep(60)
@@ -611,6 +613,7 @@ def get_publish_jobs_route():
     if batch_id:
         filters["batchId"] = batch_id
     try:
+        sync_publish_job_statuses(get_db_path(), Path(BASE_DIR), limit=20)
         result = list_publish_jobs(get_db_path(), filters)
         return jsonify({
             "code": 200,
@@ -642,6 +645,7 @@ def get_publish_calendar_entries_route():
         "profileId": request.args.get("profileId"),
     }
     try:
+        sync_publish_job_statuses(get_db_path(), Path(BASE_DIR), limit=20)
         result = get_publish_calendar_entries(get_db_path(), start_date, end_date, filters)
         return jsonify({
             "code": 200,

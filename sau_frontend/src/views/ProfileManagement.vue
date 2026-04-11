@@ -1090,7 +1090,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { profileApi } from '@/api/profile'
 import { accountApi } from '@/api/account'
 import { materialApi } from '@/api/material'
@@ -1099,6 +1099,7 @@ import { useAppStore } from '@/stores/app'
 
 const accountStore = useAccountStore()
 const appStore = useAppStore()
+const route = useRoute()
 const router = useRouter()
 
 const searchKeyword = ref('')
@@ -1917,6 +1918,28 @@ const openEditDialog = (profile) => {
   dialogVisible.value = true
 }
 
+const clearConsumedQueryParams = async (keys) => {
+  const nextQuery = { ...route.query }
+  keys.forEach((key) => {
+    delete nextQuery[key]
+  })
+  await router.replace({ query: nextQuery })
+}
+
+const focusProfileFromRoute = async () => {
+  const focusProfileId = Number(route.query.focusProfileId || 0)
+  if (!focusProfileId) {
+    return
+  }
+
+  const profile = profiles.value.find(item => item.id === focusProfileId)
+  if (profile) {
+    searchKeyword.value = profile.name || ''
+    openEditDialog(profile)
+  }
+  await clearConsumedQueryParams(['focusProfileId'])
+}
+
 const submitProfile = async () => {
   if (!profileForm.value.name.trim()) {
     ElMessage.warning('請輸入 Profile 名稱')
@@ -2141,6 +2164,7 @@ onMounted(async () => {
     fetchGoogleSheetConfig(),
     fetchDirectPublishersConfig()
   ])
+  await focusProfileFromRoute()
 })
 </script>
 

@@ -7,6 +7,7 @@ from utils.direct_publishers import (
     get_direct_publisher_target,
     get_direct_publishers_config,
     publish_job_to_direct_target,
+    refresh_direct_publish_job_status,
     save_direct_publishers_config,
 )
 
@@ -317,6 +318,92 @@ class DirectPublishersTests(unittest.TestCase):
         payload = requests_module_mock.return_value.post.call_args.kwargs["data"]
         self.assertIn('"source": "PULL_FROM_URL"', payload)
         self.assertIn('"privacy_level": "PUBLIC_TO_EVERYONE"', payload)
+
+    @patch("utils.direct_publishers._get_requests_module")
+    def test_refresh_threads_status_returns_permalink(self, requests_module_mock):
+        response = Mock()
+        response.ok = True
+        response.json.return_value = {
+            "id": "thread-123",
+            "permalink": "https://www.threads.net/@demo/post/abc",
+            "username": "demo",
+        }
+        requests_module_mock.return_value.get.return_value = response
+
+        result = refresh_direct_publish_job_status(
+            Path("."),
+            {
+                "platformKey": "threads",
+                "metadata": {"threadId": "thread-123"},
+            },
+            {
+                "platform": "threads",
+                "enabled": True,
+                "config": {"accessToken": "threads-token", "userId": "user-123"},
+            },
+        )
+
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["url"], "https://www.threads.net/@demo/post/abc")
+
+    @patch("utils.direct_publishers._get_requests_module")
+    def test_refresh_youtube_status_returns_processing_until_processed(self, requests_module_mock):
+        response = Mock()
+        response.ok = True
+        response.json.return_value = {
+            "items": [
+                {
+                    "id": "yt-1",
+                    "status": {"uploadStatus": "uploaded", "privacyStatus": "private"},
+                    "processingDetails": {"processingStatus": "processing"},
+                }
+            ]
+        }
+        requests_module_mock.return_value.get.return_value = response
+
+        result = refresh_direct_publish_job_status(
+            Path("."),
+            {
+                "platformKey": "youtube",
+                "metadata": {"videoId": "yt-1"},
+            },
+            {
+                "platform": "youtube",
+                "enabled": True,
+                "config": {"accessToken": "yt-token"},
+            },
+        )
+
+        self.assertEqual(result["status"], "processing")
+        self.assertEqual(result["remoteId"], "yt-1")
+
+    @patch("utils.direct_publishers._get_requests_module")
+    def test_refresh_tiktok_status_maps_complete_to_published(self, requests_module_mock):
+        response = Mock()
+        response.ok = True
+        response.json.return_value = {
+            "data": {
+                "status": "PUBLISH_COMPLETE",
+                "video_id": "tt-video-1",
+            }
+        }
+        requests_module_mock.return_value.post.return_value = response
+
+        result = refresh_direct_publish_job_status(
+            Path("."),
+            {
+                "platformKey": "tiktok",
+                "metadata": {"publishId": "publish-1"},
+            },
+            {
+                "platform": "tiktok",
+                "enabled": True,
+                "config": {"accessToken": "tt-token"},
+            },
+        )
+
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["remoteId"], "tt-video-1")
 
     def test_get_direct_publisher_target_raises_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

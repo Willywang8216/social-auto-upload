@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from utils.account_registry import serialize_account_row
-from utils.direct_publishers import get_direct_publisher_target, publish_job_to_direct_target
+from utils.direct_publishers import get_direct_publisher_target, publish_job_to_direct_target, refresh_direct_publish_job_status
 from utils.profile_pipeline import (
     append_rows_to_google_sheet,
     build_google_sheet_rows,
@@ -27,6 +27,7 @@ MANUAL_ONLY_PLATFORMS = {"patreon"}
 ACTIVE_JOB_STATUSES = {"queued", "scheduled"}
 TERMINAL_JOB_STATUSES = {"published", "exported", "manual_done", "failed", "cancelled"}
 SCHEDULER_MIRROR_PLATFORMS = {"twitter"}
+ASYNC_DIRECT_STATUS_PLATFORMS = {"threads", "youtube", "tiktok"}
 
 
 def ensure_publish_job_tables(db_path: Path) -> None:
@@ -490,6 +491,40 @@ def run_publish_job_now(db_path: Path, base_dir: Path, job_id: int) -> dict[str,
     return results
 
 
+def sync_publish_job_statuses(
+    db_path: Path,
+    base_dir: Path,
+    limit: int | None = None,
+    job_ids: list[int] | None = None,
+) -> dict[str, Any]:
+    ensure_publish_job_tables(db_path)
+    synced = []
+    for job in _list_jobs_for_status_sync(db_path, job_ids=job_ids):
+        try:
+            target = _resolve_direct_upload_target(db_path, job, base_dir)
+            status_result = refresh_direct_publish_job_status(base_dir, job, target)
+            applied_status = _apply_publish_status_result(db_path, job, status_result)
+            synced.append({
+                "id": job["id"],
+                "status": applied_status,
+                "platform": job["platformKey"],
+            })
+        except Exception as exc:
+            _record_status_sync_error(db_path, job["id"], str(exc))
+            synced.append({
+                "id": job["id"],
+                "status": job["status"],
+                "platform": job["platformKey"],
+                "error": str(exc),
+            })
+        if limit and len(synced) >= limit:
+            break
+    return {
+        "processed": len(synced),
+        "items": synced,
+    }
+
+
 def execute_due_publish_jobs(
     db_path: Path,
     base_dir: Path,
@@ -507,8 +542,8 @@ def execute_due_publish_jobs(
         job_ids = None
         try:
             if claimed["deliveryMode"] == "direct_upload":
-                _execute_direct_upload_job(db_path, claimed, base_dir)
-                final_status = "published"
+                receipt = _execute_direct_upload_job(db_path, claimed, base_dir)
+                final_status = _apply_direct_publish_receipt(db_path, claimed, receipt)
             elif claimed["deliveryMode"] == "sheet_export":
                 _execute_sheet_export_job(db_path, claimed)
                 final_status = "exported"
@@ -519,7 +554,10 @@ def execute_due_publish_jobs(
                     break
                 continue
 
-            _set_job_success(db_path, claimed["id"], final_status)
+            if final_status == "processing":
+                _set_job_processing(db_path, claimed["id"])
+            else:
+                _set_job_success(db_path, claimed["id"], final_status)
             processed.append({"id": claimed["id"], "status": final_status})
         except Exception as exc:
             _set_job_failure(db_path, claimed["id"], str(exc))
@@ -898,7 +936,7 @@ def _serialize_job_row_with_native_fields(row: sqlite3.Row | dict[str, Any]) -> 
     }
 
 
-def _execute_direct_upload_job(db_path: Path, job: dict[str, Any], base_dir: Path | None = None) -> None:
+def _execute_direct_upload_job(db_path: Path, job: dict[str, Any], base_dir: Path | None = None) -> dict[str, Any]:
     platform_key = job["platformKey"]
 
     if platform_key in {"xiaohongshu", "channels", "douyin", "kuaishou"}:
@@ -912,22 +950,21 @@ def _execute_direct_upload_job(db_path: Path, job: dict[str, Any], base_dir: Pat
 
     if platform_key == "xiaohongshu":
         post_video_xhs(title, [media_path], "", [account_file], None, False, 1, None, 0, message)
-        return
+        return {"platform": platform_key, "finalStatus": "published"}
     if platform_key == "channels":
         post_video_tencent(title, [media_path], "", [account_file], None, False, 1, None, 0, False)
-        return
+        return {"platform": platform_key, "finalStatus": "published"}
     if platform_key == "douyin":
         post_video_DouYin(title, [media_path], "", [account_file], None, False, 1, None, 0, "", "", "", message)
-        return
+        return {"platform": platform_key, "finalStatus": "published"}
     if platform_key == "kuaishou":
         post_video_ks(title, [media_path], "", [account_file], None, False, 1, None, 0, message)
-        return
+        return {"platform": platform_key, "finalStatus": "published"}
     if platform_key in {"twitter", "telegram", "reddit", "discord", "facebook", "threads", "youtube", "tiktok"}:
         if base_dir is None:
             raise ValueError("base_dir is required for direct publisher targets")
         target = _resolve_direct_upload_target(db_path, job, base_dir)
-        publish_job_to_direct_target(base_dir, job, target)
-        return
+        return publish_job_to_direct_target(base_dir, job, target)
     raise ValueError(f"unsupported direct upload platform: {platform_key}")
 
 
@@ -1160,6 +1197,114 @@ def _update_job_metadata(db_path: Path, job_id: int, metadata: dict[str, Any]) -
             (json.dumps(metadata, ensure_ascii=False), int(job_id)),
         )
         conn.commit()
+
+
+def _set_job_processing(db_path: Path, job_id: int) -> None:
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE publish_jobs
+            SET status = 'processing',
+                last_error = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (int(job_id),),
+        )
+        conn.commit()
+
+
+def _apply_direct_publish_receipt(db_path: Path, job: dict[str, Any], receipt: dict[str, Any] | None) -> str:
+    if not isinstance(receipt, dict):
+        return "published"
+    receipt = receipt or {}
+    metadata = dict(job.get("metadata") or {})
+    if receipt:
+        metadata["publishReceipt"] = {key: value for key, value in receipt.items() if key not in {"details"}}
+        if receipt.get("details"):
+            metadata["publishDetails"] = receipt.get("details")
+        if receipt.get("publishId"):
+            metadata["publishId"] = receipt["publishId"]
+        if receipt.get("videoId"):
+            metadata["videoId"] = receipt["videoId"]
+        if receipt.get("threadId"):
+            metadata["threadId"] = receipt["threadId"]
+        if receipt.get("creationId"):
+            metadata["creationId"] = receipt["creationId"]
+        if receipt.get("url"):
+            metadata["publishedUrl"] = receipt["url"]
+        metadata["lastPublishAttemptAt"] = datetime.now().isoformat(timespec="seconds")
+        _update_job_metadata(db_path, job["id"], metadata)
+    return str(receipt.get("finalStatus") or "published").strip() or "published"
+
+
+def _list_jobs_for_status_sync(db_path: Path, job_ids: list[int] | None = None) -> list[dict[str, Any]]:
+    params: list[Any] = ["processing"]
+    query = """
+        SELECT j.*,
+               COALESCE(MAX(r.revision_no), 0) AS revision_count
+        FROM publish_jobs j
+        LEFT JOIN publish_job_revisions r ON r.job_id = j.id
+        WHERE j.status = ?
+          AND j.delivery_mode = 'direct_upload'
+          AND j.platform_key IN ('threads', 'youtube', 'tiktok')
+    """
+    if job_ids:
+        placeholders = ",".join("?" for _ in job_ids)
+        query += f" AND j.id IN ({placeholders})"
+        params.extend(int(job_id) for job_id in job_ids)
+    query += """
+        GROUP BY j.id
+        ORDER BY COALESCE(j.scheduled_at, j.created_at) ASC, j.id ASC
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+    return [_serialize_job_row(row) for row in rows]
+
+
+def _apply_publish_status_result(db_path: Path, job: dict[str, Any], status_result: dict[str, Any]) -> str:
+    status = str(status_result.get("status") or "processing").strip() or "processing"
+    metadata = dict(job.get("metadata") or {})
+    details = status_result.get("details") if isinstance(status_result.get("details"), dict) else {}
+    publish_status = {
+        "platform": status_result.get("platform") or job.get("platformKey") or "",
+        "status": status,
+        "checkedAt": datetime.now().isoformat(timespec="seconds"),
+    }
+    if status_result.get("remoteId"):
+        publish_status["remoteId"] = status_result["remoteId"]
+    if status_result.get("url"):
+        publish_status["url"] = status_result["url"]
+        metadata["publishedUrl"] = status_result["url"]
+    if details:
+        publish_status["details"] = details
+        metadata["publishDetails"] = details
+    if status_result.get("error"):
+        publish_status["error"] = status_result["error"]
+    metadata["publishStatus"] = publish_status
+    metadata["lastStatusCheckAt"] = publish_status["checkedAt"]
+    _update_job_metadata(db_path, job["id"], metadata)
+
+    if status == "published":
+        _set_job_success(db_path, job["id"], "published")
+        return "published"
+    if status == "failed":
+        _set_job_failure(db_path, job["id"], str(status_result.get("error") or "publish status sync failed"))
+        return "failed"
+    _set_job_processing(db_path, job["id"])
+    return "processing"
+
+
+def _record_status_sync_error(db_path: Path, job_id: int, error_text: str) -> None:
+    job = _get_job_by_id(db_path, job_id)
+    metadata = dict(job.get("metadata") or {})
+    metadata["lastStatusSyncError"] = str(error_text or "").strip()
+    metadata["lastStatusCheckAt"] = datetime.now().isoformat(timespec="seconds")
+    _update_job_metadata(db_path, job_id, metadata)
 
 
 def _update_job_status(db_path: Path, job_id: int, status: str) -> dict[str, Any]:
