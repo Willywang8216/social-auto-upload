@@ -445,6 +445,10 @@
 
         <el-divider>片頭 / 片尾素材</el-divider>
 
+        <el-form-item label="影片自動加片頭 / 片尾">
+          <el-switch v-model="profileForm.settings.introOutro.videoEnabled" />
+        </el-form-item>
+
         <el-form-item label="影片片頭路徑">
           <el-input
             v-model="profileForm.settings.introOutro.videoIntroPath"
@@ -459,17 +463,37 @@
           />
         </el-form-item>
 
-        <el-form-item label="圖片片頭路徑">
+        <el-form-item label="圖片自動加介紹卡 / 感謝圖">
+          <el-switch v-model="profileForm.settings.introOutro.imageEnabled" />
+        </el-form-item>
+
+        <el-form-item label="圖片介紹卡標題">
           <el-input
-            v-model="profileForm.settings.introOutro.imageIntroPath"
-            placeholder="本機可存取圖片路徑，例如：C:/branding/image-intro.png"
+            v-model="profileForm.settings.introOutro.imageIntroTitle"
+            placeholder="例如：香港官方帳號｜廣東話內容"
           />
         </el-form-item>
 
-        <el-form-item label="圖片片尾路徑">
+        <el-form-item label="圖片介紹卡內容">
           <el-input
-            v-model="profileForm.settings.introOutro.imageOutroPath"
-            placeholder="本機可存取圖片路徑，例如：C:/branding/image-outro.png"
+            v-model="profileForm.settings.introOutro.imageIntroBody"
+            type="textarea"
+            :rows="3"
+            placeholder="可填聯絡方式、簡短品牌介紹、區域說明；留空時會回退使用 profile 的聯絡資訊"
+          />
+        </el-form-item>
+
+        <el-form-item label="圖片介紹卡背景圖路徑">
+          <el-input
+            v-model="profileForm.settings.introOutro.imageIntroPath"
+            placeholder="選填；若有提供，會直接使用這張圖作為介紹卡"
+          />
+        </el-form-item>
+
+        <el-form-item label="Thank-you 圖路徑">
+          <el-input
+            v-model="profileForm.settings.introOutro.imageThankYouPath"
+            placeholder="本機可存取圖片路徑，例如：C:/branding/thank-you.png"
           />
         </el-form-item>
 
@@ -487,9 +511,13 @@
           <el-color-picker v-model="profileForm.settings.introOutro.backgroundColor" />
         </el-form-item>
 
+        <el-form-item label="文字顏色">
+          <el-color-picker v-model="profileForm.settings.introOutro.textColor" />
+        </el-form-item>
+
         <el-form-item label="使用方式說明">
           <div class="muted-text">
-            影片素材會依序串接為「片頭 → 主影片 → 片尾」。圖片素材會把圖片片頭加在上方、圖片片尾加在下方，輸出成同一張圖片。
+            影片預設會依序串接為「片頭 → 主影片 → 片尾」，可用上方開關關閉。圖片預設會輸出成「介紹卡 / 主圖 / thank-you 圖」三段式；介紹卡可用文字生成，也可直接指定一張背景圖。
           </div>
         </el-form-item>
 
@@ -1383,11 +1411,16 @@ const normalizeWatermarkFormSettings = (watermark = {}) => ({
 })
 
 const normalizeIntroOutroFormSettings = (introOutro = {}) => ({
+  videoEnabled: introOutro.videoEnabled !== false,
   videoIntroPath: introOutro.videoIntroPath || '',
   videoOutroPath: introOutro.videoOutroPath || '',
+  imageEnabled: introOutro.imageEnabled !== false,
   imageIntroPath: introOutro.imageIntroPath || '',
-  imageOutroPath: introOutro.imageOutroPath || '',
+  imageIntroTitle: introOutro.imageIntroTitle || '',
+  imageIntroBody: introOutro.imageIntroBody || '',
+  imageThankYouPath: introOutro.imageThankYouPath || introOutro.imageOutroPath || '',
   backgroundColor: /^#[0-9A-Fa-f]{6}$/.test(introOutro.backgroundColor || '') ? introOutro.backgroundColor : '#000000',
+  textColor: /^#[0-9A-Fa-f]{6}$/.test(introOutro.textColor || '') ? introOutro.textColor : '#FFFFFF',
   imagePanelRatio: Math.min(Math.max(Number(introOutro.imagePanelRatio) || 0.22, 0.08), 0.45)
 })
 
@@ -1488,11 +1521,16 @@ const makeDefaultProfile = () => ({
       opacity: 0.45
     },
     introOutro: {
+      videoEnabled: true,
       videoIntroPath: '',
       videoOutroPath: '',
+      imageEnabled: true,
       imageIntroPath: '',
-      imageOutroPath: '',
+      imageIntroTitle: '',
+      imageIntroBody: '',
+      imageThankYouPath: '',
       backgroundColor: '#000000',
+      textColor: '#FFFFFF',
       imagePanelRatio: 0.22
     },
     googleSheet: {

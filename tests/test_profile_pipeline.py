@@ -327,11 +327,15 @@ class ProfilePipelineTests(unittest.TestCase):
                     "name": "Intro Outro Profile",
                     "settings": {
                         "introOutro": {
+                            "videoEnabled": False,
                             "videoIntroPath": " intro.mp4 ",
                             "videoOutroPath": "outro.mp4",
                             "imageIntroPath": "intro.png",
+                            "imageIntroTitle": "Regional intro",
+                            "imageIntroBody": "Contact us",
                             "imageOutroPath": "outro.png",
                             "backgroundColor": "bad-color",
+                            "textColor": "also-bad",
                             "imagePanelRatio": 9,
                         }
                     },
@@ -339,14 +343,19 @@ class ProfilePipelineTests(unittest.TestCase):
             )
 
             intro_outro = saved["settings"]["introOutro"]
+            self.assertFalse(intro_outro["videoEnabled"])
             self.assertEqual(intro_outro["videoIntroPath"], "intro.mp4")
             self.assertEqual(intro_outro["videoOutroPath"], "outro.mp4")
+            self.assertTrue(intro_outro["imageEnabled"])
             self.assertEqual(intro_outro["imageIntroPath"], "intro.png")
-            self.assertEqual(intro_outro["imageOutroPath"], "outro.png")
+            self.assertEqual(intro_outro["imageIntroTitle"], "Regional intro")
+            self.assertEqual(intro_outro["imageIntroBody"], "Contact us")
+            self.assertEqual(intro_outro["imageThankYouPath"], "outro.png")
             self.assertEqual(intro_outro["backgroundColor"], "#000000")
+            self.assertEqual(intro_outro["textColor"], "#FFFFFF")
             self.assertEqual(intro_outro["imagePanelRatio"], 0.45)
 
-    def test_apply_intro_outro_if_needed_stacks_image_intro_and_outro(self):
+    def test_apply_intro_outro_if_needed_stacks_image_intro_card_and_thank_you_image(self):
         try:
             from PIL import Image
         except ImportError:
@@ -364,11 +373,15 @@ class ProfilePipelineTests(unittest.TestCase):
             result_path = apply_intro_outro_if_needed(
                 source_path,
                 {
+                    "name": "HK Profile",
+                    "contactDetails": "WhatsApp: +852 1234 5678",
                     "settings": {
                         "introOutro": {
-                            "imageIntroPath": str(intro_path),
-                            "imageOutroPath": str(outro_path),
+                            "imageIntroTitle": "Hong Kong 廣東話內容",
+                            "imageIntroBody": "WhatsApp: +852 1234 5678",
+                            "imageThankYouPath": str(outro_path),
                             "backgroundColor": "#112233",
+                            "textColor": "#FFFFFF",
                             "imagePanelRatio": 0.2,
                         }
                     }

@@ -1249,19 +1249,24 @@ def apply_intro_outro_if_needed(source_path: Path, profile: dict[str, Any], base
     intro_outro = _normalize_intro_outro_settings(settings.get("introOutro"))
     media_kind = infer_media_kind(source_path)
     has_video_branding = bool(intro_outro.get("videoIntroPath") or intro_outro.get("videoOutroPath"))
-    has_image_branding = bool(intro_outro.get("imageIntroPath") or intro_outro.get("imageOutroPath"))
+    has_image_branding = bool(
+        intro_outro.get("imageIntroPath")
+        or intro_outro.get("imageIntroTitle")
+        or intro_outro.get("imageIntroBody")
+        or intro_outro.get("imageThankYouPath")
+    )
 
-    if media_kind == "video" and has_video_branding:
+    if media_kind == "video" and intro_outro.get("videoEnabled") and has_video_branding:
         output_dir = base_dir / "generated_media"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{uuid.uuid4().hex}_{source_path.name}"
         return _apply_video_intro_outro(source_path, output_path, intro_outro)
 
-    if media_kind == "image" and has_image_branding:
+    if media_kind == "image" and intro_outro.get("imageEnabled") and has_image_branding:
         output_dir = base_dir / "generated_media"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{uuid.uuid4().hex}_{source_path.name}"
-        return _apply_image_intro_outro(source_path, output_path, intro_outro)
+        return _apply_image_intro_outro(source_path, output_path, intro_outro, profile)
 
     return source_path
 
@@ -1424,15 +1429,24 @@ def _normalize_intro_outro_settings(settings: dict[str, Any] | None) -> dict[str
     if not re.fullmatch(r"#[0-9A-F]{6}", background_color):
         background_color = "#000000"
 
+    text_color = str(settings.get("textColor") or "#FFFFFF").strip().upper() or "#FFFFFF"
+    if not re.fullmatch(r"#[0-9A-F]{6}", text_color):
+        text_color = "#FFFFFF"
+
     image_panel_ratio = _coerce_float(settings.get("imagePanelRatio"), 0.22)
     image_panel_ratio = min(max(image_panel_ratio, 0.08), 0.45)
 
     return {
+        "videoEnabled": settings.get("videoEnabled") is not False,
         "videoIntroPath": str(settings.get("videoIntroPath") or "").strip(),
         "videoOutroPath": str(settings.get("videoOutroPath") or "").strip(),
+        "imageEnabled": settings.get("imageEnabled") is not False,
         "imageIntroPath": str(settings.get("imageIntroPath") or "").strip(),
-        "imageOutroPath": str(settings.get("imageOutroPath") or "").strip(),
+        "imageIntroTitle": str(settings.get("imageIntroTitle") or "").strip(),
+        "imageIntroBody": str(settings.get("imageIntroBody") or "").strip(),
+        "imageThankYouPath": str(settings.get("imageThankYouPath") or settings.get("imageOutroPath") or "").strip(),
         "backgroundColor": background_color,
+        "textColor": text_color,
         "imagePanelRatio": image_panel_ratio,
     }
 
@@ -1974,7 +1988,12 @@ def _apply_image_watermark(source_path: Path, output_path: Path, watermark: dict
     return output_path
 
 
-def _apply_image_intro_outro(source_path: Path, output_path: Path, intro_outro: dict[str, Any]) -> Path:
+def _apply_image_intro_outro(
+    source_path: Path,
+    output_path: Path,
+    intro_outro: dict[str, Any],
+    profile: dict[str, Any],
+) -> Path:
     try:
         from PIL import Image
     except ImportError as exc:
@@ -1983,8 +2002,8 @@ def _apply_image_intro_outro(source_path: Path, output_path: Path, intro_outro: 
     base = Image.open(source_path).convert("RGB")
     background_color = intro_outro.get("backgroundColor") or "#000000"
     panel_ratio = float(intro_outro.get("imagePanelRatio") or 0.22)
-    intro_panel = _build_image_branding_panel(intro_outro.get("imageIntroPath"), base.width, base.height, panel_ratio)
-    outro_panel = _build_image_branding_panel(intro_outro.get("imageOutroPath"), base.width, base.height, panel_ratio)
+    intro_panel = _build_image_intro_panel(base.width, base.height, intro_outro, profile, panel_ratio)
+    outro_panel = _build_image_branding_panel(intro_outro.get("imageThankYouPath"), base.width, base.height, panel_ratio)
 
     total_height = base.height
     if intro_panel is not None:
@@ -2249,6 +2268,74 @@ def _build_image_branding_panel(image_path: str | None, base_width: int, base_he
     y_offset = max((target_height - resized_panel.height) // 2, 0)
     canvas.paste(resized_panel, (x_offset, y_offset))
     return canvas
+
+
+def _build_image_intro_panel(
+    base_width: int,
+    base_height: int,
+    intro_outro: dict[str, Any],
+    profile: dict[str, Any],
+    panel_ratio: float,
+):
+    image_path = intro_outro.get("imageIntroPath")
+    if image_path:
+        return _build_image_branding_panel(image_path, base_width, base_height, panel_ratio)
+
+    title = (intro_outro.get("imageIntroTitle") or profile.get("name") or "").strip()
+    body = (intro_outro.get("imageIntroBody") or profile.get("contactDetails") or "").strip()
+    if not title and not body:
+        return None
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required for image intro/outro rendering") from exc
+
+    target_height = max(96, int(base_height * panel_ratio))
+    canvas = Image.new("RGB", (base_width, target_height), _hex_to_rgb_tuple(intro_outro.get("backgroundColor") or "#000000"))
+    draw = ImageDraw.Draw(canvas)
+    title_font = _load_watermark_font(ImageFont, max(22, target_height // 4))
+    body_font = _load_watermark_font(ImageFont, max(16, target_height // 7))
+    text_color = _hex_to_rgb_tuple(intro_outro.get("textColor") or "#FFFFFF")
+    left_margin = max(24, base_width // 20)
+    top_margin = max(18, target_height // 8)
+    max_text_width = max(base_width - (left_margin * 2), 40)
+
+    current_y = top_margin
+    if title:
+        current_y = _draw_wrapped_text_block(draw, title, title_font, left_margin, current_y, max_text_width, text_color)
+    if body:
+        current_y += max(10, target_height // 18)
+        _draw_wrapped_text_block(draw, body, body_font, left_margin, current_y, max_text_width, text_color)
+    return canvas
+
+
+def _draw_wrapped_text_block(draw, text: str, font, x: int, y: int, max_width: int, fill: tuple[int, int, int]) -> int:
+    lines = _wrap_text_lines(draw, text, font, max_width)
+    current_y = y
+    for line in lines:
+        bbox = draw.textbbox((x, current_y), line, font=font)
+        draw.text((x, current_y), line, fill=fill, font=font)
+        current_y += max((bbox[3] - bbox[1]) + 6, 12)
+    return current_y
+
+
+def _wrap_text_lines(draw, text: str, font, max_width: int) -> list[str]:
+    words = str(text or "").split()
+    if not words:
+        return []
+    lines = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        bbox = draw.textbbox((0, 0), candidate, font=font)
+        if (bbox[2] - bbox[0]) <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
 
 
 def _load_watermark_font(image_font_module, font_size: int):
