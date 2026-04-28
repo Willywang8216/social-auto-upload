@@ -1,0 +1,29 @@
+services:
+  social-auto-upload:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ""
+    image: social-auto-upload:latest
+    container_name: social-auto-upload
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "5409:5409"
+    shm_size: "1gb"
+    volumes:
+      - ./data/db:/app/db
+      - ./data/videoFile:/app/videoFile
+      - ./data/cookiesFile:/app/cookiesFile
+      - ./data/generated_media:/app/generated_media
+      - ./docker/rclone:/root/.config/rclone:ro
+      - ./secrets:/run/secrets:ro
+    networks:
+      1panel-network:
+        ipv4_address: 172.18.0.46
+
+networks:
+  1panel-network:
+    external: true
