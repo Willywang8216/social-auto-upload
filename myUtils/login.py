@@ -101,7 +101,7 @@ async def get_tencent_cookie(id,status_queue):
     async with async_playwright() as playwright:
         options = {
             'args': [
-                '--lang en-GB'
+                '--lang=en-GB'
             ],
             'headless': LOCAL_CHROME_HEADLESS,  # Set headless option here
         }
@@ -178,7 +178,7 @@ async def get_ks_cookie(id,status_queue):
     async with async_playwright() as playwright:
         options = {
             'args': [
-                '--lang en-GB'
+                '--lang=en-GB'
             ],
             'headless': LOCAL_CHROME_HEADLESS,  # Set headless option here
         }
@@ -254,7 +254,7 @@ async def xiaohongshu_cookie_gen(id,status_queue):
     async with async_playwright() as playwright:
         options = {
             'args': [
-                '--lang en-GB'
+                '--lang=en-GB'
             ],
             'headless': LOCAL_CHROME_HEADLESS,  # Set headless option here
         }

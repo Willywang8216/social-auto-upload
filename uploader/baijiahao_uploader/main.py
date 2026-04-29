@@ -17,7 +17,7 @@ async def baijiahao_cookie_gen(account_file):
     async with async_playwright() as playwright:
         options = {
             'args': [
-                '--lang en-GB'
+                '--lang=en-GB'
             ],
             'headless': LOCAL_CHROME_HEADLESS,  # Set headless option here
         }
