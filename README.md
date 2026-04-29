@@ -23,15 +23,34 @@
 
 ## 💡功能特性
 
-| 平台 | 登录/账号准备 | 视频上传 | 图文上传 | 定时发布 | CLI | Skill | 说明 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 抖音 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 当前主线重构最完整 |
-| Bilibili | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | 运行时自动准备 `biliup` |
-| 小红书（浏览器版） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 浏览器自动化，CLI/Skill 已接入 |
-| 快手 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 浏览器自动化，CLI/Skill 初版已接入 |
-| 视频号 | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | 对应 `tencent_uploader` |
-| 百家号 | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | 浏览器自动化 |
-| TikTok | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | 当前示例走 Chrome 版实现 |
+| 平台 | 登录/账号准备 | 视频上传 | 图文上传 | 长文 / Post | 定时发布 | CLI | Skill | 说明 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 抖音 | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | 当前主线重构最完整 |
+| Bilibili | ✅ | ✅ | ❌ | — | ✅ | ✅ | ✅ | 运行时自动准备 `biliup` |
+| 小红书（浏览器版） | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | 浏览器自动化，CLI/Skill 已接入 |
+| 快手 | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | 浏览器自动化，CLI/Skill 初版已接入 |
+| 视频号 | ✅ | ✅ | ❌ | — | ✅ | ❌ | ❌ | 对应 `tencent_uploader` |
+| 百家号 | ✅ | ✅ | ❌ | — | ✅ | ❌ | ❌ | 浏览器自动化 |
+| TikTok | ✅ | ✅ | ❌ | — | ✅ | ❌ | ❌ | 当前示例走 Chrome 版实现 |
+| Medium | ✅ | — | — | ✅ | ❌ (草稿/立即) | ✅ | 🚧 | 浏览器自动化，Medium API 已弃用 |
+| Substack | ✅ | — | — | ✅ | ✅ (定时) | ✅ | 🚧 | 浏览器自动化，每写手一个 publication 子域名 |
+
+### Profile 模型（多账号管理）
+
+每个 **Profile** 代表一个人或品牌，可拥有多个 **Account**。同一个 Profile 可以在同一个平台上持有多个账号
+（例如一个 Profile 下挂两个 Medium 账号），系统按 `(profile, platform, account_name)` 三元组解析 cookie 文件路径。
+
+```bash
+sau profile create --name "Acme Corp"
+sau profile list
+sau profile show --profile acme-corp
+sau medium login --account alice --profile acme-corp
+sau medium login --account bob   --profile acme-corp
+sau medium upload-post --account alice --profile acme-corp \
+    --file post.md --title "Hello world" --tags ai,python
+```
+
+不传 `--profile` 时，CLI 仍然走旧的扁平 cookie 文件布局，向后兼容现有脚本。
 
 ### AI这么强，为什么还需要这个项目
 在你使用AI的能力，browser agent等等，每次都让 agent 重新解析网页、截图理解, 临场判断
@@ -139,6 +158,16 @@ sau xiaohongshu upload-note --account <account_name> --images videos/1.png video
 sau bilibili login --account <account_name>
 sau bilibili check --account <account_name>
 sau bilibili upload-video --account <account_name> --file videos/demo.mp4 --title "示例标题" --desc "示例简介" --tid 249
+
+sau medium login --account <account_name> [--profile <slug>] --headed
+sau medium check --account <account_name> [--profile <slug>]
+sau medium upload-post --account <account_name> [--profile <slug>] \
+    --file post.md --title "Hello world" --subtitle "可选副标题" --tags ai,python
+
+sau substack login --account <account_name> [--profile <slug>] --headed
+sau substack check --account <account_name> [--profile <slug>]
+sau substack upload-post --account <account_name> [--profile <slug>] \
+    --publication acme --file post.md --title "Hello world" --tags ai,python
 ```
 
 补充说明：

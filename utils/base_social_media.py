@@ -8,10 +8,22 @@ SOCIAL_MEDIA_TENCENT = "tencent"
 SOCIAL_MEDIA_TIKTOK = "tiktok"
 SOCIAL_MEDIA_BILIBILI = "bilibili"
 SOCIAL_MEDIA_KUAISHOU = "kuaishou"
+SOCIAL_MEDIA_XIAOHONGSHU = "xiaohongshu"
+SOCIAL_MEDIA_MEDIUM = "medium"
+SOCIAL_MEDIA_SUBSTACK = "substack"
 
 
 def get_supported_social_media() -> List[str]:
-    return [SOCIAL_MEDIA_DOUYIN, SOCIAL_MEDIA_TENCENT, SOCIAL_MEDIA_TIKTOK, SOCIAL_MEDIA_KUAISHOU]
+    return [
+        SOCIAL_MEDIA_DOUYIN,
+        SOCIAL_MEDIA_TENCENT,
+        SOCIAL_MEDIA_TIKTOK,
+        SOCIAL_MEDIA_KUAISHOU,
+        SOCIAL_MEDIA_BILIBILI,
+        SOCIAL_MEDIA_XIAOHONGSHU,
+        SOCIAL_MEDIA_MEDIUM,
+        SOCIAL_MEDIA_SUBSTACK,
+    ]
 
 
 def get_cli_action() -> List[str]:
