@@ -78,7 +78,7 @@ The project also provides a command-line interface (CLI) for users who prefer to
 
 ### Command-line Interface
 
-To use the CLI, you can run the `cli_main.py` script with the appropriate arguments.
+The CLI is exposed as the `sau` console script (configured in `pyproject.toml` as `sau = "sau_cli:main"`). Install the project (`uv sync` or `pip install -e .`) and then call `sau <platform> <action> ...`.
 
 **Login:**
 

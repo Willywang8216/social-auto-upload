@@ -12,6 +12,10 @@ dependencies = [
   "loguru==0.7.3",
   "opencv-python>=4.13.0.92",
   "patchright==1.58.2",
+  # `playwright` is the upstream package used by tencent/tk/baijiahao uploaders
+  # and the legacy Flask helpers; `patchright` is the stealthier fork used by
+  # the newer Douyin/Kuaishou/Xiaohongshu/Medium/Substack uploaders.
+  "playwright>=1.52.0",
   "qrcode==8.2",
   "requests==2.32.3",
   "segno>=1.6.6",
@@ -30,11 +34,11 @@ web = [
 package = true
 
 [tool.setuptools]
-py-modules = ["cli_main", "conf", "sau_cli"]
+py-modules = ["conf", "sau_cli"]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["uploader*", "utils*", "myUtils*"]
+include = ["uploader*", "utils*", "myUtils*", "db*"]
 
 [tool.setuptools.package-data]
 utils = ["stealth.min.js"]

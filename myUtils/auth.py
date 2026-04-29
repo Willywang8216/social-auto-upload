@@ -1,15 +1,11 @@
-import asyncio
-import configparser
 import os
+from pathlib import Path
 
 from playwright.async_api import async_playwright
-from xhs import XhsClient
 
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS
 from utils.base_social_media import set_init_script
-from utils.log import tencent_logger, kuaishou_logger, douyin_logger
-from pathlib import Path
-from uploader.xhs_uploader.main import sign_local
+from utils.log import douyin_logger, kuaishou_logger, tencent_logger
 
 
 async def cookie_auth_douyin(account_file):

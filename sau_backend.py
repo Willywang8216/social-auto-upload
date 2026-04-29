@@ -71,21 +71,27 @@ def upload_file():
 
 @app.route('/getFile', methods=['GET'])
 def get_file():
-    # 获取 filename 参数
     filename = request.args.get('filename')
 
     if not filename:
         return jsonify({"code": 400, "msg": "filename is required", "data": None}), 400
 
-    # 防止路径穿越攻击
-    if '..' in filename or filename.startswith('/'):
+    # Robust path-traversal guard: resolve the requested path inside the video
+    # directory and reject anything that escapes the base directory. This
+    # handles `..`, absolute paths, Windows backslashes and percent-encoded
+    # variants (which Werkzeug already decoded into `filename`).
+    base_dir = Path(BASE_DIR / "videoFile").resolve()
+    try:
+        target = (base_dir / filename).resolve()
+    except (OSError, ValueError):
         return jsonify({"code": 400, "msg": "Invalid filename", "data": None}), 400
 
-    # 拼接完整路径
-    file_path = str(Path(BASE_DIR / "videoFile"))
+    if not target.is_relative_to(base_dir):
+        return jsonify({"code": 400, "msg": "Invalid filename", "data": None}), 400
+    if not target.is_file():
+        return jsonify({"code": 404, "msg": "File not found", "data": None}), 404
 
-    # 返回文件
-    return send_from_directory(file_path,filename)
+    return send_from_directory(str(base_dir), target.name)
 
 
 @app.route('/uploadSave', methods=['POST'])
@@ -183,9 +189,10 @@ def get_all_files():
                 "data": data
             }), 200
     except Exception as e:
+        print(f"get files failed: {e}")
         return jsonify({
             "code": 500,
-            "msg": str("get file failed!"),
+            "msg": f"get file failed: {e}",
             "data": None
         }), 500
 
@@ -308,9 +315,10 @@ def delete_file():
         }), 200
 
     except Exception as e:
+        print(f"delete file failed: {e}")
         return jsonify({
             "code": 500,
-            "msg": str("delete failed!"),
+            "msg": f"delete failed: {e}",
             "data": None
         }), 500
 
@@ -386,13 +394,10 @@ def login():
     status_queue = Queue()
     active_queues[id] = status_queue
 
-    def on_close():
-        print(f"清理队列: {id}")
-        del active_queues[id]
     # 启动异步任务线程
-    thread = threading.Thread(target=run_async_function, args=(type,id,status_queue), daemon=True)
+    thread = threading.Thread(target=run_async_function, args=(type, id, status_queue), daemon=True)
     thread.start()
-    response = Response(sse_stream(status_queue,), mimetype='text/event-stream')
+    response = Response(sse_stream(status_queue, login_id=id), mimetype='text/event-stream')
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['X-Accel-Buffering'] = 'no'  # 关键：禁用 Nginx 缓冲
     response.headers['Content-Type'] = 'text/event-stream'
@@ -504,9 +509,10 @@ def updateUserinfo():
         }), 200
 
     except Exception as e:
+        print(f"update userinfo failed: {e}")
         return jsonify({
             "code": 500,
-            "msg": str("update failed!"),
+            "msg": f"update failed: {e}",
             "data": None
         }), 500
 
@@ -516,8 +522,9 @@ def postVideoBatch():
 
     if not isinstance(data_list, list):
         return jsonify({"code": 400, "msg": "Expected a JSON array", "data": None}), 400
-    for data in data_list:
-        # 从JSON数据中提取fileList和accountList
+
+    failures = []
+    for index, data in enumerate(data_list):
         file_list = data.get('fileList', [])
         account_list = data.get('accountList', [])
         type = data.get('type')
@@ -529,34 +536,45 @@ def postVideoBatch():
             category = None
         productLink = data.get('productLink', '')
         productTitle = data.get('productTitle', '')
+        thumbnail_path = data.get('thumbnail', '')
         is_draft = data.get('isDraft', False)
 
         videos_per_day = data.get('videosPerDay')
         daily_times = data.get('dailyTimes')
         start_days = data.get('startDays')
-        # 打印获取到的数据（仅作为示例）
         print("File List:", file_list)
         print("Account List:", account_list)
-        match type:
-            case 1:
-                post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                               start_days)
-            case 2:
-                post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days, is_draft)
-            case 3:
-                post_video_DouYin(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                          start_days, productLink, productTitle)
-            case 4:
-                post_video_ks(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                          start_days)
-    # 返回响应给客户端
-    return jsonify(
-        {
-            "code": 200,
-            "msg": None,
-            "data": None
-        }), 200
+
+        try:
+            match type:
+                case 1:
+                    post_video_xhs(title, file_list, tags, account_list, category, enableTimer,
+                                   videos_per_day, daily_times, start_days)
+                case 2:
+                    post_video_tencent(title, file_list, tags, account_list, category, enableTimer,
+                                       videos_per_day, daily_times, start_days, is_draft)
+                case 3:
+                    # NOTE: keyword args used here on purpose. The earlier positional
+                    # call dropped `thumbnail_path` and silently bound `productLink`
+                    # to the thumbnail parameter.
+                    post_video_DouYin(title, file_list, tags, account_list,
+                                      category=category, enableTimer=enableTimer,
+                                      videos_per_day=videos_per_day, daily_times=daily_times,
+                                      start_days=start_days,
+                                      thumbnail_path=thumbnail_path,
+                                      productLink=productLink, productTitle=productTitle)
+                case 4:
+                    post_video_ks(title, file_list, tags, account_list, category, enableTimer,
+                                  videos_per_day, daily_times, start_days)
+                case _:
+                    failures.append({"index": index, "msg": f"unsupported platform type: {type}"})
+        except Exception as exc:
+            print(f"batch publish item {index} failed: {exc}")
+            failures.append({"index": index, "msg": str(exc)})
+
+    if failures:
+        return jsonify({"code": 207, "msg": "partial success", "data": {"failures": failures}}), 207
+    return jsonify({"code": 200, "msg": "ok", "data": None}), 200
 
 # Cookie文件上传API
 @app.route('/uploadCookie', methods=['POST'])
@@ -703,15 +721,32 @@ def run_async_function(type,id,status_queue):
             loop.run_until_complete(get_ks_cookie(id,status_queue))
             loop.close()
 
-# SSE 流生成器函数
-def sse_stream(status_queue):
-    while True:
-        if not status_queue.empty():
-            msg = status_queue.get()
+# SSE stream generator. Exits as soon as a terminal status ("200" or "500")
+# is emitted so the worker thread does not pin a Python thread per login flow.
+# A safety timeout closes the stream after ~5 minutes if no message arrives.
+TERMINAL_SSE_PAYLOADS = {"200", "500"}
+SSE_IDLE_TIMEOUT_SECONDS = 300
+
+
+def sse_stream(status_queue, login_id=None, idle_timeout=SSE_IDLE_TIMEOUT_SECONDS):
+    last_activity = time.time()
+    try:
+        while True:
+            try:
+                msg = status_queue.get(timeout=0.5)
+            except Exception:
+                if time.time() - last_activity > idle_timeout:
+                    yield "data: 500\n\n"
+                    return
+                continue
+
+            last_activity = time.time()
             yield f"data: {msg}\n\n"
-        else:
-            # 避免 CPU 占满
-            time.sleep(0.1)
+            if str(msg) in TERMINAL_SSE_PAYLOADS:
+                return
+    finally:
+        if login_id is not None:
+            active_queues.pop(login_id, None)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0' ,port=5409)

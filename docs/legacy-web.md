@@ -2,11 +2,12 @@
 
 这套 Web 相关代码主要包括：
 
-- `sau_backend.py`
-- `sau_backend/`
-- `sau_frontend/`
+- `sau_backend.py`（Flask 后端，仍保留并修复了若干 bug）
+- `sau_frontend/`（Vue 前端）
 
 它们属于项目过去阶段的实现，当前已经不是主线维护方向。
+
+> 注：原来的空壳目录 `sau_backend/` 已经清理。`sau_backend.py` 是真正的 Flask 入口。
 
 ## 当前定位
 
@@ -29,7 +30,6 @@
 
 可以参考这些文件：
 
-- `sau_backend/README.md`
 - `sau_frontend/README.md`
 - `sau_backend.py`
 
