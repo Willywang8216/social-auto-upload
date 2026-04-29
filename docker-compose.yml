@@ -1,0 +1,22 @@
+services:
+  social-auto-upload:
+    build: .
+    container_name: social-auto-upload
+    restart: always
+    ports:
+      - "5409:5409"
+    volumes:
+      - ./videoFile:/app/videoFile
+      - ./cookiesFile:/app/cookiesFile
+      - ./conf.py:/app/conf.py
+      - ./data:/app/data
+    networks:
+      1panel-network:
+        ipv4_address: 172.18.0.46  # 這是你原本清單中這個容器用的 IP
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  1panel-network:
+    external: true
+
