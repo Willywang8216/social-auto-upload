@@ -63,10 +63,50 @@ CREATE TABLE IF NOT EXISTS accounts (
 )
 """
 
+PUBLISH_JOBS = """
+CREATE TABLE IF NOT EXISTS publish_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    profile_id INTEGER,
+    platform TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    total_targets INTEGER NOT NULL DEFAULT 0,
+    completed_targets INTEGER NOT NULL DEFAULT 0,
+    failed_targets INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    started_at DATETIME,
+    finished_at DATETIME,
+    FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE SET NULL
+)
+"""
+
+PUBLISH_JOB_TARGETS = """
+CREATE TABLE IF NOT EXISTS publish_job_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    account_ref TEXT NOT NULL,
+    file_ref TEXT NOT NULL,
+    schedule_at DATETIME,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    started_at DATETIME,
+    finished_at DATETIME,
+    UNIQUE(job_id, account_ref, file_ref),
+    FOREIGN KEY(job_id) REFERENCES publish_jobs(id) ON DELETE CASCADE
+)
+"""
+
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_accounts_profile ON accounts(profile_id)",
     "CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform)",
     "CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status)",
+    "CREATE INDEX IF NOT EXISTS idx_publish_jobs_status ON publish_jobs(status)",
+    "CREATE INDEX IF NOT EXISTS idx_publish_jobs_platform ON publish_jobs(platform)",
+    "CREATE INDEX IF NOT EXISTS idx_publish_job_targets_job ON publish_job_targets(job_id)",
+    "CREATE INDEX IF NOT EXISTS idx_publish_job_targets_status ON publish_job_targets(status)",
+    "CREATE INDEX IF NOT EXISTS idx_publish_job_targets_account ON publish_job_targets(account_ref)",
 ]
 
 
@@ -79,6 +119,8 @@ def bootstrap(db_path: Path = DB_PATH) -> None:
         cursor.execute(FILE_RECORDS)
         cursor.execute(PROFILES)
         cursor.execute(ACCOUNTS)
+        cursor.execute(PUBLISH_JOBS)
+        cursor.execute(PUBLISH_JOB_TARGETS)
         for statement in INDEXES:
             cursor.execute(statement)
         conn.commit()
