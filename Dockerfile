@@ -46,9 +46,16 @@ COPY requirements.txt requirements.txt
 RUN pip install -r requirements.txt
 
 # Install browsers for both drivers. The live uploaders use patchright;
-# the legacy Flask helpers still import upstream playwright. Each
-# package manages its own browsers under PLAYWRIGHT_BROWSERS_PATH.
-RUN playwright install --with-deps chromium && \
+# the legacy Flask helpers still import upstream playwright. Each package
+# manages its own browser bundle under PLAYWRIGHT_BROWSERS_PATH.
+#
+# Note: we deliberately do NOT pass --with-deps here. The system libraries
+# Chromium needs (libnss3, libatk1.0-0, libgbm1, ...) are explicitly
+# installed by the apt-get block earlier in this stage. --with-deps would
+# additionally try to install ttf-ubuntu-font-family / ttf-unifont, which
+# do not exist in Debian Trixie (this image's base distro) and break the
+# build on ARM64 hosts.
+RUN playwright install chromium && \
     patchright install chromium
 
 COPY . .
