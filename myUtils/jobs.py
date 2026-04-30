@@ -292,6 +292,9 @@ def get_job_by_idempotency_key(key: str, *, db_path: Path | None = None) -> Job 
     return _row_to_job(row) if row else None
 
 
+LIST_JOBS_MAX_LIMIT = 500
+
+
 def list_jobs(
     *,
     status: str | None = None,
@@ -299,6 +302,18 @@ def list_jobs(
     limit: int = 50,
     db_path: Path | None = None,
 ) -> list[Job]:
+    # Guard against the SQLite quirk where ``LIMIT -1`` (and any negative
+    # integer) means "no limit". A 0 limit is also rejected because an
+    # empty page is almost certainly a caller bug rather than an intent.
+    try:
+        limit_int = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"limit must be an integer, got {limit!r}") from exc
+    if limit_int < 1:
+        raise ValueError(f"limit must be >= 1, got {limit_int}")
+    if limit_int > LIST_JOBS_MAX_LIMIT:
+        limit_int = LIST_JOBS_MAX_LIMIT
+
     query = "SELECT * FROM publish_jobs"
     clauses: list[str] = []
     params: list = []
@@ -311,7 +326,7 @@ def list_jobs(
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY id DESC LIMIT ?"
-    params.append(int(limit))
+    params.append(limit_int)
 
     with _connect(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
@@ -429,7 +444,30 @@ def claim_next_targets(
     return claimed
 
 
-def mark_target_success(target_id: int, *, db_path: Path | None = None) -> None:
+# Worker-facing transitions are written so they only mutate a target that is
+# still ``running``. If the target was cancelled (or otherwise transitioned)
+# while the executor was in flight, the cancellation wins and the late
+# success/failure/retry call becomes a no-op. This avoids the cancel-race
+# where a cancelled target gets resurrected as succeeded/failed/retrying and
+# the corresponding job counters drift.
+#
+# Note on in-flight uploads: cancelling a job updates the DB row immediately,
+# but the worker has no way to abort an already-running Playwright upload —
+# the platform-side post may still complete. The caller should treat
+# cancellation as "stop processing further attempts on our side", not as a
+# guarantee that no upload happens. This matches what every browser-driven
+# automation tool can promise.
+
+
+def mark_target_success(target_id: int, *, db_path: Path | None = None) -> bool:
+    """Transition a running target to succeeded.
+
+    Returns ``True`` when the row actually changed (i.e. it was still
+    ``running`` at the time of the UPDATE), ``False`` when the call was a
+    no-op because the target had already been cancelled or otherwise moved
+    on. Callers can use the return value to detect cancel races.
+    """
+
     now = _now_iso()
     with _connect(db_path) as conn:
         target = conn.execute(
@@ -437,42 +475,62 @@ def mark_target_success(target_id: int, *, db_path: Path | None = None) -> None:
         ).fetchone()
         if target is None:
             raise LookupError(f"Target not found: id={target_id}")
-        conn.execute(
+
+        cursor = conn.execute(
             """
             UPDATE publish_job_targets
             SET status = ?, finished_at = ?, last_error = NULL
-            WHERE id = ?
+            WHERE id = ? AND status = ?
             """,
-            (TARGET_SUCCEEDED, now, target_id),
+            (TARGET_SUCCEEDED, now, target_id, TARGET_RUNNING),
         )
+        if cursor.rowcount == 0:
+            # Cancelled (or otherwise transitioned) while the executor was
+            # running. Leave the row alone; do not bump the counters.
+            conn.commit()
+            return False
+
         conn.execute(
             "UPDATE publish_jobs SET completed_targets = completed_targets + 1 WHERE id = ?",
             (target["job_id"],),
         )
         _maybe_finalise_job(conn, target["job_id"])
         conn.commit()
+        return True
 
 
 def mark_target_retry(
     target_id: int, error: str, *, db_path: Path | None = None
-) -> None:
-    """Push a failed target back into the queue for another attempt."""
+) -> bool:
+    """Push a transiently-failed target back into the queue for another attempt.
+
+    Guarded on ``status = 'running'`` so a cancellation that happened while
+    the executor was in flight is preserved (the cancelled target is not
+    resurrected into the queue). Returns ``True`` when the row was updated.
+    """
 
     with _connect(db_path) as conn:
-        conn.execute(
+        cursor = conn.execute(
             """
             UPDATE publish_job_targets
             SET status = ?, last_error = ?
-            WHERE id = ?
+            WHERE id = ? AND status = ?
             """,
-            (TARGET_RETRYING, error[:2000], target_id),
+            (TARGET_RETRYING, error[:2000], target_id, TARGET_RUNNING),
         )
         conn.commit()
+        return cursor.rowcount > 0
 
 
 def mark_target_failed(
     target_id: int, error: str, *, db_path: Path | None = None
-) -> None:
+) -> bool:
+    """Transition a running target to permanently failed.
+
+    Same cancel-race semantics as ``mark_target_success``: returns ``False``
+    when the target was no longer ``running`` at UPDATE time.
+    """
+
     now = _now_iso()
     with _connect(db_path) as conn:
         target = conn.execute(
@@ -480,20 +538,26 @@ def mark_target_failed(
         ).fetchone()
         if target is None:
             raise LookupError(f"Target not found: id={target_id}")
-        conn.execute(
+
+        cursor = conn.execute(
             """
             UPDATE publish_job_targets
             SET status = ?, finished_at = ?, last_error = ?
-            WHERE id = ?
+            WHERE id = ? AND status = ?
             """,
-            (TARGET_FAILED, now, error[:2000], target_id),
+            (TARGET_FAILED, now, error[:2000], target_id, TARGET_RUNNING),
         )
+        if cursor.rowcount == 0:
+            conn.commit()
+            return False
+
         conn.execute(
             "UPDATE publish_jobs SET failed_targets = failed_targets + 1 WHERE id = ?",
             (target["job_id"],),
         )
         _maybe_finalise_job(conn, target["job_id"])
         conn.commit()
+        return True
 
 
 def _maybe_finalise_job(conn: sqlite3.Connection, job_id: int) -> None:

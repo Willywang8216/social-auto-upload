@@ -799,11 +799,17 @@ def jobs_create():
 def jobs_list():
     status = request.args.get("status")
     platform = request.args.get("platform")
+    raw_limit = request.args.get("limit", "50")
     try:
-        limit = int(request.args.get("limit", "50"))
-    except ValueError:
-        return jsonify({"code": 400, "msg": "Invalid limit", "data": None}), 400
-    items = job_runtime.list_jobs(status=status, platform=platform, limit=limit)
+        # ValueError covers non-numeric input; the data layer ValueError covers
+        # zero/negative/oversized limits and surfaces a precise message.
+        items = job_runtime.list_jobs(
+            status=status,
+            platform=platform,
+            limit=int(raw_limit),
+        )
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     return jsonify({"code": 200, "msg": "ok",
                     "data": [_job_to_payload(item) for item in items]}), 200
 

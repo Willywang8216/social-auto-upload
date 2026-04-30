@@ -147,5 +147,123 @@ class JobLifecycleTests(unittest.TestCase):
         self.assertEqual(running[0].id, running_job.id)
 
 
+class CancelRaceTests(unittest.TestCase):
+    """Regressions for the QA-found cancel-race bug.
+
+    A target that is mid-run can be cancelled, and then the worker's
+    eventual ``mark_target_*`` call must NOT resurrect the cancelled row.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "jobs.db"
+        create_table.bootstrap(self.db_path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _enqueue_two_running(self) -> jobs.Job:
+        spec = _spec(targets=[("acct-1", "f1", None), ("acct-2", "f1", None)])
+        job = jobs.enqueue_job(spec, db_path=self.db_path)
+        claimed = jobs.claim_next_targets(limit=2, db_path=self.db_path)
+        self.assertEqual(len(claimed), 2)
+        return job
+
+    def test_mark_success_after_cancel_is_a_noop(self) -> None:
+        job = self._enqueue_two_running()
+        target_a, target_b = jobs.list_targets(job.id, db_path=self.db_path)
+
+        jobs.cancel_job(job.id, db_path=self.db_path)
+        # Worker's late "I succeeded" call after the cancel.
+        result = jobs.mark_target_success(target_a.id, db_path=self.db_path)
+
+        self.assertFalse(result, "late mark_target_success must be a no-op")
+        finalised = jobs.get_job(job.id, db_path=self.db_path)
+        self.assertEqual(finalised.status, jobs.JOB_CANCELLED)
+        # Counters must NOT have ticked up.
+        self.assertEqual(finalised.completed_targets, 0)
+        self.assertEqual(finalised.failed_targets, 0)
+        # Both targets remain cancelled.
+        statuses = [t.status for t in jobs.list_targets(job.id, db_path=self.db_path)]
+        self.assertEqual(statuses, [jobs.TARGET_CANCELLED, jobs.TARGET_CANCELLED])
+
+    def test_mark_failed_after_cancel_is_a_noop(self) -> None:
+        job = self._enqueue_two_running()
+        target_a, _ = jobs.list_targets(job.id, db_path=self.db_path)
+
+        jobs.cancel_job(job.id, db_path=self.db_path)
+        result = jobs.mark_target_failed(target_a.id, "boom", db_path=self.db_path)
+
+        self.assertFalse(result)
+        finalised = jobs.get_job(job.id, db_path=self.db_path)
+        self.assertEqual(finalised.status, jobs.JOB_CANCELLED)
+        self.assertEqual(finalised.failed_targets, 0)
+        statuses = [t.status for t in jobs.list_targets(job.id, db_path=self.db_path)]
+        self.assertEqual(statuses, [jobs.TARGET_CANCELLED, jobs.TARGET_CANCELLED])
+
+    def test_mark_retry_after_cancel_does_not_resurrect(self) -> None:
+        job = self._enqueue_two_running()
+        target_a, _ = jobs.list_targets(job.id, db_path=self.db_path)
+
+        jobs.cancel_job(job.id, db_path=self.db_path)
+        result = jobs.mark_target_retry(target_a.id, "transient", db_path=self.db_path)
+
+        self.assertFalse(result, "cancelled targets must not be re-queued for retry")
+        # The cancelled target stays cancelled — never goes to retrying.
+        target_after = next(
+            t for t in jobs.list_targets(job.id, db_path=self.db_path)
+            if t.id == target_a.id
+        )
+        self.assertEqual(target_after.status, jobs.TARGET_CANCELLED)
+
+    def test_mark_success_on_running_target_still_succeeds(self) -> None:
+        # Sanity: the guard does not break the happy path.
+        job = self._enqueue_two_running()
+        target_a, _ = jobs.list_targets(job.id, db_path=self.db_path)
+        result = jobs.mark_target_success(target_a.id, db_path=self.db_path)
+        self.assertTrue(result)
+        finalised = jobs.get_job(job.id, db_path=self.db_path)
+        self.assertEqual(finalised.completed_targets, 1)
+
+
+class ListJobsLimitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "jobs.db"
+        create_table.bootstrap(self.db_path)
+        # Seed a few jobs so a "no limit" bug would actually be visible.
+        for index in range(3):
+            jobs.enqueue_job(
+                _spec(key=f"k-{index}", targets=[(f"acct-{index}", "f1", None)]),
+                db_path=self.db_path,
+            )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_negative_limit_rejected(self) -> None:
+        # SQLite would otherwise interpret LIMIT -1 as "all rows".
+        with self.assertRaises(ValueError):
+            jobs.list_jobs(limit=-5, db_path=self.db_path)
+
+    def test_zero_limit_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            jobs.list_jobs(limit=0, db_path=self.db_path)
+
+    def test_non_integer_limit_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            jobs.list_jobs(limit="five", db_path=self.db_path)
+
+    def test_oversized_limit_clamped_to_max(self) -> None:
+        # Above LIST_JOBS_MAX_LIMIT we silently clamp rather than 400 — this
+        # protects the DB without surprising sane callers.
+        rows = jobs.list_jobs(limit=10**6, db_path=self.db_path)
+        self.assertLessEqual(len(rows), jobs.LIST_JOBS_MAX_LIMIT)
+
+    def test_normal_limit_returns_at_most_n(self) -> None:
+        rows = jobs.list_jobs(limit=2, db_path=self.db_path)
+        self.assertEqual(len(rows), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
