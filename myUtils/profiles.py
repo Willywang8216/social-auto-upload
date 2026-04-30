@@ -18,7 +18,7 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -263,7 +263,7 @@ def list_accounts(
 def update_account_status(
     account_id: int, status: int, *, db_path: Path = DB_PATH
 ) -> None:
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    now = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
     with _connect(db_path) as conn:
         conn.execute(
             "UPDATE accounts SET status = ?, last_checked_at = ? WHERE id = ?",

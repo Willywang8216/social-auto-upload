@@ -4,14 +4,21 @@ import sqlite3
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from queue import Queue
 from flask_cors import CORS
 from myUtils.auth import check_cookie
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory
 from conf import BASE_DIR
+from myUtils import jobs as job_runtime
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
+from myUtils.worker import default_executor, run_worker_drain
+from utils.files_times import generate_schedule_time_next_day
+
+# Map the legacy numeric `type` field to the platform slug used by the job runtime.
+LEGACY_PLATFORM_CODES = {1: "xiaohongshu", 2: "tencent", 3: "douyin", 4: "kuaishou"}
 
 active_queues = {}
 app = Flask(__name__)
@@ -695,6 +702,181 @@ def download_cookie():
             "msg": f"下载Cookie文件失败: {str(e)}",
             "data": None
         }), 500
+
+
+# ---------------------------------------------------------------------------
+# Job runtime API
+#
+# These endpoints are the modern publish surface. They enqueue work into the
+# `publish_jobs` table and return immediately; the worker (`POST /jobs/run` in
+# single-process mode, or a separate process in production) drains the queue.
+# The legacy `/postVideo` endpoint is preserved so the existing frontend keeps
+# working unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _normalise_publish_payload(data: dict) -> tuple[str, dict, list[tuple[str, str, datetime | None]]]:
+    """Pull a /postVideo-shaped payload apart into (platform, payload, targets).
+
+    Accepts either the legacy numeric ``type`` field or an explicit ``platform``
+    string slug. Targets are the cartesian product of fileList × accountList,
+    with optional schedule times derived from the timer fields.
+    """
+
+    if "platform" in data and isinstance(data["platform"], str):
+        platform = data["platform"]
+    else:
+        platform_code = data.get("type")
+        if platform_code not in LEGACY_PLATFORM_CODES:
+            raise ValueError(f"Unsupported platform code: {platform_code!r}")
+        platform = LEGACY_PLATFORM_CODES[platform_code]
+
+    file_list = data.get("fileList", [])
+    account_list = data.get("accountList", [])
+    if not file_list:
+        raise ValueError("fileList must not be empty")
+    if not account_list:
+        raise ValueError("accountList must not be empty")
+
+    enable_timer = bool(data.get("enableTimer"))
+    if enable_timer:
+        schedules = generate_schedule_time_next_day(
+            len(file_list),
+            data.get("videosPerDay", 1) or 1,
+            data.get("dailyTimes") or None,
+            start_days=data.get("startDays", 0) or 0,
+        )
+    else:
+        schedules = [None] * len(file_list)
+
+    payload = {
+        "title": data.get("title", ""),
+        "tags": data.get("tags") or [],
+        "category": data.get("category"),
+        "isDraft": bool(data.get("isDraft", False)),
+        "thumbnail": data.get("thumbnail", "") or "",
+        "productLink": data.get("productLink", "") or "",
+        "productTitle": data.get("productTitle", "") or "",
+    }
+
+    targets: list[tuple[str, str, datetime | None]] = []
+    for index, file_ref in enumerate(file_list):
+        scheduled = schedules[index] if index < len(schedules) else None
+        for account_ref in account_list:
+            targets.append((account_ref, file_ref, scheduled))
+
+    return platform, payload, targets
+
+
+@app.route("/jobs", methods=["POST"])
+def jobs_create():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "Expected a JSON object", "data": None}), 400
+
+    try:
+        platform, payload, targets = _normalise_publish_payload(data)
+    except (ValueError, TypeError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    spec = job_runtime.JobSpec(
+        platform=platform,
+        payload=payload,
+        targets=targets,
+        profile_id=data.get("profileId"),
+        idempotency_key=data.get("idempotencyKey"),
+    )
+    try:
+        job = job_runtime.enqueue_job(spec)
+    except Exception as exc:  # noqa: BLE001
+        print(f"jobs_create failed: {exc}")
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+    return jsonify({"code": 200, "msg": "queued", "data": _job_to_payload(job)}), 200
+
+
+@app.route("/jobs", methods=["GET"])
+def jobs_list():
+    status = request.args.get("status")
+    platform = request.args.get("platform")
+    try:
+        limit = int(request.args.get("limit", "50"))
+    except ValueError:
+        return jsonify({"code": 400, "msg": "Invalid limit", "data": None}), 400
+    items = job_runtime.list_jobs(status=status, platform=platform, limit=limit)
+    return jsonify({"code": 200, "msg": "ok",
+                    "data": [_job_to_payload(item) for item in items]}), 200
+
+
+@app.route("/jobs/<int:job_id>", methods=["GET"])
+def jobs_get(job_id):
+    try:
+        job = job_runtime.get_job(job_id)
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Job not found", "data": None}), 404
+    targets = job_runtime.list_targets(job_id)
+    body = _job_to_payload(job)
+    body["targets"] = [_target_to_payload(target) for target in targets]
+    return jsonify({"code": 200, "msg": "ok", "data": body}), 200
+
+
+@app.route("/jobs/<int:job_id>/cancel", methods=["POST"])
+def jobs_cancel(job_id):
+    try:
+        job = job_runtime.cancel_job(job_id)
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Job not found", "data": None}), 404
+    return jsonify({"code": 200, "msg": "cancelled", "data": _job_to_payload(job)}), 200
+
+
+@app.route("/jobs/run", methods=["POST"])
+def jobs_run():
+    """Drain the queue synchronously in this process.
+
+    Useful for dev mode and single-instance deployments where running a
+    separate worker process would be overkill. Production should run a
+    dedicated worker via ``python -m myUtils.worker`` instead and skip this
+    endpoint entirely.
+    """
+
+    try:
+        run_worker_drain(default_executor)
+    except Exception as exc:  # noqa: BLE001
+        print(f"jobs_run failed: {exc}")
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+    return jsonify({"code": 200, "msg": "drained", "data": None}), 200
+
+
+def _job_to_payload(job: job_runtime.Job) -> dict:
+    return {
+        "id": job.id,
+        "idempotencyKey": job.idempotency_key,
+        "platform": job.platform,
+        "profileId": job.profile_id,
+        "status": job.status,
+        "totalTargets": job.total_targets,
+        "completedTargets": job.completed_targets,
+        "failedTargets": job.failed_targets,
+        "createdAt": job.created_at,
+        "startedAt": job.started_at,
+        "finishedAt": job.finished_at,
+        "payload": job.payload,
+    }
+
+
+def _target_to_payload(target: job_runtime.Target) -> dict:
+    return {
+        "id": target.id,
+        "jobId": target.job_id,
+        "accountRef": target.account_ref,
+        "fileRef": target.file_ref,
+        "scheduleAt": target.schedule_at,
+        "status": target.status,
+        "attempts": target.attempts,
+        "lastError": target.last_error,
+        "startedAt": target.started_at,
+        "finishedAt": target.finished_at,
+    }
 
 
 # 包装函数：在线程中运行异步函数
