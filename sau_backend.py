@@ -1,3 +1,12 @@
+# Heal a possibly-incomplete user-supplied ``conf.py`` before any other
+# module imports ``conf``. A stripped-down ``conf.py`` (e.g. one that
+# defines only ``LOCAL_CHROME_PATH`` and gets bind-mounted into a
+# container over the shipped one) used to crash every consumer with
+# ``ImportError: cannot import name 'BASE_DIR' from 'conf'``. The backfill
+# is idempotent and never overwrites an attribute the user explicitly set.
+from conf_defaults import apply_conf_defaults
+apply_conf_defaults()
+
 import asyncio
 import logging
 import os

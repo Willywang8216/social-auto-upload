@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+# See sau_backend.py for the rationale: backfill missing attributes on a
+# possibly-stripped-down user ``conf.py`` before any other module imports
+# it. Idempotent and never overrides an explicit user setting.
+from conf_defaults import apply_conf_defaults
+apply_conf_defaults()
+
 import argparse
 import asyncio
 import sys

@@ -64,7 +64,14 @@ COPY --from=builder /app/dist/index.html /app
 COPY --from=builder /app/dist/assets /app/assets
 COPY --from=builder /app/dist/vite.svg /app/assets
 
-RUN cp conf.example.py conf.py
+# Always derive conf.py from the canonical example so the image ships a
+# valid configuration even if the build context contains a stale or
+# stripped-down conf.py. Operators can still override at run-time by
+# bind-mounting their own conf.py over /app/conf.py — apply_conf_defaults()
+# in the entry points will backfill any missing attribute (e.g. BASE_DIR)
+# from conf_defaults.py so a partial bind-mount no longer crashes the
+# process at import time.
+RUN cp -f conf.example.py conf.py
 
 RUN mkdir -p /app/videoFile
 RUN mkdir -p /app/cookiesFile

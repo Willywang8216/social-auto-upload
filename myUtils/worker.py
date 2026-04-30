@@ -19,6 +19,13 @@ delayed by exponential backoff capped at ``max_backoff_seconds``.
 
 from __future__ import annotations
 
+# Backfill missing attributes on a possibly-stripped-down user ``conf.py``
+# before any other module here imports ``conf``. See sau_backend.py for
+# the full rationale. Idempotent and only fills attributes the user did
+# not explicitly set, so an explicit override in ``conf.py`` always wins.
+from conf_defaults import apply_conf_defaults
+apply_conf_defaults()
+
 import asyncio
 import inspect
 import json
