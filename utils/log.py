@@ -59,3 +59,10 @@ baijiahao_logger = create_logger('baijiahao', 'logs/baijiahao.log')
 xiaohongshu_logger = create_logger('xiaohongshu', 'logs/xiaohongshu.log')
 medium_logger = create_logger('medium', 'logs/medium.log')
 substack_logger = create_logger('substack', 'logs/substack.log')
+worker_logger = create_logger('worker', 'logs/worker.log')
+
+
+# Re-export the raw loguru handle so modules that need to add structured
+# sinks (e.g. per-job file sinks in myUtils.job_logging) can do so without
+# each importing loguru directly. Keeps the dependency surface flat.
+loguru_logger = logger

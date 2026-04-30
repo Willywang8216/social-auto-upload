@@ -132,6 +132,36 @@ AI的发展毋庸置疑，希望你遇到这种安装和使用，不要再怯场
 
 Web 端相关代码仍然保留，但已经不是当前主线，不保证可直接运行，也不保证与当前 uploader/CLI 完全同步。
 
+### Web 后端 / 任务运行时
+
+新版 Web 后端已经从同步 `/postVideo` 切换到一套基于 `publish_jobs` 表的异步任务运行时：
+
+- `POST /jobs` 入队任务（幂等），立即返回 job id
+- `GET /jobs/<id>` 查看进度与每个 target 的状态、重试次数、错误信息
+- `POST /jobs/<id>/cancel` 取消任务
+- 老的 `/postVideo` 仍然在线，方便与现有前端逐步迁移
+
+推荐生产部署里把 Flask 当成无状态服务，把任务消费跑在独立进程里：
+
+```bash
+# Flask（任务入队 + 查询）
+SAU_API_TOKENS=your-strong-token python sau_backend.py
+
+# Worker（任务消费）
+SAU_API_TOKENS=ignored python -m myUtils.worker \
+    --max-concurrent 3 --max-attempts 3
+```
+
+`python -m myUtils.worker` 会一直跑直到收到 `SIGINT`/`SIGTERM`，然后把已经在跑的 target 排空再退出。
+传 `--once` 可以只跑一轮排空，适合在 cron / one-shot 场景。
+
+每个 job 的日志会落到 `logs/jobs/job-<id>.log`，包含 `job_id`/`target_id`/`platform`/`account_ref`/`attempt`
+等结构化字段；想要 JSON 行格式可以设置 `SAU_JSON_LOGS=1`。
+
+安全相关的环境变量见 [Phase 3 Security](./docs/install.md)：
+- `SAU_API_TOKENS` — 接受的 bearer token 集合，留空表示开放模式
+- `SAU_CORS_ORIGINS` — 允许的浏览器来源列表，默认是 Vite 的 dev/preview 端口
+
 
 ## 🏁快速开始
 

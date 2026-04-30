@@ -29,8 +29,13 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from conf import BASE_DIR
 from myUtils import jobs
+from myUtils.job_logging import (
+    bind_job_logger,
+    close_job_sink,
+    ensure_job_sink,
+)
 from utils.concurrency import AccountConcurrency, MAX_CONCURRENT_BROWSERS
-from utils.log import douyin_logger as _logger  # reuse a styled sink
+from utils.log import worker_logger as _logger
 
 # A target executor takes (platform, payload, target) and returns an awaitable
 # that resolves to None on success or raises on failure.
@@ -144,39 +149,86 @@ class PublishWorker:
 
     async def _run_target(self, target: jobs.Target) -> None:
         job = jobs.get_job(target.job_id, db_path=self._db_path)
+        log = bind_job_logger(
+            job_id=target.job_id,
+            target_id=target.id,
+            platform=job.platform,
+            account_ref=target.account_ref,
+            attempt=target.attempts,
+        )
+        log.info("target claimed; starting execution")
+
         try:
             async with self._concurrency.slot(target.account_ref):
                 result = self._executor(job.platform, job.payload, target)
                 if inspect.isawaitable(result):
                     await result
         except asyncio.CancelledError:
-            jobs.mark_target_retry(target.id, "cancelled mid-run; will retry", db_path=self._db_path)
+            log.warning("target cancelled mid-run; queued for retry")
+            jobs.mark_target_retry(
+                target.id,
+                "cancelled mid-run; will retry",
+                db_path=self._db_path,
+            )
+            self._maybe_close_job_sink(target.job_id)
             raise
         except Exception as exc:  # noqa: BLE001 — we want the message regardless
-            await self._handle_failure(target, exc)
+            await self._handle_failure(target, exc, log)
         else:
-            jobs.mark_target_success(target.id, db_path=self._db_path)
+            transitioned = jobs.mark_target_success(
+                target.id, db_path=self._db_path
+            )
+            if transitioned:
+                log.success("target succeeded")
+            else:
+                # The success was a no-op because the target was cancelled
+                # while we were running. Record the fact at INFO so a human
+                # auditing the per-job log can see the race resolution.
+                log.info(
+                    "target finished after the parent job was cancelled; "
+                    "executor result discarded"
+                )
+            self._maybe_close_job_sink(target.job_id)
 
-    async def _handle_failure(self, target: jobs.Target, exc: BaseException) -> None:
+    async def _handle_failure(
+        self, target: jobs.Target, exc: BaseException, log
+    ) -> None:
         message = f"{type(exc).__name__}: {exc}"
         attempts = target.attempts  # already incremented when claimed
         if attempts >= self._config.retry.max_attempts:
-            jobs.mark_target_failed(target.id, message, db_path=self._db_path)
-            _logger.error(
-                f"target {target.id} (job {target.job_id}, account {target.account_ref}) "
-                f"failed permanently after {attempts} attempts: {message}"
+            transitioned = jobs.mark_target_failed(
+                target.id, message, db_path=self._db_path
             )
+            if transitioned:
+                log.error(
+                    f"target failed permanently after {attempts} attempts: {message}"
+                )
+            else:
+                log.info(
+                    f"target failed permanently but parent job was already "
+                    f"cancelled; transition skipped: {message}"
+                )
+            self._maybe_close_job_sink(target.job_id)
             return
 
         delay = self._config.retry.backoff_for(attempts)
-        _logger.warning(
-            f"target {target.id} (job {target.job_id}, account {target.account_ref}) "
-            f"failed on attempt {attempts}; retrying in {delay:.1f}s: {message}"
+        log.warning(
+            f"target failed on attempt {attempts}; retrying in {delay:.1f}s: {message}"
         )
         # Sleep BEFORE flipping back to retrying so the worker can't pick the
         # row up again immediately on the next tick.
         await asyncio.sleep(delay)
         jobs.mark_target_retry(target.id, message, db_path=self._db_path)
+
+    def _maybe_close_job_sink(self, job_id: int) -> None:
+        """Close the per-job log sink once the job has reached terminal status."""
+
+        try:
+            job = jobs.get_job(job_id, db_path=self._db_path)
+        except LookupError:
+            return
+        if job.status in jobs.JOB_TERMINAL:
+            close_job_sink(job_id)
 
 
 # --------------------------- default platform registry ---------------------------
@@ -289,3 +341,143 @@ def run_worker_drain(executor: Executor | None = None,
         db_path=db_path,
     )
     asyncio.run(worker.drain())
+
+
+# --------------------------- standalone process entry point ---------------------------
+
+
+def _build_arg_parser():
+    import argparse
+
+    # ``WorkerConfig`` and ``RetryPolicy`` are @dataclass(slots=True) so the
+    # *class*-level attribute access ``WorkerConfig.batch_size`` returns a
+    # slot member descriptor, not the default int. Read the defaults from a
+    # freshly-instantiated dataclass instead so argparse sees real numbers.
+    config_defaults = WorkerConfig()
+    retry_defaults = RetryPolicy()
+
+    parser = argparse.ArgumentParser(
+        prog="python -m myUtils.worker",
+        description=(
+            "Drain the publish_jobs queue. Without --once the worker runs "
+            "until it receives SIGINT/SIGTERM, draining in-flight targets "
+            "gracefully before exiting."
+        ),
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Drain the queue and exit (default: run forever).",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=config_defaults.poll_interval,
+        help="Seconds between worker ticks.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=config_defaults.batch_size,
+        help="Maximum targets claimed per tick.",
+    )
+    parser.add_argument(
+        "--max-concurrent",
+        type=int,
+        default=MAX_CONCURRENT_BROWSERS,
+        help="Maximum concurrent browsers / executor calls.",
+    )
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=retry_defaults.max_attempts,
+        help="Retry budget per target before failing permanently.",
+    )
+    parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=None,
+        help=(
+            "Override the SQLite database path. Defaults to "
+            "the value resolved by myUtils.jobs.DB_PATH."
+        ),
+    )
+    return parser
+
+
+async def _serve(worker: PublishWorker, *, run_once: bool) -> None:
+    """Drive a worker honouring SIGINT/SIGTERM for graceful shutdown.
+
+    On first signal we ask the worker to stop polling for new work; the
+    inner loop finishes any in-flight tasks before returning. A second
+    signal would surface as KeyboardInterrupt — we don't trap it twice
+    so the operator can force-exit if a stuck task refuses to drain.
+    """
+
+    import signal
+
+    loop = asyncio.get_running_loop()
+    stopping = False
+
+    def _on_signal(signum: int) -> None:
+        nonlocal stopping
+        if stopping:
+            return  # second signal — let the default handler run
+        stopping = True
+        _logger.info(
+            f"received signal {signal.Signals(signum).name}; "
+            "draining in-flight targets before exiting"
+        )
+        worker.stop()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _on_signal, sig)
+        except NotImplementedError:
+            # Windows event loops only support a subset of signals; fall
+            # back to the default handler there.
+            pass
+
+    if run_once:
+        await worker.drain()
+        return
+
+    # In long-running mode, ``run_forever`` exits as soon as ``stop`` is
+    # set, but we still want any in-flight tasks to finish cleanly. The
+    # _tick loop already reaps them on each pass, so we explicitly wait
+    # for the in-flight set to empty before returning.
+    await worker.run_forever()
+    while worker._tasks:  # noqa: SLF001 — drain is intentionally on the inside
+        await asyncio.sleep(worker._config.poll_interval)
+        await worker._tick()  # noqa: SLF001
+
+
+def _cli(argv: list[str] | None = None) -> int:
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    config = WorkerConfig(
+        poll_interval=args.poll_interval,
+        batch_size=args.batch_size,
+        max_concurrent=args.max_concurrent,
+        retry=RetryPolicy(max_attempts=args.max_attempts),
+    )
+    worker = PublishWorker(default_executor, config=config, db_path=args.db_path)
+
+    mode = "once" if args.once else "forever"
+    _logger.info(
+        f"publish worker starting (mode={mode}, batch_size={config.batch_size}, "
+        f"max_concurrent={config.max_concurrent}, "
+        f"max_attempts={config.retry.max_attempts})"
+    )
+    try:
+        asyncio.run(_serve(worker, run_once=args.once))
+    except KeyboardInterrupt:
+        _logger.warning("worker interrupted by KeyboardInterrupt")
+        return 130
+    _logger.info("publish worker stopped")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())

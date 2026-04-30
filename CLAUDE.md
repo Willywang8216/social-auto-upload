@@ -58,6 +58,18 @@ The project also provides a command-line interface (CLI) for users who prefer to
     ```
     The backend server will start on `http://localhost:5409`.
 
+5.  **(Production) Run a standalone worker:**
+    ```bash
+    python -m myUtils.worker --max-concurrent 3
+    ```
+    The worker drains the `publish_jobs` queue, runs uploads with bounded
+    concurrency, retries failed targets with exponential backoff, and writes
+    a per-job log to `logs/jobs/job-<id>.log` with structured fields
+    (`job_id`, `target_id`, `platform`, `account_ref`, `attempt`). Pass
+    `--once` to drain and exit; otherwise the worker runs until it receives
+    `SIGINT`/`SIGTERM`, then drains in-flight targets before exiting. Set
+    `SAU_JSON_LOGS=1` for newline-delimited JSON instead of human text.
+
 ### Frontend
 
 1.  **Navigate to the frontend directory:**
