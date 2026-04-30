@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import sqlite3
 import threading
@@ -14,6 +15,10 @@ from conf import BASE_DIR
 from myUtils import jobs as job_runtime
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
+from myUtils.security import (
+    extract_bearer_token,
+    load_policy,
+)
 from myUtils.worker import default_executor, run_worker_drain
 from utils.files_times import generate_schedule_time_next_day
 
@@ -23,8 +28,70 @@ LEGACY_PLATFORM_CODES = {1: "xiaohongshu", 2: "tencent", 3: "douyin", 4: "kuaish
 active_queues = {}
 app = Flask(__name__)
 
-#允许所有来源跨域访问
-CORS(app)
+# Security policy is loaded once from the environment at import time. Tests
+# can rebind ``app.config['SECURITY_POLICY']`` to override the live policy
+# without touching the env.
+_security_policy = load_policy()
+app.config['SECURITY_POLICY'] = _security_policy
+
+if _security_policy.open_mode:
+    logging.getLogger(__name__).warning(
+        "[security] running in open mode — set SAU_API_TOKENS to require a bearer token"
+    )
+
+# Restricted CORS: explicit origin allow-list, plus the headers the frontend
+# actually uses. Credentials stay disabled because we authenticate via the
+# Authorization header rather than cookies.
+CORS(
+    app,
+    resources={r"/*": {"origins": list(_security_policy.cors_origins)}},
+    allow_headers=["Authorization", "Content-Type"],
+    supports_credentials=False,
+)
+
+
+@app.before_request
+def _enforce_auth():
+    """Bearer-token gate for every non-public route.
+
+    Skipped entirely when the policy is in open mode (no SAU_API_TOKENS set).
+    The login SSE endpoint pulls the token from a query parameter because
+    the browser EventSource API cannot send custom headers.
+    """
+
+    policy = app.config['SECURITY_POLICY']
+    if policy.open_mode:
+        return None
+    if request.method == "OPTIONS":
+        return None  # let the CORS layer answer preflight
+    if policy.is_public_path(request.path):
+        return None
+
+    is_sse = request.path == "/login"
+    token = extract_bearer_token(
+        request.headers,
+        request.args,
+        is_sse=is_sse,
+    )
+    if not policy.token_is_valid(token):
+        return jsonify({"code": 401, "msg": "unauthorized", "data": None}), 401
+    return None
+
+
+@app.route('/whoami', methods=['GET'])
+def whoami():
+    """Cheap health check used by the frontend login screen to validate a token."""
+
+    policy = app.config['SECURITY_POLICY']
+    return jsonify({
+        "code": 200,
+        "msg": "ok",
+        "data": {
+            "openMode": policy.open_mode,
+            "authenticated": policy.open_mode or True,  # passed the gate
+        }
+    }), 200
+
 
 # 限制上传文件大小为160MB
 app.config['MAX_CONTENT_LENGTH'] = 160 * 1024 * 1024
@@ -67,14 +134,16 @@ def upload_file():
             "msg": "No selected file"
         }), 400
     try:
-        # 保存文件到指定位置
-        uuid_v1 = uuid.uuid1()
-        print(f"UUID v1: {uuid_v1}")
-        filepath = Path(BASE_DIR / "videoFile" / f"{uuid_v1}_{file.filename}")
+        # UUIDv4 — random, no MAC/timestamp leak. UUIDv1 (the legacy choice
+        # here) embeds the host MAC address and creation time in the
+        # filename, which the upload directory exposes via /getFile.
+        file_uuid = uuid.uuid4()
+        filepath = Path(BASE_DIR / "videoFile" / f"{file_uuid}_{file.filename}")
         file.save(filepath)
-        return jsonify({"code":200,"msg": "File uploaded successfully", "data": f"{uuid_v1}_{file.filename}"}), 200
+        return jsonify({"code": 200, "msg": "File uploaded successfully",
+                        "data": f"{file_uuid}_{file.filename}"}), 200
     except Exception as e:
-        return jsonify({"code":500,"msg": str(e),"data":None}), 500
+        return jsonify({"code": 500, "msg": str(e), "data": None}), 500
 
 @app.route('/getFile', methods=['GET'])
 def get_file():
@@ -126,13 +195,10 @@ def upload_save():
         filename = file.filename
 
     try:
-        # 生成 UUID v1
-        uuid_v1 = uuid.uuid1()
-        print(f"UUID v1: {uuid_v1}")
-
-        # 构造文件名和路径
-        final_filename = f"{uuid_v1}_{filename}"
-        filepath = Path(BASE_DIR / "videoFile" / f"{uuid_v1}_{filename}")
+        # UUIDv4 — see /upload for the rationale (no MAC/timestamp leak).
+        file_uuid = uuid.uuid4()
+        final_filename = f"{file_uuid}_{filename}"
+        filepath = Path(BASE_DIR / "videoFile" / final_filename)
 
         # 保存文件
         file.save(filepath)
@@ -634,14 +700,31 @@ def upload_cookie():
                 "data": None
             }), 404
 
-        # 保存上传的Cookie文件到对应路径
+        # Validate the uploaded JSON looks like a Playwright storage_state file
+        # BEFORE we touch the destination path, so a malformed upload cannot
+        # silently overwrite a valid cookie file.
+        try:
+            payload_bytes = file.stream.read()
+            from myUtils.security import (
+                CookieValidationError,
+                validate_storage_state,
+            )
+            validate_storage_state(payload_bytes)
+        except CookieValidationError as exc:
+            return jsonify({
+                "code": 400,
+                "msg": f"Cookie文件无效: {exc}",
+                "data": None
+            }), 400
+
+        # Save the validated bytes. We write atomically via a temp file +
+        # rename so a crash mid-write cannot leave a half-written cookie on
+        # disk for the uploader to choke on.
         cookie_file_path = Path(BASE_DIR / "cookiesFile" / result['filePath'])
         cookie_file_path.parent.mkdir(parents=True, exist_ok=True)
-
-        file.save(str(cookie_file_path))
-
-        # 更新数据库中的账号信息（可选，比如更新更新时间）
-        # 这里可以根据需要添加额外的处理逻辑
+        tmp_path = cookie_file_path.with_suffix(cookie_file_path.suffix + ".tmp")
+        tmp_path.write_bytes(payload_bytes)
+        tmp_path.replace(cookie_file_path)
 
         return jsonify({
             "code": 200,
@@ -799,11 +882,17 @@ def jobs_create():
 def jobs_list():
     status = request.args.get("status")
     platform = request.args.get("platform")
+    raw_limit = request.args.get("limit", "50")
     try:
-        limit = int(request.args.get("limit", "50"))
-    except ValueError:
-        return jsonify({"code": 400, "msg": "Invalid limit", "data": None}), 400
-    items = job_runtime.list_jobs(status=status, platform=platform, limit=limit)
+        # ValueError covers non-numeric input; the data layer ValueError covers
+        # zero/negative/oversized limits and surfaces a precise message.
+        items = job_runtime.list_jobs(
+            status=status,
+            platform=platform,
+            limit=int(raw_limit),
+        )
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     return jsonify({"code": 200, "msg": "ok",
                     "data": [_job_to_payload(item) for item in items]}), 200
 

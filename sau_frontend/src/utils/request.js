@@ -1,6 +1,8 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
+import { clearToken, getToken } from '@/utils/auth'
+
 // 创建axios实例
 const request = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409',
@@ -12,8 +14,7 @@ const request = axios.create({
 // 请求拦截器
 request.interceptors.request.use(
   (config) => {
-    // 可以在这里添加token等认证信息
-    const token = localStorage.getItem('token')
+    const token = getToken()
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
     }
@@ -47,7 +48,14 @@ request.interceptors.response.use(
       switch (status) {
         case 401:
           ElMessage.error('未授权，请重新登录')
-          // 可以在这里处理登录跳转
+          clearToken()
+          // Bounce back to the login screen using the hash router. Use a
+          // direct location.hash assignment rather than importing the
+          // router, which would create a circular dependency.
+          if (typeof window !== 'undefined' &&
+              window.location && !window.location.hash.includes('#/login')) {
+            window.location.hash = '#/login'
+          }
           break
         case 403:
           ElMessage.error('拒绝访问')

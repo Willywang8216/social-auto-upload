@@ -99,6 +99,25 @@ class JobsHttpTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["data"]["status"], "cancelled")
 
+    # --- /jobs?limit edge cases (QA regression) ---
+
+    def test_list_negative_limit_rejected(self) -> None:
+        response = self.client.get("/jobs?limit=-5")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("limit", response.get_json()["msg"])
+
+    def test_list_zero_limit_rejected(self) -> None:
+        response = self.client.get("/jobs?limit=0")
+        self.assertEqual(response.status_code, 400)
+
+    def test_list_non_numeric_limit_rejected(self) -> None:
+        response = self.client.get("/jobs?limit=five")
+        self.assertEqual(response.status_code, 400)
+
+    def test_list_oversized_limit_does_not_500(self) -> None:
+        response = self.client.get("/jobs?limit=999999")
+        self.assertEqual(response.status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()

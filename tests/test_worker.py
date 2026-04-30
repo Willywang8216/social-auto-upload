@@ -149,6 +149,59 @@ class WorkerLifecycleTests(unittest.TestCase):
         self.assertGreaterEqual(peak, 2,
             "different-account targets must overlap")
 
+    def test_cancel_mid_run_does_not_let_executor_resurrect_target(self) -> None:
+        # Simulates the QA-found cancel race: target is running, the user
+        # cancels the job, then the executor finishes "successfully". The
+        # final state must show both the job AND its targets as cancelled.
+        job = jobs.enqueue_job(
+            _spec([("acct-1", "f1", None)]),
+            db_path=self.db_path,
+        )
+
+        cancel_observed = asyncio.Event()
+        executor_finished = asyncio.Event()
+
+        async def executor(platform, payload, target):
+            # Wait for the test driver to cancel before "finishing".
+            await cancel_observed.wait()
+            executor_finished.set()
+            # Returning normally would drive mark_target_success; without
+            # the guard this would resurrect the cancelled target.
+
+        async def drive() -> None:
+            config = WorkerConfig(
+                poll_interval=0.001,
+                batch_size=1,
+                max_concurrent=1,
+                retry=RetryPolicy(max_attempts=1, base_backoff_seconds=0.001,
+                                   max_backoff_seconds=0.001),
+            )
+            worker = PublishWorker(executor, config=config, db_path=self.db_path)
+            drain_task = asyncio.create_task(worker.drain())
+
+            # Wait until the worker has actually claimed the target.
+            for _ in range(50):
+                target = jobs.list_targets(job.id, db_path=self.db_path)[0]
+                if target.status == jobs.TARGET_RUNNING:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(target.status, jobs.TARGET_RUNNING)
+
+            jobs.cancel_job(job.id, db_path=self.db_path)
+            cancel_observed.set()
+            await executor_finished.wait()
+            await drain_task
+
+        asyncio.run(drive())
+
+        finalised = jobs.get_job(job.id, db_path=self.db_path)
+        target_after = jobs.list_targets(job.id, db_path=self.db_path)[0]
+        self.assertEqual(finalised.status, jobs.JOB_CANCELLED)
+        self.assertEqual(target_after.status, jobs.TARGET_CANCELLED,
+            "executor's late success must not overwrite a cancelled target")
+        self.assertEqual(finalised.completed_targets, 0)
+        self.assertEqual(finalised.failed_targets, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

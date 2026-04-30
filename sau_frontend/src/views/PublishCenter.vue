@@ -62,6 +62,14 @@
             />
           </div>
 
+          <!-- 任务进度（已切换到 /jobs 异步发布管线） -->
+          <div v-if="tab.jobId" class="publish-job-progress">
+            <PublishJobProgress
+              :job="jobsStore.jobsById[tab.jobId]"
+              @cancel="handleCancelJob(tab)"
+            />
+          </div>
+
           <!-- 视频上传区域 -->
           <div class="upload-section">
             <h3>视频</h3>
@@ -491,21 +499,27 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onBeforeUnmount } from 'vue'
 import { Upload, Plus, Close, Folder } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
+import { useJobsStore } from '@/stores/jobs'
 import { materialApi } from '@/api/material'
-import { http } from '@/utils/request'
+import { getToken } from '@/utils/auth'
+import PublishJobProgress from '@/components/PublishJobProgress.vue'
 
 // API base URL
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409'
 
-// Authorization headers
-const authHeaders = computed(() => ({
-  'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
-}))
+// Authorization headers for the in-page <el-upload>. The component owns its
+// own XHR pipeline so we cannot reuse the axios interceptor — we read the
+// canonical token from utils/auth instead. In open mode the helper returns
+// '' and we omit the header entirely.
+const authHeaders = computed(() => {
+  const token = getToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+})
 
 // 当前激活的tab
 const activeTab = ref('tab1')
@@ -552,10 +566,11 @@ const defaultTabInit = {
   videosPerDay: 1, // 每天发布视频数量
   dailyTimes: ['10:00'], // 每天发布时间点列表
   startDays: 0, // 从今天开始计算的发布天数，0表示明天，1表示后天
-  publishStatus: null, // 发布状态，包含message和type
-  publishing: false, // 发布状态，用于控制按钮loading效果
-  isDraft: false, // 是否保存为草稿，仅视频号平台可见
-  isOriginal: false // 是否标记为原创
+  publishStatus: null, // 发布状态提示（message + type）
+  publishing: false, // 控制发布按钮的 loading 状态
+  jobId: null, // /jobs 任务 ID；非空时显示进度条
+  isDraft: false, // 仅视频号草稿
+  isOriginal: false // 是否声明原创
 }
 
 // helper to create a fresh deep-copied tab from defaultTabInit
@@ -580,6 +595,9 @@ const currentTab = ref(null)
 
 // 获取账号状态管理
 const accountStore = useAccountStore()
+
+// 任务运行时状态（轮询 /jobs/<id> 获取进度）
+const jobsStore = useJobsStore()
 
 // 根据选择的平台获取可用账号列表
 const availableAccounts = computed(() => {
@@ -753,80 +771,86 @@ const getAccountDisplayName = (accountId) => {
   return account ? account.name : accountId
 }
 
-// 取消发布
+// 取消发布（在已经入队后取消任务，否则只清状态）
 const cancelPublish = (tab) => {
-  ElMessage.info('已取消发布')
+  if (tab.jobId) {
+    handleCancelJob(tab)
+  } else {
+    ElMessage.info('已取消发布')
+  }
 }
 
-// 确认发布
+// 已入队任务的取消按钮
+const handleCancelJob = async (tab) => {
+  if (!tab.jobId) return
+  try {
+    await jobsStore.cancelJob(tab.jobId)
+    jobsStore.stopPolling(tab.jobId)
+    tab.publishStatus = { message: '任务已取消', type: 'warning' }
+  } catch (error) {
+    console.error('取消任务失败:', error)
+    ElMessage.error(error?.message || '取消任务失败')
+  }
+}
+
+// Validate the publish form. Returns null on success or a human error message.
+const validatePublishForm = (tab) => {
+  if (tab.fileList.length === 0) return '请先上传视频文件'
+  if (!tab.title.trim()) return '请输入标题'
+  if (!tab.selectedPlatform) return '请选择发布平台'
+  if (tab.selectedAccounts.length === 0) return '请选择发布账号'
+  return null
+}
+
+// Build a /jobs payload from a tab's reactive state. Kept pure so it is
+// easy to unit-test and reuse from the batch-publish path.
+const buildPublishPayload = (tab) => ({
+  type: tab.selectedPlatform,
+  title: tab.title,
+  tags: tab.selectedTopics,
+  fileList: tab.fileList.map((file) => file.path),
+  accountList: tab.selectedAccounts.map((accountId) => {
+    const account = accountStore.accounts.find((acc) => acc.id === accountId)
+    return account ? account.filePath : accountId
+  }),
+  enableTimer: tab.scheduleEnabled ? 1 : 0,
+  videosPerDay: tab.scheduleEnabled ? tab.videosPerDay || 1 : 1,
+  dailyTimes: tab.scheduleEnabled ? tab.dailyTimes || ['10:00'] : ['10:00'],
+  startDays: tab.scheduleEnabled ? tab.startDays || 0 : 0,
+  category: tab.isOriginal ? 1 : 0,
+  productLink: tab.productLink.trim() || '',
+  productTitle: tab.productTitle.trim() || '',
+  isDraft: tab.isDraft
+})
+
+// Confirm publish — enqueues a /jobs task and starts polling. The button is
+// loading-locked until the queue has accepted the job; the per-target
+// progress is then driven by the jobs store.
 const confirmPublish = async (tab) => {
-  // 防止重复点击
   if (tab.publishing) {
     throw new Error('正在发布中，请稍候...')
   }
 
-  tab.publishing = true // 设置发布状态为进行中
-
-  // 数据验证
-  if (tab.fileList.length === 0) {
-    ElMessage.error('请先上传视频文件')
-    tab.publishing = false
-    throw new Error('请先上传视频文件')
-  }
-  if (!tab.title.trim()) {
-    ElMessage.error('请输入标题')
-    tab.publishing = false
-    throw new Error('请输入标题')
-  }
-  if (!tab.selectedPlatform) {
-    ElMessage.error('请选择发布平台')
-    tab.publishing = false
-    throw new Error('请选择发布平台')
-  }
-  if (tab.selectedAccounts.length === 0) {
-    ElMessage.error('请选择发布账号')
-    tab.publishing = false
-    throw new Error('请选择发布账号')
+  const validationError = validatePublishForm(tab)
+  if (validationError) {
+    ElMessage.error(validationError)
+    throw new Error(validationError)
   }
 
-  // 构造发布数据，符合后端API格式
-  const publishData = {
-    type: tab.selectedPlatform,
-    title: tab.title,
-    tags: tab.selectedTopics, // 不带#号的话题列表
-    fileList: tab.fileList.map(file => file.path), // 只发送文件路径
-    accountList: tab.selectedAccounts.map(accountId => {
-      const account = accountStore.accounts.find(acc => acc.id === accountId)
-      return account ? account.filePath : accountId
-    }), // 发送账号的文件路径
-    enableTimer: tab.scheduleEnabled ? 1 : 0,
-    videosPerDay: tab.scheduleEnabled ? tab.videosPerDay || 1 : 1,
-    dailyTimes: tab.scheduleEnabled ? tab.dailyTimes || ['10:00'] : ['10:00'],
-    startDays: tab.scheduleEnabled ? tab.startDays || 0 : 0,
-    category: tab.isOriginal ? 1 : 0, // 1表示原创，0表示非原创
-    productLink: tab.productLink.trim() || '',
-    productTitle: tab.productTitle.trim() || '',
-    isDraft: tab.isDraft
-  }
+  tab.publishing = true
+  tab.publishStatus = null
 
-  // 调用后端发布API（使用统一的http封装）
   try {
-    const data = await http.post('/postVideo', publishData)
+    const job = await jobsStore.createJob(buildPublishPayload(tab))
+    tab.jobId = job?.id ?? null
     tab.publishStatus = {
-      message: '发布成功',
+      message: `任务已入队（#${job?.id}），共 ${job?.totalTargets} 个目标`,
       type: 'success'
     }
-    // 清空当前tab的数据
-    tab.fileList = []
-    tab.displayFileList = []
-    tab.title = ''
-    tab.selectedTopics = []
-    tab.selectedAccounts = []
-    tab.scheduleEnabled = false
   } catch (error) {
-    console.error('发布错误:', error)
+    console.error('入队失败:', error)
     tab.publishStatus = {
-      message: `发布失败：${error.message || '请检查网络连接'}`,
+      message: `入队失败：${error?.message || '请检查网络连接'}`,
       type: 'error'
     }
     throw error
@@ -996,6 +1020,12 @@ const batchPublish = async () => {
     isCancelled.value = false
   }
 }
+
+// Stop every active job poller when the user navigates away. Without this
+// the polling timers keep ticking against the backend in the background.
+onBeforeUnmount(() => {
+  jobsStore.stopAllPolling()
+})
 </script>
 
 <style lang="scss" scoped>
