@@ -764,6 +764,29 @@ def build_parser() -> argparse.ArgumentParser:
     profile_delete = profile_actions.add_parser("delete", help="Delete a profile and all its accounts")
     profile_delete.add_argument("--profile", required=True, help="Profile slug")
 
+    # ----- Cookie encryption helpers -----
+    cookies_parser = platform_parsers.add_parser(
+        "cookies",
+        help="Cookie storage helpers (encrypt-at-rest migration etc.)",
+    )
+    cookies_actions = cookies_parser.add_subparsers(dest="action", required=True)
+    cookies_actions.add_parser(
+        "status",
+        help="Report whether at-rest encryption is enabled and how many files are encrypted",
+    )
+    encrypt_action = cookies_actions.add_parser(
+        "encrypt",
+        help=(
+            "Encrypt every plaintext cookie file under cookiesFile/ and "
+            "cookies/. Idempotent. Requires SAU_COOKIE_ENCRYPTION_KEY to be set."
+        ),
+    )
+    encrypt_action.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print which files would be encrypted without touching disk.",
+    )
+
     return parser
 
 
@@ -1050,7 +1073,77 @@ async def dispatch(args: argparse.Namespace) -> int:
 
         raise RuntimeError(f"Unsupported profile action: {args.action}")
 
+    if args.platform == "cookies":
+        from myUtils import cookie_storage
+
+        if args.action == "status":
+            enabled = cookie_storage.is_encryption_enabled()
+            paths = _all_cookie_files()
+            encrypted = sum(
+                1 for path in paths
+                if path.exists()
+                and cookie_storage.looks_encrypted(path.read_bytes()[:8])
+            )
+            mode = "encrypted" if enabled else "open (set SAU_COOKIE_ENCRYPTION_KEY)"
+            print(f"Cookie storage: {mode}")
+            print(f"  files on disk:    {len(paths)}")
+            print(f"  already encrypted: {encrypted}")
+            print(f"  plaintext:         {len(paths) - encrypted}")
+            return 0
+
+        if args.action == "encrypt":
+            if not cookie_storage.is_encryption_enabled():
+                print(
+                    "SAU_COOKIE_ENCRYPTION_KEY is not set; refusing to run.",
+                    file=sys.stderr,
+                )
+                print(
+                    "Generate a key via: "
+                    "python -c \"import base64, secrets; "
+                    "print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())\"",
+                    file=sys.stderr,
+                )
+                return 2
+
+            paths = _all_cookie_files()
+            if args.dry_run:
+                for path in paths:
+                    if not path.exists():
+                        continue
+                    head = path.read_bytes()[:8]
+                    state = "already-encrypted" if cookie_storage.looks_encrypted(head) else "would-encrypt"
+                    print(f"{state}\t{path}")
+                return 0
+
+            outcomes = cookie_storage.encrypt_existing_files(paths)
+            counts: dict[str, int] = {}
+            for outcome in outcomes.values():
+                counts[outcome] = counts.get(outcome, 0) + 1
+            for outcome, count in sorted(counts.items()):
+                print(f"{outcome}: {count}")
+            return 0
+
+        raise RuntimeError(f"Unsupported cookies action: {args.action}")
+
     raise RuntimeError(f"Unsupported platform: {args.platform}")
+
+
+def _all_cookie_files() -> list[Path]:
+    """Discover every cookie file the project knows about.
+
+    Walks both the legacy Flask layout (``cookiesFile/*.json``) and the
+    profile-aware layout (``cookies/{platform}/{profile}/{name}.json``).
+    """
+
+    home = resolve_runtime_home()
+    candidates: list[Path] = []
+    legacy = home / "cookiesFile"
+    if legacy.exists():
+        candidates.extend(p for p in legacy.glob("*.json") if p.is_file())
+    new_root = home / "cookies"
+    if new_root.exists():
+        candidates.extend(p for p in new_root.rglob("*.json") if p.is_file())
+    return sorted(set(candidates))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

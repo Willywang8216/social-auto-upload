@@ -260,15 +260,21 @@ def _resolve_file_path(file_ref: str) -> Path:
     return candidate
 
 
-async def default_executor(platform: str, payload: dict, target: jobs.Target) -> None:
-    """Default platform router used by the Flask publish endpoints.
+async def _run_platform_upload(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account_file: Path,
+    file_path: Path,
+) -> None:
+    """Per-platform dispatch.
 
-    The mapping mirrors what ``myUtils/postVideo.py`` did, but on a single
-    target (not the full N·M product), so the worker can parallelise.
+    Split out from ``default_executor`` so the cookie-decryption wrapper
+    lives in one place and the platform router stays purely about argument
+    shaping.
     """
 
-    account_file = _resolve_account_path(target.account_ref)
-    file_path = _resolve_file_path(target.file_ref)
     schedule_at = target.schedule_at or 0
     if isinstance(schedule_at, str) and schedule_at:
         from datetime import datetime
@@ -328,6 +334,31 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
         return
 
     raise ValueError(f"Unsupported publish platform: {platform!r}")
+
+
+async def default_executor(platform: str, payload: dict, target: jobs.Target) -> None:
+    """Default platform router used by the Flask publish endpoints.
+
+    Wraps the per-platform dispatch in
+    :func:`myUtils.cookie_storage.decrypted_storage_state` so the uploader
+    always sees a plaintext cookie file regardless of how the file is
+    stored on disk. When ``SAU_COOKIE_ENCRYPTION_KEY`` is unset the
+    helper degrades to a no-op and the uploader uses the canonical path.
+    """
+
+    from myUtils.cookie_storage import decrypted_storage_state
+
+    canonical_account_file = _resolve_account_path(target.account_ref)
+    file_path = _resolve_file_path(target.file_ref)
+
+    with decrypted_storage_state(canonical_account_file) as plain_path:
+        await _run_platform_upload(
+            platform,
+            payload,
+            target,
+            account_file=plain_path,
+            file_path=file_path,
+        )
 
 
 def run_worker_drain(executor: Executor | None = None,

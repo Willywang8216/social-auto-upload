@@ -717,14 +717,13 @@ def upload_cookie():
                 "data": None
             }), 400
 
-        # Save the validated bytes. We write atomically via a temp file +
-        # rename so a crash mid-write cannot leave a half-written cookie on
-        # disk for the uploader to choke on.
+        # Save the validated bytes via the cookie_storage helper so the file
+        # lands encrypted on disk when SAU_COOKIE_ENCRYPTION_KEY is set, or
+        # plaintext (with the same atomic temp-file + rename semantics) when
+        # encryption is disabled.
+        from myUtils.cookie_storage import write_cookie
         cookie_file_path = Path(BASE_DIR / "cookiesFile" / result['filePath'])
-        cookie_file_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = cookie_file_path.with_suffix(cookie_file_path.suffix + ".tmp")
-        tmp_path.write_bytes(payload_bytes)
-        tmp_path.replace(cookie_file_path)
+        write_cookie(cookie_file_path, payload_bytes)
 
         return jsonify({
             "code": 200,
@@ -771,11 +770,29 @@ def download_cookie():
                 "data": None
             }), 404
 
-        # 返回文件
-        return send_from_directory(
-            directory=str(cookie_file_path.parent),
-            path=cookie_file_path.name,
-            as_attachment=True
+        # Always serve plaintext to the user — they're typically exporting
+        # the session for use in another tool. cookie_storage.read_cookie
+        # transparently decrypts when SAU_COOKIE_ENCRYPTION_KEY is set and
+        # returns the file verbatim otherwise.
+        from myUtils.cookie_storage import CookieEncryptionError, read_cookie
+        try:
+            payload = read_cookie(cookie_file_path)
+        except CookieEncryptionError as exc:
+            return jsonify({
+                "code": 500,
+                "msg": f"无法解密 Cookie 文件: {exc}",
+                "data": None,
+            }), 500
+
+        download_name = cookie_file_path.name
+        if not download_name.endswith(".json"):
+            download_name = f"{download_name}.json"
+        return Response(
+            payload,
+            mimetype="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{download_name}"',
+            },
         )
 
     except Exception as e:

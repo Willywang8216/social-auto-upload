@@ -1,20 +1,38 @@
 """Idempotent schema bootstrap for social-auto-upload.
 
-Running this script is safe on a fresh database, on the legacy (`user_info`,
-`file_records`) layout, and on the current layout that adds the `profiles` and
-`accounts` tables. It never drops data; it only adds what is missing.
+Running this script is safe on a fresh database, on the legacy
+(``user_info``, ``file_records``) layout, and on the current layout that
+adds the Profile / job-runtime tables. It never drops data; it only adds
+what is missing.
 
-The Profile model represents a person/brand who can hold many accounts across
-many platforms. The same Profile may own more than one account on the same
-platform (e.g. two Medium accounts under one brand).
+There are two ways into this module:
+
+* ``python db/createTable.py`` — invokes ``alembic upgrade head`` against
+  the canonical ``db/database.db`` file, which is now the supported
+  production path. New schema work is added as a new migration under
+  ``migrations/versions/`` rather than by editing the table definitions
+  in this file.
+
+* ``bootstrap(db_path)`` — the Python-level entry point used by the test
+  suite to spin up a throwaway DB without paying the cost of an Alembic
+  config load. It runs the raw-SQL ``CREATE TABLE IF NOT EXISTS`` chain
+  defined here AND stamps the result with Alembic's current head, so the
+  resulting database is indistinguishable from one bootstrapped via
+  ``alembic upgrade``. The two paths must therefore always agree on the
+  schema; ``tests/test_alembic.py`` enforces that.
 """
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent / "database.db"
+
+# Alembic config lives at the workspace root.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ALEMBIC_INI_PATH = _PROJECT_ROOT / "alembic.ini"
 
 
 LEGACY_USER_INFO = """
@@ -110,6 +128,61 @@ INDEXES = [
 ]
 
 
+def _stamp_alembic_head(db_path: Path) -> None:
+    """Best-effort: mark the DB as up-to-date with Alembic head.
+
+    We avoid actually running migrations from inside ``bootstrap`` because
+    spinning up an Alembic config is expensive and the test suite calls
+    this function on every test setup. Instead we directly write the
+    current head revision into ``alembic_version`` so any later
+    ``alembic upgrade`` is a no-op.
+
+    Alembic might not be installed in extremely minimal environments
+    (running tests against a stripped-down sandbox); we degrade
+    gracefully there.
+    """
+
+    try:
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+    except ImportError:
+        return
+
+    try:
+        cfg = Config(str(ALEMBIC_INI_PATH))
+        head_rev = ScriptDirectory.from_config(cfg).get_current_head()
+    except Exception:
+        # Couldn't load the config (e.g. ini missing in a packaged wheel);
+        # leaving the version table empty just means a future
+        # ``alembic upgrade head`` will run the baseline migration, which
+        # is itself idempotent.
+        return
+    if head_rev is None:
+        return
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS alembic_version "
+            "(version_num VARCHAR(32) NOT NULL PRIMARY KEY)"
+        )
+        existing = conn.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                "INSERT INTO alembic_version (version_num) VALUES (?)",
+                (head_rev,),
+            )
+        elif existing[0] != head_rev:
+            # A real migration would normally do this; we just keep the
+            # row in sync so the bootstrap path doesn't drift behind.
+            conn.execute(
+                "UPDATE alembic_version SET version_num = ?",
+                (head_rev,),
+            )
+        conn.commit()
+
+
 def bootstrap(db_path: Path = DB_PATH) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
@@ -124,8 +197,28 @@ def bootstrap(db_path: Path = DB_PATH) -> None:
         for statement in INDEXES:
             cursor.execute(statement)
         conn.commit()
+    _stamp_alembic_head(db_path)
+
+
+def _alembic_upgrade_head(db_path: Path = DB_PATH) -> None:
+    """Run ``alembic upgrade head`` against the given DB file.
+
+    This is what ``python db/createTable.py`` invokes — the supported
+    production path. Tests use the lighter ``bootstrap()`` path above.
+    """
+
+    from alembic import command
+    from alembic.config import Config
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg = Config(str(ALEMBIC_INI_PATH))
+    cfg.set_main_option(
+        "sqlalchemy.url", f"sqlite:///{db_path.resolve()}"
+    )
+    command.upgrade(cfg, "head")
 
 
 if __name__ == "__main__":
-    bootstrap()
-    print(f"OK schema ensured at {DB_PATH}")
+    target = Path(os.environ.get("SAU_DB_PATH", DB_PATH))
+    _alembic_upgrade_head(target)
+    print(f"OK alembic upgraded {target} to head")
