@@ -161,6 +161,46 @@ SAU_API_TOKENS=ignored python -m myUtils.worker \
 安全相关的环境变量见 [Phase 3 Security](./docs/install.md)：
 - `SAU_API_TOKENS` — 接受的 bearer token 集合，留空表示开放模式
 - `SAU_CORS_ORIGINS` — 允许的浏览器来源列表，默认是 Vite 的 dev/preview 端口
+- `SAU_COOKIE_ENCRYPTION_KEY` — base64 编码的 16/24/32 字节 AES 密钥；
+  设置后所有 cookie 文件以 AES-GCM 加密落盘，`worker` 会在调用上传器之前解密到一个
+  `0o600` 临时文件、上传完成后再加密回原位
+
+生成一个 32-byte 的随机密钥：
+
+```bash
+python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+```
+
+把现有的明文 cookie 一次性加密：
+
+```bash
+SAU_COOKIE_ENCRYPTION_KEY=... sau cookies status   # 看一下现状
+SAU_COOKIE_ENCRYPTION_KEY=... sau cookies encrypt  # 实际执行
+```
+
+`sau cookies encrypt` 是幂等的，已经加密过的文件会被跳过；磁盘上未加密的文件如果
+没设置 key，启动时也会按以前的明文路径继续工作，不影响向后兼容。
+
+### 数据库迁移（Alembic）
+
+数据库 schema 现在由 Alembic 管理，迁移脚本位于 `migrations/versions/`。
+普通用户继续用：
+
+```bash
+python db/createTable.py
+```
+
+这条命令现在会调用 `alembic upgrade head`，把 `db/database.db` 升级到最新 schema。
+新加表 / 加列就在 `migrations/versions/` 下加一个新的迁移脚本，不要再直接改
+`db/createTable.py` 里的 `CREATE TABLE` 语句。
+
+要在自定义路径上运行迁移：
+
+```bash
+SAU_DB_PATH=/path/to/database.db python db/createTable.py
+# 或者直接调 alembic：
+alembic -x url=sqlite:///path/to/database.db upgrade head
+```
 
 
 ## 🏁快速开始

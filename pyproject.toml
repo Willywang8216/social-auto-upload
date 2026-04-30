@@ -9,6 +9,12 @@ description = "Social media auto uploader"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
+  # `cryptography` powers at-rest encryption for cookie files
+  # (myUtils/cookie_storage.py). Encryption is opt-in via the
+  # SAU_COOKIE_ENCRYPTION_KEY env var; without the key the project still
+  # writes plaintext cookies, but the dependency is always installed so
+  # the encryption code path is unconditionally importable.
+  "cryptography>=42.0.0",
   "loguru==0.7.3",
   "opencv-python>=4.13.0.92",
   # `patchright` is a stealth-patched fork of `playwright` with the same
@@ -18,6 +24,9 @@ dependencies = [
   "qrcode==8.2",
   "requests==2.32.3",
   "segno>=1.6.6",
+  # `alembic` drives the SQLite schema migrations under migrations/.
+  # `db/createTable.py` is now a thin wrapper around `alembic upgrade head`.
+  "alembic>=1.13",
 ]
 
 [project.scripts]
