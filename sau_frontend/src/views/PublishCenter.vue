@@ -506,15 +506,20 @@ import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { useJobsStore } from '@/stores/jobs'
 import { materialApi } from '@/api/material'
+import { getToken } from '@/utils/auth'
 import PublishJobProgress from '@/components/PublishJobProgress.vue'
 
 // API base URL
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409'
 
-// Authorization headers
-const authHeaders = computed(() => ({
-  'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
-}))
+// Authorization headers for the in-page <el-upload>. The component owns its
+// own XHR pipeline so we cannot reuse the axios interceptor — we read the
+// canonical token from utils/auth instead. In open mode the helper returns
+// '' and we omit the header entirely.
+const authHeaders = computed(() => {
+  const token = getToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+})
 
 // 当前激活的tab
 const activeTab = ref('tab1')

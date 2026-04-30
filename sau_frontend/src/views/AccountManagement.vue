@@ -167,7 +167,7 @@ import { accountApi } from '@/api/account'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { http } from '@/utils/request'
-import { appendAuthQuery } from '@/utils/auth'
+import { appendAuthQuery, getToken } from '@/utils/auth'
 import AccountTabPane from '@/components/AccountTabPane.vue'
 
 // 获取账号状态管理
@@ -413,7 +413,7 @@ const handleDownloadCookie = async (row) => {
     const response = await fetch(
       `${baseUrl}/downloadCookie?filePath=${encodeURIComponent(row.filePath)}`,
       {
-        headers: { Authorization: `Bearer ${localStorage.getItem('sau-auth-token') || ''}` }
+        headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {}
       }
     )
     if (!response.ok) {

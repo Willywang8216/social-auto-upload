@@ -63,13 +63,13 @@ async def douyin_cookie_gen(id,status_queue):
             await browser.close()
             status_queue.put("500")
             return None
-        uuid_v1 = uuid.uuid1()
-        print(f"UUID v1: {uuid_v1}")
+        cookie_uuid = uuid.uuid4()
+        print(f"cookie uuid: {cookie_uuid}")
         # 确保cookiesFile目录存在
         cookies_dir = Path(BASE_DIR / "cookiesFile")
         cookies_dir.mkdir(exist_ok=True)
-        await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
-        result = await check_cookie(3, f"{uuid_v1}.json")
+        await context.storage_state(path=cookies_dir / f"{cookie_uuid}.json")
+        result = await check_cookie(3, f"{cookie_uuid}.json")
         if not result:
             status_queue.put("500")
             await page.close()
@@ -84,7 +84,7 @@ async def douyin_cookie_gen(id,status_queue):
             cursor.execute('''
                                 INSERT INTO user_info (type, filePath, userName, status)
                                 VALUES (?, ?, ?, ?)
-                                ''', (3, f"{uuid_v1}.json", id, 1))
+                                ''', (3, f"{cookie_uuid}.json", id, 1))
             conn.commit()
             print("✅ 用户状态已记录")
         status_queue.put("200")
@@ -141,13 +141,13 @@ async def get_tencent_cookie(id,status_queue):
             await context.close()
             await browser.close()
             return None
-        uuid_v1 = uuid.uuid1()
-        print(f"UUID v1: {uuid_v1}")
+        cookie_uuid = uuid.uuid4()
+        print(f"cookie uuid: {cookie_uuid}")
         # 确保cookiesFile目录存在
         cookies_dir = Path(BASE_DIR / "cookiesFile")
         cookies_dir.mkdir(exist_ok=True)
-        await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
-        result = await check_cookie(2,f"{uuid_v1}.json")
+        await context.storage_state(path=cookies_dir / f"{cookie_uuid}.json")
+        result = await check_cookie(2,f"{cookie_uuid}.json")
         if not result:
             status_queue.put("500")
             await page.close()
@@ -163,7 +163,7 @@ async def get_tencent_cookie(id,status_queue):
             cursor.execute('''
                                 INSERT INTO user_info (type, filePath, userName, status)
                                 VALUES (?, ?, ?, ?)
-                                ''', (2, f"{uuid_v1}.json", id, 1))
+                                ''', (2, f"{cookie_uuid}.json", id, 1))
             conn.commit()
             print("✅ 用户状态已记录")
         status_queue.put("200")
@@ -215,13 +215,13 @@ async def get_ks_cookie(id,status_queue):
             await context.close()
             await browser.close()
             return None
-        uuid_v1 = uuid.uuid1()
-        print(f"UUID v1: {uuid_v1}")
+        cookie_uuid = uuid.uuid4()
+        print(f"cookie uuid: {cookie_uuid}")
         # 确保cookiesFile目录存在
         cookies_dir = Path(BASE_DIR / "cookiesFile")
         cookies_dir.mkdir(exist_ok=True)
-        await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
-        result = await check_cookie(4, f"{uuid_v1}.json")
+        await context.storage_state(path=cookies_dir / f"{cookie_uuid}.json")
+        result = await check_cookie(4, f"{cookie_uuid}.json")
         if not result:
             status_queue.put("500")
             await page.close()
@@ -237,7 +237,7 @@ async def get_ks_cookie(id,status_queue):
             cursor.execute('''
                                         INSERT INTO user_info (type, filePath, userName, status)
                                         VALUES (?, ?, ?, ?)
-                                        ''', (4, f"{uuid_v1}.json", id, 1))
+                                        ''', (4, f"{cookie_uuid}.json", id, 1))
             conn.commit()
             print("✅ 用户状态已记录")
         status_queue.put("200")
@@ -289,13 +289,13 @@ async def xiaohongshu_cookie_gen(id,status_queue):
             await context.close()
             await browser.close()
             return None
-        uuid_v1 = uuid.uuid1()
-        print(f"UUID v1: {uuid_v1}")
+        cookie_uuid = uuid.uuid4()
+        print(f"cookie uuid: {cookie_uuid}")
         # 确保cookiesFile目录存在
         cookies_dir = Path(BASE_DIR / "cookiesFile")
         cookies_dir.mkdir(exist_ok=True)
-        await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
-        result = await check_cookie(1, f"{uuid_v1}.json")
+        await context.storage_state(path=cookies_dir / f"{cookie_uuid}.json")
+        result = await check_cookie(1, f"{cookie_uuid}.json")
         if not result:
             status_queue.put("500")
             await page.close()
@@ -311,7 +311,7 @@ async def xiaohongshu_cookie_gen(id,status_queue):
             cursor.execute('''
                            INSERT INTO user_info (type, filePath, userName, status)
                            VALUES (?, ?, ?, ?)
-                           ''', (1, f"{uuid_v1}.json", id, 1))
+                           ''', (1, f"{cookie_uuid}.json", id, 1))
             conn.commit()
             print("✅ 用户状态已记录")
         status_queue.put("200")
