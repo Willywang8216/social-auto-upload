@@ -45,7 +45,11 @@ COPY requirements.txt requirements.txt
 
 RUN pip install -r requirements.txt
 
-RUN playwright install chromium-headless-shell
+# Install browsers for both drivers. The live uploaders use patchright;
+# the legacy Flask helpers still import upstream playwright. Each
+# package manages its own browsers under PLAYWRIGHT_BROWSERS_PATH.
+RUN playwright install --with-deps chromium && \
+    patchright install chromium
 
 COPY . .
 
