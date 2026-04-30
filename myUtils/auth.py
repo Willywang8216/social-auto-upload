@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS
 from utils.base_social_media import set_init_script
