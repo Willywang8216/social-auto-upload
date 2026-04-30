@@ -167,6 +167,7 @@ import { accountApi } from '@/api/account'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { http } from '@/utils/request'
+import { appendAuthQuery } from '@/utils/auth'
 import AccountTabPane from '@/components/AccountTabPane.vue'
 
 // 获取账号状态管理
@@ -403,21 +404,35 @@ const handleDelete = (row) => {
     })
 }
 
-// 下载Cookie文件
-const handleDownloadCookie = (row) => {
-  // 从后端获取Cookie文件
-  const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409'
-  const downloadUrl = `${baseUrl}/downloadCookie?filePath=${encodeURIComponent(row.filePath)}`
-
-  // 创建一个隐藏的链接来触发下载
-  const link = document.createElement('a')
-  link.href = downloadUrl
-  link.download = `${row.name}_cookie.json`
-  link.target = '_blank'
-  link.style.display = 'none'
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
+// Cookie file download. We fetch via axios so the Authorization header is
+// attached, then turn the response into a Blob and trigger a synthetic
+// download. Using a plain <a download> would skip the auth header and 401.
+const handleDownloadCookie = async (row) => {
+  try {
+    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409'
+    const response = await fetch(
+      `${baseUrl}/downloadCookie?filePath=${encodeURIComponent(row.filePath)}`,
+      {
+        headers: { Authorization: `Bearer ${localStorage.getItem('sau-auth-token') || ''}` }
+      }
+    )
+    if (!response.ok) {
+      ElMessage.error(response.status === 401 ? '未授权，请重新登录' : '下载失败')
+      return
+    }
+    const blob = await response.blob()
+    const objectUrl = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = objectUrl
+    link.download = `${row.name}_cookie.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(objectUrl)
+  } catch (error) {
+    console.error('下载Cookie失败:', error)
+    ElMessage.error('下载Cookie失败')
+  }
 }
 
 // 上传Cookie文件
@@ -525,9 +540,13 @@ const connectSSE = (platform, name) => {
 
   const type = platformTypeMap[platform] || '1'
 
-  // 创建SSE连接
+  // EventSource cannot attach an Authorization header, so we tunnel the
+  // auth token through a query parameter that the backend specifically
+  // honours for /login. In open mode this is a no-op.
   const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409'
-  const url = `${baseUrl}/login?type=${type}&id=${encodeURIComponent(name)}`
+  const url = appendAuthQuery(
+    `${baseUrl}/login?type=${type}&id=${encodeURIComponent(name)}`
+  )
 
   eventSource = new EventSource(url)
 
