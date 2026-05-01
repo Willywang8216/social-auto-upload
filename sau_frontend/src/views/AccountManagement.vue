@@ -22,60 +22,17 @@
             @search="onSearchChange"
           />
         </el-tab-pane>
-        <el-tab-pane label="快手" name="kuaishou">
+        <el-tab-pane
+          v-for="platform in accountPlatformTabs"
+          :key="platform.publishSlug"
+          :label="platform.label"
+          :name="platform.publishSlug"
+        >
           <AccountTabPane
-            :accounts="filteredKuaishouAccounts"
+            :accounts="getFilteredAccountsByPlatform(platform.label)"
             :search-keyword="searchKeyword"
             :refreshing="appStore.isAccountRefreshing"
-            empty-text="目前沒有快手帳號資料"
-            @add="handleAddAccount"
-            @edit="handleEdit"
-            @delete="handleDelete"
-            @download-cookie="handleDownloadCookie"
-            @upload-cookie="handleUploadCookie"
-            @refresh="fetchAccounts"
-            @relogin="handleReLogin"
-            @search="onSearchChange"
-          />
-        </el-tab-pane>
-        <el-tab-pane label="抖音" name="douyin">
-          <AccountTabPane
-            :accounts="filteredDouyinAccounts"
-            :search-keyword="searchKeyword"
-            :refreshing="appStore.isAccountRefreshing"
-            empty-text="目前沒有抖音帳號資料"
-            @add="handleAddAccount"
-            @edit="handleEdit"
-            @delete="handleDelete"
-            @download-cookie="handleDownloadCookie"
-            @upload-cookie="handleUploadCookie"
-            @refresh="fetchAccounts"
-            @relogin="handleReLogin"
-            @search="onSearchChange"
-          />
-        </el-tab-pane>
-        <el-tab-pane label="視頻號" name="channels">
-          <AccountTabPane
-            :accounts="filteredChannelsAccounts"
-            :search-keyword="searchKeyword"
-            :refreshing="appStore.isAccountRefreshing"
-            empty-text="目前沒有視頻號帳號資料"
-            @add="handleAddAccount"
-            @edit="handleEdit"
-            @delete="handleDelete"
-            @download-cookie="handleDownloadCookie"
-            @upload-cookie="handleUploadCookie"
-            @refresh="fetchAccounts"
-            @relogin="handleReLogin"
-            @search="onSearchChange"
-          />
-        </el-tab-pane>
-        <el-tab-pane label="小紅書" name="xiaohongshu">
-          <AccountTabPane
-            :accounts="filteredXiaohongshuAccounts"
-            :search-keyword="searchKeyword"
-            :refreshing="appStore.isAccountRefreshing"
-            empty-text="目前沒有小紅書帳號資料"
+            :empty-text="`目前沒有${platform.label}帳號資料`"
             @add="handleAddAccount"
             @edit="handleEdit"
             @delete="handleDelete"
@@ -106,10 +63,12 @@
             style="width: 100%"
             :disabled="dialogType === 'edit' || sseConnecting"
           >
-            <el-option label="快手" value="快手" />
-            <el-option label="抖音" value="抖音" />
-            <el-option label="視頻號" value="視頻號" />
-            <el-option label="小紅書" value="小紅書" />
+            <el-option
+              v-for="platform in accountPlatformTabs"
+              :key="platform.publishSlug"
+              :label="platform.label"
+              :value="platform.value"
+            />
           </el-select>
         </el-form-item>
         <el-form-item label="名稱" prop="name">
@@ -169,6 +128,11 @@ import { useAppStore } from '@/stores/app'
 import { buildApiUrl } from '@/utils/api-url'
 import { http } from '@/utils/request'
 import { appendAuthQuery, getToken } from '@/utils/auth'
+import {
+  ACCOUNT_PLATFORM_OPTIONS,
+  LEGACY_ACCOUNT_PLATFORM_ORDER,
+  getLegacyPlatformType
+} from '@/utils/platforms'
 import AccountTabPane from '@/components/AccountTabPane.vue'
 
 // 获取账号状态管理
@@ -181,6 +145,12 @@ const activeTab = ref('all')
 
 // 搜索关键词
 const searchKeyword = ref('')
+
+const accountPlatformTabs = LEGACY_ACCOUNT_PLATFORM_ORDER
+  .map((publishSlug) =>
+    ACCOUNT_PLATFORM_OPTIONS.find((platform) => platform.publishSlug === publishSlug)
+  )
+  .filter(Boolean)
 
 // 获取账号数据（快速，不验证）
 const fetchAccountsQuick = async () => {
@@ -252,41 +222,6 @@ onMounted(() => {
   }, 100) // 稍微延迟一下，让用户看到快速加载的效果
 })
 
-// 获取平台标签类型
-const getPlatformTagType = (platform) => {
-  const typeMap = {
-    '快手': 'success',
-    '抖音': 'danger',
-    '視頻號': 'warning',
-    '小紅書': 'info'
-  }
-  return typeMap[platform] || 'info'
-}
-
-// 判断状态是否可点击（异常状态可点击）
-const isStatusClickable = (status) => {
-  return status === '異常'; // 只有异常状态可点击，验证中不可点击
-}
-
-// 获取状态标签类型
-const getStatusTagType = (status) => {
-  if (status === '驗證中') {
-    return 'info'; // 验证中使用灰色
-  } else if (status === '正常') {
-    return 'success'; // 正常使用绿色
-  } else {
-    return 'danger'; // 无效使用红色
-  }
-}
-
-// 处理状态点击事件
-const handleStatusClick = (row) => {
-  if (isStatusClickable(row.status)) {
-    // 触发重新登录流程
-    handleReLogin(row)
-  }
-}
-
 // 过滤后的账号列表
 const filteredAccounts = computed(() => {
   if (!searchKeyword.value) return accountStore.accounts
@@ -295,22 +230,8 @@ const filteredAccounts = computed(() => {
   )
 })
 
-// 按平台过滤的账号列表
-const filteredKuaishouAccounts = computed(() => {
-  return filteredAccounts.value.filter(account => account.platform === '快手')
-})
-
-const filteredDouyinAccounts = computed(() => {
-  return filteredAccounts.value.filter(account => account.platform === '抖音')
-})
-
-const filteredChannelsAccounts = computed(() => {
-  return filteredAccounts.value.filter(account => account.platform === '視頻號')
-})
-
-const filteredXiaohongshuAccounts = computed(() => {
-  return filteredAccounts.value.filter(account => account.platform === '小紅書')
-})
+const getFilteredAccountsByPlatform = (platformLabel) =>
+  filteredAccounts.value.filter(account => account.platform === platformLabel)
 
 // 搜索处理。AccountTabPane 把输入值通过 @search 传回这里。
 const onSearchChange = (value) => {
@@ -503,12 +424,6 @@ const handleReLogin = (row) => {
   }, 300)
 }
 
-// 获取默认头像
-const getDefaultAvatar = (name) => {
-  // 使用简单的默认头像，可以基于用户名生成不同的颜色
-  return `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random`
-}
-
 // SSE事件源对象
 let eventSource = null
 
@@ -530,15 +445,7 @@ const connectSSE = (platform, name) => {
   qrCodeData.value = ''
   loginStatus.value = ''
 
-  // 获取平台类型编号
-  const platformTypeMap = {
-    '小紅書': '1',
-    '視頻號': '2',
-    '抖音': '3',
-    '快手': '4'
-  }
-
-  const type = platformTypeMap[platform] || '1'
+  const type = String(getLegacyPlatformType(platform) || 1)
 
   // EventSource cannot attach an Authorization header, so we tunnel the
   // auth token through a query parameter that the backend specifically
@@ -631,18 +538,11 @@ const submitAccountForm = () => {
       } else {
         // 編輯帳號逻辑
         try {
-          // 将平台名称转换为类型数字
-          const platformTypeMap = {
-            '小紅書': 1,
-            '視頻號': 2,
-            '抖音': 3,
-            '快手': 4
-          };
-          const type = platformTypeMap[accountForm.platform] || 1;
+          const type = getLegacyPlatformType(accountForm.platform) || 1
 
           const res = await accountApi.updateAccount({
             id: accountForm.id,
-            type: type,
+            type,
             userName: accountForm.name
           })
           if (res.code === 200) {

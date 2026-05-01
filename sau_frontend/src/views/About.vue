@@ -19,10 +19,13 @@
       <div class="about-section">
         <h3>支援平台</h3>
         <div class="platform-tags">
-          <el-tag type="danger">抖音</el-tag>
-          <el-tag type="success">快手</el-tag>
-          <el-tag type="warning">視頻號</el-tag>
-          <el-tag type="info">小紅書</el-tag>
+          <el-tag
+            v-for="platform in supportedPlatforms"
+            :key="platform.label"
+            :type="platform.tagType"
+          >
+            {{ platform.label }}
+          </el-tag>
         </div>
       </div>
 
@@ -53,7 +56,9 @@
 </template>
 
 <script setup>
-// 关于页面组件
+import { SUPPORTED_PLATFORM_TAGS } from '@/utils/platforms'
+
+const supportedPlatforms = SUPPORTED_PLATFORM_TAGS
 </script>
 
 <style lang="scss" scoped>

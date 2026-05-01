@@ -295,11 +295,11 @@
             <el-radio-group v-model="tab.selectedPlatform" class="platform-radios">
               <el-radio 
                 v-for="platform in platforms" 
-                :key="platform.key"
-                :label="platform.key"
+                :key="platform.value"
+                :label="platform.value"
                 class="platform-radio"
               >
-                {{ platform.name }}
+                {{ platform.label }}
               </el-radio>
             </el-radio-group>
           </div>
@@ -314,7 +314,7 @@
           </div>
 
           <!-- 草稿选项 (仅在視頻號可见) -->
-          <div v-if="tab.selectedPlatform === 2" class="draft-section">
+          <div v-if="tab.selectedPlatform === 'tencent'" class="draft-section">
             <el-checkbox
               v-model="tab.isDraft"
               label="視頻號僅儲存草稿（請使用手機發佈）"
@@ -322,8 +322,17 @@
             />
           </div>
 
+          <el-alert
+            v-if="tab.selectedPlatform === 'twitter'"
+            class="twitter-hint"
+            type="info"
+            :closable="false"
+            show-icon
+            title="X / Twitter 會自動將超過 2 分 20 秒的影片切分為多段，並以單一連續回覆串貼文發佈到每個帳號。"
+          />
+
           <!-- 标签 (仅在抖音可见) -->
-          <div v-if="tab.selectedPlatform === 3" class="product-section">
+          <div v-if="tab.selectedPlatform === 'douyin'" class="product-section">
             <h3>商品連結</h3>
             <el-input
               v-model="tab.productTitle"
@@ -508,6 +517,7 @@ import { useJobsStore } from '@/stores/jobs'
 import { materialApi } from '@/api/material'
 import { getToken } from '@/utils/auth'
 import { buildApiUrl } from '@/utils/api-url'
+import { getPlatformLabel, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
 import PublishJobProgress from '@/components/PublishJobProgress.vue'
 
 const uploadAction = buildApiUrl('/upload')
@@ -540,16 +550,8 @@ const materials = computed(() => appStore.materials)
 
 // 批次發佈相关状态
 const batchPublishing = ref(false)
-const batchPublishMessage = ref('')
-const batchPublishType = ref('info')
 
-// 平台列表 - 对应后端type字段
-const platforms = [
-  { key: 3, name: '抖音' },
-  { key: 4, name: '快手' },
-  { key: 2, name: '視頻號' },
-  { key: 1, name: '小紅書' }
-]
+const platforms = PUBLISH_PLATFORM_OPTIONS
 
 const defaultTabInit = {
   name: 'tab1',
@@ -557,7 +559,7 @@ const defaultTabInit = {
   fileList: [], // 后端返回的文件名列表
   displayFileList: [], // 用于显示的文件列表
   selectedAccounts: [], // 选中的帳號ID列表
-  selectedPlatform: 1, // 选中的平台（单选）
+  selectedPlatform: 'xiaohongshu', // 选中的平台（单选）
   title: '',
   productLink: '', // 商品連結
   productTitle: '', // 商品名称
@@ -601,13 +603,9 @@ const jobsStore = useJobsStore()
 
 // 根据选择的平台获取可用帳號列表
 const availableAccounts = computed(() => {
-  const platformMap = {
-    3: '抖音',
-    2: '視頻號',
-    1: '小紅書',
-    4: '快手'
-  }
-  const currentPlatform = currentTab.value ? platformMap[currentTab.value.selectedPlatform] : null
+  const currentPlatform = currentTab.value
+    ? getPlatformLabel(currentTab.value.selectedPlatform)
+    : null
   return currentPlatform ? accountStore.accounts.filter(acc => acc.platform === currentPlatform) : []
 })
 
@@ -805,7 +803,7 @@ const validatePublishForm = (tab) => {
 // Build a /jobs payload from a tab's reactive state. Kept pure so it is
 // easy to unit-test and reuse from the batch-publish path.
 const buildPublishPayload = (tab) => ({
-  type: tab.selectedPlatform,
+  platform: tab.selectedPlatform,
   title: tab.title,
   tags: tab.selectedTopics,
   fileList: tab.fileList.map((file) => file.path),
@@ -1316,6 +1314,10 @@ onBeforeUnmount(() => {
             display: block;
             margin: 10px 0;
           }
+        }
+
+        .twitter-hint {
+          margin: -10px 0 20px;
         }
 
         .original-section {

@@ -266,7 +266,8 @@ async def _run_platform_upload(
     target: jobs.Target,
     *,
     account_file: Path,
-    file_path: Path,
+    file_path: Path | None = None,
+    thread_file_paths: list[Path] | None = None,
 ) -> None:
     """Per-platform dispatch.
 
@@ -333,6 +334,23 @@ async def _run_platform_upload(
         await app.main()
         return
 
+    if platform == "twitter":
+        from uploader.twitter_uploader.main import TwitterThreadVideo
+
+        ordered_thread_files = thread_file_paths or ([file_path] if file_path else [])
+        if not ordered_thread_files:
+            raise ValueError("Twitter target requires at least one thread file")
+
+        app = TwitterThreadVideo(
+            title=title,
+            file_paths=[str(path) for path in ordered_thread_files],
+            tags=tags,
+            account_file=str(account_file),
+            publish_date=schedule_at,
+        )
+        await app.main()
+        return
+
     raise ValueError(f"Unsupported publish platform: {platform!r}")
 
 
@@ -349,8 +367,20 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
     from myUtils.cookie_storage import decrypted_storage_state
 
     canonical_account_file = _resolve_account_path(target.account_ref)
-    file_path = _resolve_file_path(target.file_ref)
+    if platform == "twitter":
+        thread_file_refs = payload.get("threadFileRefs") or [target.file_ref]
+        thread_file_paths = [_resolve_file_path(file_ref) for file_ref in thread_file_refs]
+        with decrypted_storage_state(canonical_account_file) as plain_path:
+            await _run_platform_upload(
+                platform,
+                payload,
+                target,
+                account_file=plain_path,
+                thread_file_paths=thread_file_paths,
+            )
+        return
 
+    file_path = _resolve_file_path(target.file_ref)
     with decrypted_storage_state(canonical_account_file) as plain_path:
         await _run_platform_upload(
             platform,

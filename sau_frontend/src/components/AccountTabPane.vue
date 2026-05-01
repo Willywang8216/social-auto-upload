@@ -85,6 +85,7 @@
 
 <script setup>
 import { Refresh, Download, Upload, Loading } from '@element-plus/icons-vue'
+import { getPlatformTagType } from '@/utils/platforms'
 
 defineProps({
   accounts: { type: Array, required: true },
@@ -104,15 +105,8 @@ const emit = defineEmits([
   'search'
 ])
 
-const PLATFORM_TAG = {
-  快手: 'success',
-  抖音: 'danger',
-  視頻號: 'warning',
-  小紅書: 'info'
-}
-
 function platformTagType(platform) {
-  return PLATFORM_TAG[platform] || 'info'
+  return getPlatformTagType(platform)
 }
 
 function statusTagType(status) {

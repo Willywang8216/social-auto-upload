@@ -75,6 +75,27 @@ class JobsHttpTests(unittest.TestCase):
                                    "fileList": ["v.mp4"], "accountList": ["a.json"]})
         self.assertEqual(response.status_code, 400)
 
+    def test_create_twitter_job_normalises_alias_and_uses_one_target_per_account(self) -> None:
+        response = self._post_job({
+            "platform": "x",
+            "title": "thread",
+            "fileList": ["v1.mp4", "v2.mp4", "v3.mp4"],
+            "accountList": ["a1.json", "a2.json"],
+            "tags": ["news"],
+        })
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["data"]["platform"], "twitter")
+        self.assertEqual(body["data"]["totalTargets"], 2)
+        self.assertEqual(
+            body["data"]["payload"]["threadFileRefs"],
+            ["v1.mp4", "v2.mp4", "v3.mp4"],
+        )
+
+        detail = self.client.get(f"/jobs/{body['data']['id']}").get_json()["data"]
+        self.assertEqual([target["accountRef"] for target in detail["targets"]], ["a1.json", "a2.json"])
+        self.assertTrue(all(target["fileRef"] == "v1.mp4" for target in detail["targets"]))
+
     def test_get_job_returns_targets(self) -> None:
         created = self._post_job({
             "type": 3,
@@ -98,6 +119,52 @@ class JobsHttpTests(unittest.TestCase):
         response = self.client.post(f"/jobs/{created['id']}/cancel")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["data"]["status"], "cancelled")
+
+    def test_post_video_accepts_x_alias(self) -> None:
+        with patch("sau_backend.post_video_twitter") as mocked:
+            response = self.client.post(
+                "/postVideo",
+                data=json.dumps({
+                    "type": "x",
+                    "title": "thread",
+                    "fileList": ["v1.mp4", "v2.mp4"],
+                    "accountList": ["acct.json"],
+                    "tags": ["topic"],
+                }),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        mocked.assert_called_once_with(
+            "thread",
+            ["v1.mp4", "v2.mp4"],
+            ["topic"],
+            ["acct.json"],
+        )
+
+    def test_post_video_batch_accepts_twitter_numeric_code(self) -> None:
+        with patch("sau_backend.post_video_twitter") as mocked:
+            response = self.client.post(
+                "/postVideoBatch",
+                data=json.dumps([
+                    {
+                        "type": 7,
+                        "title": "thread",
+                        "fileList": ["v1.mp4", "v2.mp4"],
+                        "accountList": ["acct.json"],
+                        "tags": ["topic"],
+                    }
+                ]),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        mocked.assert_called_once_with(
+            "thread",
+            ["v1.mp4", "v2.mp4"],
+            ["topic"],
+            ["acct.json"],
+        )
 
     # --- /jobs?limit edge cases (QA regression) ---
 

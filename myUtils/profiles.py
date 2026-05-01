@@ -39,6 +39,7 @@ PLATFORM_TIKTOK = "tiktok"
 PLATFORM_BAIJIAHAO = "baijiahao"
 PLATFORM_MEDIUM = "medium"
 PLATFORM_SUBSTACK = "substack"
+PLATFORM_TWITTER = "twitter"
 
 SUPPORTED_PLATFORMS: tuple[str, ...] = (
     PLATFORM_DOUYIN,
@@ -50,6 +51,7 @@ SUPPORTED_PLATFORMS: tuple[str, ...] = (
     PLATFORM_BAIJIAHAO,
     PLATFORM_MEDIUM,
     PLATFORM_SUBSTACK,
+    PLATFORM_TWITTER,
 )
 
 # Legacy numeric platform codes still used by the Flask backend's `type` column.
@@ -61,6 +63,7 @@ LEGACY_PLATFORM_CODE_TO_SLUG = {
     4: PLATFORM_KUAISHOU,
     5: PLATFORM_MEDIUM,
     6: PLATFORM_SUBSTACK,
+    7: PLATFORM_TWITTER,
 }
 LEGACY_PLATFORM_SLUG_TO_CODE = {v: k for k, v in LEGACY_PLATFORM_CODE_TO_SLUG.items()}
 

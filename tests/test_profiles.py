@@ -66,6 +66,15 @@ class ProfileRegistryTests(unittest.TestCase):
         self.assertIn("acme-corp", path.parts)
         self.assertEqual(path.suffix, ".json")
 
+    def test_twitter_platform_is_registered_with_canonical_path(self) -> None:
+        self.assertIn(profiles.PLATFORM_TWITTER, profiles.SUPPORTED_PLATFORMS)
+        self.assertEqual(profiles.LEGACY_PLATFORM_CODE_TO_SLUG[7], profiles.PLATFORM_TWITTER)
+
+        path = profiles.resolve_cookie_path(profiles.PLATFORM_TWITTER, "acme-corp", "x handle")
+        self.assertIn("twitter", path.parts)
+        self.assertIn("acme-corp", path.parts)
+        self.assertEqual(path.name, "x-handle.json")
+
     def test_unsupported_platform_rejected(self) -> None:
         profile = profiles.create_profile("Brand", db_path=self.db_path)
         with self.assertRaises(ValueError):

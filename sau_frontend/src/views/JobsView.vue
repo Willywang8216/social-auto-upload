@@ -11,10 +11,12 @@
           <el-option label="已取消" value="cancelled" />
         </el-select>
         <el-select v-model="platformFilter" placeholder="全部平台" clearable @change="loadJobs">
-          <el-option label="抖音" value="douyin" />
-          <el-option label="快手" value="kuaishou" />
-          <el-option label="視頻號" value="tencent" />
-          <el-option label="小紅書" value="xiaohongshu" />
+          <el-option
+            v-for="platform in platformOptions"
+            :key="platform.value"
+            :label="platform.label"
+            :value="platform.value"
+          />
         </el-select>
         <el-button type="primary" @click="loadJobs" :loading="loading">
           <el-icon><Refresh /></el-icon>
@@ -109,6 +111,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import PublishJobProgress from '@/components/PublishJobProgress.vue'
 import { jobsApi } from '@/api/jobs'
 import { useJobsStore, JOB_STATUS } from '@/stores/jobs'
+import { getPlatformLabel, getPlatformTagType, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
 
 const jobsStore = useJobsStore()
 const loading = ref(false)
@@ -196,26 +199,14 @@ async function cancelSelected() {
   }
 }
 
-const PLATFORM_TAG = {
-  douyin: 'danger',
-  kuaishou: 'success',
-  tencent: 'warning',
-  xiaohongshu: 'info'
-}
+const platformOptions = PUBLISH_PLATFORM_OPTIONS
 
 function platformTagType(platform) {
-  return PLATFORM_TAG[platform] || 'info'
-}
-
-const PLATFORM_LABEL = {
-  douyin: '抖音',
-  kuaishou: '快手',
-  tencent: '視頻號',
-  xiaohongshu: '小紅書'
+  return getPlatformTagType(platform)
 }
 
 function platformLabel(platform) {
-  return PLATFORM_LABEL[platform] || platform
+  return getPlatformLabel(platform)
 }
 
 const STATUS_LABELS = {

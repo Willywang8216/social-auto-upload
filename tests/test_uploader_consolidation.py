@@ -46,6 +46,7 @@ SMOKE_IMPORT_MODULES = (
     "uploader.baijiahao_uploader.main",
     "uploader.medium_uploader.main",
     "uploader.substack_uploader.main",
+    "uploader.twitter_uploader.main",
 )
 
 

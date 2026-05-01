@@ -5,6 +5,7 @@ from conf import BASE_DIR
 from uploader.douyin_uploader.main import DouYinVideo
 from uploader.ks_uploader.main import KSVideo
 from uploader.tencent_uploader.main import TencentVideo
+from uploader.twitter_uploader.main import TwitterThreadVideo
 from uploader.xiaohongshu_uploader.main import XiaoHongShuVideo
 from utils.constant import TencentZoneTypes
 from utils.files_times import generate_schedule_time_next_day
@@ -85,6 +86,24 @@ def post_video_xhs(title,files,tags,account_file,category=TencentZoneTypes.LIFES
             print(f"Hashtag：{tags}")
             app = XiaoHongShuVideo(title, file, tags, publish_datetimes, cookie)
             asyncio.run(app.main(), debug=False)
+
+
+def post_video_twitter(title, files, tags, account_file, publish_date=0):
+    account_files = [Path(BASE_DIR / "cookiesFile" / file) for file in account_file]
+    file_paths = [Path(BASE_DIR / "videoFile" / file) for file in files]
+
+    for cookie in account_files:
+        print(f"线程视频文件列表：{file_paths}")
+        print(f"标题：{title}")
+        print(f"Hashtag：{tags}")
+        app = TwitterThreadVideo(
+            title=title,
+            file_paths=file_paths,
+            tags=tags,
+            account_file=str(cookie),
+            publish_date=publish_date,
+        )
+        asyncio.run(app.main(), debug=False)
 
 
 

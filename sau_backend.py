@@ -14,7 +14,13 @@ from flask import Flask, request, jsonify, Response, render_template, send_from_
 from conf import BASE_DIR
 from myUtils import jobs as job_runtime
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
-from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
+from myUtils.postVideo import (
+    post_video_DouYin,
+    post_video_ks,
+    post_video_tencent,
+    post_video_twitter,
+    post_video_xhs,
+)
 from myUtils.security import (
     extract_bearer_token,
     load_policy,
@@ -23,7 +29,14 @@ from myUtils.worker import default_executor, run_worker_drain
 from utils.files_times import generate_schedule_time_next_day
 
 # Map the legacy numeric `type` field to the platform slug used by the job runtime.
-LEGACY_PLATFORM_CODES = {1: "xiaohongshu", 2: "tencent", 3: "douyin", 4: "kuaishou"}
+LEGACY_PLATFORM_CODES = {
+    1: "xiaohongshu",
+    2: "tencent",
+    3: "douyin",
+    4: "kuaishou",
+    7: "twitter",
+}
+TWITTER_PLATFORM_ALIASES = {"twitter", "x"}
 
 active_queues = {}
 app = Flask(__name__)
@@ -553,19 +566,22 @@ def postVideo():
     print("Account List:", account_list)
 
     try:
-        match type:
-            case 1:
+        platform = _resolve_publish_platform(type)
+        match platform:
+            case "xiaohongshu":
                 post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days)
-            case 2:
+                               start_days)
+            case "tencent":
                 post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
                                    start_days, is_draft)
-            case 3:
+            case "douyin":
                 post_video_DouYin(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                          start_days, thumbnail_path, productLink, productTitle)
-            case 4:
+                                  start_days, thumbnail_path, productLink, productTitle)
+            case "kuaishou":
                 post_video_ks(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                          start_days)
+                              start_days)
+            case "twitter":
+                post_video_twitter(title, file_list, tags, account_list)
             case _:
                 return jsonify({"code": 400, "msg": f"不支持的平台类型: {type}", "data": None}), 400
 
@@ -653,14 +669,15 @@ def postVideoBatch():
         print("Account List:", account_list)
 
         try:
-            match type:
-                case 1:
+            platform = _resolve_publish_platform(type)
+            match platform:
+                case "xiaohongshu":
                     post_video_xhs(title, file_list, tags, account_list, category, enableTimer,
                                    videos_per_day, daily_times, start_days)
-                case 2:
+                case "tencent":
                     post_video_tencent(title, file_list, tags, account_list, category, enableTimer,
                                        videos_per_day, daily_times, start_days, is_draft)
-                case 3:
+                case "douyin":
                     # NOTE: keyword args used here on purpose. The earlier positional
                     # call dropped `thumbnail_path` and silently bound `productLink`
                     # to the thumbnail parameter.
@@ -670,9 +687,11 @@ def postVideoBatch():
                                       start_days=start_days,
                                       thumbnail_path=thumbnail_path,
                                       productLink=productLink, productTitle=productTitle)
-                case 4:
+                case "kuaishou":
                     post_video_ks(title, file_list, tags, account_list, category, enableTimer,
                                   videos_per_day, daily_times, start_days)
+                case "twitter":
+                    post_video_twitter(title, file_list, tags, account_list)
                 case _:
                     failures.append({"index": index, "msg": f"unsupported platform type: {type}"})
         except Exception as exc:
@@ -849,6 +868,28 @@ def download_cookie():
 # ---------------------------------------------------------------------------
 
 
+def _resolve_publish_platform(value) -> str:
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if not stripped:
+            raise ValueError("平台类型不能为空")
+        if stripped.isdigit():
+            value = int(stripped)
+        elif stripped in TWITTER_PLATFORM_ALIASES:
+            return "twitter"
+        elif stripped in LEGACY_PLATFORM_CODES.values():
+            return stripped
+        else:
+            raise ValueError(f"Unsupported platform code: {value!r}")
+
+    if isinstance(value, int):
+        if value not in LEGACY_PLATFORM_CODES:
+            raise ValueError(f"Unsupported platform code: {value!r}")
+        return LEGACY_PLATFORM_CODES[value]
+
+    raise ValueError(f"Unsupported platform code: {value!r}")
+
+
 def _normalise_publish_payload(data: dict) -> tuple[str, dict, list[tuple[str, str, datetime | None]]]:
     """Pull a /postVideo-shaped payload apart into (platform, payload, targets).
 
@@ -857,13 +898,7 @@ def _normalise_publish_payload(data: dict) -> tuple[str, dict, list[tuple[str, s
     with optional schedule times derived from the timer fields.
     """
 
-    if "platform" in data and isinstance(data["platform"], str):
-        platform = data["platform"]
-    else:
-        platform_code = data.get("type")
-        if platform_code not in LEGACY_PLATFORM_CODES:
-            raise ValueError(f"Unsupported platform code: {platform_code!r}")
-        platform = LEGACY_PLATFORM_CODES[platform_code]
+    platform = _resolve_publish_platform(data.get("platform", data.get("type")))
 
     file_list = data.get("fileList", [])
     account_list = data.get("accountList", [])
@@ -892,8 +927,16 @@ def _normalise_publish_payload(data: dict) -> tuple[str, dict, list[tuple[str, s
         "productLink": data.get("productLink", "") or "",
         "productTitle": data.get("productTitle", "") or "",
     }
+    if platform == "twitter":
+        payload["threadFileRefs"] = list(file_list)
 
     targets: list[tuple[str, str, datetime | None]] = []
+    if platform == "twitter":
+        root_file_ref = str(file_list[0])
+        for account_ref in account_list:
+            targets.append((account_ref, root_file_ref, None))
+        return platform, payload, targets
+
     for index, file_ref in enumerate(file_list):
         scheduled = schedules[index] if index < len(schedules) else None
         for account_ref in account_list:

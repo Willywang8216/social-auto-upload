@@ -1,18 +1,11 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { getPlatformLabel } from '@/utils/platforms'
 
 export const useAccountStore = defineStore('account', () => {
   // 存储所有账号信息
   const accounts = ref([])
-  
-  // 平台类型映射
-  const platformTypes = {
-    1: '小紅書',
-    2: '視頻號',
-    3: '抖音',
-    4: '快手'
-  }
-  
+
   // 设置账号列表
   const setAccounts = (accountsData) => {
     // 转换后端返回的数据格式为前端使用的格式
@@ -23,7 +16,7 @@ export const useAccountStore = defineStore('account', () => {
         filePath: item[2],
         name: item[3],
         status: item[4] === -1 ? '驗證中' : (item[4] === 1 ? '正常' : '異常'),
-        platform: platformTypes[item[1]] || '未知'
+        platform: getPlatformLabel(item[1])
       }
     })
   }

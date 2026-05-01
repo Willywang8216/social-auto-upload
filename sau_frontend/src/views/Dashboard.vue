@@ -41,17 +41,15 @@
             </div>
             <div class="stat-footer">
               <div class="stat-detail">
-                <el-tooltip content="快手帳號" placement="top">
-                  <el-tag size="small" type="success">{{ platformStats.kuaishou }}</el-tag>
-                </el-tooltip>
-                <el-tooltip content="抖音帳號" placement="top">
-                  <el-tag size="small" type="danger">{{ platformStats.douyin }}</el-tag>
-                </el-tooltip>
-                <el-tooltip content="視頻號帳號" placement="top">
-                  <el-tag size="small" type="warning">{{ platformStats.channels }}</el-tag>
-                </el-tooltip>
-                <el-tooltip content="小紅書帳號" placement="top">
-                  <el-tag size="small" type="info">{{ platformStats.xiaohongshu }}</el-tag>
+                <el-tooltip
+                  v-for="platform in dashboardPlatforms"
+                  :key="platform.key"
+                  :content="`${platform.label}帳號`"
+                  placement="top"
+                >
+                  <el-tag size="small" :type="platform.tagType">
+                    {{ platformStats.counts[platform.key] || 0 }}
+                  </el-tag>
                 </el-tooltip>
               </div>
             </div>
@@ -159,7 +157,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   User, UserFilled, Platform, Document,
@@ -169,11 +167,22 @@ import { accountApi } from '@/api/account'
 import { materialApi } from '@/api/material'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
+import { ACCOUNT_PLATFORM_OPTIONS, LEGACY_ACCOUNT_PLATFORM_ORDER } from '@/utils/platforms'
 
 const router = useRouter()
 const accountStore = useAccountStore()
 const appStore = useAppStore()
 const loading = ref(false)
+const dashboardPlatforms = LEGACY_ACCOUNT_PLATFORM_ORDER
+  .map((publishSlug) =>
+    ACCOUNT_PLATFORM_OPTIONS.find((platform) => platform.publishSlug === publishSlug)
+  )
+  .filter(Boolean)
+  .map(({ publishSlug, label, tagType }) => ({
+    key: publishSlug,
+    label,
+    tagType
+  }))
 
 // 账号统计数据 - 从真实数据计算
 const accountStats = computed(() => {
@@ -190,13 +199,15 @@ const accountStats = computed(() => {
 // 平台统计数据 - 从真实数据计算
 const platformStats = computed(() => {
   const accounts = accountStore.accounts
-  const kuaishou = accounts.filter(a => a.platform === '快手').length
-  const douyin = accounts.filter(a => a.platform === '抖音').length
-  const channels = accounts.filter(a => a.platform === '視頻號').length
-  const xiaohongshu = accounts.filter(a => a.platform === '小紅書').length
-  // 统计有账号的平台数量
-  const total = [kuaishou, douyin, channels, xiaohongshu].filter(n => n > 0).length
-  return { total, kuaishou, douyin, channels, xiaohongshu }
+  const counts = dashboardPlatforms.reduce((result, platform) => {
+    result[platform.key] = accounts.filter(a => a.platform === platform.label).length
+    return result
+  }, {})
+
+  return {
+    total: dashboardPlatforms.filter(platform => counts[platform.key] > 0).length,
+    counts
+  }
 })
 
 // 素材统计数据 - 从真实数据计算
@@ -345,7 +356,8 @@ onMounted(() => {
 
         .stat-detail {
           display: flex;
-          justify-content: space-between;
+          flex-wrap: wrap;
+          gap: 8px;
           color: $text-secondary;
           font-size: 13px;
 
