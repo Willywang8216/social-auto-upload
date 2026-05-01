@@ -9,8 +9,12 @@ These cover the bug fixes applied in this round:
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
+import tempfile
 import unittest
 from queue import Queue
+from pathlib import Path
+from unittest.mock import patch
 
 
 flask_available = importlib.util.find_spec("flask") is not None
@@ -69,6 +73,61 @@ class GetFileTraversalGuardTests(unittest.TestCase):
     def test_missing_filename_rejected(self) -> None:
         response = self.client.get("/getFile")
         self.assertEqual(response.status_code, 400)
+
+
+@unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
+class LegacyDbBootstrapEndpointTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import sau_backend
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base_dir = Path(self._tmp.name)
+        self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
+        self._base_dir_patch.start()
+
+        sau_backend.app.config["TESTING"] = True
+        self.client = sau_backend.app.test_client()
+
+    def tearDown(self) -> None:
+        self._base_dir_patch.stop()
+        self._tmp.cleanup()
+
+    def _legacy_db_path(self) -> Path:
+        return self.base_dir / "db" / "database.db"
+
+    def _table_names(self) -> set[str]:
+        with sqlite3.connect(self._legacy_db_path()) as conn:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        return {row[0] for row in rows}
+
+    def test_get_accounts_bootstraps_fresh_environment(self) -> None:
+        response = self.client.get("/getAccounts")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["data"], [])
+        self.assertTrue(self._legacy_db_path().exists())
+        self.assertTrue({"user_info", "file_records"}.issubset(self._table_names()))
+
+    def test_get_files_bootstraps_fresh_environment(self) -> None:
+        response = self.client.get("/getFiles")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["data"], [])
+        self.assertTrue(self._legacy_db_path().exists())
+        self.assertTrue({"user_info", "file_records"}.issubset(self._table_names()))
+
+    def test_get_accounts_recovers_from_empty_sqlite_file(self) -> None:
+        db_path = self._legacy_db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        sqlite3.connect(db_path).close()
+
+        response = self.client.get("/getAccounts")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["data"], [])
+        self.assertTrue({"user_info", "file_records"}.issubset(self._table_names()))
 
 
 if __name__ == "__main__":

@@ -3,8 +3,8 @@
     <el-card class="login-card">
       <template #header>
         <div class="card-header">
-          <h2>自媒体自动化运营系统</h2>
-          <p class="subtitle">请输入访问令牌以登录</p>
+          <h2>自媒體自動化營運系統</h2>
+          <p class="subtitle">請輸入存取權杖以登入</p>
         </div>
       </template>
 
@@ -15,12 +15,12 @@
         label-position="top"
         @submit.prevent="onSubmit"
       >
-        <el-form-item label="访问令牌（API Token）" prop="token">
+        <el-form-item label="存取權杖（API Token）" prop="token">
           <el-input
             v-model="form.token"
             type="password"
             show-password
-            placeholder="留空表示后端处于开放模式"
+            placeholder="留空表示後端處於開放模式"
             autocomplete="current-password"
             @keyup.enter="onSubmit"
           />
@@ -33,13 +33,13 @@
             class="submit-btn"
             @click="onSubmit"
           >
-            登录
+            登入
           </el-button>
         </el-form-item>
 
         <div v-if="errorMessage" class="login-error">{{ errorMessage }}</div>
         <div v-else-if="openModeNotice" class="login-hint">
-          后端当前在开放模式，可直接进入。生产部署请配置 <code>SAU_API_TOKENS</code>。
+          後端目前為開放模式，可直接進入。正式部署請設定 <code>SAU_API_TOKENS</code>。
         </div>
       </el-form>
     </el-card>
@@ -88,9 +88,9 @@ async function probeToken(token, { silent = false } = {}) {
     if (!silent) {
       const status = error?.response?.status
       if (status === 401) {
-        errorMessage.value = '令牌无效。请检查后端 SAU_API_TOKENS 配置。'
+        errorMessage.value = '權杖無效。請檢查後端 SAU_API_TOKENS 設定。'
       } else {
-        errorMessage.value = error?.message || '无法连接后端，请稍后再试。'
+        errorMessage.value = error?.message || '無法連線後端，請稍後再試。'
       }
     }
     clearToken()
@@ -104,7 +104,7 @@ async function onSubmit() {
   try {
     const ok = await probeToken(form.value.token || '')
     if (ok) {
-      ElMessage.success(openModeNotice.value ? '已进入（开放模式）' : '登录成功')
+      ElMessage.success(openModeNotice.value ? '已進入（開放模式）' : '登入成功')
       router.replace(route.query.redirect || '/')
     }
   } finally {

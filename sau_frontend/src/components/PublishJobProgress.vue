@@ -1,14 +1,14 @@
 <template>
   <div class="publish-job-progress" v-if="job">
     <div class="progress-header">
-      <span class="job-id">任务 #{{ job.id }}</span>
+      <span class="job-id">任務 #{{ job.id }}</span>
       <el-tag :type="statusTagType" size="small" effect="plain">
         {{ statusLabel }}
       </el-tag>
       <span class="counters">
         {{ job.completedTargets }} / {{ job.totalTargets }} 完成
         <template v-if="job.failedTargets > 0">
-          · {{ job.failedTargets }} 失败
+          · {{ job.failedTargets }} 失敗
         </template>
       </span>
       <el-button
@@ -18,7 +18,7 @@
         plain
         @click="$emit('cancel')"
       >
-        取消任务
+        取消任務
       </el-button>
     </div>
 
@@ -45,7 +45,7 @@
           {{ shortRef(target.fileRef) }}
         </span>
         <span v-if="target.attempts > 1" class="target-attempts">
-          第 {{ target.attempts }} 次尝试
+          第 {{ target.attempts }} 次嘗試
         </span>
         <span v-if="target.lastError" class="target-error" :title="target.lastError">
           {{ target.lastError }}
@@ -86,10 +86,10 @@ const progressStatus = computed(() => {
 })
 
 const STATUS_LABELS = {
-  pending: '排队中',
-  running: '发布中',
+  pending: '佇列中',
+  running: '發佈中',
   succeeded: '已完成',
-  failed: '部分失败',
+  failed: '部分失敗',
   cancelled: '已取消'
 }
 
@@ -117,11 +117,11 @@ function targetTagType(status) {
 }
 
 const TARGET_LABELS = {
-  pending: '排队中',
-  running: '运行中',
-  retrying: '重试中',
+  pending: '佇列中',
+  running: '執行中',
+  retrying: '重試中',
   succeeded: '成功',
-  failed: '失败',
+  failed: '失敗',
   cancelled: '已取消'
 }
 

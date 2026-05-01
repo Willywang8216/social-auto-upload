@@ -5,7 +5,7 @@
         <div class="sidebar">
           <div class="logo">
             <img v-show="isCollapse" src="/vite.svg" alt="Logo" class="logo-img">
-            <h2 v-show="!isCollapse">自媒体自动化运营系统</h2>
+            <h2 v-show="!isCollapse">自媒體自動化營運系統</h2>
           </div>
           <el-menu
             :router="true"
@@ -18,27 +18,27 @@
           >
             <el-menu-item index="/">
               <el-icon><HomeFilled /></el-icon>
-              <span>首页</span>
+              <span>儀表板</span>
             </el-menu-item>
             <el-menu-item index="/account-management">
               <el-icon><User /></el-icon>
-              <span>账号管理</span>
+              <span>帳號管理</span>
             </el-menu-item>
             <el-menu-item index="/material-management">
               <el-icon><Picture /></el-icon>
-              <span>素材管理</span>
+              <span>素材庫</span>
             </el-menu-item>
             <el-menu-item index="/publish-center">
               <el-icon><Upload /></el-icon>
-              <span>发布中心</span>
+              <span>發佈中心</span>
             </el-menu-item>
             <el-menu-item index="/jobs">
               <el-icon><List /></el-icon>
-              <span>任务中心</span>
+              <span>任務中心</span>
             </el-menu-item>
             <el-menu-item index="/about">
               <el-icon><DataAnalysis /></el-icon>
-              <span>关于</span>
+              <span>說明</span>
             </el-menu-item>
           </el-menu>
         </div>

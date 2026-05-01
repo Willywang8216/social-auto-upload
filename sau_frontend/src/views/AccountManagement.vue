@@ -1,7 +1,7 @@
 <template>
   <div class="account-management">
     <div class="page-header">
-      <h1>账号管理</h1>
+      <h1>帳號管理</h1>
     </div>
     
     <div class="account-tabs">
@@ -11,7 +11,7 @@
             :accounts="filteredAccounts"
             :search-keyword="searchKeyword"
             :refreshing="appStore.isAccountRefreshing"
-            empty-text="暂无账号数据"
+            empty-text="目前沒有帳號資料"
             @add="handleAddAccount"
             @edit="handleEdit"
             @delete="handleDelete"
@@ -27,7 +27,7 @@
             :accounts="filteredKuaishouAccounts"
             :search-keyword="searchKeyword"
             :refreshing="appStore.isAccountRefreshing"
-            empty-text="暂无快手账号数据"
+            empty-text="目前沒有快手帳號資料"
             @add="handleAddAccount"
             @edit="handleEdit"
             @delete="handleDelete"
@@ -43,7 +43,7 @@
             :accounts="filteredDouyinAccounts"
             :search-keyword="searchKeyword"
             :refreshing="appStore.isAccountRefreshing"
-            empty-text="暂无抖音账号数据"
+            empty-text="目前沒有抖音帳號資料"
             @add="handleAddAccount"
             @edit="handleEdit"
             @delete="handleDelete"
@@ -54,12 +54,12 @@
             @search="onSearchChange"
           />
         </el-tab-pane>
-        <el-tab-pane label="视频号" name="channels">
+        <el-tab-pane label="視頻號" name="channels">
           <AccountTabPane
             :accounts="filteredChannelsAccounts"
             :search-keyword="searchKeyword"
             :refreshing="appStore.isAccountRefreshing"
-            empty-text="暂无视频号账号数据"
+            empty-text="目前沒有視頻號帳號資料"
             @add="handleAddAccount"
             @edit="handleEdit"
             @delete="handleDelete"
@@ -70,12 +70,12 @@
             @search="onSearchChange"
           />
         </el-tab-pane>
-        <el-tab-pane label="小红书" name="xiaohongshu">
+        <el-tab-pane label="小紅書" name="xiaohongshu">
           <AccountTabPane
             :accounts="filteredXiaohongshuAccounts"
             :search-keyword="searchKeyword"
             :refreshing="appStore.isAccountRefreshing"
-            empty-text="暂无小红书账号数据"
+            empty-text="目前沒有小紅書帳號資料"
             @add="handleAddAccount"
             @edit="handleEdit"
             @delete="handleDelete"
@@ -89,10 +89,10 @@
       </el-tabs>
     </div>
     
-    <!-- 添加/编辑账号对话框 -->
+    <!-- 添加/編輯帳號对话框 -->
     <el-dialog
       v-model="dialogVisible"
-      :title="dialogType === 'add' ? '添加账号' : '编辑账号'"
+      :title="dialogType === 'add' ? '新增帳號' : '編輯帳號'"
       width="500px"
       :close-on-click-modal="false"
       :close-on-press-escape="!sseConnecting"
@@ -102,20 +102,20 @@
         <el-form-item label="平台" prop="platform">
           <el-select 
             v-model="accountForm.platform" 
-            placeholder="请选择平台" 
+            placeholder="請選擇平台" 
             style="width: 100%"
             :disabled="dialogType === 'edit' || sseConnecting"
           >
             <el-option label="快手" value="快手" />
             <el-option label="抖音" value="抖音" />
-            <el-option label="视频号" value="视频号" />
-            <el-option label="小红书" value="小红书" />
+            <el-option label="視頻號" value="視頻號" />
+            <el-option label="小紅書" value="小紅書" />
           </el-select>
         </el-form-item>
-        <el-form-item label="名称" prop="name">
+        <el-form-item label="名稱" prop="name">
           <el-input 
             v-model="accountForm.name" 
-            placeholder="请输入账号名称" 
+            placeholder="請輸入帳號名稱" 
             :disabled="sseConnecting"
           />
         </el-form-item>
@@ -123,20 +123,20 @@
         <!-- 二维码显示区域 -->
         <div v-if="sseConnecting" class="qrcode-container">
           <div v-if="qrCodeData && !loginStatus" class="qrcode-wrapper">
-            <p class="qrcode-tip">请使用对应平台APP扫描二维码登录</p>
-            <img :src="qrCodeData" alt="登录二维码" class="qrcode-image" />
+            <p class="qrcode-tip">請使用對應平台 App 掃描 QR Code 登入</p>
+            <img :src="qrCodeData" alt="登入 QR Code" class="qrcode-image" />
           </div>
           <div v-else-if="!qrCodeData && !loginStatus" class="loading-wrapper">
             <el-icon class="is-loading"><Refresh /></el-icon>
-            <span>请求中...</span>
+            <span>載入中...</span>
           </div>
           <div v-else-if="loginStatus === '200'" class="success-wrapper">
             <el-icon><CircleCheckFilled /></el-icon>
-            <span>添加成功</span>
+            <span>新增成功</span>
           </div>
           <div v-else-if="loginStatus === '500'" class="error-wrapper">
             <el-icon><CircleCloseFilled /></el-icon>
-            <span>添加失败，请稍后再试</span>
+            <span>新增失敗，請稍後再試</span>
           </div>
         </div>
       </el-form>
@@ -149,7 +149,7 @@
             :loading="sseConnecting" 
             :disabled="sseConnecting"
           >
-            {{ sseConnecting ? '请求中' : '确认' }}
+            {{ sseConnecting ? '處理中' : '確認' }}
           </el-button>
         </span>
       </template>
@@ -196,7 +196,7 @@ const fetchAccountsQuick = async () => {
       accountStore.setAccounts(accountsWithPendingStatus);
     }
   } catch (error) {
-    console.error('快速获取账号数据失败:', error)
+    console.error('快速取得帳號資料失敗:', error)
   }
 }
 
@@ -210,17 +210,17 @@ const fetchAccounts = async () => {
     const res = await accountApi.getValidAccounts()
     if (res.code === 200 && res.data) {
       accountStore.setAccounts(res.data)
-      ElMessage.success('账号数据获取成功')
+      ElMessage.success('帳號資料取得成功')
       // 标记为已访问
       if (appStore.isFirstTimeAccountManagement) {
         appStore.setAccountManagementVisited()
       }
     } else {
-      ElMessage.error('获取账号数据失败')
+      ElMessage.error('取得帳號資料失敗')
     }
   } catch (error) {
-    console.error('获取账号数据失败:', error)
-    ElMessage.error('获取账号数据失败')
+    console.error('取得帳號資料失敗:', error)
+    ElMessage.error('取得帳號資料失敗')
   } finally {
     appStore.setAccountRefreshing(false)
   }
@@ -257,20 +257,20 @@ const getPlatformTagType = (platform) => {
   const typeMap = {
     '快手': 'success',
     '抖音': 'danger',
-    '视频号': 'warning',
-    '小红书': 'info'
+    '視頻號': 'warning',
+    '小紅書': 'info'
   }
   return typeMap[platform] || 'info'
 }
 
 // 判断状态是否可点击（异常状态可点击）
 const isStatusClickable = (status) => {
-  return status === '异常'; // 只有异常状态可点击，验证中不可点击
+  return status === '異常'; // 只有异常状态可点击，验证中不可点击
 }
 
 // 获取状态标签类型
 const getStatusTagType = (status) => {
-  if (status === '验证中') {
+  if (status === '驗證中') {
     return 'info'; // 验证中使用灰色
   } else if (status === '正常') {
     return 'success'; // 正常使用绿色
@@ -305,11 +305,11 @@ const filteredDouyinAccounts = computed(() => {
 })
 
 const filteredChannelsAccounts = computed(() => {
-  return filteredAccounts.value.filter(account => account.platform === '视频号')
+  return filteredAccounts.value.filter(account => account.platform === '視頻號')
 })
 
 const filteredXiaohongshuAccounts = computed(() => {
-  return filteredAccounts.value.filter(account => account.platform === '小红书')
+  return filteredAccounts.value.filter(account => account.platform === '小紅書')
 })
 
 // 搜索处理。AccountTabPane 把输入值通过 @search 传回这里。
@@ -332,8 +332,8 @@ const accountForm = reactive({
 
 // 表单验证规则
 const rules = {
-  platform: [{ required: true, message: '请选择平台', trigger: 'change' }],
-  name: [{ required: true, message: '请输入账号名称', trigger: 'blur' }]
+  platform: [{ required: true, message: '請選擇平台', trigger: 'change' }],
+  name: [{ required: true, message: '請輸入帳號名稱', trigger: 'blur' }]
 }
 
 // SSE连接状态
@@ -341,7 +341,7 @@ const sseConnecting = ref(false)
 const qrCodeData = ref('')
 const loginStatus = ref('')
 
-// 添加账号
+// 新增帳號
 const handleAddAccount = () => {
   dialogType.value = 'add'
   Object.assign(accountForm, {
@@ -357,7 +357,7 @@ const handleAddAccount = () => {
   dialogVisible.value = true
 }
 
-// 编辑账号
+// 編輯帳號
 const handleEdit = (row) => {
   dialogType.value = 'edit'
   Object.assign(accountForm, {
@@ -372,10 +372,10 @@ const handleEdit = (row) => {
 // 删除账号
 const handleDelete = (row) => {
   ElMessageBox.confirm(
-    `确定要删除账号 ${row.name} 吗？`,
+    `確定要刪除帳號 ${row.name} 嗎？`,
     '警告',
     {
-      confirmButtonText: '确定',
+      confirmButtonText: '確定',
       cancelButtonText: '取消',
       type: 'warning',
     }
@@ -390,14 +390,14 @@ const handleDelete = (row) => {
           accountStore.deleteAccount(row.id)
           ElMessage({
             type: 'success',
-            message: '删除成功',
+            message: '刪除成功',
           })
         } else {
-          ElMessage.error(response.msg || '删除失败')
+          ElMessage.error(response.msg || '刪除失敗')
         }
       } catch (error) {
-        console.error('删除账号失败:', error)
-        ElMessage.error('删除账号失败')
+        console.error('刪除帳號失敗:', error)
+        ElMessage.error('刪除帳號失敗')
       }
     })
     .catch(() => {
@@ -417,7 +417,7 @@ const handleDownloadCookie = async (row) => {
       }
     )
     if (!response.ok) {
-      ElMessage.error(response.status === 401 ? '未授权，请重新登录' : '下载失败')
+      ElMessage.error(response.status === 401 ? '未授權，請重新登入' : '下載失敗')
       return
     }
     const blob = await response.blob()
@@ -430,8 +430,8 @@ const handleDownloadCookie = async (row) => {
     document.body.removeChild(link)
     URL.revokeObjectURL(objectUrl)
   } catch (error) {
-    console.error('下载Cookie失败:', error)
-    ElMessage.error('下载Cookie失败')
+    console.error('下載 Cookie 失敗:', error)
+    ElMessage.error('下載 Cookie 失敗')
   }
 }
 
@@ -450,7 +450,7 @@ const handleUploadCookie = (row) => {
 
     // 检查文件类型
     if (!file.name.endsWith('.json')) {
-      ElMessage.error('请选择JSON格式的Cookie文件')
+      ElMessage.error('請選擇 JSON 格式的 Cookie 檔案')
       document.body.removeChild(input)
       return
     }
@@ -465,11 +465,11 @@ const handleUploadCookie = (row) => {
       // 使用统一的http封装发送上传请求
       const result = await http.upload('/uploadCookie', formData)
 
-      ElMessage.success('Cookie文件上传成功')
+      ElMessage.success('Cookie 檔案上傳成功')
       // 刷新账号列表以显示更新
       fetchAccounts()
     } catch (error) {
-      ElMessage.error('Cookie文件上传失败')
+      ElMessage.error('Cookie 檔案上傳失敗')
     } finally {
       document.body.removeChild(input)
     }
@@ -532,8 +532,8 @@ const connectSSE = (platform, name) => {
 
   // 获取平台类型编号
   const platformTypeMap = {
-    '小红书': '1',
-    '视频号': '2',
+    '小紅書': '1',
+    '視頻號': '2',
     '抖音': '3',
     '快手': '4'
   }
@@ -581,12 +581,12 @@ const connectSSE = (platform, name) => {
             sseConnecting.value = false
 
             // 根据是否是重新登录显示不同提示
-            ElMessage.success(dialogType.value === 'edit' ? '重新登录成功' : '账号添加成功')
+            ElMessage.success(dialogType.value === 'edit' ? '重新登入成功' : '帳號新增成功')
 
             // 显示更新账号信息提示
             ElMessage({
               type: 'info',
-              message: '正在同步账号信息...',
+              message: '正在同步帳號資訊...',
               duration: 0
             })
 
@@ -594,7 +594,7 @@ const connectSSE = (platform, name) => {
             fetchAccounts().then(() => {
               // 刷新完成后关闭提示
               ElMessage.closeAll()
-              ElMessage.success('账号信息已更新')
+              ElMessage.success('帳號資訊已更新')
             })
           }, 1000)
         }, 1000)
@@ -614,8 +614,8 @@ const connectSSE = (platform, name) => {
 
   // 监听错误
   eventSource.onerror = (error) => {
-    console.error('SSE连接错误:', error)
-    ElMessage.error('连接服务器失败，请稍后再试')
+    console.error('SSE 連線錯誤:', error)
+    ElMessage.error('連線伺服器失敗，請稍後再試')
     closeSSEConnection()
     sseConnecting.value = false
   }
@@ -629,12 +629,12 @@ const submitAccountForm = () => {
         // 建立SSE连接
         connectSSE(accountForm.platform, accountForm.name)
       } else {
-        // 编辑账号逻辑
+        // 編輯帳號逻辑
         try {
           // 将平台名称转换为类型数字
           const platformTypeMap = {
-            '小红书': 1,
-            '视频号': 2,
+            '小紅書': 1,
+            '視頻號': 2,
             '抖音': 3,
             '快手': 4
           };
@@ -659,11 +659,11 @@ const submitAccountForm = () => {
             // 刷新账号列表
             fetchAccounts()
           } else {
-            ElMessage.error(res.msg || '更新账号失败')
+            ElMessage.error(res.msg || '更新帳號失敗')
           }
         } catch (error) {
-          console.error('更新账号失败:', error)
-          ElMessage.error('更新账号失败')
+          console.error('更新帳號失敗:', error)
+          ElMessage.error('更新帳號失敗')
         }
       }
     } else {

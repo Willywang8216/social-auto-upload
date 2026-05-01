@@ -49,6 +49,38 @@ CORS(
     supports_credentials=False,
 )
 
+LEGACY_DB_REQUIRED_TABLES = frozenset({"user_info", "file_records"})
+
+
+def _get_legacy_db_path() -> Path:
+    """Resolve the legacy SQLite path from the current BASE_DIR value."""
+
+    return Path(BASE_DIR) / "db" / "database.db"
+
+
+def _legacy_db_missing_required_tables(db_path: Path) -> bool:
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name IN (?, ?)",
+            tuple(sorted(LEGACY_DB_REQUIRED_TABLES)),
+        ).fetchall()
+    existing_tables = {row[0] for row in rows}
+    return not LEGACY_DB_REQUIRED_TABLES.issubset(existing_tables)
+
+
+def _ensure_legacy_db_ready() -> Path:
+    """Create the legacy DB/schema on first run or after partial init."""
+
+    db_path = _get_legacy_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not db_path.exists() or _legacy_db_missing_required_tables(db_path):
+        from db.createTable import bootstrap
+
+        bootstrap(db_path)
+    return db_path
+
 
 @app.before_request
 def _enforce_auth():
@@ -232,8 +264,9 @@ def upload_save():
 @app.route('/getFiles', methods=['GET'])
 def get_all_files():
     try:
+        db_path = _ensure_legacy_db_ready()
         # 使用 with 自动管理数据库连接
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row  # 允许通过列名访问结果
             cursor = conn.cursor()
 
@@ -274,7 +307,8 @@ def get_all_files():
 def getAccounts():
     """快速获取所有账号信息，不进行cookie验证"""
     try:
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        db_path = _ensure_legacy_db_ready()
+        with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''

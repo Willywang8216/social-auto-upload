@@ -1,7 +1,7 @@
 <template>
   <div class="dashboard">
     <div class="page-header">
-      <h1>自媒体自动化运营系统</h1>
+      <h1>自媒體自動化營運系統</h1>
     </div>
 
     <div class="dashboard-content">
@@ -15,13 +15,13 @@
               </div>
               <div class="stat-info">
                 <div class="stat-value">{{ accountStats.total }}</div>
-                <div class="stat-label">账号总数</div>
+                <div class="stat-label">帳號總數</div>
               </div>
             </div>
             <div class="stat-footer">
               <div class="stat-detail">
-                <span>正常: {{ accountStats.normal }}</span>
-                <span>异常: {{ accountStats.abnormal }}</span>
+                <span>正常：{{ accountStats.normal }}</span>
+                <span>異常：{{ accountStats.abnormal }}</span>
               </div>
             </div>
           </el-card>
@@ -41,16 +41,16 @@
             </div>
             <div class="stat-footer">
               <div class="stat-detail">
-                <el-tooltip content="快手账号" placement="top">
+                <el-tooltip content="快手帳號" placement="top">
                   <el-tag size="small" type="success">{{ platformStats.kuaishou }}</el-tag>
                 </el-tooltip>
-                <el-tooltip content="抖音账号" placement="top">
+                <el-tooltip content="抖音帳號" placement="top">
                   <el-tag size="small" type="danger">{{ platformStats.douyin }}</el-tag>
                 </el-tooltip>
-                <el-tooltip content="视频号账号" placement="top">
+                <el-tooltip content="視頻號帳號" placement="top">
                   <el-tag size="small" type="warning">{{ platformStats.channels }}</el-tag>
                 </el-tooltip>
-                <el-tooltip content="小红书账号" placement="top">
+                <el-tooltip content="小紅書帳號" placement="top">
                   <el-tag size="small" type="info">{{ platformStats.xiaohongshu }}</el-tag>
                 </el-tooltip>
               </div>
@@ -67,31 +67,31 @@
               </div>
               <div class="stat-info">
                 <div class="stat-value">{{ contentStats.total }}</div>
-                <div class="stat-label">素材总数</div>
+                <div class="stat-label">素材總數</div>
               </div>
             </div>
             <div class="stat-footer">
               <div class="stat-detail">
-                <span>视频: {{ contentStats.videos }}</span>
-                <span>图片: {{ contentStats.images }}</span>
-                <span>其他: {{ contentStats.others }}</span>
+                <span>影片：{{ contentStats.videos }}</span>
+                <span>圖片：{{ contentStats.images }}</span>
+                <span>其他：{{ contentStats.others }}</span>
               </div>
             </div>
           </el-card>
         </el-col>
       </el-row>
 
-      <!-- 快捷操作区域 -->
+      <!-- 快速操作区域 -->
       <div class="quick-actions">
-        <h2>快捷操作</h2>
+        <h2>快速操作</h2>
         <el-row :gutter="20">
           <el-col :span="6">
             <el-card class="action-card" @click="navigateTo('/account-management')">
               <div class="action-icon">
                 <el-icon><UserFilled /></el-icon>
               </div>
-              <div class="action-title">账号管理</div>
-              <div class="action-desc">管理所有平台账号</div>
+              <div class="action-title">帳號管理</div>
+              <div class="action-desc">管理所有平台帳號</div>
             </el-card>
           </el-col>
           <el-col :span="6">
@@ -99,8 +99,8 @@
               <div class="action-icon">
                 <el-icon><Upload /></el-icon>
               </div>
-              <div class="action-title">素材管理</div>
-              <div class="action-desc">上传和管理视频素材</div>
+              <div class="action-title">素材庫</div>
+              <div class="action-desc">上傳與管理影片素材</div>
             </el-card>
           </el-col>
           <el-col :span="6">
@@ -108,8 +108,8 @@
               <div class="action-icon">
                 <el-icon><Timer /></el-icon>
               </div>
-              <div class="action-title">发布中心</div>
-              <div class="action-desc">发布内容到各平台</div>
+              <div class="action-title">發佈中心</div>
+              <div class="action-desc">將內容發佈到各平台</div>
             </el-card>
           </el-col>
           <el-col :span="6">
@@ -117,8 +117,8 @@
               <div class="action-icon">
                 <el-icon><DataAnalysis /></el-icon>
               </div>
-              <div class="action-title">关于系统</div>
-              <div class="action-desc">查看系统信息</div>
+              <div class="action-title">關於系統</div>
+              <div class="action-desc">查看系統資訊</div>
             </el-card>
           </el-col>
         </el-row>
@@ -127,19 +127,19 @@
       <!-- 素材列表 -->
       <div class="recent-tasks">
         <div class="section-header">
-          <h2>最近上传素材</h2>
+          <h2>最近上傳素材</h2>
           <el-button text @click="navigateTo('/material-management')">查看全部</el-button>
         </div>
 
         <el-table :data="recentMaterials" style="width: 100%" v-loading="loading">
-          <el-table-column prop="filename" label="文件名" width="300" />
-          <el-table-column prop="filesize" label="文件大小" width="120">
+          <el-table-column prop="filename" label="檔案名稱" width="300" />
+          <el-table-column prop="filesize" label="檔案大小" width="120">
             <template #default="scope">
               {{ scope.row.filesize }} MB
             </template>
           </el-table-column>
-          <el-table-column prop="upload_time" label="上传时间" width="200" />
-          <el-table-column label="类型" width="100">
+          <el-table-column prop="upload_time" label="上傳時間" width="200" />
+          <el-table-column label="類型" width="100">
             <template #default="scope">
               <el-tag
                 :type="getFileTypeTag(scope.row.filename)"
@@ -152,7 +152,7 @@
           </el-table-column>
         </el-table>
 
-        <el-empty v-if="!loading && recentMaterials.length === 0" description="暂无素材数据" />
+        <el-empty v-if="!loading && recentMaterials.length === 0" description="目前沒有素材資料" />
       </div>
     </div>
   </div>
@@ -179,7 +179,7 @@ const loading = ref(false)
 const accountStats = computed(() => {
   const accounts = accountStore.accounts
   const normal = accounts.filter(a => a.status === '正常').length
-  const abnormal = accounts.filter(a => a.status !== '正常' && a.status !== '验证中').length
+  const abnormal = accounts.filter(a => a.status !== '正常' && a.status !== '驗證中').length
   return {
     total: accounts.length,
     normal,
@@ -192,8 +192,8 @@ const platformStats = computed(() => {
   const accounts = accountStore.accounts
   const kuaishou = accounts.filter(a => a.platform === '快手').length
   const douyin = accounts.filter(a => a.platform === '抖音').length
-  const channels = accounts.filter(a => a.platform === '视频号').length
-  const xiaohongshu = accounts.filter(a => a.platform === '小红书').length
+  const channels = accounts.filter(a => a.platform === '視頻號').length
+  const xiaohongshu = accounts.filter(a => a.platform === '小紅書').length
   // 统计有账号的平台数量
   const total = [kuaishou, douyin, channels, xiaohongshu].filter(n => n > 0).length
   return { total, kuaishou, douyin, channels, xiaohongshu }
@@ -222,17 +222,17 @@ const recentMaterials = computed(() => {
     .slice(0, 5)
 })
 
-// 获取文件类型
+// 获取文件類型
 const getFileType = (filename) => {
-  if (videoExtensions.some(ext => filename.toLowerCase().endsWith(ext))) return '视频'
-  if (imageExtensions.some(ext => filename.toLowerCase().endsWith(ext))) return '图片'
+  if (videoExtensions.some(ext => filename.toLowerCase().endsWith(ext))) return '影片'
+  if (imageExtensions.some(ext => filename.toLowerCase().endsWith(ext))) return '圖片'
   return '其他'
 }
 
-// 获取文件类型标签颜色
+// 获取文件類型标签颜色
 const getFileTypeTag = (filename) => {
   const type = getFileType(filename)
-  return { '视频': 'success', '图片': 'warning', '其他': 'info' }[type] || 'info'
+  return { '影片': 'success', '圖片': 'warning', '其他': 'info' }[type] || 'info'
 }
 
 // 导航到指定路由
@@ -257,7 +257,7 @@ const fetchDashboardData = async () => {
       appStore.setMaterials(materialRes.value.data)
     }
   } catch (error) {
-    console.error('获取仪表盘数据失败:', error)
+    console.error('取得儀表板資料失敗:', error)
   } finally {
     loading.value = false
   }

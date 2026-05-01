@@ -1,32 +1,32 @@
 <template>
   <div class="jobs-view">
     <div class="page-header">
-      <h1>任务中心</h1>
+      <h1>任務中心</h1>
       <div class="page-actions">
-        <el-select v-model="statusFilter" placeholder="全部状态" clearable @change="loadJobs">
-          <el-option label="排队中" value="pending" />
-          <el-option label="发布中" value="running" />
+        <el-select v-model="statusFilter" placeholder="全部狀態" clearable @change="loadJobs">
+          <el-option label="佇列中" value="pending" />
+          <el-option label="發佈中" value="running" />
           <el-option label="已完成" value="succeeded" />
-          <el-option label="部分失败" value="failed" />
+          <el-option label="部分失敗" value="failed" />
           <el-option label="已取消" value="cancelled" />
         </el-select>
         <el-select v-model="platformFilter" placeholder="全部平台" clearable @change="loadJobs">
           <el-option label="抖音" value="douyin" />
           <el-option label="快手" value="kuaishou" />
-          <el-option label="视频号" value="tencent" />
-          <el-option label="小红书" value="xiaohongshu" />
+          <el-option label="視頻號" value="tencent" />
+          <el-option label="小紅書" value="xiaohongshu" />
         </el-select>
         <el-button type="primary" @click="loadJobs" :loading="loading">
           <el-icon><Refresh /></el-icon>
-          刷新
+          重新整理
         </el-button>
         <el-button type="warning" plain @click="drainNow" :loading="draining">
-          立即排空队列
+          立即排空佇列
         </el-button>
       </div>
     </div>
 
-    <el-empty v-if="!loading && jobs.length === 0" description="暂无任务" />
+    <el-empty v-if="!loading && jobs.length === 0" description="目前沒有任務" />
 
     <div v-else class="jobs-list">
       <el-table :data="jobs" style="width: 100%">
@@ -38,12 +38,12 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="标题">
+        <el-table-column label="標題">
           <template #default="scope">
             {{ scope.row.payload?.title || '—' }}
           </template>
         </el-table-column>
-        <el-table-column label="进度" width="200">
+        <el-table-column label="進度" width="200">
           <template #default="scope">
             <div class="job-progress-cell">
               <el-progress
@@ -54,27 +54,27 @@
               <span class="counters">
                 {{ scope.row.completedTargets }}/{{ scope.row.totalTargets }}
                 <template v-if="scope.row.failedTargets > 0">
-                  · {{ scope.row.failedTargets }} 失败
+                  · {{ scope.row.failedTargets }} 失敗
                 </template>
               </span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="状态" width="110">
+        <el-table-column prop="status" label="狀態" width="110">
           <template #default="scope">
             <el-tag :type="statusTagType(scope.row.status)" effect="plain">
               {{ statusLabel(scope.row.status) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="创建时间" width="180">
+        <el-table-column label="建立時間" width="180">
           <template #default="scope">
             {{ formatTime(scope.row.createdAt) }}
           </template>
         </el-table-column>
         <el-table-column label="操作" width="180">
           <template #default="scope">
-            <el-button size="small" @click="openDetail(scope.row)">详情</el-button>
+            <el-button size="small" @click="openDetail(scope.row)">詳情</el-button>
             <el-button
               v-if="!isTerminal(scope.row.status)"
               size="small"
@@ -88,7 +88,7 @@
 
     <el-drawer
       v-model="drawerVisible"
-      title="任务详情"
+      title="任務詳情"
       direction="rtl"
       size="640px"
     >
@@ -142,7 +142,7 @@ async function loadJobs() {
       platform: platformFilter.value || undefined
     })
   } catch (error) {
-    console.error('加载任务列表失败:', error)
+    console.error('載入任務清單失敗:', error)
   } finally {
     loading.value = false
   }
@@ -152,10 +152,10 @@ async function drainNow() {
   draining.value = true
   try {
     await jobsApi.runDrain()
-    ElMessage.success('队列已排空')
+    ElMessage.success('佇列已排空')
     await loadJobs()
   } catch (error) {
-    ElMessage.error(error?.message || '排空队列失败')
+    ElMessage.error(error?.message || '排空佇列失敗')
   } finally {
     draining.value = false
   }
@@ -170,13 +170,13 @@ async function openDetail(job) {
       jobsStore.startPolling(job.id, { interval: 1500 })
     }
   } catch (error) {
-    ElMessage.error('加载任务详情失败')
+    ElMessage.error('載入任務詳情失敗')
   }
 }
 
 async function cancel(job) {
   try {
-    await ElMessageBox.confirm(`确定取消任务 #${job.id} 吗？`, '提示', {
+    await ElMessageBox.confirm(`確定取消任務 #${job.id} 嗎？`, '提示', {
       type: 'warning'
     })
   } catch {
@@ -184,9 +184,9 @@ async function cancel(job) {
   }
   try {
     await jobsStore.cancelJob(job.id)
-    ElMessage.success('任务已取消')
+    ElMessage.success('任務已取消')
   } catch (error) {
-    ElMessage.error(error?.message || '取消失败')
+    ElMessage.error(error?.message || '取消失敗')
   }
 }
 
@@ -210,8 +210,8 @@ function platformTagType(platform) {
 const PLATFORM_LABEL = {
   douyin: '抖音',
   kuaishou: '快手',
-  tencent: '视频号',
-  xiaohongshu: '小红书'
+  tencent: '視頻號',
+  xiaohongshu: '小紅書'
 }
 
 function platformLabel(platform) {
@@ -219,10 +219,10 @@ function platformLabel(platform) {
 }
 
 const STATUS_LABELS = {
-  pending: '排队中',
-  running: '发布中',
+  pending: '佇列中',
+  running: '發佈中',
   succeeded: '已完成',
-  failed: '部分失败',
+  failed: '部分失敗',
   cancelled: '已取消'
 }
 

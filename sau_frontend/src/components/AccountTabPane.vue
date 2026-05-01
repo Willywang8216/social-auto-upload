@@ -3,29 +3,30 @@
     <div class="account-search">
       <el-input
         :model-value="searchKeyword"
-        placeholder="输入名称或账号搜索"
+        placeholder="輸入名稱或帳號搜尋"
         prefix-icon="Search"
         clearable
         @clear="$emit('search', '')"
         @update:model-value="$emit('search', $event)"
       />
       <div class="action-buttons">
-        <el-button type="primary" @click="$emit('add')">添加账号</el-button>
+        <el-button type="primary" @click="$emit('add')">新增帳號</el-button>
         <el-button type="info" :loading="false" @click="$emit('refresh')">
           <el-icon :class="{ 'is-loading': refreshing }"><Refresh /></el-icon>
-          <span v-if="refreshing">刷新中</span>
+          <span v-if="refreshing">重新整理中</span>
+          <span v-else>重新整理</span>
         </el-button>
       </div>
     </div>
 
     <div v-if="accounts.length > 0" class="account-list">
       <el-table :data="accounts" style="width: 100%">
-        <el-table-column label="头像" width="80">
+        <el-table-column label="頭像" width="80">
           <template #default="scope">
             <el-avatar :src="getDefaultAvatar(scope.row.name)" :size="40" />
           </template>
         </el-table-column>
-        <el-table-column prop="name" label="名称" width="180" />
+        <el-table-column prop="name" label="名稱" width="180" />
         <el-table-column prop="platform" label="平台">
           <template #default="scope">
             <el-tag :type="platformTagType(scope.row.platform)" effect="plain">
@@ -33,7 +34,7 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="状态">
+        <el-table-column prop="status" label="狀態">
           <template #default="scope">
             <el-tag
               :type="statusTagType(scope.row.status)"
@@ -42,7 +43,7 @@
               @click="onStatusClick(scope.row)"
             >
               <el-icon
-                v-if="scope.row.status === '验证中'"
+                v-if="scope.row.status === '驗證中'"
                 class="is-loading"
               >
                 <Loading />
@@ -53,24 +54,24 @@
         </el-table-column>
         <el-table-column label="操作">
           <template #default="scope">
-            <el-button size="small" @click="$emit('edit', scope.row)">编辑</el-button>
+            <el-button size="small" @click="$emit('edit', scope.row)">編輯</el-button>
             <el-button
               size="small"
               type="primary"
               :icon="Download"
               @click="$emit('download-cookie', scope.row)"
-            >下载Cookie</el-button>
+            >下載 Cookie</el-button>
             <el-button
               size="small"
               type="info"
               :icon="Upload"
               @click="$emit('upload-cookie', scope.row)"
-            >上传Cookie</el-button>
+            >上傳 Cookie</el-button>
             <el-button
               size="small"
               type="danger"
               @click="$emit('delete', scope.row)"
-            >删除</el-button>
+            >刪除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -89,7 +90,7 @@ defineProps({
   accounts: { type: Array, required: true },
   searchKeyword: { type: String, default: '' },
   refreshing: { type: Boolean, default: false },
-  emptyText: { type: String, default: '暂无账号数据' }
+  emptyText: { type: String, default: '目前沒有帳號資料' }
 })
 
 const emit = defineEmits([
@@ -106,8 +107,8 @@ const emit = defineEmits([
 const PLATFORM_TAG = {
   快手: 'success',
   抖音: 'danger',
-  视频号: 'warning',
-  小红书: 'info'
+  視頻號: 'warning',
+  小紅書: 'info'
 }
 
 function platformTagType(platform) {
@@ -115,13 +116,13 @@ function platformTagType(platform) {
 }
 
 function statusTagType(status) {
-  if (status === '验证中') return 'info'
+  if (status === '驗證中') return 'info'
   if (status === '正常') return 'success'
   return 'danger'
 }
 
 function isStatusClickable(status) {
-  return status === '异常'
+  return status === '異常'
 }
 
 function onStatusClick(row) {

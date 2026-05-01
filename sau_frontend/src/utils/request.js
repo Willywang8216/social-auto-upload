@@ -22,7 +22,7 @@ request.interceptors.request.use(
     return config
   },
   (error) => {
-    console.error('请求错误:', error)
+    console.error('請求錯誤:', error)
     return Promise.reject(error)
   }
 )
@@ -36,19 +36,19 @@ request.interceptors.response.use(
     if (data.code === 200 || data.success) {
       return data
     } else {
-      ElMessage.error(data.msg || data.message || '请求失败')
-      return Promise.reject(new Error(data.msg || data.message || '请求失败'))
+      ElMessage.error(data.msg || data.message || '請求失敗')
+      return Promise.reject(new Error(data.msg || data.message || '請求失敗'))
     }
   },
   (error) => {
-    console.error('响应错误:', error)
+    console.error('回應錯誤:', error)
     
     // 处理HTTP错误状态码
     if (error.response) {
       const { status } = error.response
       switch (status) {
         case 401:
-          ElMessage.error('未授权，请重新登录')
+          ElMessage.error('未授權，請重新登入')
           clearToken()
           // Bounce back to the login screen using the hash router. Use a
           // direct location.hash assignment rather than importing the
@@ -59,19 +59,19 @@ request.interceptors.response.use(
           }
           break
         case 403:
-          ElMessage.error('拒绝访问')
+          ElMessage.error('拒絕存取')
           break
         case 404:
-          ElMessage.error('请求地址不存在')
+          ElMessage.error('找不到請求位址')
           break
         case 500:
-          ElMessage.error('服务器内部错误')
+          ElMessage.error('伺服器內部錯誤')
           break
         default:
-          ElMessage.error('网络错误')
+          ElMessage.error('網路錯誤')
       }
     } else {
-      ElMessage.error('网络连接失败')
+      ElMessage.error('網路連線失敗')
     }
     
     return Promise.reject(error)
