@@ -166,6 +166,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { accountApi } from '@/api/account'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
+import { buildApiUrl } from '@/utils/api-url'
 import { http } from '@/utils/request'
 import { appendAuthQuery, getToken } from '@/utils/auth'
 import AccountTabPane from '@/components/AccountTabPane.vue'
@@ -409,9 +410,8 @@ const handleDelete = (row) => {
 // download. Using a plain <a download> would skip the auth header and 401.
 const handleDownloadCookie = async (row) => {
   try {
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409'
     const response = await fetch(
-      `${baseUrl}/downloadCookie?filePath=${encodeURIComponent(row.filePath)}`,
+      buildApiUrl(`/downloadCookie?filePath=${encodeURIComponent(row.filePath)}`),
       {
         headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {}
       }
@@ -543,9 +543,8 @@ const connectSSE = (platform, name) => {
   // EventSource cannot attach an Authorization header, so we tunnel the
   // auth token through a query parameter that the backend specifically
   // honours for /login. In open mode this is a no-op.
-  const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409'
   const url = appendAuthQuery(
-    `${baseUrl}/login?type=${type}&id=${encodeURIComponent(name)}`
+    buildApiUrl(`/login?type=${type}&id=${encodeURIComponent(name)}`)
   )
 
   eventSource = new EventSource(url)

@@ -123,7 +123,7 @@
               class="video-upload"
               drag
               :auto-upload="true"
-              :action="`${apiBaseUrl}/upload`"
+              :action="uploadAction"
               :on-success="(response, file) => handleUploadSuccess(response, file, currentUploadTab)"
               :on-error="handleUploadError"
               multiple
@@ -507,10 +507,10 @@ import { useAppStore } from '@/stores/app'
 import { useJobsStore } from '@/stores/jobs'
 import { materialApi } from '@/api/material'
 import { getToken } from '@/utils/auth'
+import { buildApiUrl } from '@/utils/api-url'
 import PublishJobProgress from '@/components/PublishJobProgress.vue'
 
-// API base URL
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409'
+const uploadAction = buildApiUrl('/upload')
 
 // Authorization headers for the in-page <el-upload>. The component owns its
 // own XHR pipeline so we cannot reuse the axios interceptor — we read the
