@@ -97,7 +97,8 @@ AI的发展毋庸置疑，希望你遇到这种安装和使用，不要再怯场
 - agent / skill 请看：[Bilibili Upload Skill](./skills/bilibili-upload/SKILL.md)
 - 历史 Web 说明请看：[历史 Web 版本说明](./docs/legacy-web.md)
 - 其他单平台 skill 与整合型 skill 仍在开发中
-- `requirements.txt` 目前主要用于历史兼容路径，普通用户不需要优先使用它
+- Python 主线安装元数据以 `pyproject.toml` 为准（`uv sync` / `pip install -e .`）
+- `requirements.txt` 目前主要用于 Docker / 历史兼容路径，普通用户不需要优先使用它；但后端运行时依赖仍需与 `pyproject.toml` 保持一致
 
 
 ## 📣近况说明

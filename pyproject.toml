@@ -16,14 +16,16 @@ dependencies = [
   # the encryption code path is unconditionally importable.
   "cryptography>=42.0.0",
   "loguru==0.7.3",
-  "opencv-python>=4.13.0.92",
+  # `utils/login_qrcode.py` imports these at runtime. Keep them mirrored
+  # with requirements.txt because Docker / legacy installs still use it.
+  "opencv-python-headless==4.13.0.92",
   # `patchright` is a stealth-patched fork of `playwright` with the same
   # async API. Every uploader and the Flask login/auth helpers go through
   # it; we no longer ship the upstream `playwright` package alongside.
   "patchright==1.58.2",
   "qrcode==8.2",
   "requests==2.32.3",
-  "segno>=1.6.6",
+  "segno==1.6.6",
   # `alembic` drives the SQLite schema migrations under migrations/.
   # `db/createTable.py` is now a thin wrapper around `alembic upgrade head`.
   "alembic>=1.13",

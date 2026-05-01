@@ -1,11 +1,37 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime
 import base64
+import importlib
 from pathlib import Path
 import sys
 
-import cv2
-import segno
+
+_cv2_module = None
+_segno_module = None
+
+
+def _get_cv2():
+    global _cv2_module
+    if _cv2_module is None:
+        try:
+            _cv2_module = importlib.import_module("cv2")
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "缺少二维码解码依赖 cv2，请安装 opencv-python-headless 后再重试。"
+            ) from exc
+    return _cv2_module
+
+
+def _get_segno():
+    global _segno_module
+    if _segno_module is None:
+        try:
+            _segno_module = importlib.import_module("segno")
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "缺少终端二维码依赖 segno，请安装 segno 后再重试。"
+            ) from exc
+    return _segno_module
 
 
 def build_login_qrcode_path(account_file: str, suffix: str = "login_qrcode") -> Path:
@@ -35,6 +61,7 @@ def remove_qrcode_file(qrcode_path: Path | None) -> bool:
 
 
 def decode_qrcode_from_path(qrcode_path: Path) -> str | None:
+    cv2 = _get_cv2()
     image = cv2.imread(str(qrcode_path))
     if image is None:
         return None
@@ -66,6 +93,7 @@ def print_terminal_qrcode(
 ) -> None:
     print()
     print(f"请使用{app_name}扫描下方二维码登录：")
+    segno = _get_segno()
     qrcode = segno.make(qrcode_content, error="L", boost_error=False)
     try:
         if hasattr(sys.stdout, "reconfigure"):

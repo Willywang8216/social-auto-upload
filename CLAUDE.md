@@ -39,8 +39,16 @@ The project also provides a command-line interface (CLI) for users who prefer to
 
 1.  **Install dependencies:**
     ```bash
+    uv sync --extra web
+    # or: pip install -e '.[web]'
+    ```
+    `pyproject.toml` is the primary Python dependency metadata for backend/development installs. Use the `web` extra when you need the Flask server entrypoints.
+
+    For Docker / legacy compatibility installs, keep using:
+    ```bash
     pip install -r requirements.txt
     ```
+    `requirements.txt` still needs to mirror backend runtime dependencies because the current Dockerfile installs from it.
 
 2.  **Install Playwright browser drivers:**
     ```bash
@@ -149,5 +157,6 @@ sau skill install
 *   The frontend code is located in the `sau_frontend` directory.
 *   The project uses a SQLite database for data storage. The database file is located at `db/database.db`.
 *   The `conf.example.py` file should be copied to `conf.py` and configured with the appropriate settings.
-*   The `requirements.txt` file lists the Python dependencies.
+*   `pyproject.toml` is the primary Python dependency metadata for `uv sync` / `pip install -e .`.
+*   `requirements.txt` remains the Docker / legacy compatibility install path and must stay aligned for backend runtime dependencies.
 *   The `package.json` file in the `sau_frontend` directory lists the frontend dependencies.
