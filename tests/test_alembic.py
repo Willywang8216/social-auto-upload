@@ -9,7 +9,15 @@ from pathlib import Path
 
 import db.createTable as create_table
 
+try:
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+except ModuleNotFoundError:  # pragma: no cover - environment-specific
+    Config = None
+    ScriptDirectory = None
 
+
+@unittest.skipUnless(Config is not None, "alembic is not installed")
 class AlembicBaselineTests(unittest.TestCase):
     """The baseline migration must agree with db/createTable.bootstrap()."""
 
@@ -29,6 +37,10 @@ class AlembicBaselineTests(unittest.TestCase):
         # filter it out for a stable comparison.
         return {name for (name,) in rows if name != "sqlite_sequence"}
 
+    def _current_head(self) -> str:
+        cfg = Config(str(create_table.ALEMBIC_INI_PATH))
+        return ScriptDirectory.from_config(cfg).get_current_head()
+
     def test_alembic_upgrade_creates_expected_tables(self) -> None:
         create_table._alembic_upgrade_head(self.db_path)
         tables = self._table_set(self.db_path)
@@ -42,6 +54,11 @@ class AlembicBaselineTests(unittest.TestCase):
             "accounts",
             "publish_jobs",
             "publish_job_targets",
+            "media_groups",
+            "media_group_items",
+            "campaigns",
+            "campaign_artifacts",
+            "campaign_posts",
         ):
             self.assertIn(expected, tables)
 
@@ -62,7 +79,7 @@ class AlembicBaselineTests(unittest.TestCase):
                 "SELECT version_num FROM alembic_version"
             ).fetchall()
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0][0], "0001_baseline")
+        self.assertEqual(rows[0][0], self._current_head())
 
     def test_alembic_upgrade_is_idempotent(self) -> None:
         # Running upgrade head twice must succeed and not duplicate rows.

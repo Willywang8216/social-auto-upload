@@ -12,7 +12,15 @@ from flask_cors import CORS
 from myUtils.auth import check_cookie
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory
 from conf import BASE_DIR
+from myUtils import campaigns as campaign_store
+from myUtils import content_rules
+from myUtils import google_sheets
 from myUtils import jobs as job_runtime
+from myUtils import llm_client
+from myUtils import media_groups as media_group_store
+from myUtils import media_pipeline
+from myUtils import profiles as profile_registry
+from myUtils import rclone_storage
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.postVideo import (
     post_video_DouYin,
@@ -943,6 +951,821 @@ def _normalise_publish_payload(data: dict) -> tuple[str, dict, list[tuple[str, s
             targets.append((account_ref, file_ref, scheduled))
 
     return platform, payload, targets
+
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
+
+
+def _current_db_path() -> Path:
+    return _ensure_legacy_db_ready()
+
+
+def _profile_payload(profile: profile_registry.Profile) -> dict:
+    return profile.to_dict()
+
+
+def _account_payload(account: profile_registry.Account) -> dict:
+    return account.to_dict()
+
+
+def _media_group_payload(
+    media_group: media_group_store.MediaGroup,
+    *,
+    items: list[media_group_store.MediaGroupItem] | None = None,
+) -> dict:
+    payload = media_group.to_dict()
+    if items is not None:
+        payload["items"] = [item.to_dict() for item in items]
+    return payload
+
+
+def _campaign_payload(campaign: campaign_store.Campaign, *, db_path: Path) -> dict:
+    payload = campaign.to_dict()
+    payload["artifacts"] = [
+        artifact.to_dict()
+        for artifact in campaign_store.list_campaign_artifacts(campaign.id, db_path=db_path)
+    ]
+    payload["posts"] = [
+        post.to_dict()
+        for post in campaign_store.list_campaign_posts(campaign.id, db_path=db_path)
+    ]
+    return payload
+
+
+def _read_json_body() -> dict:
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise ValueError("Expected a JSON object")
+    return data
+
+
+def _load_file_record(file_record_id: int, *, db_path: Path) -> dict:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM file_records WHERE id = ?",
+            (file_record_id,),
+        ).fetchone()
+    if row is None:
+        raise LookupError(f"File record not found: id={file_record_id}")
+    return {key: row[key] for key in row.keys()}
+
+
+def _ensure_file_record_for_path(file_path: str, *, db_path: Path) -> int:
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM file_records WHERE file_path = ?",
+            (file_path,),
+        ).fetchone()
+        if row is not None:
+            return int(row[0])
+
+        absolute_path = Path(BASE_DIR) / "videoFile" / file_path
+        filename = Path(file_path).name
+        filesize = None
+        if absolute_path.exists():
+            filesize = round(float(absolute_path.stat().st_size) / (1024 * 1024), 2)
+        cursor = conn.execute(
+            """
+            INSERT INTO file_records (filename, filesize, file_path)
+            VALUES (?, ?, ?)
+            """,
+            (filename, filesize, file_path),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def _load_media_group_files(media_group_id: int, *, db_path: Path) -> list[dict]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                mgi.id,
+                mgi.media_group_id,
+                mgi.file_record_id,
+                mgi.role,
+                mgi.sort_order,
+                fr.filename,
+                fr.file_path,
+                fr.filesize
+            FROM media_group_items AS mgi
+            JOIN file_records AS fr ON fr.id = mgi.file_record_id
+            WHERE mgi.media_group_id = ?
+            ORDER BY mgi.sort_order, mgi.id
+            """,
+            (media_group_id,),
+        ).fetchall()
+    return [{key: row[key] for key in row.keys()} for row in rows]
+
+
+def _is_image_file(path: str | Path) -> bool:
+    return Path(path).suffix.lower() in IMAGE_SUFFIXES
+
+
+def _is_video_file(path: str | Path) -> bool:
+    return Path(path).suffix.lower() in VIDEO_SUFFIXES
+
+
+def _derive_watermark_spec(profile: profile_registry.Profile, data: dict) -> dict:
+    watermark = data.get("watermark")
+    if watermark is None:
+        watermark = (profile.settings or {}).get("watermark")
+    if isinstance(watermark, str) and watermark.strip():
+        return {"text": watermark.strip()}
+    if isinstance(watermark, dict):
+        return dict(watermark)
+    return {}
+
+
+def _prepare_campaign_media_artifacts(
+    campaign_id: int,
+    profile: profile_registry.Profile,
+    media_files: list[dict],
+    request_data: dict,
+    *,
+    db_path: Path,
+) -> dict:
+    upload_to_remote = bool(
+        request_data.get("uploadToRemote", os.environ.get("SAU_DEFAULT_RCLONE_REMOTE"))
+    )
+    watermark_spec = _derive_watermark_spec(profile, request_data)
+    artifacts_context = {
+        "imageUrls": [],
+        "videoUrl": "",
+        "imageLocalPaths": [],
+        "videoLocalPath": "",
+        "transcriptText": str(request_data.get("transcriptText", "") or "").strip(),
+    }
+
+    for media_file in media_files:
+        source_path = Path(media_file["file_path"]).expanduser().resolve()
+        publish_path = source_path
+        artifact_kind = None
+
+        if watermark_spec and _is_image_file(source_path):
+            artifact_kind = "watermarked_image"
+            publish_path = media_pipeline.prepare_campaign_artifact_path(
+                campaign_id,
+                source_path,
+                artifact_kind=artifact_kind,
+            )
+            media_pipeline.apply_image_watermark(
+                source_path,
+                publish_path,
+                watermark_text=watermark_spec.get("text"),
+                watermark_image_path=watermark_spec.get("imagePath"),
+                seed=campaign_id * 1000 + int(media_file["file_record_id"]),
+            )
+        elif watermark_spec and _is_video_file(source_path):
+            artifact_kind = "watermarked_video"
+            publish_path = media_pipeline.prepare_campaign_artifact_path(
+                campaign_id,
+                source_path,
+                artifact_kind=artifact_kind,
+            )
+            media_pipeline.apply_video_watermark(
+                source_path,
+                publish_path,
+                watermark_text=watermark_spec.get("text"),
+                watermark_image_path=watermark_spec.get("imagePath"),
+                seed=campaign_id * 1000 + int(media_file["file_record_id"]),
+                duration_seconds=request_data.get("durationSeconds"),
+            )
+
+        if artifact_kind is not None:
+            campaign_store.add_campaign_artifact(
+                campaign_id,
+                source_file_record_id=media_file["file_record_id"],
+                artifact_kind=artifact_kind,
+                local_path=str(publish_path),
+                metadata={"role": media_file["role"]},
+                db_path=db_path,
+            )
+
+        public_url = None
+        if upload_to_remote:
+            remote_artifact = rclone_storage.upload_artifact(
+                publish_path,
+                campaign_id=campaign_id,
+                artifact_subdir="videos" if _is_video_file(publish_path) else "images",
+            )
+            public_url = remote_artifact.public_url
+            campaign_store.add_campaign_artifact(
+                campaign_id,
+                source_file_record_id=media_file["file_record_id"],
+                artifact_kind="remote_upload",
+                local_path=str(publish_path),
+                public_url=remote_artifact.public_url,
+                remote_path=remote_artifact.remote_path,
+                metadata={"role": media_file["role"]},
+                db_path=db_path,
+            )
+
+        if _is_image_file(publish_path):
+            artifacts_context["imageLocalPaths"].append(str(publish_path))
+            if public_url:
+                artifacts_context["imageUrls"].append(public_url)
+        elif _is_video_file(publish_path):
+            artifacts_context["videoLocalPath"] = str(publish_path)
+            if public_url:
+                artifacts_context["videoUrl"] = public_url
+
+    should_transcribe = bool(
+        request_data.get("transcribe", False)
+        or (
+            not artifacts_context["transcriptText"]
+            and os.environ.get("SAU_LLM_API_KEY")
+            and os.environ.get("SAU_LLM_API_BASE_URL")
+        )
+    )
+    primary_video = next((item for item in media_files if item["role"] == "video"), None)
+    if should_transcribe and primary_video is not None and not artifacts_context["transcriptText"]:
+        source_path = Path(primary_video["file_path"]).expanduser().resolve()
+        audio_path = media_pipeline.prepare_campaign_artifact_path(
+            campaign_id,
+            source_path,
+            artifact_kind="audio",
+            suffix=".wav",
+        )
+        media_pipeline.extract_video_audio(source_path, audio_path)
+        transcript = llm_client.transcribe_audio(audio_path)
+        transcript_path = media_pipeline.prepare_campaign_artifact_path(
+            campaign_id,
+            source_path,
+            artifact_kind="transcript",
+            suffix=".txt",
+        )
+        transcript_path.write_text(transcript.text, encoding="utf-8")
+        artifacts_context["transcriptText"] = transcript.text
+        campaign_store.add_campaign_artifact(
+            campaign_id,
+            source_file_record_id=primary_video["file_record_id"],
+            artifact_kind="audio",
+            local_path=str(audio_path),
+            db_path=db_path,
+        )
+        campaign_store.add_campaign_artifact(
+            campaign_id,
+            source_file_record_id=primary_video["file_record_id"],
+            artifact_kind="transcript",
+            local_path=str(transcript_path),
+            metadata={"text": transcript.text},
+            db_path=db_path,
+        )
+
+    return artifacts_context
+
+
+def _fallback_generated_draft(
+    platform: str,
+    media_group: media_group_store.MediaGroup,
+    request_data: dict,
+    media_context: dict,
+) -> dict:
+    headline = str(request_data.get("title") or media_group.name).strip()
+    notes = str(request_data.get("notes", "") or "").strip()
+    transcript = str(media_context.get("transcriptText", "") or "").strip()
+    snippets = [part for part in (headline, notes, transcript[:500]) if part]
+    message = "\n\n".join(snippets).strip() or media_group.name
+    return {
+        "message": message,
+        "hashtags": request_data.get("hashtags") or [],
+        "firstComment": str(request_data.get("firstComment", "") or "").strip(),
+    }
+
+
+def _build_generation_prompt(
+    platform: str,
+    profile: profile_registry.Profile,
+    media_group: media_group_store.MediaGroup,
+    request_data: dict,
+    media_context: dict,
+) -> tuple[str, str]:
+    rule = content_rules.get_platform_rule(platform)
+    system_prompt = str((profile.settings or {}).get("systemPrompt", "") or "").strip()
+    if not system_prompt:
+        system_prompt = "You write concise, platform-native social media copy."
+    user_prompt = "\n".join(
+        [
+            f"Platform: {platform}",
+            f"Media group: {media_group.name}",
+            f"Max chars: {rule.max_chars if rule.max_chars is not None else 'none'}",
+            f"Required hashtag count: {rule.hashtag_count}",
+            f"Require emoji: {rule.require_emoji}",
+            f"Require contact details: {rule.require_contact_details}",
+            f"Require CTA: {rule.require_cta}",
+            f"Title: {request_data.get('title', '')}",
+            f"Notes: {request_data.get('notes', '')}",
+            f"Transcript: {media_context.get('transcriptText', '')}",
+            f"Contact details: {request_data.get('contactDetails', '')}",
+            f"CTA: {request_data.get('cta', '')}",
+            "Return JSON with keys: message, hashtags, firstComment, contactDetails, cta.",
+        ]
+    )
+    return system_prompt, user_prompt
+
+
+def _generate_platform_draft(
+    platform: str,
+    profile: profile_registry.Profile,
+    media_group: media_group_store.MediaGroup,
+    request_data: dict,
+    media_context: dict,
+) -> dict:
+    should_use_llm = bool(
+        request_data.get("useLlm", True)
+        and os.environ.get("SAU_LLM_API_KEY")
+        and os.environ.get("SAU_LLM_API_BASE_URL")
+    )
+
+    raw_draft = None
+    if should_use_llm:
+        try:
+            system_prompt, user_prompt = _build_generation_prompt(
+                platform,
+                profile,
+                media_group,
+                request_data,
+                media_context,
+            )
+            result = llm_client.generate_chat_completion(system_prompt, user_prompt)
+            raw_draft = result.parsed_json or {"message": result.content}
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "LLM generation failed for %s: %s",
+                platform,
+                exc,
+            )
+
+    if not isinstance(raw_draft, dict):
+        raw_draft = _fallback_generated_draft(platform, media_group, request_data, media_context)
+
+    return content_rules.prepare_platform_draft(
+        platform,
+        raw_draft,
+        contact_details=str(request_data.get("contactDetails", "") or "").strip(),
+        cta=str(request_data.get("cta", "") or "").strip(),
+        default_hashtags=request_data.get("hashtags") or [],
+    )
+
+
+def _default_sheet_title(profile: profile_registry.Profile) -> str:
+    return f"{datetime.now().strftime('%Y-%m-%d')}-{profile.slug}"
+
+
+@app.route("/profiles", methods=["GET"])
+def profiles_list():
+    db_path = _current_db_path()
+    items = profile_registry.list_profiles(db_path=db_path)
+    return jsonify(
+        {"code": 200, "msg": "ok", "data": [_profile_payload(item) for item in items]}
+    ), 200
+
+
+@app.route("/profiles", methods=["POST"])
+def profiles_create():
+    try:
+        data = _read_json_body()
+        name = str(data.get("name", "")).strip()
+        if not name:
+            raise ValueError("name is required")
+        profile = profile_registry.create_profile(
+            name,
+            description=str(data.get("description", "") or ""),
+            settings=data.get("settings") if isinstance(data.get("settings"), dict) else None,
+            db_path=_current_db_path(),
+        )
+    except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "created", "data": _profile_payload(profile)}), 200
+
+
+@app.route("/profiles/<int:profile_id>", methods=["GET"])
+def profiles_get(profile_id):
+    try:
+        profile = profile_registry.get_profile(profile_id, db_path=_current_db_path())
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
+    return jsonify({"code": 200, "msg": "ok", "data": _profile_payload(profile)}), 200
+
+
+@app.route("/profiles/<int:profile_id>", methods=["PATCH"])
+def profiles_patch(profile_id):
+    try:
+        data = _read_json_body()
+        profile = profile_registry.update_profile(
+            profile_id,
+            name=data.get("name"),
+            description=data.get("description"),
+            settings=data.get("settings") if isinstance(data.get("settings"), dict) else None,
+            db_path=_current_db_path(),
+        )
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
+    except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "updated", "data": _profile_payload(profile)}), 200
+
+
+@app.route("/profiles/<int:profile_id>/accounts", methods=["GET"])
+def profile_accounts_list(profile_id):
+    db_path = _current_db_path()
+    try:
+        profile_registry.get_profile(profile_id, db_path=db_path)
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
+
+    enabled = request.args.get("enabled")
+    enabled_filter = None
+    if enabled is not None:
+        enabled_filter = enabled.lower() in {"1", "true", "yes", "y"}
+    items = profile_registry.list_accounts(
+        profile_id=profile_id,
+        platform=request.args.get("platform"),
+        enabled=enabled_filter,
+        db_path=db_path,
+    )
+    return jsonify(
+        {"code": 200, "msg": "ok", "data": [_account_payload(item) for item in items]}
+    ), 200
+
+
+@app.route("/profiles/<int:profile_id>/accounts", methods=["POST"])
+def profile_accounts_create(profile_id):
+    try:
+        data = _read_json_body()
+        account_name = str(data.get("accountName", "")).strip()
+        platform = str(data.get("platform", "")).strip().lower()
+        if not account_name:
+            raise ValueError("accountName is required")
+        if not platform:
+            raise ValueError("platform is required")
+        account = profile_registry.add_account(
+            profile_id,
+            platform,
+            account_name,
+            cookie_path=data.get("cookiePath"),
+            auth_type=str(data.get("authType", "cookie") or "cookie"),
+            config=data.get("config") if isinstance(data.get("config"), dict) else None,
+            enabled=bool(data.get("enabled", True)),
+            status=int(data.get("status", 0) or 0),
+            db_path=_current_db_path(),
+        )
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
+    except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "created", "data": _account_payload(account)}), 200
+
+
+@app.route("/accounts/<int:account_id>", methods=["PATCH"])
+def accounts_patch(account_id):
+    try:
+        data = _read_json_body()
+        account = profile_registry.update_account(
+            account_id,
+            account_name=data.get("accountName"),
+            cookie_path=data.get("cookiePath"),
+            auth_type=data.get("authType"),
+            config=data.get("config") if isinstance(data.get("config"), dict) else None,
+            enabled=data.get("enabled"),
+            status=data.get("status"),
+            db_path=_current_db_path(),
+        )
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
+    except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "updated", "data": _account_payload(account)}), 200
+
+
+@app.route("/media-groups", methods=["POST"])
+def media_groups_create():
+    try:
+        data = _read_json_body()
+        name = str(data.get("name", "")).strip()
+        if not name:
+            raise ValueError("name is required")
+        db_path = _current_db_path()
+        group = media_group_store.create_media_group(
+            name,
+            notes=str(data.get("notes", "") or ""),
+            primary_video_file_id=data.get("primaryVideoFileId"),
+            db_path=db_path,
+        )
+        items = data.get("items") or []
+        if not isinstance(items, list):
+            raise ValueError("items must be a list")
+        if items:
+            media_group_store.replace_media_group_items(
+                group.id,
+                [
+                    (
+                        int(item["fileRecordId"])
+                        if "fileRecordId" in item
+                        else _ensure_file_record_for_path(str(item["filePath"]), db_path=db_path),
+                        str(item.get("role", "attachment")),
+                    )
+                    for item in items
+                ],
+                db_path=db_path,
+            )
+        payload = _media_group_payload(
+            media_group_store.get_media_group(group.id, db_path=db_path),
+            items=media_group_store.list_media_group_items(group.id, db_path=db_path),
+        )
+    except (LookupError, ValueError, TypeError, sqlite3.IntegrityError, KeyError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "created", "data": payload}), 200
+
+
+@app.route("/media-groups", methods=["GET"])
+def media_groups_list():
+    db_path = _current_db_path()
+    groups = media_group_store.list_media_groups(db_path=db_path)
+    data = []
+    for group in groups:
+        items = media_group_store.list_media_group_items(group.id, db_path=db_path)
+        data.append(_media_group_payload(group, items=items))
+    return jsonify({"code": 200, "msg": "ok", "data": data}), 200
+
+
+@app.route("/media-groups/<int:media_group_id>", methods=["GET"])
+def media_groups_get(media_group_id):
+    db_path = _current_db_path()
+    try:
+        group = media_group_store.get_media_group(media_group_id, db_path=db_path)
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Media group not found", "data": None}), 404
+    items = media_group_store.list_media_group_items(media_group_id, db_path=db_path)
+    return jsonify(
+        {"code": 200, "msg": "ok", "data": _media_group_payload(group, items=items)}
+    ), 200
+
+
+@app.route("/campaigns/prepare", methods=["POST"])
+def campaigns_prepare():
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        profile_id = int(data.get("profileId"))
+        media_group_id = int(data.get("mediaGroupId"))
+        profile = profile_registry.get_profile(profile_id, db_path=db_path)
+        media_group = media_group_store.get_media_group(media_group_id, db_path=db_path)
+        selected_account_ids = data.get("selectedAccountIds")
+        if selected_account_ids is None:
+            account_rows = profile_registry.list_accounts(
+                profile_id=profile_id,
+                enabled=True,
+                db_path=db_path,
+            )
+        else:
+            if not isinstance(selected_account_ids, list):
+                raise ValueError("selectedAccountIds must be a list")
+            account_rows = [
+                profile_registry.get_account(int(account_id), db_path=db_path)
+                for account_id in selected_account_ids
+            ]
+            account_rows = [
+                account for account in account_rows
+                if account.profile_id == profile_id and account.enabled
+            ]
+        if not account_rows:
+            raise ValueError("No enabled accounts selected for this profile")
+
+        campaign = campaign_store.create_campaign(
+            profile_id,
+            media_group_id,
+            status=campaign_store.CAMPAIGN_PREPARING,
+            selected_account_ids=[account.id for account in account_rows],
+            metadata={
+                "title": data.get("title", ""),
+                "notes": data.get("notes", ""),
+                "requestedPlatforms": sorted({account.platform for account in account_rows}),
+            },
+            sheet_spreadsheet_id=data.get("spreadsheetId"),
+            sheet_title=str(data.get("sheetTitle", "") or "") or None,
+            db_path=db_path,
+        )
+
+        media_files = _load_media_group_files(media_group_id, db_path=db_path)
+        media_context = _prepare_campaign_media_artifacts(
+            campaign.id,
+            profile,
+            media_files,
+            data,
+            db_path=db_path,
+        )
+
+        grouped_accounts: dict[str, list[profile_registry.Account]] = {}
+        for account in account_rows:
+            grouped_accounts.setdefault(account.platform, []).append(account)
+
+        created_posts: list[campaign_store.CampaignPost] = []
+        for platform, platform_accounts in grouped_accounts.items():
+            draft = _generate_platform_draft(
+                platform,
+                profile,
+                media_group,
+                data,
+                media_context,
+            )
+            sheet_row = {}
+            if profile_registry.platform_supports_sheet_export(platform):
+                sheet_image_urls = media_context["imageUrls"] or None
+                sheet_video_url = media_context["videoUrl"]
+                if sheet_image_urls and sheet_video_url:
+                    # The downstream sheet import format accepts either images
+                    # or one video URL per row, never both. Prefer the video
+                    # when the group contains mixed media so the row remains
+                    # importable.
+                    sheet_image_urls = None
+                sheet_row = content_rules.build_sheet_row(
+                    message=draft["message"],
+                    link=str(data.get("link", "") or ""),
+                    image_urls=sheet_image_urls,
+                    video_url=sheet_video_url,
+                    schedule=data.get("schedule"),
+                    watermark="Default" if _derive_watermark_spec(profile, data) else "",
+                    first_comment=str(draft.get("firstComment", "") or ""),
+                    alt_text=str(data.get("altText", "") or ""),
+                    post_preset=str((platform_accounts[0].config or {}).get("sheetPostPreset", "") or ""),
+                )
+            created_posts.append(
+                campaign_store.add_campaign_post(
+                    campaign.id,
+                    platform,
+                    account_ids=[account.id for account in platform_accounts],
+                    draft=draft,
+                    sheet_row=sheet_row,
+                    status=campaign_store.CAMPAIGN_POST_READY,
+                    db_path=db_path,
+                )
+            )
+
+        sheet_title = campaign.sheet_title or _default_sheet_title(profile)
+        spreadsheet_id = campaign.sheet_spreadsheet_id
+        if data.get("exportToSheet", True):
+            exportable_rows = [
+                post.sheet_row
+                for post in created_posts
+                if post.sheet_row
+            ]
+            if exportable_rows:
+                export_result = google_sheets.GoogleSheetsClient.from_env().export_rows(
+                    sheet_title=sheet_title,
+                    rows=exportable_rows,
+                    spreadsheet_id=spreadsheet_id,
+                )
+                spreadsheet_id = export_result.spreadsheet_id
+                sheet_title = export_result.sheet_title
+
+        campaign = campaign_store.update_campaign(
+            campaign.id,
+            status=campaign_store.CAMPAIGN_PREPARED,
+            metadata={
+                **(campaign.metadata or {}),
+                "transcriptText": media_context.get("transcriptText", ""),
+            },
+            sheet_spreadsheet_id=spreadsheet_id,
+            sheet_title=sheet_title,
+            prepared_at=datetime.now().isoformat(timespec="seconds"),
+            last_error=None,
+            db_path=db_path,
+        )
+    except LookupError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except Exception as exc:  # noqa: BLE001
+        if "campaign" in locals():
+            campaign_store.update_campaign(
+                campaign.id,
+                status=campaign_store.CAMPAIGN_NEEDS_REVIEW,
+                last_error=str(exc),
+                db_path=db_path,
+            )
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    return jsonify({"code": 200, "msg": "prepared", "data": _campaign_payload(campaign, db_path=db_path)}), 200
+
+
+@app.route("/campaigns/<int:campaign_id>", methods=["GET"])
+def campaigns_get(campaign_id):
+    db_path = _current_db_path()
+    try:
+        campaign = campaign_store.get_campaign(campaign_id, db_path=db_path)
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Campaign not found", "data": None}), 404
+    return jsonify(
+        {"code": 200, "msg": "ok", "data": _campaign_payload(campaign, db_path=db_path)}
+    ), 200
+
+
+@app.route("/campaigns/<int:campaign_id>/posts/<int:post_id>", methods=["PATCH"])
+def campaigns_posts_patch(campaign_id, post_id):
+    db_path = _current_db_path()
+    try:
+        campaign_store.get_campaign(campaign_id, db_path=db_path)
+        post = campaign_store.get_campaign_post(post_id, db_path=db_path)
+        if post.campaign_id != campaign_id:
+            raise LookupError("Campaign post not found")
+        data = _read_json_body()
+        updated = campaign_store.update_campaign_post(
+            post_id,
+            account_ids=data.get("accountIds") if isinstance(data.get("accountIds"), list) else None,
+            draft=data.get("draft") if isinstance(data.get("draft"), dict) else None,
+            sheet_row=data.get("sheetRow") if isinstance(data.get("sheetRow"), dict) else None,
+            status=data.get("status"),
+            last_published_job_id=data.get("lastPublishedJobId", campaign_store._UNSET),
+            db_path=db_path,
+        )
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Campaign post not found", "data": None}), 404
+    except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "updated", "data": updated.to_dict()}), 200
+
+
+@app.route("/campaigns/<int:campaign_id>/publish", methods=["POST"])
+def campaigns_publish(campaign_id):
+    db_path = _current_db_path()
+    try:
+        campaign = campaign_store.get_campaign(campaign_id, db_path=db_path)
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Campaign not found", "data": None}), 404
+
+    posts = campaign_store.list_campaign_posts(campaign.id, db_path=db_path)
+    artifacts = [
+        artifact.to_dict()
+        for artifact in campaign_store.list_campaign_artifacts(campaign.id, db_path=db_path)
+    ]
+    queued_jobs: list[dict] = []
+    skipped: list[dict] = []
+    for post in posts:
+        if not profile_registry.platform_supports_direct_publish(post.platform):
+            skipped.append({"platform": post.platform, "reason": "content_only"})
+            continue
+
+        accounts = [
+            profile_registry.get_account(account_id, db_path=db_path)
+            for account_id in post.account_ids
+        ]
+        enabled_accounts = [account for account in accounts if account.enabled]
+        if not enabled_accounts:
+            skipped.append({"platform": post.platform, "reason": "no_enabled_accounts"})
+            continue
+
+        payload = {
+            "campaignId": campaign.id,
+            "campaignPostId": post.id,
+            "platform": post.platform,
+            "draft": post.draft,
+            "message": post.draft.get("message", ""),
+            "sheetRow": post.sheet_row,
+            "artifacts": artifacts,
+        }
+        targets = [
+            (account.cookie_path or f"account:{account.id}", f"campaign_post:{post.id}", None)
+            for account in enabled_accounts
+        ]
+        job = job_runtime.enqueue_job(
+            job_runtime.JobSpec(
+                platform=post.platform,
+                payload=payload,
+                targets=targets,
+                profile_id=campaign.profile_id,
+                idempotency_key=f"campaign-{campaign.id}-post-{post.id}",
+            ),
+            db_path=db_path,
+        )
+        queued_jobs.append(_job_to_payload(job))
+        campaign_store.update_campaign_post(
+            post.id,
+            status=campaign_store.CAMPAIGN_POST_QUEUED,
+            last_published_job_id=job.id,
+            db_path=db_path,
+        )
+
+    campaign = campaign_store.update_campaign(
+        campaign.id,
+        status=campaign_store.CAMPAIGN_PUBLISHING if queued_jobs else campaign_store.CAMPAIGN_NEEDS_REVIEW,
+        published_at=datetime.now().isoformat(timespec="seconds") if queued_jobs else campaign.published_at,
+        last_error=None if queued_jobs else "No publishable posts were queued",
+        db_path=db_path,
+    )
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "queued",
+            "data": {
+                "campaign": _campaign_payload(campaign, db_path=db_path),
+                "jobs": queued_jobs,
+                "skipped": skipped,
+            },
+        }
+    ), 200
 
 
 @app.route("/jobs", methods=["POST"])

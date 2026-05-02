@@ -91,6 +91,10 @@ export const http = {
   put(url, data, config = {}) {
     return request.put(url, data, config)
   },
+
+  patch(url, data, config = {}) {
+    return request.patch(url, data, config)
+  },
   
   delete(url, params) {
     return request.delete(url, { params })

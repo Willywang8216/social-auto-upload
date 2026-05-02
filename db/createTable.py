@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
     description TEXT DEFAULT '',
+    settings_json TEXT NOT NULL DEFAULT '{}',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 )
@@ -73,6 +74,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     platform TEXT NOT NULL,
     account_name TEXT NOT NULL,
     cookie_path TEXT NOT NULL,
+    auth_type TEXT NOT NULL DEFAULT 'cookie',
+    config_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
     status INTEGER NOT NULL DEFAULT 0,
     last_checked_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -116,16 +120,132 @@ CREATE TABLE IF NOT EXISTS publish_job_targets (
 )
 """
 
+MEDIA_GROUPS = """
+CREATE TABLE IF NOT EXISTS media_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    notes TEXT DEFAULT '',
+    primary_video_file_id INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(primary_video_file_id) REFERENCES file_records(id) ON DELETE SET NULL
+)
+"""
+
+MEDIA_GROUP_ITEMS = """
+CREATE TABLE IF NOT EXISTS media_group_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_group_id INTEGER NOT NULL,
+    file_record_id INTEGER NOT NULL,
+    role TEXT NOT NULL DEFAULT 'attachment',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(media_group_id, file_record_id),
+    FOREIGN KEY(media_group_id) REFERENCES media_groups(id) ON DELETE CASCADE,
+    FOREIGN KEY(file_record_id) REFERENCES file_records(id) ON DELETE CASCADE
+)
+"""
+
+CAMPAIGNS = """
+CREATE TABLE IF NOT EXISTS campaigns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER NOT NULL,
+    media_group_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    selected_account_ids_json TEXT NOT NULL DEFAULT '[]',
+    sheet_spreadsheet_id TEXT,
+    sheet_title TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    prepared_at DATETIME,
+    published_at DATETIME,
+    last_error TEXT,
+    FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+    FOREIGN KEY(media_group_id) REFERENCES media_groups(id) ON DELETE CASCADE
+)
+"""
+
+CAMPAIGN_ARTIFACTS = """
+CREATE TABLE IF NOT EXISTS campaign_artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER NOT NULL,
+    source_file_record_id INTEGER,
+    artifact_kind TEXT NOT NULL,
+    local_path TEXT,
+    public_url TEXT,
+    remote_path TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
+    FOREIGN KEY(source_file_record_id) REFERENCES file_records(id) ON DELETE SET NULL
+)
+"""
+
+CAMPAIGN_POSTS = """
+CREATE TABLE IF NOT EXISTS campaign_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    account_ids_json TEXT NOT NULL DEFAULT '[]',
+    draft_json TEXT NOT NULL DEFAULT '{}',
+    sheet_row_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'draft',
+    last_published_job_id INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
+    FOREIGN KEY(last_published_job_id) REFERENCES publish_jobs(id) ON DELETE SET NULL
+)
+"""
+
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_accounts_profile ON accounts(profile_id)",
     "CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform)",
     "CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status)",
+    "CREATE INDEX IF NOT EXISTS idx_accounts_enabled ON accounts(enabled)",
     "CREATE INDEX IF NOT EXISTS idx_publish_jobs_status ON publish_jobs(status)",
     "CREATE INDEX IF NOT EXISTS idx_publish_jobs_platform ON publish_jobs(platform)",
     "CREATE INDEX IF NOT EXISTS idx_publish_job_targets_job ON publish_job_targets(job_id)",
     "CREATE INDEX IF NOT EXISTS idx_publish_job_targets_status ON publish_job_targets(status)",
     "CREATE INDEX IF NOT EXISTS idx_publish_job_targets_account ON publish_job_targets(account_ref)",
+    "CREATE INDEX IF NOT EXISTS idx_media_groups_primary_video ON media_groups(primary_video_file_id)",
+    "CREATE INDEX IF NOT EXISTS idx_media_group_items_group ON media_group_items(media_group_id)",
+    "CREATE INDEX IF NOT EXISTS idx_media_group_items_file ON media_group_items(file_record_id)",
+    "CREATE INDEX IF NOT EXISTS idx_campaigns_profile ON campaigns(profile_id)",
+    "CREATE INDEX IF NOT EXISTS idx_campaigns_media_group ON campaigns(media_group_id)",
+    "CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status)",
+    "CREATE INDEX IF NOT EXISTS idx_campaign_artifacts_campaign ON campaign_artifacts(campaign_id)",
+    "CREATE INDEX IF NOT EXISTS idx_campaign_artifacts_kind ON campaign_artifacts(artifact_kind)",
+    "CREATE INDEX IF NOT EXISTS idx_campaign_posts_campaign ON campaign_posts(campaign_id)",
+    "CREATE INDEX IF NOT EXISTS idx_campaign_posts_platform ON campaign_posts(platform)",
+    "CREATE INDEX IF NOT EXISTS idx_campaign_posts_status ON campaign_posts(status)",
 ]
+
+
+REQUIRED_COLUMNS = {
+    "profiles": {
+        "settings_json": "settings_json TEXT NOT NULL DEFAULT '{}'",
+    },
+    "accounts": {
+        "auth_type": "auth_type TEXT NOT NULL DEFAULT 'cookie'",
+        "config_json": "config_json TEXT NOT NULL DEFAULT '{}'",
+        "enabled": "enabled INTEGER NOT NULL DEFAULT 1",
+    },
+}
+
+
+def _existing_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row[1] for row in rows}
+
+
+def _ensure_required_columns(conn: sqlite3.Connection) -> None:
+    for table_name, columns in REQUIRED_COLUMNS.items():
+        existing = _existing_columns(conn, table_name)
+        for column_name, definition in columns.items():
+            if column_name in existing:
+                continue
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {definition}")
 
 
 def _stamp_alembic_head(db_path: Path) -> None:
@@ -194,6 +314,12 @@ def bootstrap(db_path: Path = DB_PATH) -> None:
         cursor.execute(ACCOUNTS)
         cursor.execute(PUBLISH_JOBS)
         cursor.execute(PUBLISH_JOB_TARGETS)
+        cursor.execute(MEDIA_GROUPS)
+        cursor.execute(MEDIA_GROUP_ITEMS)
+        cursor.execute(CAMPAIGNS)
+        cursor.execute(CAMPAIGN_ARTIFACTS)
+        cursor.execute(CAMPAIGN_POSTS)
+        _ensure_required_columns(conn)
         for statement in INDEXES:
             cursor.execute(statement)
         conn.commit()

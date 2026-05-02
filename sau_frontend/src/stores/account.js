@@ -1,36 +1,71 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { getPlatformLabel } from '@/utils/platforms'
+import { getLegacyPlatformType, getPlatformLabel, getPublishPlatformSlug } from '@/utils/platforms'
 
 export const useAccountStore = defineStore('account', () => {
   // 存储所有账号信息
   const accounts = ref([])
 
-  // 设置账号列表
-  const setAccounts = (accountsData) => {
-    // 转换后端返回的数据格式为前端使用的格式
-    accounts.value = accountsData.map(item => {
+  const mapStatusLabel = (value) => {
+    if (value === -1) return '驗證中'
+    if (value === 1 || value === 'ok' || value === 'ready') return '正常'
+    return '異常'
+  }
+
+  const normalizeAccount = (item) => {
+    if (Array.isArray(item)) {
       return {
         id: item[0],
         type: item[1],
         filePath: item[2],
         name: item[3],
-        status: item[4] === -1 ? '驗證中' : (item[4] === 1 ? '正常' : '異常'),
-        platform: getPlatformLabel(item[1])
+        accountName: item[3],
+        status: mapStatusLabel(item[4]),
+        rawStatus: item[4],
+        platformSlug: getPublishPlatformSlug(item[1]),
+        platform: getPlatformLabel(item[1]),
+        profileId: null,
+        authType: 'cookie',
+        config: {},
+        enabled: true
       }
-    })
+    }
+
+    const platformSlug = item.platformSlug || item.platform || getPublishPlatformSlug(item.type)
+    const accountName = item.accountName || item.account_name || item.name || `帳號 ${item.id}`
+    const rawStatus = item.status ?? 0
+    return {
+      id: item.id,
+      type: item.type ?? getLegacyPlatformType(platformSlug),
+      filePath: item.filePath || item.cookiePath || item.cookie_path || '',
+      name: accountName,
+      accountName,
+      status: mapStatusLabel(rawStatus),
+      rawStatus,
+      platformSlug,
+      platform: getPlatformLabel(platformSlug),
+      profileId: item.profileId ?? item.profile_id ?? null,
+      authType: item.authType || item.auth_type || 'cookie',
+      config: item.config || {},
+      enabled: item.enabled ?? true
+    }
+  }
+
+  // 设置账号列表
+  const setAccounts = (accountsData) => {
+    accounts.value = (accountsData || []).map(normalizeAccount)
   }
   
   // 添加账号
   const addAccount = (account) => {
-    accounts.value.push(account)
+    accounts.value.push(normalizeAccount(account))
   }
   
   // 更新账号
   const updateAccount = (id, updatedAccount) => {
     const index = accounts.value.findIndex(acc => acc.id === id)
     if (index !== -1) {
-      accounts.value[index] = { ...accounts.value[index], ...updatedAccount }
+      accounts.value[index] = normalizeAccount({ ...accounts.value[index], ...updatedAccount })
     }
   }
   

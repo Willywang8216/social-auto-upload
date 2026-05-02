@@ -14,6 +14,7 @@ That keeps the dependency surface flat and matches the rest of the project.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -40,6 +41,14 @@ PLATFORM_BAIJIAHAO = "baijiahao"
 PLATFORM_MEDIUM = "medium"
 PLATFORM_SUBSTACK = "substack"
 PLATFORM_TWITTER = "twitter"
+PLATFORM_FACEBOOK = "facebook"
+PLATFORM_INSTAGRAM = "instagram"
+PLATFORM_REDDIT = "reddit"
+PLATFORM_TELEGRAM = "telegram"
+PLATFORM_YOUTUBE = "youtube"
+PLATFORM_THREADS = "threads"
+PLATFORM_DISCORD = "discord"
+PLATFORM_PATREON = "patreon"
 
 SUPPORTED_PLATFORMS: tuple[str, ...] = (
     PLATFORM_DOUYIN,
@@ -52,6 +61,14 @@ SUPPORTED_PLATFORMS: tuple[str, ...] = (
     PLATFORM_MEDIUM,
     PLATFORM_SUBSTACK,
     PLATFORM_TWITTER,
+    PLATFORM_FACEBOOK,
+    PLATFORM_INSTAGRAM,
+    PLATFORM_REDDIT,
+    PLATFORM_TELEGRAM,
+    PLATFORM_YOUTUBE,
+    PLATFORM_THREADS,
+    PLATFORM_DISCORD,
+    PLATFORM_PATREON,
 )
 
 # Legacy numeric platform codes still used by the Flask backend's `type` column.
@@ -84,6 +101,7 @@ class Profile:
     name: str
     slug: str
     description: str = ""
+    settings: dict | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -98,6 +116,9 @@ class Account:
     platform: str
     account_name: str
     cookie_path: str
+    auth_type: str = "cookie"
+    config: dict | None = None
+    enabled: bool = True
     status: int = 0
     last_checked_at: str | None = None
     created_at: str | None = None
@@ -119,11 +140,82 @@ def _connect(db_path: Path = DB_PATH) -> Iterator[sqlite3.Connection]:
 
 
 def _row_to_profile(row: sqlite3.Row) -> Profile:
-    return Profile(**{key: row[key] for key in row.keys()})
+    payload = {key: row[key] for key in row.keys()}
+    payload["settings"] = json.loads(payload.pop("settings_json", "{}") or "{}")
+    return Profile(**payload)
 
 
 def _row_to_account(row: sqlite3.Row) -> Account:
-    return Account(**{key: row[key] for key in row.keys()})
+    payload = {key: row[key] for key in row.keys()}
+    payload["config"] = json.loads(payload.pop("config_json", "{}") or "{}")
+    payload["enabled"] = bool(payload.get("enabled", 1))
+    return Account(**payload)
+
+
+DIRECT_PUBLISH_PLATFORMS: frozenset[str] = frozenset(
+    {
+        PLATFORM_DOUYIN,
+        PLATFORM_KUAISHOU,
+        PLATFORM_XIAOHONGSHU,
+        PLATFORM_TENCENT,
+        PLATFORM_BILIBILI,
+        PLATFORM_TIKTOK,
+        PLATFORM_BAIJIAHAO,
+        PLATFORM_MEDIUM,
+        PLATFORM_SUBSTACK,
+        PLATFORM_TWITTER,
+        PLATFORM_FACEBOOK,
+        PLATFORM_INSTAGRAM,
+        PLATFORM_REDDIT,
+        PLATFORM_TELEGRAM,
+        PLATFORM_YOUTUBE,
+        PLATFORM_THREADS,
+        PLATFORM_DISCORD,
+    }
+)
+
+SHEET_EXPORT_PLATFORMS: frozenset[str] = frozenset(
+    {
+        PLATFORM_FACEBOOK,
+        PLATFORM_INSTAGRAM,
+        PLATFORM_TWITTER,
+        PLATFORM_YOUTUBE,
+        PLATFORM_TIKTOK,
+        PLATFORM_THREADS,
+        PLATFORM_REDDIT,
+    }
+)
+
+COOKIE_REQUIRED_PLATFORMS: frozenset[str] = frozenset(
+    {
+        PLATFORM_DOUYIN,
+        PLATFORM_KUAISHOU,
+        PLATFORM_XIAOHONGSHU,
+        PLATFORM_TENCENT,
+        PLATFORM_BILIBILI,
+        PLATFORM_BAIJIAHAO,
+        PLATFORM_MEDIUM,
+        PLATFORM_SUBSTACK,
+    }
+)
+
+
+def platform_requires_cookie(platform: str) -> bool:
+    if platform not in SUPPORTED_PLATFORMS:
+        raise ValueError(f"Unsupported platform: {platform!r}")
+    return platform in COOKIE_REQUIRED_PLATFORMS
+
+
+def platform_supports_direct_publish(platform: str) -> bool:
+    if platform not in SUPPORTED_PLATFORMS:
+        raise ValueError(f"Unsupported platform: {platform!r}")
+    return platform in DIRECT_PUBLISH_PLATFORMS
+
+
+def platform_supports_sheet_export(platform: str) -> bool:
+    if platform not in SUPPORTED_PLATFORMS:
+        raise ValueError(f"Unsupported platform: {platform!r}")
+    return platform in SHEET_EXPORT_PLATFORMS
 
 
 def resolve_cookie_path(platform: str, profile_slug: str, account_name: str) -> Path:
@@ -143,12 +235,26 @@ def resolve_cookie_path(platform: str, profile_slug: str, account_name: str) -> 
 # --------------------------- Profile CRUD ---------------------------
 
 
-def create_profile(name: str, description: str = "", *, db_path: Path = DB_PATH) -> Profile:
+def create_profile(
+    name: str,
+    description: str = "",
+    *,
+    settings: dict | None = None,
+    db_path: Path = DB_PATH,
+) -> Profile:
     slug = slugify(name)
     with _connect(db_path) as conn:
         cursor = conn.execute(
-            "INSERT INTO profiles (name, slug, description) VALUES (?, ?, ?)",
-            (name.strip(), slug, description.strip()),
+            """
+            INSERT INTO profiles (name, slug, description, settings_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                name.strip(),
+                slug,
+                description.strip(),
+                json.dumps(settings or {}, ensure_ascii=False),
+            ),
         )
         conn.commit()
         profile_id = cursor.lastrowid
@@ -177,6 +283,40 @@ def list_profiles(*, db_path: Path = DB_PATH) -> list[Profile]:
     return [_row_to_profile(row) for row in rows]
 
 
+def update_profile(
+    profile_id: int,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    settings: dict | None = None,
+    db_path: Path = DB_PATH,
+) -> Profile:
+    current = get_profile(profile_id, db_path=db_path)
+    next_name = current.name if name is None else name.strip()
+    next_description = current.description if description is None else description.strip()
+    next_settings = current.settings if settings is None else settings
+    next_slug = current.slug if name is None else slugify(next_name)
+    now = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE profiles
+            SET name = ?, slug = ?, description = ?, settings_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                next_name,
+                next_slug,
+                next_description,
+                json.dumps(next_settings or {}, ensure_ascii=False),
+                now,
+                profile_id,
+            ),
+        )
+        conn.commit()
+    return get_profile(profile_id, db_path=db_path)
+
+
 def delete_profile(profile_id: int, *, db_path: Path = DB_PATH) -> None:
     with _connect(db_path) as conn:
         conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
@@ -192,6 +332,9 @@ def add_account(
     account_name: str,
     *,
     cookie_path: str | Path | None = None,
+    auth_type: str = "cookie",
+    config: dict | None = None,
+    enabled: bool = True,
     status: int = 0,
     db_path: Path = DB_PATH,
 ) -> Account:
@@ -199,19 +342,38 @@ def add_account(
         raise ValueError(f"Unsupported platform: {platform!r}")
 
     profile = get_profile(profile_id, db_path=db_path)
-    resolved_path = (
-        Path(cookie_path)
-        if cookie_path is not None
-        else resolve_cookie_path(platform, profile.slug, account_name)
-    )
+    if cookie_path is not None:
+        resolved_path = str(Path(cookie_path))
+    elif auth_type == "cookie" or platform_requires_cookie(platform):
+        resolved_path = str(resolve_cookie_path(platform, profile.slug, account_name))
+    else:
+        resolved_path = ""
 
     with _connect(db_path) as conn:
         cursor = conn.execute(
             """
-            INSERT INTO accounts (profile_id, platform, account_name, cookie_path, status)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO accounts (
+                profile_id,
+                platform,
+                account_name,
+                cookie_path,
+                auth_type,
+                config_json,
+                enabled,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (profile_id, platform, account_name.strip(), str(resolved_path), status),
+            (
+                profile_id,
+                platform,
+                account_name.strip(),
+                resolved_path,
+                auth_type,
+                json.dumps(config or {}, ensure_ascii=False),
+                int(enabled),
+                status,
+            ),
         )
         conn.commit()
         account_id = cursor.lastrowid
@@ -244,6 +406,7 @@ def list_accounts(
     *,
     profile_id: int | None = None,
     platform: str | None = None,
+    enabled: bool | None = None,
     db_path: Path = DB_PATH,
 ) -> list[Account]:
     query = "SELECT * FROM accounts"
@@ -255,6 +418,9 @@ def list_accounts(
     if platform is not None:
         clauses.append("platform = ?")
         params.append(platform)
+    if enabled is not None:
+        clauses.append("enabled = ?")
+        params.append(int(enabled))
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY platform, account_name"
@@ -273,6 +439,54 @@ def update_account_status(
             (status, now, account_id),
         )
         conn.commit()
+
+
+def update_account(
+    account_id: int,
+    *,
+    account_name: str | None = None,
+    cookie_path: str | Path | None = None,
+    auth_type: str | None = None,
+    config: dict | None = None,
+    enabled: bool | None = None,
+    status: int | None = None,
+    db_path: Path = DB_PATH,
+) -> Account:
+    current = get_account(account_id, db_path=db_path)
+    next_account_name = current.account_name if account_name is None else account_name.strip()
+    next_auth_type = current.auth_type if auth_type is None else auth_type
+    next_config = current.config if config is None else config
+    next_enabled = current.enabled if enabled is None else enabled
+    next_status = current.status if status is None else status
+    next_cookie_path = current.cookie_path
+    if cookie_path is not None:
+        next_cookie_path = str(Path(cookie_path))
+    elif not next_cookie_path and (next_auth_type == "cookie" or platform_requires_cookie(current.platform)):
+        profile = get_profile(current.profile_id, db_path=db_path)
+        next_cookie_path = str(
+            resolve_cookie_path(current.platform, profile.slug, next_account_name)
+        )
+
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE accounts
+            SET account_name = ?, cookie_path = ?, auth_type = ?, config_json = ?,
+                enabled = ?, status = ?
+            WHERE id = ?
+            """,
+            (
+                next_account_name,
+                next_cookie_path,
+                next_auth_type,
+                json.dumps(next_config or {}, ensure_ascii=False),
+                int(next_enabled),
+                next_status,
+                account_id,
+            ),
+        )
+        conn.commit()
+    return get_account(account_id, db_path=db_path)
 
 
 def delete_account(account_id: int, *, db_path: Path = DB_PATH) -> None:

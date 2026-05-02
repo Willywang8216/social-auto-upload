@@ -1,4 +1,4 @@
-const PLATFORM_METADATA = [
+const LEGACY_PLATFORM_METADATA = [
   {
     accountType: 3,
     publishSlug: 'douyin',
@@ -36,11 +36,78 @@ const PLATFORM_METADATA = [
   }
 ]
 
+const PROFILE_PLATFORM_METADATA = [
+  ...LEGACY_PLATFORM_METADATA,
+  {
+    accountType: null,
+    publishSlug: 'facebook',
+    label: 'Facebook',
+    tagType: 'primary',
+    aliases: ['facebook']
+  },
+  {
+    accountType: null,
+    publishSlug: 'instagram',
+    label: 'Instagram',
+    tagType: 'danger',
+    aliases: ['instagram', 'ig']
+  },
+  {
+    accountType: null,
+    publishSlug: 'reddit',
+    label: 'Reddit',
+    tagType: 'warning',
+    aliases: ['reddit']
+  },
+  {
+    accountType: null,
+    publishSlug: 'telegram',
+    label: 'Telegram',
+    tagType: 'info',
+    aliases: ['telegram']
+  },
+  {
+    accountType: null,
+    publishSlug: 'youtube',
+    label: 'YouTube',
+    tagType: 'danger',
+    aliases: ['youtube']
+  },
+  {
+    accountType: null,
+    publishSlug: 'tiktok',
+    label: 'TikTok',
+    tagType: 'success',
+    aliases: ['tiktok']
+  },
+  {
+    accountType: null,
+    publishSlug: 'threads',
+    label: 'Threads',
+    tagType: 'primary',
+    aliases: ['threads']
+  },
+  {
+    accountType: null,
+    publishSlug: 'discord',
+    label: 'Discord',
+    tagType: 'info',
+    aliases: ['discord']
+  },
+  {
+    accountType: null,
+    publishSlug: 'patreon',
+    label: 'Patreon',
+    tagType: 'warning',
+    aliases: ['patreon']
+  }
+]
+
 const PLATFORM_LOOKUP = new Map()
 
 const normalizePlatformKey = (value) => String(value).trim().toLowerCase()
 
-PLATFORM_METADATA.forEach((platform) => {
+PROFILE_PLATFORM_METADATA.forEach((platform) => {
   ;[
     platform.accountType,
     String(platform.accountType),
@@ -52,12 +119,12 @@ PLATFORM_METADATA.forEach((platform) => {
   })
 })
 
-export const PUBLISH_PLATFORM_OPTIONS = PLATFORM_METADATA.map(({ publishSlug, label }) => ({
+export const PUBLISH_PLATFORM_OPTIONS = LEGACY_PLATFORM_METADATA.map(({ publishSlug, label }) => ({
   value: publishSlug,
   label
 }))
 
-export const ACCOUNT_PLATFORM_OPTIONS = PLATFORM_METADATA.map(
+export const ACCOUNT_PLATFORM_OPTIONS = LEGACY_PLATFORM_METADATA.map(
   ({ publishSlug, label, accountType, tagType }) => ({
     value: label,
     label,
@@ -67,7 +134,12 @@ export const ACCOUNT_PLATFORM_OPTIONS = PLATFORM_METADATA.map(
   })
 )
 
-export const SUPPORTED_PLATFORM_TAGS = PLATFORM_METADATA.map(({ label, tagType }) => ({
+export const PROFILE_PLATFORM_OPTIONS = PROFILE_PLATFORM_METADATA.map(({ publishSlug, label }) => ({
+  value: publishSlug,
+  label
+}))
+
+export const SUPPORTED_PLATFORM_TAGS = PROFILE_PLATFORM_METADATA.map(({ label, tagType }) => ({
   label,
   tagType
 }))

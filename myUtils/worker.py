@@ -29,6 +29,7 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from conf import BASE_DIR
 from myUtils import jobs
+from myUtils import profiles as profile_registry
 from myUtils.job_logging import (
     bind_job_logger,
     close_job_sink,
@@ -241,6 +242,11 @@ def _resolve_account_path(account_ref: str) -> Path:
     The CLI / Profile path stores absolute paths. We accept both.
     """
 
+    if account_ref.startswith("account:"):
+        account_id = int(account_ref.split(":", 1)[1])
+        account = profile_registry.get_account(account_id)
+        return Path(account.cookie_path)
+
     candidate = Path(account_ref)
     if candidate.is_absolute() and candidate.exists():
         return candidate
@@ -258,6 +264,18 @@ def _resolve_file_path(file_ref: str) -> Path:
     if legacy.exists():
         return legacy
     return candidate
+
+
+def _prepared_artifact_local_paths(payload: dict) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for artifact in payload.get("artifacts", []) or []:
+        local_path = artifact.get("local_path")
+        if not local_path or local_path in seen:
+            continue
+        seen.add(local_path)
+        paths.append(Path(local_path))
+    return paths
 
 
 async def _run_platform_upload(
@@ -354,6 +372,70 @@ async def _run_platform_upload(
     raise ValueError(f"Unsupported publish platform: {platform!r}")
 
 
+async def _publish_prepared_twitter(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account_file: Path,
+) -> None:
+    file_paths = _prepared_artifact_local_paths(payload)
+    if not file_paths:
+        raise ValueError("Prepared Twitter publish requires local media artifacts")
+
+    await _run_platform_upload(
+        "twitter",
+        {
+            "title": payload.get("message") or payload.get("draft", {}).get("message", ""),
+            "tags": payload.get("draft", {}).get("hashtags", []) or [],
+            "threadFileRefs": [str(path) for path in file_paths],
+        },
+        target,
+        account_file=account_file,
+        thread_file_paths=file_paths,
+    )
+
+
+async def _publish_prepared_not_implemented(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account_file: Path,
+) -> None:
+    raise NotImplementedError(
+        f"Prepared campaign publisher not implemented for {platform!r}. "
+        "The campaign payload is queued correctly, but this platform still "
+        "needs a runtime publisher integration."
+    )
+
+
+PREPARED_PUBLISHER_REGISTRY: dict[str, Callable[..., Awaitable[None]]] = {
+    "twitter": _publish_prepared_twitter,
+    "facebook": _publish_prepared_not_implemented,
+    "instagram": _publish_prepared_not_implemented,
+    "reddit": _publish_prepared_not_implemented,
+    "telegram": _publish_prepared_not_implemented,
+    "youtube": _publish_prepared_not_implemented,
+    "tiktok": _publish_prepared_not_implemented,
+    "threads": _publish_prepared_not_implemented,
+    "discord": _publish_prepared_not_implemented,
+}
+
+
+async def _run_prepared_campaign_upload(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account_file: Path,
+) -> None:
+    publisher = PREPARED_PUBLISHER_REGISTRY.get(platform)
+    if publisher is None:
+        raise ValueError(f"Unsupported prepared publish platform: {platform!r}")
+    await publisher(platform=platform, payload=payload, target=target, account_file=account_file)
+
+
 async def default_executor(platform: str, payload: dict, target: jobs.Target) -> None:
     """Default platform router used by the Flask publish endpoints.
 
@@ -367,6 +449,16 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
     from myUtils.cookie_storage import decrypted_storage_state
 
     canonical_account_file = _resolve_account_path(target.account_ref)
+    if payload.get("campaignId") and payload.get("campaignPostId"):
+        with decrypted_storage_state(canonical_account_file) as plain_path:
+            await _run_prepared_campaign_upload(
+                platform,
+                payload,
+                target,
+                account_file=plain_path,
+            )
+        return
+
     if platform == "twitter":
         thread_file_refs = payload.get("threadFileRefs") or [target.file_ref]
         thread_file_paths = [_resolve_file_path(file_ref) for file_ref in thread_file_refs]

@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
 import db.createTable as create_table
+
+if "conf" not in sys.modules:
+    conf_module = types.ModuleType("conf")
+    conf_module.BASE_DIR = str(Path(__file__).resolve().parent.parent)
+    sys.modules["conf"] = conf_module
+
 from myUtils import profiles
 
 
@@ -21,11 +29,19 @@ class ProfileRegistryTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_create_and_lookup_profile(self) -> None:
-        profile = profiles.create_profile("Acme Corp", db_path=self.db_path)
+        profile = profiles.create_profile(
+            "Acme Corp",
+            settings={"systemPrompt": "formal", "ctaText": "Contact us"},
+            db_path=self.db_path,
+        )
         self.assertEqual(profile.slug, "acme-corp")
         fetched = profiles.get_profile_by_slug("acme-corp", db_path=self.db_path)
         self.assertEqual(fetched.id, profile.id)
         self.assertEqual(fetched.name, "Acme Corp")
+        self.assertEqual(
+            fetched.settings,
+            {"systemPrompt": "formal", "ctaText": "Contact us"},
+        )
 
     def test_slug_collision_raises(self) -> None:
         profiles.create_profile("Acme", db_path=self.db_path)
@@ -74,6 +90,29 @@ class ProfileRegistryTests(unittest.TestCase):
         self.assertIn("twitter", path.parts)
         self.assertIn("acme-corp", path.parts)
         self.assertEqual(path.name, "x-handle.json")
+
+    def test_new_platform_helpers_cover_api_publish_targets(self) -> None:
+        self.assertIn(profiles.PLATFORM_FACEBOOK, profiles.SUPPORTED_PLATFORMS)
+        self.assertTrue(profiles.platform_supports_direct_publish(profiles.PLATFORM_THREADS))
+        self.assertTrue(profiles.platform_supports_sheet_export(profiles.PLATFORM_INSTAGRAM))
+        self.assertFalse(profiles.platform_supports_sheet_export(profiles.PLATFORM_TELEGRAM))
+        self.assertFalse(profiles.platform_supports_direct_publish(profiles.PLATFORM_PATREON))
+        self.assertFalse(profiles.platform_requires_cookie(profiles.PLATFORM_REDDIT))
+
+    def test_add_account_supports_structured_config(self) -> None:
+        profile = profiles.create_profile("Brand", db_path=self.db_path)
+        account = profiles.add_account(
+            profile.id,
+            profiles.PLATFORM_REDDIT,
+            "brand-main",
+            auth_type="oauth",
+            config={"subreddits": ["a", "b"]},
+            db_path=self.db_path,
+        )
+        self.assertEqual(account.auth_type, "oauth")
+        self.assertEqual(account.config, {"subreddits": ["a", "b"]})
+        self.assertEqual(account.cookie_path, "")
+        self.assertTrue(account.enabled)
 
     def test_unsupported_platform_rejected(self) -> None:
         profile = profiles.create_profile("Brand", db_path=self.db_path)

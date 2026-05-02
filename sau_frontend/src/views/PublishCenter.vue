@@ -231,6 +231,28 @@
             </template>
           </el-dialog>
 
+          <div class="profile-section">
+            <h3>Profile</h3>
+            <el-select
+              v-model="tab.selectedProfileId"
+              placeholder="選擇 Profile（啟用多平台 campaign 模式）"
+              clearable
+              filterable
+              style="width: 100%; max-width: 420px"
+              @change="(value) => handleProfileChange(tab, value)"
+            >
+              <el-option
+                v-for="profile in profileOptions"
+                :key="profile.id"
+                :label="profile.name"
+                :value="profile.id"
+              />
+            </el-select>
+            <div class="profile-hint">
+              選擇 Profile 後，會改走 campaign 準備與多平台排程流程；未選擇時仍使用原本單平台 job 模式。
+            </div>
+          </div>
+
           <!-- 帳號选择 -->
           <div class="account-section">
             <h3>帳號</h3>
@@ -290,7 +312,7 @@
           </el-dialog>
 
           <!-- 平台选择 -->
-          <div class="platform-section">
+          <div v-if="!tab.selectedProfileId" class="platform-section">
             <h3>平台</h3>
             <el-radio-group v-model="tab.selectedPlatform" class="platform-radios">
               <el-radio 
@@ -305,7 +327,7 @@
           </div>
 
           <!-- 原创声明 -->
-          <div class="original-section">
+          <div v-if="!tab.selectedProfileId" class="original-section">
             <el-checkbox
               v-model="tab.isOriginal"
               label="聲明原創"
@@ -314,7 +336,7 @@
           </div>
 
           <!-- 草稿选项 (仅在視頻號可见) -->
-          <div v-if="tab.selectedPlatform === 'tencent'" class="draft-section">
+          <div v-if="!tab.selectedProfileId && tab.selectedPlatform === 'tencent'" class="draft-section">
             <el-checkbox
               v-model="tab.isDraft"
               label="視頻號僅儲存草稿（請使用手機發佈）"
@@ -323,7 +345,7 @@
           </div>
 
           <el-alert
-            v-if="tab.selectedPlatform === 'twitter'"
+            v-if="!tab.selectedProfileId && tab.selectedPlatform === 'twitter'"
             class="twitter-hint"
             type="info"
             :closable="false"
@@ -332,7 +354,7 @@
           />
 
           <!-- 标签 (仅在抖音可见) -->
-          <div v-if="tab.selectedPlatform === 'douyin'" class="product-section">
+          <div v-if="!tab.selectedProfileId && tab.selectedPlatform === 'douyin'" class="product-section">
             <h3>商品連結</h3>
             <el-input
               v-model="tab.productTitle"
@@ -364,6 +386,29 @@
               show-word-limit
               class="title-input"
             />
+          </div>
+
+          <div v-if="tab.selectedProfileId" class="campaign-details-section">
+            <h3>Campaign 補充資訊</h3>
+            <el-input
+              v-model="tab.notes"
+              type="textarea"
+              :rows="4"
+              placeholder="補充內容摘要、賣點、口吻或平台注意事項"
+              class="notes-input"
+            />
+            <div class="campaign-inline-fields">
+              <el-input
+                v-model="tab.contactDetails"
+                placeholder="聯絡資訊"
+                class="campaign-inline-input"
+              />
+              <el-input
+                v-model="tab.cta"
+                placeholder="CTA"
+                class="campaign-inline-input"
+              />
+            </div>
           </div>
 
           <!-- 話題输入 -->
@@ -508,12 +553,14 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, onBeforeUnmount, onMounted } from 'vue'
 import { Upload, Plus, Close, Folder } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
+import { useCampaignsStore } from '@/stores/campaigns'
 import { useJobsStore } from '@/stores/jobs'
+import { useProfilesStore } from '@/stores/profiles'
 import { materialApi } from '@/api/material'
 import { getToken } from '@/utils/auth'
 import { buildApiUrl } from '@/utils/api-url'
@@ -539,6 +586,8 @@ let tabCounter = 1
 
 // 获取应用状态管理
 const appStore = useAppStore()
+const profilesStore = useProfilesStore()
+const campaignsStore = useCampaignsStore()
 
 // 上传相关状态
 const uploadOptionsVisible = ref(false)
@@ -559,8 +608,12 @@ const defaultTabInit = {
   fileList: [], // 后端返回的文件名列表
   displayFileList: [], // 用于显示的文件列表
   selectedAccounts: [], // 选中的帳號ID列表
+  selectedProfileId: null,
   selectedPlatform: 'xiaohongshu', // 选中的平台（单选）
   title: '',
+  notes: '',
+  contactDetails: '',
+  cta: '',
   productLink: '', // 商品連結
   productTitle: '', // 商品名称
   selectedTopics: [], // 話題列表（不带#号）
@@ -571,6 +624,7 @@ const defaultTabInit = {
   publishStatus: null, // 發佈状态提示（message + type）
   publishing: false, // 控制發佈按钮的 loading 状态
   jobId: null, // /jobs 任务 ID；非空时显示进度条
+  campaignId: null,
   isDraft: false, // 仅視頻號草稿
   isOriginal: false // 是否聲明原創
 }
@@ -600,9 +654,15 @@ const accountStore = useAccountStore()
 
 // 任务运行时状态（轮询 /jobs/<id> 获取进度）
 const jobsStore = useJobsStore()
+const profileOptions = computed(() => profilesStore.profiles)
 
 // 根据选择的平台获取可用帳號列表
 const availableAccounts = computed(() => {
+  if (currentTab.value?.selectedProfileId) {
+    return accountStore.accounts.filter(
+      (acc) => acc.profileId === currentTab.value.selectedProfileId && acc.enabled !== false
+    )
+  }
   const currentPlatform = currentTab.value
     ? getPlatformLabel(currentTab.value.selectedPlatform)
     : null
@@ -766,7 +826,7 @@ const removeAccount = (tab, index) => {
 // 获取帳號显示名称
 const getAccountDisplayName = (accountId) => {
   const account = accountStore.accounts.find(acc => acc.id === accountId)
-  return account ? account.name : accountId
+  return account ? `${account.name} · ${account.platform}` : accountId
 }
 
 // 取消發佈（在已经入队后取消任务，否则只清状态）
@@ -795,8 +855,9 @@ const handleCancelJob = async (tab) => {
 const validatePublishForm = (tab) => {
   if (tab.fileList.length === 0) return '請先上傳影片檔案'
   if (!tab.title.trim()) return '請輸入標題'
-  if (!tab.selectedPlatform) return '請選擇發佈平台'
   if (tab.selectedAccounts.length === 0) return '請選擇發佈帳號'
+  if (tab.selectedProfileId) return null
+  if (!tab.selectedPlatform) return '請選擇發佈平台'
   return null
 }
 
@@ -821,6 +882,42 @@ const buildPublishPayload = (tab) => ({
   isDraft: tab.isDraft
 })
 
+const guessMediaRole = (filePath) => {
+  const normalized = String(filePath).toLowerCase()
+  if (/\.(mp4|mov|m4v|avi|mkv|webm)$/.test(normalized)) return 'video'
+  if (/\.(jpg|jpeg|png|webp|gif)$/.test(normalized)) return 'image'
+  return 'attachment'
+}
+
+const buildCampaignPayload = (tab, mediaGroupId) => ({
+  profileId: tab.selectedProfileId,
+  mediaGroupId,
+  selectedAccountIds: [...tab.selectedAccounts],
+  title: tab.title,
+  notes: tab.notes,
+  contactDetails: tab.contactDetails,
+  cta: tab.cta,
+  hashtags: [...tab.selectedTopics],
+  uploadToRemote: true,
+  exportToSheet: true,
+  useLlm: true
+})
+
+const handleProfileChange = async (tab, profileId) => {
+  tab.selectedAccounts = []
+  if (!profileId) {
+    return
+  }
+
+  try {
+    const accounts = await profilesStore.fetchAccountsForProfile(profileId, { enabled: true })
+    accountStore.setAccounts(accounts)
+  } catch (error) {
+    console.error('載入 Profile 帳號失敗:', error)
+    ElMessage.error('載入 Profile 帳號失敗')
+  }
+}
+
 // Confirm publish — enqueues a /jobs task and starts polling. The button is
 // loading-locked until the queue has accepted the job; the per-target
 // progress is then driven by the jobs store.
@@ -839,11 +936,36 @@ const confirmPublish = async (tab) => {
   tab.publishStatus = null
 
   try {
-    const job = await jobsStore.createJob(buildPublishPayload(tab))
-    tab.jobId = job?.id ?? null
-    tab.publishStatus = {
-      message: `任務已加入佇列（#${job?.id}），共 ${job?.totalTargets} 個目標`,
-      type: 'success'
+    if (tab.selectedProfileId) {
+      const mediaGroup = await campaignsStore.createMediaGroup({
+        name: tab.title.trim() || tab.label,
+        items: tab.fileList.map((file) => ({
+          filePath: file.path,
+          role: guessMediaRole(file.path)
+        }))
+      })
+      const campaign = await campaignsStore.prepareCampaign(
+        buildCampaignPayload(tab, mediaGroup.id)
+      )
+      tab.campaignId = campaign?.id ?? null
+
+      const publishResult = await campaignsStore.publishCampaign(campaign.id)
+      const firstJob = publishResult?.jobs?.[0] || null
+      if (firstJob?.id) {
+        tab.jobId = firstJob.id
+        jobsStore.startPolling(firstJob.id)
+      }
+      tab.publishStatus = {
+        message: `Campaign 已準備完成，排入 ${publishResult?.jobs?.length || 0} 個平台任務`,
+        type: publishResult?.jobs?.length ? 'success' : 'warning'
+      }
+    } else {
+      const job = await jobsStore.createJob(buildPublishPayload(tab))
+      tab.jobId = job?.id ?? null
+      tab.publishStatus = {
+        message: `任務已加入佇列（#${job?.id}），共 ${job?.totalTargets} 個目標`,
+        type: 'success'
+      }
     }
   } catch (error) {
     console.error('加入佇列失敗:', error)
@@ -1021,6 +1143,12 @@ const batchPublish = async () => {
 
 // Stop every active job poller when the user navigates away. Without this
 // the polling timers keep ticking against the backend in the background.
+onMounted(() => {
+  profilesStore.refreshProfiles().catch((error) => {
+    console.error('載入 Profiles 失敗:', error)
+  })
+})
+
 onBeforeUnmount(() => {
   jobsStore.stopAllPolling()
 })
@@ -1198,13 +1326,24 @@ onBeforeUnmount(() => {
         }
         
         .upload-section,
+        .profile-section,
         .account-section,
         .platform-section,
         .title-section,
+        .campaign-details-section,
         .product-section,
         .topic-section,
         .schedule-section {
           margin-bottom: 30px;
+        }
+
+        .profile-section {
+          .profile-hint {
+            margin-top: 8px;
+            color: #909399;
+            font-size: 13px;
+            line-height: 1.6;
+          }
         }
 
         .product-section {
@@ -1239,6 +1378,23 @@ onBeforeUnmount(() => {
         
         .title-input {
           max-width: 600px;
+        }
+
+        .campaign-details-section {
+          .notes-input {
+            max-width: 700px;
+            margin-bottom: 12px;
+          }
+
+          .campaign-inline-fields {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+
+            .campaign-inline-input {
+              max-width: 340px;
+            }
+          }
         }
         
         .topic-display {
