@@ -24,6 +24,8 @@ YOUTUBE_RESUMABLE_UPLOAD_URL = (
 YOUTUBE_PLAYLIST_INSERT_URL = (
     "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet"
 )
+FACEBOOK_GRAPH_ROOT = "https://graph.facebook.com/v25.0"
+THREADS_GRAPH_ROOT = "https://graph.threads.net/v1.0"
 
 
 class PreparedPublishError(RuntimeError):
@@ -62,6 +64,13 @@ def _payload_message(payload: dict) -> str:
 def _message_title(payload: dict, *, fallback: str = "Campaign post") -> str:
     raw = _payload_message(payload) or fallback
     return raw.splitlines()[0].strip()[:100] or fallback
+
+
+def _response_payload(response):
+    try:
+        return response.json()
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _extract_media(payload: dict) -> dict[str, list[dict[str, str]]]:
@@ -219,6 +228,303 @@ def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
             timeout=120,
         )
     return responses
+
+
+def publish_discord_sync(account, payload: dict, *, session=None) -> list[Any]:
+    config = account.config or {}
+    webhook_url = str(_config_value(config, "webhookUrl") or "").strip()
+    if not webhook_url:
+        raise PreparedPublishError("Discord publish requires webhookUrl or webhookUrlEnv")
+
+    http = _get_session(session)
+    message = _payload_message(payload) or _message_title(payload)
+    media = _extract_media(payload)
+    attachments = [*media["videos"], *media["images"]][:10]
+    files = {}
+    open_files = []
+    try:
+        content_lines = [message] if message else []
+        for index, item in enumerate(attachments):
+            local_path = item.get("local_path")
+            public_url = item.get("public_url")
+            if local_path and Path(local_path).exists():
+                handle = Path(local_path).open("rb")
+                open_files.append(handle)
+                files[f"files[{index}]"] = (Path(local_path).name, handle)
+            elif public_url:
+                content_lines.append(public_url)
+
+        if files:
+            response = http.post(
+                webhook_url,
+                data={"payload_json": json.dumps({"content": "\n".join(content_lines).strip()}, ensure_ascii=False)},
+                files=files,
+                timeout=600,
+            )
+        else:
+            response = http.post(
+                webhook_url,
+                json={"content": "\n".join(content_lines).strip()},
+                timeout=120,
+            )
+        _raise_for_status(response)
+        return [_response_payload(response)]
+    finally:
+        for handle in open_files:
+            handle.close()
+
+
+def publish_facebook_sync(account, payload: dict, *, session=None) -> list[Any]:
+    config = account.config or {}
+    page_id = str(config.get("pageId") or "").strip()
+    access_token = str(_config_value(config, "accessToken") or "").strip()
+    if not page_id:
+        raise PreparedPublishError("Facebook publish requires pageId")
+    if not access_token:
+        raise PreparedPublishError("Facebook publish requires accessToken or accessTokenEnv")
+
+    http = _get_session(session)
+    message = _payload_message(payload)
+    title = _message_title(payload)
+    media = _extract_media(payload)
+    results = []
+
+    def _post(edge: str, *, data: dict, files=None, timeout=120):
+        response = http.post(
+            f"{FACEBOOK_GRAPH_ROOT}/{page_id}/{edge}",
+            data=data,
+            files=files,
+            timeout=timeout,
+        )
+        _raise_for_status(response)
+        body = _response_payload(response)
+        results.append(body)
+        return body
+
+    if media["videos"]:
+        item = media["videos"][0]
+        data = {"access_token": access_token, "description": message, "title": title}
+        local_path = item.get("local_path")
+        public_url = item.get("public_url")
+        if public_url:
+            data["file_url"] = public_url
+            _post("videos", data=data, timeout=600)
+        elif local_path:
+            with Path(local_path).open("rb") as handle:
+                _post("videos", data=data, files={"source": (Path(local_path).name, handle)}, timeout=1800)
+        else:
+            raise PreparedPublishError("Facebook video publish requires a public_url or local_path")
+        return results
+
+    if len(media["images"]) > 1:
+        attached_media = []
+        for item in media["images"][:10]:
+            data = {"access_token": access_token, "published": "false"}
+            local_path = item.get("local_path")
+            public_url = item.get("public_url")
+            if public_url:
+                data["url"] = public_url
+                body = _post("photos", data=data)
+            elif local_path:
+                with Path(local_path).open("rb") as handle:
+                    body = _post("photos", data=data, files={"source": (Path(local_path).name, handle)}, timeout=600)
+            else:
+                raise PreparedPublishError("Facebook image publish requires a public_url or local_path")
+            media_id = body.get("id")
+            if not media_id:
+                raise PreparedPublishError("Facebook photo upload did not return an id")
+            attached_media.append({"media_fbid": media_id})
+
+        _post(
+            "feed",
+            data={
+                "access_token": access_token,
+                "message": message,
+                "attached_media": json.dumps(attached_media, ensure_ascii=False),
+            },
+        )
+        return results
+
+    if media["images"]:
+        item = media["images"][0]
+        data = {"access_token": access_token, "caption": message}
+        local_path = item.get("local_path")
+        public_url = item.get("public_url")
+        if public_url:
+            data["url"] = public_url
+            _post("photos", data=data)
+        elif local_path:
+            with Path(local_path).open("rb") as handle:
+                _post("photos", data=data, files={"source": (Path(local_path).name, handle)}, timeout=600)
+        else:
+            raise PreparedPublishError("Facebook image publish requires a public_url or local_path")
+        return results
+
+    _post("feed", data={"access_token": access_token, "message": message})
+    return results
+
+
+def _instagram_create_container(http, ig_user_id: str, access_token: str, data: dict) -> str:
+    response = http.post(
+        f"{FACEBOOK_GRAPH_ROOT}/{ig_user_id}/media",
+        data={**data, "access_token": access_token},
+        timeout=120,
+    )
+    _raise_for_status(response)
+    payload = _response_payload(response)
+    container_id = payload.get("id")
+    if not container_id:
+        raise PreparedPublishError("Instagram media creation did not return an id")
+    return str(container_id)
+
+
+def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
+    config = account.config or {}
+    ig_user_id = str(config.get("igUserId") or "").strip()
+    access_token = str(_config_value(config, "accessToken") or "").strip()
+    if not ig_user_id:
+        raise PreparedPublishError("Instagram publish requires igUserId")
+    if not access_token:
+        raise PreparedPublishError("Instagram publish requires accessToken or accessTokenEnv")
+
+    http = _get_session(session)
+    message = _payload_message(payload)
+    media = _extract_media(payload)
+
+    if media["videos"]:
+        public_url = media["videos"][0].get("public_url") or ""
+        if not public_url:
+            raise PreparedPublishError("Instagram video publish requires a public_url")
+        container_id = _instagram_create_container(
+            http,
+            ig_user_id,
+            access_token,
+            {"media_type": "REELS", "video_url": public_url, "caption": message},
+        )
+    elif len(media["images"]) > 1:
+        child_ids = []
+        for item in media["images"][:10]:
+            public_url = item.get("public_url") or ""
+            if not public_url:
+                raise PreparedPublishError("Instagram carousel publish requires public image URLs")
+            child_ids.append(
+                _instagram_create_container(
+                    http,
+                    ig_user_id,
+                    access_token,
+                    {"image_url": public_url, "is_carousel_item": "true"},
+                )
+            )
+        container_id = _instagram_create_container(
+            http,
+            ig_user_id,
+            access_token,
+            {"media_type": "CAROUSEL", "children": ",".join(child_ids), "caption": message},
+        )
+    elif media["images"]:
+        public_url = media["images"][0].get("public_url") or ""
+        if not public_url:
+            raise PreparedPublishError("Instagram image publish requires a public_url")
+        container_id = _instagram_create_container(
+            http,
+            ig_user_id,
+            access_token,
+            {"image_url": public_url, "caption": message},
+        )
+    else:
+        raise PreparedPublishError("Instagram publish requires at least one image or video")
+
+    publish_response = http.post(
+        f"{FACEBOOK_GRAPH_ROOT}/{ig_user_id}/media_publish",
+        data={"creation_id": container_id, "access_token": access_token},
+        timeout=120,
+    )
+    _raise_for_status(publish_response)
+    return {"container_id": container_id, "publish": _response_payload(publish_response)}
+
+
+def _threads_create_container(http, user_id: str, access_token: str, data: dict) -> str:
+    response = http.post(
+        f"{THREADS_GRAPH_ROOT}/{user_id}/threads",
+        data={**data, "access_token": access_token},
+        timeout=120,
+    )
+    _raise_for_status(response)
+    payload = _response_payload(response)
+    container_id = payload.get("id")
+    if not container_id:
+        raise PreparedPublishError("Threads media creation did not return an id")
+    return str(container_id)
+
+
+def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
+    config = account.config or {}
+    user_id = str(config.get("threadUserId") or config.get("userId") or "").strip()
+    access_token = str(_config_value(config, "accessToken") or "").strip()
+    if not user_id:
+        raise PreparedPublishError("Threads publish requires threadUserId")
+    if not access_token:
+        raise PreparedPublishError("Threads publish requires accessToken or accessTokenEnv")
+
+    http = _get_session(session)
+    message = _payload_message(payload)
+    media = _extract_media(payload)
+
+    if media["videos"]:
+        public_url = media["videos"][0].get("public_url") or ""
+        if not public_url:
+            raise PreparedPublishError("Threads video publish requires a public_url")
+        container_id = _threads_create_container(
+            http,
+            user_id,
+            access_token,
+            {"media_type": "VIDEO", "video_url": public_url, "text": message},
+        )
+    elif len(media["images"]) > 1:
+        child_ids = []
+        for item in media["images"][:10]:
+            public_url = item.get("public_url") or ""
+            if not public_url:
+                raise PreparedPublishError("Threads carousel publish requires public image URLs")
+            child_ids.append(
+                _threads_create_container(
+                    http,
+                    user_id,
+                    access_token,
+                    {"media_type": "IMAGE", "image_url": public_url, "is_carousel_item": "true"},
+                )
+            )
+        container_id = _threads_create_container(
+            http,
+            user_id,
+            access_token,
+            {"media_type": "CAROUSEL", "children": ",".join(child_ids), "text": message},
+        )
+    elif media["images"]:
+        public_url = media["images"][0].get("public_url") or ""
+        if not public_url:
+            raise PreparedPublishError("Threads image publish requires a public_url")
+        container_id = _threads_create_container(
+            http,
+            user_id,
+            access_token,
+            {"media_type": "IMAGE", "image_url": public_url, "text": message},
+        )
+    else:
+        container_id = _threads_create_container(
+            http,
+            user_id,
+            access_token,
+            {"media_type": "TEXT", "text": message},
+        )
+
+    publish_response = http.post(
+        f"{THREADS_GRAPH_ROOT}/{user_id}/threads_publish",
+        data={"creation_id": container_id, "access_token": access_token},
+        timeout=120,
+    )
+    _raise_for_status(publish_response)
+    return {"container_id": container_id, "publish": _response_payload(publish_response)}
 
 
 def _reddit_access_token(config: dict[str, Any], *, session=None) -> str:

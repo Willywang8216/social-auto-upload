@@ -445,6 +445,58 @@ async def _publish_prepared_youtube(
     await asyncio.to_thread(prepared_publishers.publish_youtube_sync, account, payload)
 
 
+async def _publish_prepared_facebook(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account,
+    account_file: Path | None,
+) -> None:
+    if account is None:
+        raise ValueError("Prepared Facebook publish requires a structured account")
+    await asyncio.to_thread(prepared_publishers.publish_facebook_sync, account, payload)
+
+
+async def _publish_prepared_instagram(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account,
+    account_file: Path | None,
+) -> None:
+    if account is None:
+        raise ValueError("Prepared Instagram publish requires a structured account")
+    await asyncio.to_thread(prepared_publishers.publish_instagram_sync, account, payload)
+
+
+async def _publish_prepared_threads(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account,
+    account_file: Path | None,
+) -> None:
+    if account is None:
+        raise ValueError("Prepared Threads publish requires a structured account")
+    await asyncio.to_thread(prepared_publishers.publish_threads_sync, account, payload)
+
+
+async def _publish_prepared_discord(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account,
+    account_file: Path | None,
+) -> None:
+    if account is None:
+        raise ValueError("Prepared Discord publish requires a structured account")
+    await asyncio.to_thread(prepared_publishers.publish_discord_sync, account, payload)
+
+
 async def _publish_prepared_not_implemented(
     platform: str,
     payload: dict,
@@ -462,14 +514,14 @@ async def _publish_prepared_not_implemented(
 
 PREPARED_PUBLISHER_REGISTRY: dict[str, Callable[..., Awaitable[None]]] = {
     "twitter": _publish_prepared_twitter,
-    "facebook": _publish_prepared_not_implemented,
-    "instagram": _publish_prepared_not_implemented,
+    "facebook": _publish_prepared_facebook,
+    "instagram": _publish_prepared_instagram,
     "reddit": _publish_prepared_reddit,
     "telegram": _publish_prepared_telegram,
     "youtube": _publish_prepared_youtube,
     "tiktok": _publish_prepared_not_implemented,
-    "threads": _publish_prepared_not_implemented,
-    "discord": _publish_prepared_not_implemented,
+    "threads": _publish_prepared_threads,
+    "discord": _publish_prepared_discord,
 }
 
 

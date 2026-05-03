@@ -89,6 +89,79 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[1][1], prepared_publishers.REDDIT_SUBMIT_URL)
         self.assertEqual(session.calls[2][2]["data"]["sr"], "subb")
 
+    def test_discord_uses_webhook_with_local_files(self):
+        session = _RecordingSession([_FakeResponse({})])
+        account = SimpleNamespace(config={"webhookUrl": "https://discord.example/webhook"})
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "cover.jpg"
+            image.write_bytes(b"image")
+            prepared_publishers.publish_discord_sync(
+                account,
+                {
+                    "message": "Discord launch",
+                    "artifacts": [{"local_path": str(image), "artifact_kind": "watermarked_image"}],
+                },
+                session=session,
+            )
+        self.assertEqual(session.calls[0][1], "https://discord.example/webhook")
+        self.assertIn("files", session.calls[0][2])
+
+    def test_facebook_multiple_images_create_unpublished_photos_then_feed_post(self):
+        session = _RecordingSession([
+            _FakeResponse({"id": "photo-1"}),
+            _FakeResponse({"id": "photo-2"}),
+            _FakeResponse({"id": "post-1"}),
+        ])
+        account = SimpleNamespace(config={"pageId": "123", "accessToken": "fb-token"})
+        prepared_publishers.publish_facebook_sync(
+            account,
+            {
+                "message": "Facebook launch",
+                "artifacts": [
+                    {"public_url": "https://cdn.example/a.jpg", "artifact_kind": "watermarked_image"},
+                    {"public_url": "https://cdn.example/b.jpg", "artifact_kind": "watermarked_image"},
+                ],
+            },
+            session=session,
+        )
+        self.assertEqual(session.calls[0][1], f"{prepared_publishers.FACEBOOK_GRAPH_ROOT}/123/photos")
+        self.assertEqual(session.calls[2][1], f"{prepared_publishers.FACEBOOK_GRAPH_ROOT}/123/feed")
+        attached = json.loads(session.calls[2][2]["data"]["attached_media"])
+        self.assertEqual(attached[0]["media_fbid"], "photo-1")
+
+    def test_instagram_single_image_creates_container_then_publishes(self):
+        session = _RecordingSession([
+            _FakeResponse({"id": "ig-container"}),
+            _FakeResponse({"id": "ig-media"}),
+        ])
+        account = SimpleNamespace(config={"igUserId": "1789", "accessToken": "ig-token"})
+        result = prepared_publishers.publish_instagram_sync(
+            account,
+            {
+                "message": "Instagram launch",
+                "artifacts": [{"public_url": "https://cdn.example/image.jpg", "artifact_kind": "watermarked_image"}],
+            },
+            session=session,
+        )
+        self.assertEqual(result["container_id"], "ig-container")
+        self.assertEqual(session.calls[0][1], f"{prepared_publishers.FACEBOOK_GRAPH_ROOT}/1789/media")
+        self.assertEqual(session.calls[1][1], f"{prepared_publishers.FACEBOOK_GRAPH_ROOT}/1789/media_publish")
+
+    def test_threads_text_only_creates_container_then_publishes(self):
+        session = _RecordingSession([
+            _FakeResponse({"id": "threads-container"}),
+            _FakeResponse({"id": "threads-post"}),
+        ])
+        account = SimpleNamespace(config={"threadUserId": "42", "accessToken": "threads-token"})
+        result = prepared_publishers.publish_threads_sync(
+            account,
+            {"message": "Threads launch"},
+            session=session,
+        )
+        self.assertEqual(result["container_id"], "threads-container")
+        self.assertEqual(session.calls[0][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads")
+        self.assertEqual(session.calls[1][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads_publish")
+
     def test_youtube_refresh_and_resumable_upload(self):
         session = _RecordingSession([
             _FakeResponse({"access_token": "google-token"}),
