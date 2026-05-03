@@ -30,6 +30,7 @@ from typing import Any, Awaitable, Callable, Protocol
 from conf import BASE_DIR
 from myUtils import jobs
 from myUtils import profiles as profile_registry
+from myUtils import prepared_publishers
 from myUtils.job_logging import (
     bind_job_logger,
     close_job_sink,
@@ -235,6 +236,13 @@ class PublishWorker:
 # --------------------------- default platform registry ---------------------------
 
 
+def _resolve_structured_account(account_ref: str):
+    if not account_ref.startswith("account:"):
+        return None
+    account_id = int(account_ref.split(":", 1)[1])
+    return profile_registry.get_account(account_id)
+
+
 def _resolve_account_path(account_ref: str) -> Path:
     """Map an ``account_ref`` to a concrete cookie file path.
 
@@ -242,10 +250,9 @@ def _resolve_account_path(account_ref: str) -> Path:
     The CLI / Profile path stores absolute paths. We accept both.
     """
 
-    if account_ref.startswith("account:"):
-        account_id = int(account_ref.split(":", 1)[1])
-        account = profile_registry.get_account(account_id)
-        return Path(account.cookie_path)
+    structured = _resolve_structured_account(account_ref)
+    if structured is not None:
+        return Path(structured.cookie_path)
 
     candidate = Path(account_ref)
     if candidate.is_absolute() and candidate.exists():
@@ -377,9 +384,12 @@ async def _publish_prepared_twitter(
     payload: dict,
     target: jobs.Target,
     *,
-    account_file: Path,
+    account,
+    account_file: Path | None,
 ) -> None:
     file_paths = _prepared_artifact_local_paths(payload)
+    if not account_file:
+        raise ValueError("Prepared Twitter publish requires a cookie-backed account")
     if not file_paths:
         raise ValueError("Prepared Twitter publish requires local media artifacts")
 
@@ -396,12 +406,52 @@ async def _publish_prepared_twitter(
     )
 
 
+async def _publish_prepared_telegram(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account,
+    account_file: Path | None,
+) -> None:
+    if account is None:
+        raise ValueError("Prepared Telegram publish requires a structured account")
+    await asyncio.to_thread(prepared_publishers.publish_telegram_sync, account, payload)
+
+
+async def _publish_prepared_reddit(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account,
+    account_file: Path | None,
+) -> None:
+    if account is None:
+        raise ValueError("Prepared Reddit publish requires a structured account")
+    await asyncio.to_thread(prepared_publishers.publish_reddit_sync, account, payload)
+
+
+async def _publish_prepared_youtube(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account,
+    account_file: Path | None,
+) -> None:
+    if account is None:
+        raise ValueError("Prepared YouTube publish requires a structured account")
+    await asyncio.to_thread(prepared_publishers.publish_youtube_sync, account, payload)
+
+
 async def _publish_prepared_not_implemented(
     platform: str,
     payload: dict,
     target: jobs.Target,
     *,
-    account_file: Path,
+    account,
+    account_file: Path | None,
 ) -> None:
     raise NotImplementedError(
         f"Prepared campaign publisher not implemented for {platform!r}. "
@@ -414,9 +464,9 @@ PREPARED_PUBLISHER_REGISTRY: dict[str, Callable[..., Awaitable[None]]] = {
     "twitter": _publish_prepared_twitter,
     "facebook": _publish_prepared_not_implemented,
     "instagram": _publish_prepared_not_implemented,
-    "reddit": _publish_prepared_not_implemented,
-    "telegram": _publish_prepared_not_implemented,
-    "youtube": _publish_prepared_not_implemented,
+    "reddit": _publish_prepared_reddit,
+    "telegram": _publish_prepared_telegram,
+    "youtube": _publish_prepared_youtube,
     "tiktok": _publish_prepared_not_implemented,
     "threads": _publish_prepared_not_implemented,
     "discord": _publish_prepared_not_implemented,
@@ -428,12 +478,13 @@ async def _run_prepared_campaign_upload(
     payload: dict,
     target: jobs.Target,
     *,
-    account_file: Path,
+    account,
+    account_file: Path | None,
 ) -> None:
     publisher = PREPARED_PUBLISHER_REGISTRY.get(platform)
     if publisher is None:
         raise ValueError(f"Unsupported prepared publish platform: {platform!r}")
-    await publisher(platform=platform, payload=payload, target=target, account_file=account_file)
+    await publisher(platform=platform, payload=payload, target=target, account=account, account_file=account_file)
 
 
 async def default_executor(platform: str, payload: dict, target: jobs.Target) -> None:
@@ -448,14 +499,25 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
 
     from myUtils.cookie_storage import decrypted_storage_state
 
+    structured_account = _resolve_structured_account(target.account_ref)
     canonical_account_file = _resolve_account_path(target.account_ref)
     if payload.get("campaignId") and payload.get("campaignPostId"):
-        with decrypted_storage_state(canonical_account_file) as plain_path:
+        if structured_account is not None and structured_account.cookie_path:
+            with decrypted_storage_state(canonical_account_file) as plain_path:
+                await _run_prepared_campaign_upload(
+                    platform,
+                    payload,
+                    target,
+                    account=structured_account,
+                    account_file=plain_path,
+                )
+        else:
             await _run_prepared_campaign_upload(
                 platform,
                 payload,
                 target,
-                account_file=plain_path,
+                account=structured_account,
+                account_file=None,
             )
         return
 

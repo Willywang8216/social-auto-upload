@@ -1781,7 +1781,7 @@ def campaigns_publish(campaign_id):
             "artifacts": artifacts,
         }
         targets = [
-            (account.cookie_path or f"account:{account.id}", f"campaign_post:{post.id}", None)
+            (f"account:{account.id}", f"campaign_post:{post.id}", None)
             for account in enabled_accounts
         ]
         job = job_runtime.enqueue_job(
