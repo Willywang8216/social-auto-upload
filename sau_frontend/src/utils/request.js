@@ -48,6 +48,7 @@ request.interceptors.response.use(
       const { status } = error.response
       switch (status) {
         case 401:
+        case 403:
           ElMessage.error('未授權，請重新登入')
           clearToken()
           // Bounce back to the login screen using the hash router. Use a
@@ -57,9 +58,6 @@ request.interceptors.response.use(
               window.location && !window.location.hash.includes('#/login')) {
             window.location.hash = '#/login'
           }
-          break
-        case 403:
-          ElMessage.error('拒絕存取')
           break
         case 404:
           ElMessage.error('找不到請求位址')

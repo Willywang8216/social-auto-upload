@@ -318,7 +318,7 @@
               <el-radio 
                 v-for="platform in platforms" 
                 :key="platform.value"
-                :label="platform.value"
+                :value="platform.value"
                 class="platform-radio"
               >
                 {{ platform.label }}
