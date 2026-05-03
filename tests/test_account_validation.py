@@ -54,6 +54,38 @@ class AccountValidationTests(unittest.TestCase):
         self.assertTrue(result.valid)
         self.assertTrue(result.warnings)
 
+    def test_live_validation_uses_telegram_helper(self) -> None:
+        from unittest.mock import patch
+
+        with patch('myUtils.account_validation.prepared_publishers.validate_telegram_config_live', return_value={'ok': True}) as mocked:
+            result = account_validation.validate_structured_account_config(
+                platform=profiles.PLATFORM_TELEGRAM,
+                auth_type='manual',
+                config={'chatId': '@brand', 'botTokenEnv': 'TELEGRAM_BOT_TOKEN'},
+                perform_live_checks=True,
+            )
+        self.assertTrue(result.valid)
+        self.assertEqual(result.metadata['telegram'], {'ok': True})
+        mocked.assert_called_once()
+
+    def test_live_validation_failure_bubbles_into_errors(self) -> None:
+        from unittest.mock import patch
+
+        with patch('myUtils.account_validation.prepared_publishers.validate_youtube_config_live', side_effect=RuntimeError('bad token')):
+            result = account_validation.validate_structured_account_config(
+                platform=profiles.PLATFORM_YOUTUBE,
+                auth_type='oauth',
+                config={
+                    'channelId': 'UC123',
+                    'clientIdEnv': 'YT_CLIENT_ID',
+                    'clientSecretEnv': 'YT_CLIENT_SECRET',
+                    'refreshTokenEnv': 'YT_REFRESH_TOKEN',
+                },
+                perform_live_checks=True,
+            )
+        self.assertFalse(result.valid)
+        self.assertIn('youtube live', result.errors[0])
+
 
 if __name__ == '__main__':
     unittest.main()

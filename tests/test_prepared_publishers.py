@@ -39,6 +39,10 @@ class _RecordingSession:
         self.calls.append(("POST", url, kwargs))
         return self._next()
 
+    def get(self, url, **kwargs):
+        self.calls.append(("GET", url, kwargs))
+        return self._next()
+
     def put(self, url, **kwargs):
         self.calls.append(("PUT", url, kwargs))
         return self._next()
@@ -88,6 +92,26 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[0][1], prepared_publishers.REDDIT_TOKEN_URL)
         self.assertEqual(session.calls[1][1], prepared_publishers.REDDIT_SUBMIT_URL)
         self.assertEqual(session.calls[2][2]["data"]["sr"], "subb")
+
+    def test_telegram_live_validation_calls_getme_and_getchat(self):
+        session = _RecordingSession([_FakeResponse({"ok": True}), _FakeResponse({"ok": True})])
+        result = prepared_publishers.validate_telegram_config_live(
+            {"botToken": "token", "chatId": "@brand"},
+            session=session,
+        )
+        self.assertEqual(session.calls[0][1], "https://api.telegram.org/bottoken/getMe")
+        self.assertEqual(session.calls[1][1], "https://api.telegram.org/bottoken/getChat")
+        self.assertIn("chat", result)
+
+    def test_facebook_live_validation_fetches_page(self):
+        session = _RecordingSession([_FakeResponse({"id": "123", "name": "Brand Page"})])
+        result = prepared_publishers.validate_facebook_config_live(
+            {"pageId": "123", "accessToken": "fb-token"},
+            session=session,
+        )
+        self.assertEqual(session.calls[0][0], "GET")
+        self.assertEqual(session.calls[0][1], f"{prepared_publishers.FACEBOOK_GRAPH_ROOT}/123")
+        self.assertEqual(result["id"], "123")
 
     def test_discord_uses_webhook_with_local_files(self):
         session = _RecordingSession([_FakeResponse({})])

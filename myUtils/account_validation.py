@@ -146,12 +146,27 @@ def validate_structured_account_config(
             errors.append("TikTok publishMode 只支援 direct 或 draft")
         if profile_settings.get("watermark"):
             errors.append("TikTok Content Posting API 不允許帶有品牌/促銷浮水印的內容；請移除 Profile 浮水印或不要選 TikTok")
-        if perform_live_checks and not errors:
-            try:
-                creator_info = prepared_publishers.query_tiktok_creator_info(config, session=session)
-                metadata["creator_info"] = creator_info
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"TikTok creator info 驗證失敗: {exc}")
+
+    if perform_live_checks and not errors:
+        try:
+            if platform == profiles.PLATFORM_TELEGRAM:
+                metadata["telegram"] = prepared_publishers.validate_telegram_config_live(config, session=session)
+            elif platform == profiles.PLATFORM_REDDIT:
+                metadata["reddit"] = prepared_publishers.validate_reddit_config_live(config, session=session)
+            elif platform == profiles.PLATFORM_YOUTUBE:
+                metadata["youtube"] = prepared_publishers.validate_youtube_config_live(config, session=session)
+            elif platform == profiles.PLATFORM_FACEBOOK:
+                metadata["facebook"] = prepared_publishers.validate_facebook_config_live(config, session=session)
+            elif platform == profiles.PLATFORM_INSTAGRAM:
+                metadata["instagram"] = prepared_publishers.validate_instagram_config_live(config, session=session)
+            elif platform == profiles.PLATFORM_THREADS:
+                metadata["threads"] = prepared_publishers.validate_threads_config_live(config, session=session)
+            elif platform == profiles.PLATFORM_DISCORD:
+                metadata["discord"] = prepared_publishers.validate_discord_config_live(config, session=session)
+            elif platform == profiles.PLATFORM_TIKTOK:
+                metadata["creator_info"] = prepared_publishers.query_tiktok_creator_info(config, session=session)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{platform} live 驗證失敗: {exc}")
 
     return AccountValidationResult(
         valid=len(errors) == 0,

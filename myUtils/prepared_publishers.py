@@ -16,6 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - environment-specific
 TELEGRAM_API_ROOT = "https://api.telegram.org/bot{token}/{method}"
 REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 REDDIT_SUBMIT_URL = "https://oauth.reddit.com/api/submit"
+REDDIT_ME_URL = "https://oauth.reddit.com/api/v1/me"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 YOUTUBE_RESUMABLE_UPLOAD_URL = (
     "https://www.googleapis.com/upload/youtube/v3/videos"
@@ -24,6 +25,7 @@ YOUTUBE_RESUMABLE_UPLOAD_URL = (
 YOUTUBE_PLAYLIST_INSERT_URL = (
     "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet"
 )
+YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 FACEBOOK_GRAPH_ROOT = "https://graph.facebook.com/v25.0"
 THREADS_GRAPH_ROOT = "https://graph.threads.net/v1.0"
 TIKTOK_API_ROOT = "https://open.tiktokapis.com"
@@ -113,6 +115,30 @@ def _telegram_caption_chunks(message: str) -> tuple[str, str]:
     if len(message) <= 1024:
         return message, ""
     return message[:1024], message
+
+
+def validate_telegram_config_live(config: dict[str, Any], *, session=None) -> dict:
+    token = str(_config_value(config, "botToken", default_env="TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = str(config.get("chatId") or "").strip()
+    if not token:
+        raise PreparedPublishError("Telegram validation requires botToken or botTokenEnv")
+    if not chat_id:
+        raise PreparedPublishError("Telegram validation requires chatId")
+
+    http = _get_session(session)
+    bot_response = http.post(
+        TELEGRAM_API_ROOT.format(token=token, method="getMe"),
+        data={},
+        timeout=120,
+    )
+    _raise_for_status(bot_response)
+    chat_response = http.post(
+        TELEGRAM_API_ROOT.format(token=token, method="getChat"),
+        data={"chat_id": chat_id},
+        timeout=120,
+    )
+    _raise_for_status(chat_response)
+    return {"bot": _response_payload(bot_response), "chat": _response_payload(chat_response)}
 
 
 def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
@@ -234,6 +260,16 @@ def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
     return responses
 
 
+def validate_discord_config_live(config: dict[str, Any], *, session=None) -> dict:
+    webhook_url = str(_config_value(config, "webhookUrl") or "").strip()
+    if not webhook_url:
+        raise PreparedPublishError("Discord validation requires webhookUrl or webhookUrlEnv")
+    http = _get_session(session)
+    response = http.get(webhook_url, timeout=120)
+    _raise_for_status(response)
+    return _response_payload(response)
+
+
 def publish_discord_sync(account, payload: dict, *, session=None) -> list[Any]:
     config = account.config or {}
     webhook_url = str(_config_value(config, "webhookUrl") or "").strip()
@@ -276,6 +312,23 @@ def publish_discord_sync(account, payload: dict, *, session=None) -> list[Any]:
     finally:
         for handle in open_files:
             handle.close()
+
+
+def validate_facebook_config_live(config: dict[str, Any], *, session=None) -> dict:
+    page_id = str(config.get("pageId") or "").strip()
+    access_token = str(_config_value(config, "accessToken") or "").strip()
+    if not page_id:
+        raise PreparedPublishError("Facebook validation requires pageId")
+    if not access_token:
+        raise PreparedPublishError("Facebook validation requires accessToken or accessTokenEnv")
+    http = _get_session(session)
+    response = http.get(
+        f"{FACEBOOK_GRAPH_ROOT}/{page_id}",
+        params={"fields": "id,name", "access_token": access_token},
+        timeout=120,
+    )
+    _raise_for_status(response)
+    return _response_payload(response)
 
 
 def publish_facebook_sync(account, payload: dict, *, session=None) -> list[Any]:
@@ -382,6 +435,23 @@ def _instagram_create_container(http, ig_user_id: str, access_token: str, data: 
     return str(container_id)
 
 
+def validate_instagram_config_live(config: dict[str, Any], *, session=None) -> dict:
+    ig_user_id = str(config.get("igUserId") or "").strip()
+    access_token = str(_config_value(config, "accessToken") or "").strip()
+    if not ig_user_id:
+        raise PreparedPublishError("Instagram validation requires igUserId")
+    if not access_token:
+        raise PreparedPublishError("Instagram validation requires accessToken or accessTokenEnv")
+    http = _get_session(session)
+    response = http.get(
+        f"{FACEBOOK_GRAPH_ROOT}/{ig_user_id}",
+        params={"fields": "id,username", "access_token": access_token},
+        timeout=120,
+    )
+    _raise_for_status(response)
+    return _response_payload(response)
+
+
 def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
     config = account.config or {}
     ig_user_id = str(config.get("igUserId") or "").strip()
@@ -461,6 +531,23 @@ def _threads_create_container(http, user_id: str, access_token: str, data: dict)
     return str(container_id)
 
 
+def validate_threads_config_live(config: dict[str, Any], *, session=None) -> dict:
+    user_id = str(config.get("threadUserId") or config.get("userId") or "").strip()
+    access_token = str(_config_value(config, "accessToken") or "").strip()
+    if not user_id:
+        raise PreparedPublishError("Threads validation requires threadUserId")
+    if not access_token:
+        raise PreparedPublishError("Threads validation requires accessToken or accessTokenEnv")
+    http = _get_session(session)
+    response = http.get(
+        f"{THREADS_GRAPH_ROOT}/{user_id}",
+        params={"fields": "id,username", "access_token": access_token},
+        timeout=120,
+    )
+    _raise_for_status(response)
+    return _response_payload(response)
+
+
 def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
     config = account.config or {}
     user_id = str(config.get("threadUserId") or config.get("userId") or "").strip()
@@ -529,6 +616,38 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
     )
     _raise_for_status(publish_response)
     return {"container_id": container_id, "publish": _response_payload(publish_response)}
+
+
+def validate_reddit_config_live(config: dict[str, Any], *, session=None) -> dict:
+    http = _get_session(session)
+    access_token = _reddit_access_token(config, session=http)
+    user_agent = str(
+        _config_value(config, "userAgent")
+        or f"social-auto-upload/0.1 ({config.get('accountName', 'sau')})"
+    ).strip()
+    response = http.get(
+        REDDIT_ME_URL,
+        headers={"Authorization": f"Bearer {access_token}", "User-Agent": user_agent},
+        timeout=120,
+    )
+    _raise_for_status(response)
+    return {"access_token": access_token, "me": _response_payload(response)}
+
+
+def validate_youtube_config_live(config: dict[str, Any], *, session=None) -> dict:
+    channel_id = str(config.get("channelId") or "").strip()
+    if not channel_id:
+        raise PreparedPublishError("YouTube validation requires channelId")
+    http = _get_session(session)
+    access_token = _google_access_token(config, session=http)
+    response = http.get(
+        YOUTUBE_CHANNELS_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+        params={"part": "id,snippet", "id": channel_id},
+        timeout=120,
+    )
+    _raise_for_status(response)
+    return {"access_token": access_token, "channel": _response_payload(response)}
 
 
 def query_tiktok_creator_info(config: dict[str, Any], *, session=None) -> dict:

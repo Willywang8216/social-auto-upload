@@ -910,7 +910,7 @@ const submitStructuredAccount = async () => {
 
   const validation = await profilesApi.validateAccountConfig({
     ...payload,
-    performLiveChecks: payload.platform === 'tiktok'
+    performLiveChecks: true
   })
   const result = validation?.data || {}
   if (!result.valid) {
