@@ -96,12 +96,12 @@
     <el-dialog
       v-model="dialogVisible"
       :title="dialogType === 'add' ? '新增帳號' : '編輯帳號'"
-      width="700px"
+      width="720px"
       :close-on-click-modal="false"
       :close-on-press-escape="!sseConnecting"
       :show-close="!sseConnecting"
     >
-      <el-form :model="accountForm" label-width="100px" :rules="rules" ref="accountFormRef">
+      <el-form :model="accountForm" label-width="110px" :rules="rules" ref="accountFormRef">
         <el-form-item label="Profile">
           <el-select
             v-model="accountForm.profileId"
@@ -127,7 +127,6 @@
             placeholder="請選擇平台"
             style="width: 100%"
             :disabled="sseConnecting"
-            @change="handlePlatformChange"
           >
             <el-option
               v-for="platform in accountPlatformTabs"
@@ -154,48 +153,166 @@
               <el-option label="manual" value="manual" />
             </el-select>
           </el-form-item>
+
           <el-form-item label="啟用狀態">
             <el-switch v-model="accountForm.enabled" active-text="啟用" inactive-text="停用" />
           </el-form-item>
+
           <el-form-item v-if="accountForm.authType === 'cookie'" label="Cookie 路徑">
             <el-input
               v-model="accountForm.cookiePath"
               placeholder="可留空，後端會依 Profile/平台自動產生"
             />
           </el-form-item>
-          <el-form-item v-if="selectedPlatformGuide" label="JSON 範例">
-            <div class="json-guide">
-              <div class="json-guide__header">
-                <div>
-                  <div class="json-guide__title">{{ selectedPlatformGuide.title }}</div>
-                  <div class="json-guide__description">{{ selectedPlatformGuide.description }}</div>
-                </div>
-                <div class="json-guide__actions">
-                  <el-button size="small" @click="applyPlatformExample">帶入範例</el-button>
-                  <el-button size="small" @click="formatConfigJson" :disabled="!accountForm.configText.trim()">格式化 JSON</el-button>
-                </div>
-              </div>
-              <ul class="json-guide__keys">
-                <li v-for="entry in selectedPlatformGuide.keys" :key="entry.key">
-                  <strong>{{ entry.key }}</strong> — {{ entry.description }}
-                </li>
-              </ul>
-              <pre class="json-guide__example">{{ selectedPlatformGuide.exampleText }}</pre>
-            </div>
+
+          <el-form-item label="Sheet Preset">
+            <el-input v-model="accountForm.sheetPostPreset" placeholder="對應 Google Sheet / 排程工具 preset 名稱" />
           </el-form-item>
-          <el-form-item label="平台設定 JSON">
+
+          <template v-if="accountForm.platform === 'reddit'">
+            <el-divider content-position="left">Reddit 設定</el-divider>
+            <el-form-item label="Subreddits">
+              <el-input
+                v-model="accountForm.subredditsText"
+                type="textarea"
+                :rows="3"
+                placeholder="用逗號或換行分隔，例如：suba, subb"
+              />
+            </el-form-item>
+            <el-form-item label="Client ID Env">
+              <el-input v-model="accountForm.clientIdEnv" placeholder="例如：REDDIT_CLIENT_ID" />
+            </el-form-item>
+            <el-form-item label="Client Secret Env">
+              <el-input v-model="accountForm.clientSecretEnv" placeholder="例如：REDDIT_CLIENT_SECRET" />
+            </el-form-item>
+            <el-form-item label="Refresh Token Env">
+              <el-input v-model="accountForm.refreshTokenEnv" placeholder="例如：REDDIT_REFRESH_TOKEN" />
+            </el-form-item>
+            <el-form-item label="User Agent">
+              <el-input v-model="accountForm.userAgent" placeholder="可選，自訂 Reddit User-Agent" />
+            </el-form-item>
+          </template>
+
+          <template v-else-if="accountForm.platform === 'telegram'">
+            <el-divider content-position="left">Telegram 設定</el-divider>
+            <el-form-item label="Chat ID">
+              <el-input v-model="accountForm.chatId" placeholder="例如：@channel_name 或 -100123456" />
+            </el-form-item>
+            <el-form-item label="Bot Token Env">
+              <el-input v-model="accountForm.botTokenEnv" placeholder="例如：TELEGRAM_BOT_TOKEN" />
+            </el-form-item>
+            <el-form-item label="Parse Mode">
+              <el-select v-model="accountForm.parseMode" clearable style="width: 100%">
+                <el-option label="HTML" value="HTML" />
+                <el-option label="MarkdownV2" value="MarkdownV2" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="靜默發送">
+              <el-switch v-model="accountForm.silent" />
+            </el-form-item>
+            <el-form-item label="關閉預覽">
+              <el-switch v-model="accountForm.disableWebPreview" />
+            </el-form-item>
+          </template>
+
+          <template v-else-if="accountForm.platform === 'youtube'">
+            <el-divider content-position="left">YouTube 設定</el-divider>
+            <el-form-item label="Channel ID">
+              <el-input v-model="accountForm.channelId" placeholder="例如：UCxxxx" />
+            </el-form-item>
+            <el-form-item label="隱私狀態">
+              <el-select v-model="accountForm.privacyStatus" style="width: 100%">
+                <el-option label="private" value="private" />
+                <el-option label="unlisted" value="unlisted" />
+                <el-option label="public" value="public" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="Playlist ID">
+              <el-input v-model="accountForm.playlistId" placeholder="可選，自動加入播放清單" />
+            </el-form-item>
+            <el-form-item label="Category ID">
+              <el-input v-model="accountForm.categoryId" placeholder="預設 22" />
+            </el-form-item>
+            <el-form-item label="Client ID Env">
+              <el-input v-model="accountForm.clientIdEnv" placeholder="例如：YT_CLIENT_ID" />
+            </el-form-item>
+            <el-form-item label="Client Secret Env">
+              <el-input v-model="accountForm.clientSecretEnv" placeholder="例如：YT_CLIENT_SECRET" />
+            </el-form-item>
+            <el-form-item label="Refresh Token Env">
+              <el-input v-model="accountForm.refreshTokenEnv" placeholder="例如：YT_REFRESH_TOKEN" />
+            </el-form-item>
+          </template>
+
+          <template v-else-if="accountForm.platform === 'facebook'">
+            <el-divider content-position="left">Facebook 設定</el-divider>
+            <el-form-item label="Page ID">
+              <el-input v-model="accountForm.pageId" />
+            </el-form-item>
+            <el-form-item label="Access Token Env">
+              <el-input v-model="accountForm.accessTokenEnv" placeholder="例如：FB_PAGE_TOKEN" />
+            </el-form-item>
+          </template>
+
+          <template v-else-if="accountForm.platform === 'instagram'">
+            <el-divider content-position="left">Instagram 設定</el-divider>
+            <el-form-item label="IG User ID">
+              <el-input v-model="accountForm.igUserId" />
+            </el-form-item>
+            <el-form-item label="Access Token Env">
+              <el-input v-model="accountForm.accessTokenEnv" placeholder="例如：IG_ACCESS_TOKEN" />
+            </el-form-item>
+          </template>
+
+          <template v-else-if="accountForm.platform === 'threads'">
+            <el-divider content-position="left">Threads 設定</el-divider>
+            <el-form-item label="User ID">
+              <el-input v-model="accountForm.threadUserId" />
+            </el-form-item>
+            <el-form-item label="Access Token Env">
+              <el-input v-model="accountForm.accessTokenEnv" placeholder="例如：THREADS_ACCESS_TOKEN" />
+            </el-form-item>
+          </template>
+
+          <template v-else-if="accountForm.platform === 'tiktok'">
+            <el-divider content-position="left">TikTok 設定</el-divider>
+            <el-form-item label="Publish Mode">
+              <el-select v-model="accountForm.publishMode" style="width: 100%">
+                <el-option label="direct" value="direct" />
+                <el-option label="draft" value="draft" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="Access Token Env">
+              <el-input v-model="accountForm.accessTokenEnv" placeholder="例如：TIKTOK_ACCESS_TOKEN" />
+            </el-form-item>
+          </template>
+
+          <template v-else-if="accountForm.platform === 'discord'">
+            <el-divider content-position="left">Discord 設定</el-divider>
+            <el-form-item label="Webhook URL Env">
+              <el-input v-model="accountForm.webhookUrlEnv" placeholder="例如：DISCORD_WEBHOOK_URL" />
+            </el-form-item>
+          </template>
+
+          <template v-else-if="accountForm.platform === 'patreon'">
+            <el-divider content-position="left">Patreon 設定</el-divider>
+            <el-form-item label="Campaign ID">
+              <el-input v-model="accountForm.patreonCampaignId" />
+            </el-form-item>
+          </template>
+
+          <el-form-item label="進階 JSON">
             <el-input
-              v-model="accountForm.configText"
+              v-model="accountForm.advancedConfigText"
               type="textarea"
-              :rows="9"
-              :placeholder="jsonPlaceholder"
+              :rows="6"
+              placeholder='如需額外設定，可填入 JSON，會與上方欄位合併'
             />
-            <div class="field-hint">此 JSON 會原樣存入 account config，供 campaign 與 publisher runtime 使用。</div>
           </el-form-item>
         </template>
 
         <div v-else class="legacy-login-hint">
-          Legacy 帳號使用現有 QR Login / Cookie 流程。非舊版平台請先建立 Profile，再新增該平台帳號。
+          Legacy 帳號使用現有 QR Login / Cookie 流程。若是 Facebook、Instagram、Reddit、Telegram、YouTube、TikTok、Threads 等新平台，請先建立 Profile，再新增該平台帳號。
         </div>
 
         <div v-if="sseConnecting" class="qrcode-container">
@@ -248,72 +365,7 @@ import { useProfilesStore } from '@/stores/profiles'
 import { buildApiUrl } from '@/utils/api-url'
 import { appendAuthQuery, getToken } from '@/utils/auth'
 import { http } from '@/utils/request'
-import { PROFILE_PLATFORM_OPTIONS, getLegacyPlatformType, getPlatformLabel } from '@/utils/platforms'
-
-const PLATFORM_JSON_GUIDES = {
-  twitter: {
-    title: 'X / Twitter JSON 設定',
-    description: '適合放與匯出、預設連結或帳號識別相關的設定。',
-    defaultAuthType: 'oauth',
-    example: {
-      username: 'brand_main',
-      sheetPostPreset: 'X Brand',
-      defaultLink: 'https://example.com'
-    },
-    keys: [
-      { key: 'username', description: 'X 帳號識別名稱' },
-      { key: 'sheetPostPreset', description: 'Google Sheet / 匯出 preset 名稱' },
-      { key: 'defaultLink', description: '此帳號預設附加的連結' }
-    ]
-  },
-  telegram: {
-    title: 'Telegram JSON 設定',
-    description: '至少需要 chatId，才能在之後的 publisher runtime 中知道發送目標。',
-    defaultAuthType: 'oauth',
-    example: {
-      chatId: '@brandchannel',
-      disableWebPreview: false,
-      silent: false
-    },
-    keys: [
-      { key: 'chatId', description: '頻道或群組，例如 @brandchannel' },
-      { key: 'disableWebPreview', description: '是否關閉連結預覽' },
-      { key: 'silent', description: '是否靜音發送' }
-    ]
-  },
-  reddit: {
-    title: 'Reddit JSON 設定',
-    description: '請提供至少一個 subreddit，供 campaign 準備與未來 publisher 使用。',
-    defaultAuthType: 'oauth',
-    example: {
-      subreddits: ['subreddit_a', 'subreddit_b'],
-      sheetPostPreset: 'Reddit Brand'
-    },
-    keys: [
-      { key: 'subreddits', description: '要投遞的 subreddit 名稱陣列' },
-      { key: 'sheetPostPreset', description: 'Google Sheet / 匯出 preset 名稱' }
-    ]
-  },
-  youtube: {
-    title: 'YouTube JSON 設定',
-    description: '請提供 channelId；privacyStatus 與 playlistId 可選。',
-    defaultAuthType: 'oauth',
-    example: {
-      channelId: 'UCxxxxxxxxxxxxxxxx',
-      privacyStatus: 'public',
-      playlistId: ''
-    },
-    keys: [
-      { key: 'channelId', description: 'YouTube channel ID' },
-      { key: 'privacyStatus', description: 'public / unlisted / private' },
-      { key: 'playlistId', description: '可選，預設播放清單 ID' }
-    ]
-  }
-}
-
-Object.values(PLATFORM_JSON_GUIDES).forEach((guide) => {
-  guide.exampleText = JSON.stringify(guide.example, null, 2)
-})
+import { PROFILE_PLATFORM_OPTIONS, getLegacyPlatformType } from '@/utils/platforms'
 
 const accountStore = useAccountStore()
 const appStore = useAppStore()
@@ -332,7 +384,7 @@ const accountFormRef = ref(null)
 const profileDialogVisible = ref(false)
 const profileFormRef = ref(null)
 
-const accountForm = reactive({
+const makeEmptyAccountForm = () => ({
   id: null,
   profileId: null,
   name: '',
@@ -340,9 +392,33 @@ const accountForm = reactive({
   authType: 'cookie',
   enabled: true,
   cookiePath: '',
-  configText: '',
+  sheetPostPreset: '',
+  subredditsText: '',
+  clientIdEnv: '',
+  clientSecretEnv: '',
+  refreshTokenEnv: '',
+  userAgent: '',
+  chatId: '',
+  botTokenEnv: '',
+  parseMode: '',
+  silent: false,
+  disableWebPreview: false,
+  channelId: '',
+  privacyStatus: 'private',
+  playlistId: '',
+  categoryId: '22',
+  pageId: '',
+  igUserId: '',
+  threadUserId: '',
+  accessTokenEnv: '',
+  publishMode: 'direct',
+  webhookUrlEnv: '',
+  patreonCampaignId: '',
+  advancedConfigText: '',
   status: '正常'
 })
+
+const accountForm = reactive(makeEmptyAccountForm())
 
 const profileForm = reactive({
   name: '',
@@ -359,8 +435,6 @@ const rules = {
 }
 
 const isStructuredAccountForm = computed(() => Boolean(accountForm.profileId))
-const selectedPlatformGuide = computed(() => PLATFORM_JSON_GUIDES[accountForm.platform] || null)
-const jsonPlaceholder = computed(() => selectedPlatformGuide.value?.exampleText || '{\n  "key": "value"\n}')
 
 const sseConnecting = ref(false)
 const qrCodeData = ref('')
@@ -389,20 +463,50 @@ const onSearchChange = (value) => {
   searchKeyword.value = value
 }
 
+const assignIfValue = (target, key, value) => {
+  if (value !== '' && value != null) {
+    target[key] = value
+  }
+}
+
+const splitListField = (value) =>
+  String(value || '')
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+
 const resetAccountForm = () => {
-  Object.assign(accountForm, {
-    id: null,
+  Object.assign(accountForm, makeEmptyAccountForm(), {
     profileId: selectedProfileFilter.value !== 'all' && selectedProfileFilter.value !== 'legacy'
       ? Number(selectedProfileFilter.value)
       : null,
-    name: '',
-    platform: activeTab.value !== 'all' ? activeTab.value : '',
-    authType: 'cookie',
-    enabled: true,
-    cookiePath: '',
-    configText: '',
-    status: '正常'
+    platform: activeTab.value !== 'all' ? activeTab.value : ''
   })
+}
+
+const loadStructuredFieldsFromConfig = (config) => {
+  accountForm.sheetPostPreset = config.sheetPostPreset || ''
+  accountForm.subredditsText = Array.isArray(config.subreddits) ? config.subreddits.join(', ') : ''
+  accountForm.clientIdEnv = config.clientIdEnv || ''
+  accountForm.clientSecretEnv = config.clientSecretEnv || ''
+  accountForm.refreshTokenEnv = config.refreshTokenEnv || ''
+  accountForm.userAgent = config.userAgent || ''
+  accountForm.chatId = config.chatId || ''
+  accountForm.botTokenEnv = config.botTokenEnv || ''
+  accountForm.parseMode = config.parseMode || ''
+  accountForm.silent = Boolean(config.silent)
+  accountForm.disableWebPreview = Boolean(config.disableWebPreview)
+  accountForm.channelId = config.channelId || ''
+  accountForm.privacyStatus = config.privacyStatus || 'private'
+  accountForm.playlistId = config.playlistId || ''
+  accountForm.categoryId = config.categoryId || '22'
+  accountForm.pageId = config.pageId || ''
+  accountForm.igUserId = config.igUserId || ''
+  accountForm.threadUserId = config.threadUserId || ''
+  accountForm.accessTokenEnv = config.accessTokenEnv || ''
+  accountForm.publishMode = config.publishMode || 'direct'
+  accountForm.webhookUrlEnv = config.webhookUrlEnv || ''
+  accountForm.patreonCampaignId = config.campaignId || ''
 }
 
 const openProfileDialog = () => {
@@ -488,34 +592,6 @@ onMounted(() => {
   }, 100)
 })
 
-const handlePlatformChange = (platform) => {
-  if (!isStructuredAccountForm.value) return
-  const guide = PLATFORM_JSON_GUIDES[platform]
-  if (!guide) return
-  if (dialogType.value === 'add' && !accountForm.configText.trim()) {
-    accountForm.configText = guide.exampleText
-  }
-  if (dialogType.value === 'add') {
-    accountForm.authType = guide.defaultAuthType
-  }
-}
-
-const applyPlatformExample = () => {
-  if (selectedPlatformGuide.value) {
-    accountForm.configText = selectedPlatformGuide.value.exampleText
-    accountForm.authType = selectedPlatformGuide.value.defaultAuthType
-  }
-}
-
-const formatConfigJson = () => {
-  if (!accountForm.configText.trim()) return
-  try {
-    accountForm.configText = JSON.stringify(JSON.parse(accountForm.configText), null, 2)
-  } catch (error) {
-    ElMessage.error('目前 JSON 格式無法格式化，請先修正內容')
-  }
-}
-
 const handleAddAccount = () => {
   dialogType.value = 'add'
   resetAccountForm()
@@ -523,14 +599,11 @@ const handleAddAccount = () => {
   qrCodeData.value = ''
   loginStatus.value = ''
   dialogVisible.value = true
-  if (accountForm.platform) {
-    handlePlatformChange(accountForm.platform)
-  }
 }
 
 const handleEdit = (row) => {
   dialogType.value = 'edit'
-  Object.assign(accountForm, {
+  Object.assign(accountForm, makeEmptyAccountForm(), {
     id: row.id,
     profileId: row.profileId,
     name: row.name,
@@ -538,11 +611,12 @@ const handleEdit = (row) => {
     authType: row.authType || 'cookie',
     enabled: row.enabled !== false,
     cookiePath: row.filePath || '',
-    configText: row.config && Object.keys(row.config).length > 0
+    advancedConfigText: row.config && Object.keys(row.config).length > 0
       ? JSON.stringify(row.config, null, 2)
       : '',
     status: row.status
   })
+  loadStructuredFieldsFromConfig(row.config || {})
   sseConnecting.value = false
   qrCodeData.value = ''
   loginStatus.value = ''
@@ -638,7 +712,7 @@ const handleReLogin = (row) => {
   }
 
   dialogType.value = 'edit'
-  Object.assign(accountForm, {
+  Object.assign(accountForm, makeEmptyAccountForm(), {
     id: row.id,
     profileId: null,
     name: row.name,
@@ -646,7 +720,6 @@ const handleReLogin = (row) => {
     authType: 'cookie',
     enabled: true,
     cookiePath: row.filePath || '',
-    configText: '',
     status: row.status
   })
 
@@ -716,40 +789,78 @@ const connectSSE = (platform, name) => {
   }
 }
 
-const validateStructuredConfig = (platform, config) => {
-  if (platform === 'telegram' && !config.chatId) {
-    return 'Telegram 設定 JSON 需要 chatId'
-  }
-  if (platform === 'reddit' && (!Array.isArray(config.subreddits) || config.subreddits.length === 0)) {
-    return 'Reddit 設定 JSON 需要至少一個 subreddit'
-  }
-  if (platform === 'youtube' && !config.channelId) {
-    return 'YouTube 設定 JSON 需要 channelId'
-  }
-  return null
-}
-
-const submitStructuredAccount = async () => {
+const buildStructuredConfig = () => {
   let config = {}
-  if (accountForm.configText.trim()) {
+  if (accountForm.advancedConfigText.trim()) {
     try {
-      config = JSON.parse(accountForm.configText)
+      config = JSON.parse(accountForm.advancedConfigText)
     } catch (error) {
-      throw new Error('平台設定 JSON 格式錯誤')
+      throw new Error('進階 JSON 格式錯誤')
     }
   }
 
-  const validationError = validateStructuredConfig(accountForm.platform, config)
-  if (validationError) {
-    throw new Error(validationError)
+  assignIfValue(config, 'sheetPostPreset', accountForm.sheetPostPreset.trim())
+
+  switch (accountForm.platform) {
+    case 'reddit':
+      assignIfValue(config, 'subreddits', splitListField(accountForm.subredditsText))
+      assignIfValue(config, 'clientIdEnv', accountForm.clientIdEnv.trim())
+      assignIfValue(config, 'clientSecretEnv', accountForm.clientSecretEnv.trim())
+      assignIfValue(config, 'refreshTokenEnv', accountForm.refreshTokenEnv.trim())
+      assignIfValue(config, 'userAgent', accountForm.userAgent.trim())
+      break
+    case 'telegram':
+      assignIfValue(config, 'chatId', accountForm.chatId.trim())
+      assignIfValue(config, 'botTokenEnv', accountForm.botTokenEnv.trim())
+      assignIfValue(config, 'parseMode', accountForm.parseMode)
+      if (accountForm.silent) config.silent = true
+      if (accountForm.disableWebPreview) config.disableWebPreview = true
+      break
+    case 'youtube':
+      assignIfValue(config, 'channelId', accountForm.channelId.trim())
+      assignIfValue(config, 'privacyStatus', accountForm.privacyStatus)
+      assignIfValue(config, 'playlistId', accountForm.playlistId.trim())
+      assignIfValue(config, 'categoryId', accountForm.categoryId.trim())
+      assignIfValue(config, 'clientIdEnv', accountForm.clientIdEnv.trim())
+      assignIfValue(config, 'clientSecretEnv', accountForm.clientSecretEnv.trim())
+      assignIfValue(config, 'refreshTokenEnv', accountForm.refreshTokenEnv.trim())
+      break
+    case 'facebook':
+      assignIfValue(config, 'pageId', accountForm.pageId.trim())
+      assignIfValue(config, 'accessTokenEnv', accountForm.accessTokenEnv.trim())
+      break
+    case 'instagram':
+      assignIfValue(config, 'igUserId', accountForm.igUserId.trim())
+      assignIfValue(config, 'accessTokenEnv', accountForm.accessTokenEnv.trim())
+      break
+    case 'threads':
+      assignIfValue(config, 'userId', accountForm.threadUserId.trim())
+      assignIfValue(config, 'accessTokenEnv', accountForm.accessTokenEnv.trim())
+      break
+    case 'tiktok':
+      assignIfValue(config, 'publishMode', accountForm.publishMode)
+      assignIfValue(config, 'accessTokenEnv', accountForm.accessTokenEnv.trim())
+      break
+    case 'discord':
+      assignIfValue(config, 'webhookUrlEnv', accountForm.webhookUrlEnv.trim())
+      break
+    case 'patreon':
+      assignIfValue(config, 'campaignId', accountForm.patreonCampaignId.trim())
+      break
+    default:
+      break
   }
 
+  return config
+}
+
+const submitStructuredAccount = async () => {
   const payload = {
     platform: accountForm.platform,
     accountName: accountForm.name,
     authType: accountForm.authType,
     enabled: accountForm.enabled,
-    config
+    config: buildStructuredConfig()
   }
   if (accountForm.authType === 'cookie' && accountForm.cookiePath.trim()) {
     payload.cookiePath = accountForm.cookiePath.trim()
@@ -765,7 +876,7 @@ const submitStructuredAccount = async () => {
 const submitLegacyAccount = async () => {
   const legacyType = getLegacyPlatformType(accountForm.platform)
   if (legacyType == null) {
-    throw new Error(`${getPlatformLabel(accountForm.platform)} 帳號必須先指定 Profile`) 
+    throw new Error('非舊版平台帳號必須先指定 Profile')
   }
 
   if (dialogType.value === 'add') {
@@ -866,61 +977,6 @@ onBeforeUnmount(() => {
     padding: 10px 12px;
     background: #f5f7fa;
     border-radius: 4px;
-  }
-
-  .json-guide {
-    width: 100%;
-    padding: 12px;
-    background: #f5f7fa;
-    border-radius: 6px;
-    border: 1px solid #ebeef5;
-
-    .json-guide__header {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: flex-start;
-      margin-bottom: 10px;
-    }
-
-    .json-guide__title {
-      font-size: 14px;
-      font-weight: 600;
-      color: #303133;
-      margin-bottom: 4px;
-    }
-
-    .json-guide__description {
-      font-size: 13px;
-      color: #606266;
-      line-height: 1.6;
-    }
-
-    .json-guide__actions {
-      display: flex;
-      gap: 8px;
-      flex-shrink: 0;
-    }
-
-    .json-guide__keys {
-      margin: 0 0 10px 18px;
-      padding: 0;
-      color: #606266;
-      font-size: 13px;
-      line-height: 1.7;
-    }
-
-    .json-guide__example {
-      margin: 0;
-      padding: 10px;
-      background: #fff;
-      border-radius: 4px;
-      border: 1px solid #e4e7ed;
-      font-size: 12px;
-      overflow-x: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
   }
 
   .qrcode-container {
