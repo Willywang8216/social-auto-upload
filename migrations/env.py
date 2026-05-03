@@ -20,8 +20,11 @@ from __future__ import annotations
 import os
 from logging.config import fileConfig
 
+from myUtils.env_loader import load_repo_env
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+
+load_repo_env()
 
 config = context.config
 

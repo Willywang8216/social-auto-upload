@@ -64,6 +64,27 @@ Linux / macOS：
 PLAYWRIGHT_DOWNLOAD_HOST="https://npmmirror.com/mirrors/playwright" patchright install chromium
 ```
 
+### 5.1 配置 .env（后端 / worker / CLI）
+
+后端、worker、CLI、Alembic 现在会自动读取仓库根目录的 `.env` 文件。
+
+推荐先复制一份模板：
+
+```bash
+cp .env.example .env
+```
+
+然后按需填入：
+
+- LLM API
+- Google Sheets service account
+- OneDrive / rclone
+- Telegram / Reddit / YouTube / Meta / TikTok / Discord 等平台凭证
+
+详细获取步骤见：
+
+- [Credential setup guide](./credential-setup.md)
+
 ### 5. 配置 conf.py
 
 复制一份配置：

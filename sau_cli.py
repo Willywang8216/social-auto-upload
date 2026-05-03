@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from conf import BASE_DIR
+from myUtils.env_loader import load_repo_env
+
+load_repo_env()
 from myUtils import profiles as profile_registry
 from uploader.bilibili_uploader.runtime import run_biliup_command
 from uploader.douyin_uploader.main import (

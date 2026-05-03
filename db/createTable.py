@@ -28,6 +28,10 @@ import os
 import sqlite3
 from pathlib import Path
 
+from myUtils.env_loader import load_repo_env
+
+load_repo_env()
+
 DB_PATH = Path(__file__).resolve().parent / "database.db"
 
 # Alembic config lives at the workspace root.
