@@ -96,7 +96,7 @@
     <el-dialog
       v-model="dialogVisible"
       :title="dialogType === 'add' ? '新增帳號' : '編輯帳號'"
-      width="620px"
+      width="700px"
       :close-on-click-modal="false"
       :close-on-press-escape="!sseConnecting"
       :show-close="!sseConnecting"
@@ -127,6 +127,7 @@
             placeholder="請選擇平台"
             style="width: 100%"
             :disabled="sseConnecting"
+            @change="handlePlatformChange"
           >
             <el-option
               v-for="platform in accountPlatformTabs"
@@ -162,13 +163,34 @@
               placeholder="可留空，後端會依 Profile/平台自動產生"
             />
           </el-form-item>
+          <el-form-item v-if="selectedPlatformGuide" label="JSON 範例">
+            <div class="json-guide">
+              <div class="json-guide__header">
+                <div>
+                  <div class="json-guide__title">{{ selectedPlatformGuide.title }}</div>
+                  <div class="json-guide__description">{{ selectedPlatformGuide.description }}</div>
+                </div>
+                <div class="json-guide__actions">
+                  <el-button size="small" @click="applyPlatformExample">帶入範例</el-button>
+                  <el-button size="small" @click="formatConfigJson" :disabled="!accountForm.configText.trim()">格式化 JSON</el-button>
+                </div>
+              </div>
+              <ul class="json-guide__keys">
+                <li v-for="entry in selectedPlatformGuide.keys" :key="entry.key">
+                  <strong>{{ entry.key }}</strong> — {{ entry.description }}
+                </li>
+              </ul>
+              <pre class="json-guide__example">{{ selectedPlatformGuide.exampleText }}</pre>
+            </div>
+          </el-form-item>
           <el-form-item label="平台設定 JSON">
             <el-input
               v-model="accountForm.configText"
               type="textarea"
-              :rows="7"
-              placeholder='例如：{"subreddits": ["a", "b"], "sheetPostPreset": "Brand preset"}'
+              :rows="9"
+              :placeholder="jsonPlaceholder"
             />
+            <div class="field-hint">此 JSON 會原樣存入 account config，供 campaign 與 publisher runtime 使用。</div>
           </el-form-item>
         </template>
 
@@ -226,7 +248,72 @@ import { useProfilesStore } from '@/stores/profiles'
 import { buildApiUrl } from '@/utils/api-url'
 import { appendAuthQuery, getToken } from '@/utils/auth'
 import { http } from '@/utils/request'
-import { PROFILE_PLATFORM_OPTIONS, getLegacyPlatformType } from '@/utils/platforms'
+import { PROFILE_PLATFORM_OPTIONS, getLegacyPlatformType, getPlatformLabel } from '@/utils/platforms'
+
+const PLATFORM_JSON_GUIDES = {
+  twitter: {
+    title: 'X / Twitter JSON 設定',
+    description: '適合放與匯出、預設連結或帳號識別相關的設定。',
+    defaultAuthType: 'oauth',
+    example: {
+      username: 'brand_main',
+      sheetPostPreset: 'X Brand',
+      defaultLink: 'https://example.com'
+    },
+    keys: [
+      { key: 'username', description: 'X 帳號識別名稱' },
+      { key: 'sheetPostPreset', description: 'Google Sheet / 匯出 preset 名稱' },
+      { key: 'defaultLink', description: '此帳號預設附加的連結' }
+    ]
+  },
+  telegram: {
+    title: 'Telegram JSON 設定',
+    description: '至少需要 chatId，才能在之後的 publisher runtime 中知道發送目標。',
+    defaultAuthType: 'oauth',
+    example: {
+      chatId: '@brandchannel',
+      disableWebPreview: false,
+      silent: false
+    },
+    keys: [
+      { key: 'chatId', description: '頻道或群組，例如 @brandchannel' },
+      { key: 'disableWebPreview', description: '是否關閉連結預覽' },
+      { key: 'silent', description: '是否靜音發送' }
+    ]
+  },
+  reddit: {
+    title: 'Reddit JSON 設定',
+    description: '請提供至少一個 subreddit，供 campaign 準備與未來 publisher 使用。',
+    defaultAuthType: 'oauth',
+    example: {
+      subreddits: ['subreddit_a', 'subreddit_b'],
+      sheetPostPreset: 'Reddit Brand'
+    },
+    keys: [
+      { key: 'subreddits', description: '要投遞的 subreddit 名稱陣列' },
+      { key: 'sheetPostPreset', description: 'Google Sheet / 匯出 preset 名稱' }
+    ]
+  },
+  youtube: {
+    title: 'YouTube JSON 設定',
+    description: '請提供 channelId；privacyStatus 與 playlistId 可選。',
+    defaultAuthType: 'oauth',
+    example: {
+      channelId: 'UCxxxxxxxxxxxxxxxx',
+      privacyStatus: 'public',
+      playlistId: ''
+    },
+    keys: [
+      { key: 'channelId', description: 'YouTube channel ID' },
+      { key: 'privacyStatus', description: 'public / unlisted / private' },
+      { key: 'playlistId', description: '可選，預設播放清單 ID' }
+    ]
+  }
+}
+
+Object.values(PLATFORM_JSON_GUIDES).forEach((guide) => {
+  guide.exampleText = JSON.stringify(guide.example, null, 2)
+})
 
 const accountStore = useAccountStore()
 const appStore = useAppStore()
@@ -272,6 +359,8 @@ const rules = {
 }
 
 const isStructuredAccountForm = computed(() => Boolean(accountForm.profileId))
+const selectedPlatformGuide = computed(() => PLATFORM_JSON_GUIDES[accountForm.platform] || null)
+const jsonPlaceholder = computed(() => selectedPlatformGuide.value?.exampleText || '{\n  "key": "value"\n}')
 
 const sseConnecting = ref(false)
 const qrCodeData = ref('')
@@ -399,6 +488,34 @@ onMounted(() => {
   }, 100)
 })
 
+const handlePlatformChange = (platform) => {
+  if (!isStructuredAccountForm.value) return
+  const guide = PLATFORM_JSON_GUIDES[platform]
+  if (!guide) return
+  if (dialogType.value === 'add' && !accountForm.configText.trim()) {
+    accountForm.configText = guide.exampleText
+  }
+  if (dialogType.value === 'add') {
+    accountForm.authType = guide.defaultAuthType
+  }
+}
+
+const applyPlatformExample = () => {
+  if (selectedPlatformGuide.value) {
+    accountForm.configText = selectedPlatformGuide.value.exampleText
+    accountForm.authType = selectedPlatformGuide.value.defaultAuthType
+  }
+}
+
+const formatConfigJson = () => {
+  if (!accountForm.configText.trim()) return
+  try {
+    accountForm.configText = JSON.stringify(JSON.parse(accountForm.configText), null, 2)
+  } catch (error) {
+    ElMessage.error('目前 JSON 格式無法格式化，請先修正內容')
+  }
+}
+
 const handleAddAccount = () => {
   dialogType.value = 'add'
   resetAccountForm()
@@ -406,6 +523,9 @@ const handleAddAccount = () => {
   qrCodeData.value = ''
   loginStatus.value = ''
   dialogVisible.value = true
+  if (accountForm.platform) {
+    handlePlatformChange(accountForm.platform)
+  }
 }
 
 const handleEdit = (row) => {
@@ -596,6 +716,19 @@ const connectSSE = (platform, name) => {
   }
 }
 
+const validateStructuredConfig = (platform, config) => {
+  if (platform === 'telegram' && !config.chatId) {
+    return 'Telegram 設定 JSON 需要 chatId'
+  }
+  if (platform === 'reddit' && (!Array.isArray(config.subreddits) || config.subreddits.length === 0)) {
+    return 'Reddit 設定 JSON 需要至少一個 subreddit'
+  }
+  if (platform === 'youtube' && !config.channelId) {
+    return 'YouTube 設定 JSON 需要 channelId'
+  }
+  return null
+}
+
 const submitStructuredAccount = async () => {
   let config = {}
   if (accountForm.configText.trim()) {
@@ -604,6 +737,11 @@ const submitStructuredAccount = async () => {
     } catch (error) {
       throw new Error('平台設定 JSON 格式錯誤')
     }
+  }
+
+  const validationError = validateStructuredConfig(accountForm.platform, config)
+  if (validationError) {
+    throw new Error(validationError)
   }
 
   const payload = {
@@ -627,7 +765,7 @@ const submitStructuredAccount = async () => {
 const submitLegacyAccount = async () => {
   const legacyType = getLegacyPlatformType(accountForm.platform)
   if (legacyType == null) {
-    throw new Error('非舊版平台帳號必須先指定 Profile')
+    throw new Error(`${getPlatformLabel(accountForm.platform)} 帳號必須先指定 Profile`) 
   }
 
   if (dialogType.value === 'add') {
@@ -728,6 +866,61 @@ onBeforeUnmount(() => {
     padding: 10px 12px;
     background: #f5f7fa;
     border-radius: 4px;
+  }
+
+  .json-guide {
+    width: 100%;
+    padding: 12px;
+    background: #f5f7fa;
+    border-radius: 6px;
+    border: 1px solid #ebeef5;
+
+    .json-guide__header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }
+
+    .json-guide__title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #303133;
+      margin-bottom: 4px;
+    }
+
+    .json-guide__description {
+      font-size: 13px;
+      color: #606266;
+      line-height: 1.6;
+    }
+
+    .json-guide__actions {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .json-guide__keys {
+      margin: 0 0 10px 18px;
+      padding: 0;
+      color: #606266;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .json-guide__example {
+      margin: 0;
+      padding: 10px;
+      background: #fff;
+      border-radius: 4px;
+      border: 1px solid #e4e7ed;
+      font-size: 12px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
   }
 
   .qrcode-container {
