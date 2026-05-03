@@ -2,8 +2,21 @@
   <div class="account-management">
     <div class="page-header">
       <h1>帳號管理</h1>
+      <div class="profile-toolbar">
+        <el-select v-model="selectedProfileFilter" style="width: 260px" placeholder="篩選 Profile">
+          <el-option label="全部帳號" value="all" />
+          <el-option label="Legacy 帳號" value="legacy" />
+          <el-option
+            v-for="profile in profileOptions"
+            :key="profile.id"
+            :label="profile.name"
+            :value="String(profile.id)"
+          />
+        </el-select>
+        <el-button type="primary" plain @click="openProfileDialog">新增 Profile</el-button>
+      </div>
     </div>
-    
+
     <div class="account-tabs">
       <el-tabs v-model="activeTab" class="account-tabs-nav">
         <el-tab-pane label="全部" name="all">
@@ -17,16 +30,16 @@
             @delete="handleDelete"
             @download-cookie="handleDownloadCookie"
             @upload-cookie="handleUploadCookie"
-            @refresh="fetchAccounts"
+            @refresh="refreshAccounts"
             @relogin="handleReLogin"
             @search="onSearchChange"
           />
         </el-tab-pane>
         <el-tab-pane
           v-for="platform in accountPlatformTabs"
-          :key="platform.publishSlug"
+          :key="platform.value"
           :label="platform.label"
-          :name="platform.publishSlug"
+          :name="platform.value"
         >
           <AccountTabPane
             :accounts="getFilteredAccountsByPlatform(platform.label)"
@@ -38,48 +51,131 @@
             @delete="handleDelete"
             @download-cookie="handleDownloadCookie"
             @upload-cookie="handleUploadCookie"
-            @refresh="fetchAccounts"
+            @refresh="refreshAccounts"
             @relogin="handleReLogin"
             @search="onSearchChange"
           />
         </el-tab-pane>
       </el-tabs>
     </div>
-    
-    <!-- 添加/編輯帳號对话框 -->
+
+    <el-dialog
+      v-model="profileDialogVisible"
+      title="新增 Profile"
+      width="560px"
+      :close-on-click-modal="false"
+    >
+      <el-form :model="profileForm" label-width="100px" ref="profileFormRef">
+        <el-form-item label="名稱" required>
+          <el-input v-model="profileForm.name" placeholder="例如：Brand A" />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="profileForm.description" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="System Prompt">
+          <el-input v-model="profileForm.systemPrompt" type="textarea" :rows="4" />
+        </el-form-item>
+        <el-form-item label="浮水印">
+          <el-input v-model="profileForm.watermark" placeholder="文字浮水印" />
+        </el-form-item>
+        <el-form-item label="聯絡資訊">
+          <el-input v-model="profileForm.contactDetails" />
+        </el-form-item>
+        <el-form-item label="CTA">
+          <el-input v-model="profileForm.ctaText" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="profileDialogVisible = false">取消</el-button>
+          <el-button type="primary" @click="submitProfileForm">建立 Profile</el-button>
+        </span>
+      </template>
+    </el-dialog>
+
     <el-dialog
       v-model="dialogVisible"
       :title="dialogType === 'add' ? '新增帳號' : '編輯帳號'"
-      width="500px"
+      width="620px"
       :close-on-click-modal="false"
       :close-on-press-escape="!sseConnecting"
       :show-close="!sseConnecting"
     >
-      <el-form :model="accountForm" label-width="80px" :rules="rules" ref="accountFormRef">
-        <el-form-item label="平台" prop="platform">
-          <el-select 
-            v-model="accountForm.platform" 
-            placeholder="請選擇平台" 
+      <el-form :model="accountForm" label-width="100px" :rules="rules" ref="accountFormRef">
+        <el-form-item label="Profile">
+          <el-select
+            v-model="accountForm.profileId"
+            clearable
+            filterable
+            placeholder="留空代表 Legacy 帳號"
             style="width: 100%"
-            :disabled="dialogType === 'edit' || sseConnecting"
+            :disabled="sseConnecting"
+          >
+            <el-option
+              v-for="profile in profileOptions"
+              :key="profile.id"
+              :label="profile.name"
+              :value="profile.id"
+            />
+          </el-select>
+          <div class="field-hint">選擇 Profile 後會使用新的 profile/account registry；留空則維持舊版 QR login 帳號。</div>
+        </el-form-item>
+
+        <el-form-item label="平台" prop="platform">
+          <el-select
+            v-model="accountForm.platform"
+            placeholder="請選擇平台"
+            style="width: 100%"
+            :disabled="sseConnecting"
           >
             <el-option
               v-for="platform in accountPlatformTabs"
-              :key="platform.publishSlug"
+              :key="platform.value"
               :label="platform.label"
               :value="platform.value"
             />
           </el-select>
         </el-form-item>
+
         <el-form-item label="名稱" prop="name">
-          <el-input 
-            v-model="accountForm.name" 
-            placeholder="請輸入帳號名稱" 
+          <el-input
+            v-model="accountForm.name"
+            placeholder="請輸入帳號名稱"
             :disabled="sseConnecting"
           />
         </el-form-item>
-        
-        <!-- 二维码显示区域 -->
+
+        <template v-if="isStructuredAccountForm">
+          <el-form-item label="登入方式">
+            <el-select v-model="accountForm.authType" style="width: 100%">
+              <el-option label="cookie" value="cookie" />
+              <el-option label="oauth" value="oauth" />
+              <el-option label="manual" value="manual" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="啟用狀態">
+            <el-switch v-model="accountForm.enabled" active-text="啟用" inactive-text="停用" />
+          </el-form-item>
+          <el-form-item v-if="accountForm.authType === 'cookie'" label="Cookie 路徑">
+            <el-input
+              v-model="accountForm.cookiePath"
+              placeholder="可留空，後端會依 Profile/平台自動產生"
+            />
+          </el-form-item>
+          <el-form-item label="平台設定 JSON">
+            <el-input
+              v-model="accountForm.configText"
+              type="textarea"
+              :rows="7"
+              placeholder='例如：{"subreddits": ["a", "b"], "sheetPostPreset": "Brand preset"}'
+            />
+          </el-form-item>
+        </template>
+
+        <div v-else class="legacy-login-hint">
+          Legacy 帳號使用現有 QR Login / Cookie 流程。非舊版平台請先建立 Profile，再新增該平台帳號。
+        </div>
+
         <div v-if="sseConnecting" class="qrcode-container">
           <div v-if="qrCodeData && !loginStatus" class="qrcode-wrapper">
             <p class="qrcode-tip">請使用對應平台 App 掃描 QR Code 登入</p>
@@ -102,10 +198,10 @@
       <template #footer>
         <span class="dialog-footer">
           <el-button @click="dialogVisible = false">取消</el-button>
-          <el-button 
-            type="primary" 
-            @click="submitAccountForm" 
-            :loading="sseConnecting" 
+          <el-button
+            type="primary"
+            @click="submitAccountForm"
+            :loading="sseConnecting"
             :disabled="sseConnecting"
           >
             {{ sseConnecting ? '處理中' : '確認' }}
@@ -118,217 +214,242 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
-// Only the icons still rendered by THIS file remain; per-row action icons
-// (Download, Upload, Loading, Refresh) live inside AccountTabPane now.
 import { CircleCheckFilled, CircleCloseFilled, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+
 import { accountApi } from '@/api/account'
+import { profilesApi } from '@/api/profiles'
+import AccountTabPane from '@/components/AccountTabPane.vue'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
+import { useProfilesStore } from '@/stores/profiles'
 import { buildApiUrl } from '@/utils/api-url'
-import { http } from '@/utils/request'
 import { appendAuthQuery, getToken } from '@/utils/auth'
-import {
-  ACCOUNT_PLATFORM_OPTIONS,
-  LEGACY_ACCOUNT_PLATFORM_ORDER,
-  getLegacyPlatformType
-} from '@/utils/platforms'
-import AccountTabPane from '@/components/AccountTabPane.vue'
+import { http } from '@/utils/request'
+import { PROFILE_PLATFORM_OPTIONS, getLegacyPlatformType } from '@/utils/platforms'
 
-// 获取账号状态管理
 const accountStore = useAccountStore()
-// 获取应用状态管理
 const appStore = useAppStore()
+const profilesStore = useProfilesStore()
 
-// 当前激活的标签页
 const activeTab = ref('all')
-
-// 搜索关键词
 const searchKeyword = ref('')
+const selectedProfileFilter = ref('all')
 
-const accountPlatformTabs = LEGACY_ACCOUNT_PLATFORM_ORDER
-  .map((publishSlug) =>
-    ACCOUNT_PLATFORM_OPTIONS.find((platform) => platform.publishSlug === publishSlug)
-  )
-  .filter(Boolean)
+const accountPlatformTabs = PROFILE_PLATFORM_OPTIONS
+const profileOptions = computed(() => profilesStore.profiles)
 
-// 获取账号数据（快速，不验证）
-const fetchAccountsQuick = async () => {
-  try {
-    const res = await accountApi.getAccounts()
-    if (res.code === 200 && res.data) {
-      // 将所有账号的状态暂时设为"验证中"
-      const accountsWithPendingStatus = res.data.map(account => {
-        const updatedAccount = [...account];
-        updatedAccount[4] = -1; // -1 表示验证中的临时状态
-        return updatedAccount;
-      });
-      accountStore.setAccounts(accountsWithPendingStatus);
-    }
-  } catch (error) {
-    console.error('快速取得帳號資料失敗:', error)
-  }
-}
-
-// 获取账号数据（带验证）
-const fetchAccounts = async () => {
-  if (appStore.isAccountRefreshing) return
-
-  appStore.setAccountRefreshing(true)
-
-  try {
-    const res = await accountApi.getValidAccounts()
-    if (res.code === 200 && res.data) {
-      accountStore.setAccounts(res.data)
-      ElMessage.success('帳號資料取得成功')
-      // 标记为已访问
-      if (appStore.isFirstTimeAccountManagement) {
-        appStore.setAccountManagementVisited()
-      }
-    } else {
-      ElMessage.error('取得帳號資料失敗')
-    }
-  } catch (error) {
-    console.error('取得帳號資料失敗:', error)
-    ElMessage.error('取得帳號資料失敗')
-  } finally {
-    appStore.setAccountRefreshing(false)
-  }
-}
-
-// 后台验证所有账号（优化版本，使用setTimeout避免阻塞UI）
-const validateAllAccountsInBackground = async () => {
-  // 使用setTimeout将验证过程放在下一个事件循环，避免阻塞UI
-  setTimeout(async () => {
-    try {
-      const res = await accountApi.getValidAccounts()
-      if (res.code === 200 && res.data) {
-        accountStore.setAccounts(res.data)
-      }
-    } catch (error) {
-      console.error('后台验证账号失败:', error)
-    }
-  }, 0)
-}
-
-// 页面加载时获取账号数据
-onMounted(() => {
-  // 快速获取账号列表（不验证），立即显示
-  fetchAccountsQuick()
-
-  // 在后台验证所有账号
-  setTimeout(() => {
-    validateAllAccountsInBackground()
-  }, 100) // 稍微延迟一下，让用户看到快速加载的效果
-})
-
-// 过滤后的账号列表
-const filteredAccounts = computed(() => {
-  if (!searchKeyword.value) return accountStore.accounts
-  return accountStore.accounts.filter(account =>
-    account.name.includes(searchKeyword.value)
-  )
-})
-
-const getFilteredAccountsByPlatform = (platformLabel) =>
-  filteredAccounts.value.filter(account => account.platform === platformLabel)
-
-// 搜索处理。AccountTabPane 把输入值通过 @search 传回这里。
-const onSearchChange = (value) => {
-  searchKeyword.value = value
-}
-
-// 对话框相关
 const dialogVisible = ref(false)
-const dialogType = ref('add') // 'add' 或 'edit'
+const dialogType = ref('add')
 const accountFormRef = ref(null)
+const profileDialogVisible = ref(false)
+const profileFormRef = ref(null)
 
-// 账号表单
 const accountForm = reactive({
   id: null,
+  profileId: null,
   name: '',
   platform: '',
+  authType: 'cookie',
+  enabled: true,
+  cookiePath: '',
+  configText: '',
   status: '正常'
 })
 
-// 表单验证规则
+const profileForm = reactive({
+  name: '',
+  description: '',
+  systemPrompt: '',
+  watermark: '',
+  contactDetails: '',
+  ctaText: ''
+})
+
 const rules = {
   platform: [{ required: true, message: '請選擇平台', trigger: 'change' }],
   name: [{ required: true, message: '請輸入帳號名稱', trigger: 'blur' }]
 }
 
-// SSE连接状态
+const isStructuredAccountForm = computed(() => Boolean(accountForm.profileId))
+
 const sseConnecting = ref(false)
 const qrCodeData = ref('')
 const loginStatus = ref('')
+let eventSource = null
 
-// 新增帳號
-const handleAddAccount = () => {
-  dialogType.value = 'add'
+const filteredAccounts = computed(() => {
+  const keyword = searchKeyword.value.trim().toLowerCase()
+  return accountStore.accounts.filter((account) => {
+    if (selectedProfileFilter.value === 'legacy' && account.profileId != null) return false
+    if (selectedProfileFilter.value !== 'all' && selectedProfileFilter.value !== 'legacy') {
+      if (String(account.profileId) !== selectedProfileFilter.value) return false
+    }
+
+    if (!keyword) return true
+    return [account.name, account.platform, account.profileName]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(keyword))
+  })
+})
+
+const getFilteredAccountsByPlatform = (platformLabel) =>
+  filteredAccounts.value.filter((account) => account.platform === platformLabel)
+
+const onSearchChange = (value) => {
+  searchKeyword.value = value
+}
+
+const resetAccountForm = () => {
   Object.assign(accountForm, {
     id: null,
+    profileId: selectedProfileFilter.value !== 'all' && selectedProfileFilter.value !== 'legacy'
+      ? Number(selectedProfileFilter.value)
+      : null,
     name: '',
-    platform: '',
+    platform: activeTab.value !== 'all' ? activeTab.value : '',
+    authType: 'cookie',
+    enabled: true,
+    cookiePath: '',
+    configText: '',
     status: '正常'
   })
-  // 重置SSE状态
+}
+
+const openProfileDialog = () => {
+  Object.assign(profileForm, {
+    name: '',
+    description: '',
+    systemPrompt: '',
+    watermark: '',
+    contactDetails: '',
+    ctaText: ''
+  })
+  profileDialogVisible.value = true
+}
+
+const submitProfileForm = async () => {
+  if (!profileForm.name.trim()) {
+    ElMessage.error('請輸入 Profile 名稱')
+    return
+  }
+
+  try {
+    const created = await profilesApi.create({
+      name: profileForm.name,
+      description: profileForm.description,
+      settings: {
+        systemPrompt: profileForm.systemPrompt,
+        watermark: profileForm.watermark,
+        contactDetails: profileForm.contactDetails,
+        ctaText: profileForm.ctaText
+      }
+    })
+    await profilesStore.refreshProfiles()
+    profileDialogVisible.value = false
+    selectedProfileFilter.value = String(created.data.id)
+    ElMessage.success('Profile 建立成功')
+  } catch (error) {
+    console.error('建立 Profile 失敗:', error)
+    ElMessage.error(error?.message || '建立 Profile 失敗')
+  }
+}
+
+const fetchAccounts = async (validateLegacy = true) => {
+  if (appStore.isAccountRefreshing) return
+  appStore.setAccountRefreshing(true)
+
+  try {
+    const profiles = await profilesStore.refreshProfiles()
+    const legacyResponse = validateLegacy
+      ? await accountApi.getValidAccounts()
+      : await accountApi.getAccounts()
+    const legacyAccounts = legacyResponse?.data || []
+
+    const structuredGroups = await Promise.all(
+      profiles.map(async (profile) => {
+        const items = await profilesStore.fetchAccountsForProfile(profile.id)
+        return items.map((item) => ({ ...item, profileName: profile.name }))
+      })
+    )
+
+    accountStore.setAccounts([...legacyAccounts, ...structuredGroups.flat()])
+    if (validateLegacy) {
+      ElMessage.success('帳號資料取得成功')
+      if (appStore.isFirstTimeAccountManagement) {
+        appStore.setAccountManagementVisited()
+      }
+    }
+  } catch (error) {
+    console.error('取得帳號資料失敗:', error)
+    if (validateLegacy) {
+      ElMessage.error('取得帳號資料失敗')
+    }
+  } finally {
+    appStore.setAccountRefreshing(false)
+  }
+}
+
+const refreshAccounts = () => fetchAccounts(true)
+
+onMounted(() => {
+  fetchAccounts(false)
+  setTimeout(() => {
+    fetchAccounts(true)
+  }, 100)
+})
+
+const handleAddAccount = () => {
+  dialogType.value = 'add'
+  resetAccountForm()
   sseConnecting.value = false
   qrCodeData.value = ''
   loginStatus.value = ''
   dialogVisible.value = true
 }
 
-// 編輯帳號
 const handleEdit = (row) => {
   dialogType.value = 'edit'
   Object.assign(accountForm, {
     id: row.id,
+    profileId: row.profileId,
     name: row.name,
-    platform: row.platform,
+    platform: row.platformSlug || row.platform,
+    authType: row.authType || 'cookie',
+    enabled: row.enabled !== false,
+    cookiePath: row.filePath || '',
+    configText: row.config && Object.keys(row.config).length > 0
+      ? JSON.stringify(row.config, null, 2)
+      : '',
     status: row.status
   })
+  sseConnecting.value = false
+  qrCodeData.value = ''
+  loginStatus.value = ''
   dialogVisible.value = true
 }
 
-// 删除账号
 const handleDelete = (row) => {
-  ElMessageBox.confirm(
-    `確定要刪除帳號 ${row.name} 嗎？`,
-    '警告',
-    {
-      confirmButtonText: '確定',
-      cancelButtonText: '取消',
-      type: 'warning',
-    }
-  )
+  ElMessageBox.confirm(`確定要刪除帳號 ${row.name} 嗎？`, '警告', {
+    confirmButtonText: '確定',
+    cancelButtonText: '取消',
+    type: 'warning'
+  })
     .then(async () => {
       try {
-        // 调用API删除账号
         const response = await accountApi.deleteAccount(row.id)
-
         if (response.code === 200) {
-          // 从状态管理中删除账号
           accountStore.deleteAccount(row.id)
-          ElMessage({
-            type: 'success',
-            message: '刪除成功',
-          })
-        } else {
-          ElMessage.error(response.msg || '刪除失敗')
+          ElMessage.success('刪除成功')
         }
       } catch (error) {
         console.error('刪除帳號失敗:', error)
         ElMessage.error('刪除帳號失敗')
       }
     })
-    .catch(() => {
-      // 取消删除
-    })
+    .catch(() => {})
 }
 
-// Cookie file download. We fetch via axios so the Authorization header is
-// attached, then turn the response into a Blob and trigger a synthetic
-// download. Using a plain <a download> would skip the auth header and 401.
 const handleDownloadCookie = async (row) => {
   try {
     const response = await fetch(
@@ -356,9 +477,7 @@ const handleDownloadCookie = async (row) => {
   }
 }
 
-// 上传Cookie文件
 const handleUploadCookie = (row) => {
-  // 创建一个隐藏的文件输入框
   const input = document.createElement('input')
   input.type = 'file'
   input.accept = '.json'
@@ -368,8 +487,6 @@ const handleUploadCookie = (row) => {
   input.onchange = async (event) => {
     const file = event.target.files[0]
     if (!file) return
-
-    // 检查文件类型
     if (!file.name.endsWith('.json')) {
       ElMessage.error('請選擇 JSON 格式的 Cookie 檔案')
       document.body.removeChild(input)
@@ -377,18 +494,13 @@ const handleUploadCookie = (row) => {
     }
 
     try {
-      // 创建FormData对象
       const formData = new FormData()
       formData.append('file', file)
       formData.append('id', row.id)
-      formData.append('platform', row.platform)
-
-      // 使用统一的http封装发送上传请求
-      const result = await http.upload('/uploadCookie', formData)
-
+      formData.append('platform', row.platformSlug || row.platform)
+      await http.upload('/uploadCookie', formData)
       ElMessage.success('Cookie 檔案上傳成功')
-      // 刷新账号列表以显示更新
-      fetchAccounts()
+      await refreshAccounts()
     } catch (error) {
       ElMessage.error('Cookie 檔案上傳失敗')
     } finally {
@@ -399,35 +511,35 @@ const handleUploadCookie = (row) => {
   input.click()
 }
 
-// 重新登录账号
 const handleReLogin = (row) => {
-  // 设置表单信息
+  if (!row.supportsRelogin) {
+    ElMessage.warning('此帳號不支援舊版 QR 重新登入，請改用 Cookie / OAuth 更新')
+    return
+  }
+
   dialogType.value = 'edit'
   Object.assign(accountForm, {
     id: row.id,
+    profileId: null,
     name: row.name,
-    platform: row.platform,
+    platform: row.platformSlug || row.platform,
+    authType: 'cookie',
+    enabled: true,
+    cookiePath: row.filePath || '',
+    configText: '',
     status: row.status
   })
 
-  // 重置SSE状态
   sseConnecting.value = false
   qrCodeData.value = ''
   loginStatus.value = ''
-
-  // 显示对话框
   dialogVisible.value = true
 
-  // 立即开始登录流程
   setTimeout(() => {
-    connectSSE(row.platform, row.name)
+    connectSSE(accountForm.platform, accountForm.name)
   }, 300)
 }
 
-// SSE事件源对象
-let eventSource = null
-
-// 关闭SSE连接
 const closeSSEConnection = () => {
   if (eventSource) {
     eventSource.close()
@@ -435,81 +547,38 @@ const closeSSEConnection = () => {
   }
 }
 
-// 建立SSE连接
 const connectSSE = (platform, name) => {
-  // 关闭可能存在的连接
   closeSSEConnection()
-
-  // 设置连接状态
   sseConnecting.value = true
   qrCodeData.value = ''
   loginStatus.value = ''
 
   const type = String(getLegacyPlatformType(platform) || 1)
-
-  // EventSource cannot attach an Authorization header, so we tunnel the
-  // auth token through a query parameter that the backend specifically
-  // honours for /login. In open mode this is a no-op.
-  const url = appendAuthQuery(
-    buildApiUrl(`/login?type=${type}&id=${encodeURIComponent(name)}`)
-  )
-
+  const url = appendAuthQuery(buildApiUrl(`/login?type=${type}&id=${encodeURIComponent(name)}`))
   eventSource = new EventSource(url)
 
-  // 监听消息
   eventSource.onmessage = (event) => {
     const data = event.data
-
-    // 如果还没有二维码数据，且数据长度较长，认为是二维码
     if (!qrCodeData.value && data.length > 100) {
-      try {
-        if (data.startsWith('data:image')) {
-          qrCodeData.value = data
-        } else {
-          qrCodeData.value = `data:image/png;base64,${data}`
-        }
-      } catch (error) {
-        // 处理二维码数据出错
-      }
-    }
-    // 如果收到状态码
-    else if (data === '200' || data === '500') {
+      qrCodeData.value = data.startsWith('data:image') ? data : `data:image/png;base64,${data}`
+    } else if (data === '200' || data === '500') {
       loginStatus.value = data
-
-      // 如果登录成功
       if (data === '200') {
         setTimeout(() => {
-          // 关闭连接
           closeSSEConnection()
-
-          // 1秒后关闭对话框并开始刷新
           setTimeout(() => {
             dialogVisible.value = false
             sseConnecting.value = false
-
-            // 根据是否是重新登录显示不同提示
             ElMessage.success(dialogType.value === 'edit' ? '重新登入成功' : '帳號新增成功')
-
-            // 显示更新账号信息提示
-            ElMessage({
-              type: 'info',
-              message: '正在同步帳號資訊...',
-              duration: 0
-            })
-
-            // 触发刷新操作
-            fetchAccounts().then(() => {
-              // 刷新完成后关闭提示
+            ElMessage({ type: 'info', message: '正在同步帳號資訊...', duration: 0 })
+            refreshAccounts().then(() => {
               ElMessage.closeAll()
               ElMessage.success('帳號資訊已更新')
             })
           }, 1000)
         }, 1000)
       } else {
-        // 登录失败，关闭连接
         closeSSEConnection()
-
-        // 2秒后重置状态，允许重试
         setTimeout(() => {
           sseConnecting.value = false
           qrCodeData.value = ''
@@ -519,7 +588,6 @@ const connectSSE = (platform, name) => {
     }
   }
 
-  // 监听错误
   eventSource.onerror = (error) => {
     console.error('SSE 連線錯誤:', error)
     ElMessage.error('連線伺服器失敗，請稍後再試')
@@ -528,51 +596,77 @@ const connectSSE = (platform, name) => {
   }
 }
 
-// 提交账号表单
+const submitStructuredAccount = async () => {
+  let config = {}
+  if (accountForm.configText.trim()) {
+    try {
+      config = JSON.parse(accountForm.configText)
+    } catch (error) {
+      throw new Error('平台設定 JSON 格式錯誤')
+    }
+  }
+
+  const payload = {
+    platform: accountForm.platform,
+    accountName: accountForm.name,
+    authType: accountForm.authType,
+    enabled: accountForm.enabled,
+    config
+  }
+  if (accountForm.authType === 'cookie' && accountForm.cookiePath.trim()) {
+    payload.cookiePath = accountForm.cookiePath.trim()
+  }
+
+  if (dialogType.value === 'add') {
+    await profilesApi.createAccount(accountForm.profileId, payload)
+  } else {
+    await profilesApi.updateAccount(accountForm.id, payload)
+  }
+}
+
+const submitLegacyAccount = async () => {
+  const legacyType = getLegacyPlatformType(accountForm.platform)
+  if (legacyType == null) {
+    throw new Error('非舊版平台帳號必須先指定 Profile')
+  }
+
+  if (dialogType.value === 'add') {
+    connectSSE(accountForm.platform, accountForm.name)
+    return
+  }
+
+  await accountApi.updateAccount({
+    id: accountForm.id,
+    type: legacyType,
+    userName: accountForm.name
+  })
+}
+
 const submitAccountForm = () => {
   accountFormRef.value.validate(async (valid) => {
-    if (valid) {
-      if (dialogType.value === 'add') {
-        // 建立SSE连接
-        connectSSE(accountForm.platform, accountForm.name)
-      } else {
-        // 編輯帳號逻辑
-        try {
-          const type = getLegacyPlatformType(accountForm.platform) || 1
+    if (!valid) return false
 
-          const res = await accountApi.updateAccount({
-            id: accountForm.id,
-            type,
-            userName: accountForm.name
-          })
-          if (res.code === 200) {
-            // 更新状态管理中的账号
-            const updatedAccount = {
-              id: accountForm.id,
-              name: accountForm.name,
-              platform: accountForm.platform,
-              status: accountForm.status // Keep the existing status
-            };
-            accountStore.updateAccount(accountForm.id, updatedAccount)
-            ElMessage.success('更新成功')
-            dialogVisible.value = false
-            // 刷新账号列表
-            fetchAccounts()
-          } else {
-            ElMessage.error(res.msg || '更新帳號失敗')
-          }
-        } catch (error) {
-          console.error('更新帳號失敗:', error)
-          ElMessage.error('更新帳號失敗')
+    try {
+      if (isStructuredAccountForm.value) {
+        await submitStructuredAccount()
+        dialogVisible.value = false
+        ElMessage.success(dialogType.value === 'add' ? '帳號新增成功' : '帳號更新成功')
+        await refreshAccounts()
+      } else {
+        await submitLegacyAccount()
+        if (dialogType.value === 'edit') {
+          dialogVisible.value = false
+          ElMessage.success('更新成功')
+          await refreshAccounts()
         }
       }
-    } else {
-      return false
+    } catch (error) {
+      console.error('提交帳號失敗:', error)
+      ElMessage.error(error?.message || '提交帳號失敗')
     }
   })
 }
 
-// 组件卸载前关闭SSE连接
 onBeforeUnmount(() => {
   closeSSEConnection()
 })
@@ -593,25 +687,48 @@ onBeforeUnmount(() => {
 .account-management {
   .page-header {
     margin-bottom: 20px;
-    
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+
     h1 {
       font-size: 24px;
       color: $text-primary;
       margin: 0;
     }
+
+    .profile-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
   }
-  
+
   .account-tabs {
     background-color: #fff;
     border-radius: 4px;
     box-shadow: $box-shadow-light;
-    
+
     .account-tabs-nav {
       padding: 20px;
     }
   }
-  
-  // 列表/搜索/状态样式现在跟随 AccountTabPane.vue。
+
+  .field-hint,
+  .legacy-login-hint {
+    margin-top: 6px;
+    color: #909399;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  .legacy-login-hint {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    background: #f5f7fa;
+    border-radius: 4px;
+  }
 
   .qrcode-container {
     margin-top: 20px;
@@ -620,15 +737,15 @@ onBeforeUnmount(() => {
     align-items: center;
     justify-content: center;
     min-height: 250px;
-    
+
     .qrcode-wrapper {
       text-align: center;
-      
+
       .qrcode-tip {
         margin-bottom: 15px;
         color: #606266;
       }
-      
+
       .qrcode-image {
         max-width: 200px;
         max-height: 200px;
@@ -636,31 +753,33 @@ onBeforeUnmount(() => {
         background-color: black;
       }
     }
-    
-    .loading-wrapper, .success-wrapper, .error-wrapper {
+
+    .loading-wrapper,
+    .success-wrapper,
+    .error-wrapper {
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
       gap: 10px;
-      
+
       .el-icon {
         font-size: 48px;
-        
+
         &.is-loading {
           animation: rotate 1s linear infinite;
         }
       }
-      
+
       span {
         font-size: 16px;
       }
     }
-    
+
     .success-wrapper .el-icon {
       color: #67c23a;
     }
-    
+
     .error-wrapper .el-icon {
       color: #f56c6c;
     }

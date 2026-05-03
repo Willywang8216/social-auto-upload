@@ -223,6 +223,44 @@ def get_file():
     return send_from_directory(str(base_dir), target.name)
 
 
+def _resolve_cookie_path(raw_path: str) -> Path:
+    requested = Path(raw_path)
+    if requested.is_absolute():
+        return requested.resolve()
+    return Path(BASE_DIR / "cookiesFile" / raw_path).resolve()
+
+
+def _allowed_cookie_roots() -> tuple[Path, ...]:
+    return (
+        Path(BASE_DIR / "cookiesFile").resolve(),
+        Path(BASE_DIR / "cookies").resolve(),
+    )
+
+
+def _cookie_path_is_allowed(cookie_path: Path) -> bool:
+    return any(cookie_path.is_relative_to(root) for root in _allowed_cookie_roots())
+
+
+def _lookup_account_cookie_path(account_id: int) -> tuple[Path, str] | None:
+    db_path = _current_db_path()
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        legacy = conn.execute(
+            "SELECT filePath FROM user_info WHERE id = ?",
+            (account_id,),
+        ).fetchone()
+        if legacy is not None:
+            return _resolve_cookie_path(legacy["filePath"]), "legacy"
+
+        structured = conn.execute(
+            "SELECT cookie_path FROM accounts WHERE id = ?",
+            (account_id,),
+        ).fetchone()
+        if structured is not None and structured["cookie_path"]:
+            return _resolve_cookie_path(structured["cookie_path"]), "structured"
+    return None
+
+
 @app.route('/uploadSave', methods=['POST'])
 def upload_save():
     if 'file' not in request.files:
@@ -464,36 +502,55 @@ def delete_account():
     account_id = int(account_id)
 
     try:
-        # 获取数据库连接
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        db_path = _current_db_path()
+        with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
-            # 查询要删除的记录
-            cursor.execute("SELECT * FROM user_info WHERE id = ?", (account_id,))
-            record = cursor.fetchone()
+            legacy = cursor.execute(
+                "SELECT * FROM user_info WHERE id = ?",
+                (account_id,),
+            ).fetchone()
+            if legacy is not None:
+                record = dict(legacy)
+                if record.get('filePath'):
+                    cookie_file_path = _resolve_cookie_path(record['filePath'])
+                    if cookie_file_path.exists():
+                        try:
+                            cookie_file_path.unlink()
+                            print(f"✅ Cookie文件已删除: {cookie_file_path}")
+                        except Exception as e:
+                            print(f"⚠️ 删除Cookie文件失败: {e}")
+                cursor.execute("DELETE FROM user_info WHERE id = ?", (account_id,))
+                conn.commit()
+                return jsonify({
+                    "code": 200,
+                    "msg": "account deleted successfully",
+                    "data": None
+                }), 200
 
-            if not record:
+            structured = cursor.execute(
+                "SELECT cookie_path FROM accounts WHERE id = ?",
+                (account_id,),
+            ).fetchone()
+            if structured is None:
                 return jsonify({
                     "code": 404,
                     "msg": "account not found",
                     "data": None
                 }), 404
 
-            record = dict(record)
-
-            # 删除关联的cookie文件
-            if record.get('filePath'):
-                cookie_file_path = Path(BASE_DIR / "cookiesFile" / record['filePath'])
-                if cookie_file_path.exists():
+            cookie_path = structured['cookie_path']
+            if cookie_path:
+                resolved_cookie_path = _resolve_cookie_path(cookie_path)
+                if _cookie_path_is_allowed(resolved_cookie_path) and resolved_cookie_path.exists():
                     try:
-                        cookie_file_path.unlink()
-                        print(f"✅ Cookie文件已删除: {cookie_file_path}")
+                        resolved_cookie_path.unlink()
+                        print(f"✅ Cookie文件已删除: {resolved_cookie_path}")
                     except Exception as e:
                         print(f"⚠️ 删除Cookie文件失败: {e}")
 
-            # 删除数据库记录
-            cursor.execute("DELETE FROM user_info WHERE id = ?", (account_id,))
+            cursor.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
             conn.commit()
 
         return jsonify({
@@ -747,14 +804,8 @@ def upload_cookie():
                 "data": None
             }), 400
 
-        # 从数据库获取账号的文件路径
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute('SELECT filePath FROM user_info WHERE id = ?', (account_id,))
-            result = cursor.fetchone()
-
-        if not result:
+        account_cookie = _lookup_account_cookie_path(int(account_id))
+        if not account_cookie:
             return jsonify({
                 "code": 500,
                 "msg": "账号不存在",
@@ -783,7 +834,13 @@ def upload_cookie():
         # plaintext (with the same atomic temp-file + rename semantics) when
         # encryption is disabled.
         from myUtils.cookie_storage import write_cookie
-        cookie_file_path = Path(BASE_DIR / "cookiesFile" / result['filePath'])
+        cookie_file_path = account_cookie[0]
+        if not _cookie_path_is_allowed(cookie_file_path):
+            return jsonify({
+                "code": 400,
+                "msg": "非法Cookie文件路径",
+                "data": None
+            }), 400
         write_cookie(cookie_file_path, payload_bytes)
 
         return jsonify({
@@ -813,11 +870,8 @@ def download_cookie():
                 "data": None
             }), 400
 
-        # 验证文件路径的安全性，防止路径遍历攻击
-        cookie_file_path = Path(BASE_DIR / "cookiesFile" / file_path).resolve()
-        base_path = Path(BASE_DIR / "cookiesFile").resolve()
-
-        if not cookie_file_path.is_relative_to(base_path):
+        cookie_file_path = _resolve_cookie_path(file_path)
+        if not _cookie_path_is_allowed(cookie_file_path):
             return jsonify({
                 "code": 500,
                 "msg": "非法文件路径",

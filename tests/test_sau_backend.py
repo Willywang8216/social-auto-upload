@@ -129,6 +129,42 @@ class LegacyDbBootstrapEndpointTests(unittest.TestCase):
         self.assertEqual(response.get_json()["data"], [])
         self.assertTrue({"user_info", "file_records"}.issubset(self._table_names()))
 
+    def test_delete_account_supports_structured_profile_accounts(self) -> None:
+        cookie_dir = self.base_dir / "cookies" / "twitter" / "brand"
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        cookie_path = cookie_dir / "main.json"
+        cookie_path.write_text("{}")
+
+        with sqlite3.connect(self._legacy_db_path()) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO profiles (name, slug, description, settings_json) VALUES (?, ?, ?, ?)",
+                ("Brand", "brand", "", "{}"),
+            )
+            profile_id = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO accounts (profile_id, platform, account_name, cookie_path, auth_type, config_json, enabled, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (profile_id, "twitter", "main", str(cookie_path), "cookie", "{}", 1, 1),
+            )
+            account_id = cursor.lastrowid
+            conn.commit()
+
+        response = self.client.get(f"/deleteAccount?id={account_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(cookie_path.exists())
+
+    def test_download_cookie_supports_structured_account_paths(self) -> None:
+        cookie_dir = self.base_dir / "cookies" / "twitter" / "brand"
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        cookie_path = cookie_dir / "main.json"
+        cookie_path.write_text('{"cookies": [], "origins": []}')
+
+        response = self.client.get(
+            f"/downloadCookie?filePath={cookie_path.as_posix()}"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'"cookies"', response.data)
+
 
 if __name__ == "__main__":
     unittest.main()

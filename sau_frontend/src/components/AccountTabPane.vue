@@ -3,7 +3,7 @@
     <div class="account-search">
       <el-input
         :model-value="searchKeyword"
-        placeholder="輸入名稱或帳號搜尋"
+        placeholder="輸入名稱、Profile 或平台搜尋"
         prefix-icon="Search"
         clearable
         @clear="$emit('search', '')"
@@ -26,52 +26,70 @@
             <el-avatar :src="getDefaultAvatar(scope.row.name)" :size="40" />
           </template>
         </el-table-column>
-        <el-table-column prop="name" label="名稱" width="180" />
-        <el-table-column prop="platform" label="平台">
+        <el-table-column prop="name" label="名稱" min-width="180" />
+        <el-table-column prop="profileName" label="Profile" min-width="120">
+          <template #default="scope">
+            <el-tag :type="scope.row.profileId ? 'primary' : 'info'" effect="plain">
+              {{ scope.row.profileName || 'Legacy' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="platform" label="平台" min-width="120">
           <template #default="scope">
             <el-tag :type="platformTagType(scope.row.platform)" effect="plain">
               {{ scope.row.platform }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="狀態">
+        <el-table-column prop="authType" label="登入方式" min-width="100">
+          <template #default="scope">
+            <span>{{ scope.row.authType || 'cookie' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="status" label="狀態" min-width="100">
           <template #default="scope">
             <el-tag
               :type="statusTagType(scope.row.status)"
               effect="plain"
-              :class="{ 'clickable-status': isStatusClickable(scope.row.status) }"
+              :class="{ 'clickable-status': isStatusClickable(scope.row) }"
               @click="onStatusClick(scope.row)"
             >
-              <el-icon
-                v-if="scope.row.status === '驗證中'"
-                class="is-loading"
-              >
+              <el-icon v-if="scope.row.status === '驗證中'" class="is-loading">
                 <Loading />
               </el-icon>
               {{ scope.row.status }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作">
+        <el-table-column label="操作" min-width="320">
           <template #default="scope">
-            <el-button size="small" @click="$emit('edit', scope.row)">編輯</el-button>
-            <el-button
-              size="small"
-              type="primary"
-              :icon="Download"
-              @click="$emit('download-cookie', scope.row)"
-            >下載 Cookie</el-button>
-            <el-button
-              size="small"
-              type="info"
-              :icon="Upload"
-              @click="$emit('upload-cookie', scope.row)"
-            >上傳 Cookie</el-button>
-            <el-button
-              size="small"
-              type="danger"
-              @click="$emit('delete', scope.row)"
-            >刪除</el-button>
+            <div class="row-actions">
+              <el-button size="small" @click="$emit('edit', scope.row)">編輯</el-button>
+              <el-button
+                v-if="scope.row.supportsCookieActions"
+                size="small"
+                type="primary"
+                :icon="Download"
+                @click="$emit('download-cookie', scope.row)"
+              >下載 Cookie</el-button>
+              <el-button
+                v-if="scope.row.supportsCookieActions"
+                size="small"
+                type="info"
+                :icon="Upload"
+                @click="$emit('upload-cookie', scope.row)"
+              >上傳 Cookie</el-button>
+              <el-button
+                v-if="scope.row.supportsRelogin"
+                size="small"
+                @click="$emit('relogin', scope.row)"
+              >重新登入</el-button>
+              <el-button
+                size="small"
+                type="danger"
+                @click="$emit('delete', scope.row)"
+              >刪除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -115,12 +133,12 @@ function statusTagType(status) {
   return 'danger'
 }
 
-function isStatusClickable(status) {
-  return status === '異常'
+function isStatusClickable(row) {
+  return row.status === '異常' && row.supportsRelogin
 }
 
 function onStatusClick(row) {
-  if (isStatusClickable(row.status)) {
+  if (isStatusClickable(row)) {
     emit('relogin', row)
   }
 }
@@ -136,9 +154,10 @@ function getDefaultAvatar(name) {
     display: flex;
     justify-content: space-between;
     margin-bottom: 20px;
+    gap: 12px;
 
     .el-input {
-      width: 300px;
+      width: 320px;
     }
 
     .action-buttons {
@@ -153,6 +172,12 @@ function getDefaultAvatar(name) {
 
   .account-list {
     margin-bottom: 20px;
+
+    .row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
   }
 
   .empty-data {
