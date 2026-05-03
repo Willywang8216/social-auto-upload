@@ -285,6 +285,29 @@
             <el-form-item label="Access Token Env">
               <el-input v-model="accountForm.accessTokenEnv" placeholder="例如：TIKTOK_ACCESS_TOKEN" />
             </el-form-item>
+            <el-form-item label="Privacy Level">
+              <el-select v-model="accountForm.privacyLevel" style="width: 100%">
+                <el-option label="PUBLIC_TO_EVERYONE" value="PUBLIC_TO_EVERYONE" />
+                <el-option label="MUTUAL_FOLLOW_FRIENDS" value="MUTUAL_FOLLOW_FRIENDS" />
+                <el-option label="SELF_ONLY" value="SELF_ONLY" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="關閉留言">
+              <el-switch v-model="accountForm.disableComment" />
+            </el-form-item>
+            <el-form-item label="關閉 Duet">
+              <el-switch v-model="accountForm.disableDuet" />
+            </el-form-item>
+            <el-form-item label="關閉 Stitch">
+              <el-switch v-model="accountForm.disableStitch" />
+            </el-form-item>
+            <el-form-item label="自動配樂（圖片）">
+              <el-switch v-model="accountForm.autoAddMusic" />
+            </el-form-item>
+            <el-form-item label="封面時間 ms">
+              <el-input v-model="accountForm.videoCoverTimestampMs" placeholder="例如：1000" />
+            </el-form-item>
+            <div class="field-hint">注意：TikTok 官方 Content Posting API 不允許品牌/促銷浮水印內容。</div>
           </template>
 
           <template v-else-if="accountForm.platform === 'discord'">
@@ -412,6 +435,12 @@ const makeEmptyAccountForm = () => ({
   threadUserId: '',
   accessTokenEnv: '',
   publishMode: 'direct',
+  privacyLevel: 'PUBLIC_TO_EVERYONE',
+  disableComment: false,
+  disableDuet: false,
+  disableStitch: false,
+  autoAddMusic: true,
+  videoCoverTimestampMs: '',
   webhookUrlEnv: '',
   patreonCampaignId: '',
   advancedConfigText: '',
@@ -505,6 +534,12 @@ const loadStructuredFieldsFromConfig = (config) => {
   accountForm.threadUserId = config.threadUserId || ''
   accountForm.accessTokenEnv = config.accessTokenEnv || ''
   accountForm.publishMode = config.publishMode || 'direct'
+  accountForm.privacyLevel = config.privacyLevel || 'PUBLIC_TO_EVERYONE'
+  accountForm.disableComment = Boolean(config.disableComment)
+  accountForm.disableDuet = Boolean(config.disableDuet)
+  accountForm.disableStitch = Boolean(config.disableStitch)
+  accountForm.autoAddMusic = config.autoAddMusic !== false
+  accountForm.videoCoverTimestampMs = config.videoCoverTimestampMs != null ? String(config.videoCoverTimestampMs) : ''
   accountForm.webhookUrlEnv = config.webhookUrlEnv || ''
   accountForm.patreonCampaignId = config.campaignId || ''
 }
@@ -840,6 +875,12 @@ const buildStructuredConfig = () => {
     case 'tiktok':
       assignIfValue(config, 'publishMode', accountForm.publishMode)
       assignIfValue(config, 'accessTokenEnv', accountForm.accessTokenEnv.trim())
+      assignIfValue(config, 'privacyLevel', accountForm.privacyLevel)
+      if (accountForm.disableComment) config.disableComment = true
+      if (accountForm.disableDuet) config.disableDuet = true
+      if (accountForm.disableStitch) config.disableStitch = true
+      if (accountForm.autoAddMusic === false) config.autoAddMusic = false
+      if (accountForm.videoCoverTimestampMs.trim()) config.videoCoverTimestampMs = Number(accountForm.videoCoverTimestampMs.trim())
       break
     case 'discord':
       assignIfValue(config, 'webhookUrlEnv', accountForm.webhookUrlEnv.trim())
@@ -856,6 +897,7 @@ const buildStructuredConfig = () => {
 
 const submitStructuredAccount = async () => {
   const payload = {
+    profileId: accountForm.profileId,
     platform: accountForm.platform,
     accountName: accountForm.name,
     authType: accountForm.authType,
@@ -864,6 +906,18 @@ const submitStructuredAccount = async () => {
   }
   if (accountForm.authType === 'cookie' && accountForm.cookiePath.trim()) {
     payload.cookiePath = accountForm.cookiePath.trim()
+  }
+
+  const validation = await profilesApi.validateAccountConfig({
+    ...payload,
+    performLiveChecks: payload.platform === 'tiktok'
+  })
+  const result = validation?.data || {}
+  if (!result.valid) {
+    throw new Error((result.errors || []).join('；') || '帳號設定驗證失敗')
+  }
+  if (Array.isArray(result.warnings) && result.warnings.length > 0) {
+    ElMessage.warning(result.warnings.join('；'))
   }
 
   if (dialogType.value === 'add') {

@@ -162,6 +162,45 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[0][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads")
         self.assertEqual(session.calls[1][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads_publish")
 
+    def test_tiktok_video_direct_post_uses_video_init(self):
+        session = _RecordingSession([
+            _FakeResponse({'data': {'creator_avatar_url': 'x'}}),
+            _FakeResponse({'data': {'publish_id': 'tt-video-1'}}),
+        ])
+        account = SimpleNamespace(config={'accessToken': 'tt-token', 'privacyLevel': 'SELF_ONLY'})
+        result = prepared_publishers.publish_tiktok_sync(
+            account,
+            {
+                'message': 'TikTok launch',
+                'artifacts': [{'public_url': 'https://cdn.example/video.mp4', 'artifact_kind': 'remote_upload'}],
+            },
+            session=session,
+        )
+        self.assertEqual(session.calls[0][1], prepared_publishers.TIKTOK_CREATOR_INFO_URL)
+        self.assertEqual(session.calls[1][1], prepared_publishers.TIKTOK_VIDEO_INIT_URL)
+        self.assertEqual(result['request']['post_info']['privacy_level'], 'SELF_ONLY')
+
+    def test_tiktok_photo_direct_post_uses_content_init(self):
+        session = _RecordingSession([
+            _FakeResponse({'data': {'creator_avatar_url': 'x'}}),
+            _FakeResponse({'data': {'publish_id': 'tt-photo-1'}}),
+        ])
+        account = SimpleNamespace(config={'accessToken': 'tt-token', 'autoAddMusic': True})
+        result = prepared_publishers.publish_tiktok_sync(
+            account,
+            {
+                'message': 'TikTok photos',
+                'artifacts': [
+                    {'public_url': 'https://cdn.example/a.jpg', 'artifact_kind': 'remote_upload'},
+                    {'public_url': 'https://cdn.example/b.jpg', 'artifact_kind': 'remote_upload'},
+                ],
+            },
+            session=session,
+        )
+        self.assertEqual(session.calls[1][1], prepared_publishers.TIKTOK_CONTENT_INIT_URL)
+        self.assertEqual(result['request']['media_type'], 'PHOTO')
+        self.assertEqual(result['request']['source_info']['photo_cover_index'], 0)
+
     def test_youtube_refresh_and_resumable_upload(self):
         session = _RecordingSession([
             _FakeResponse({"access_token": "google-token"}),

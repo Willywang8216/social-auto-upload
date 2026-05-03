@@ -26,6 +26,10 @@ YOUTUBE_PLAYLIST_INSERT_URL = (
 )
 FACEBOOK_GRAPH_ROOT = "https://graph.facebook.com/v25.0"
 THREADS_GRAPH_ROOT = "https://graph.threads.net/v1.0"
+TIKTOK_API_ROOT = "https://open.tiktokapis.com"
+TIKTOK_CREATOR_INFO_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/creator_info/query/"
+TIKTOK_VIDEO_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/video/init/"
+TIKTOK_CONTENT_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/content/init/"
 
 
 class PreparedPublishError(RuntimeError):
@@ -525,6 +529,114 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
     )
     _raise_for_status(publish_response)
     return {"container_id": container_id, "publish": _response_payload(publish_response)}
+
+
+def query_tiktok_creator_info(config: dict[str, Any], *, session=None) -> dict:
+    access_token = str(_config_value(config, "accessToken") or "").strip()
+    if not access_token:
+        raise PreparedPublishError("TikTok creator info query requires accessToken or accessTokenEnv")
+    http = _get_session(session)
+    response = http.post(
+        TIKTOK_CREATOR_INFO_URL,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=UTF-8",
+        },
+        json={},
+        timeout=120,
+    )
+    _raise_for_status(response)
+    payload = _response_payload(response)
+    return payload
+
+
+def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
+    config = account.config or {}
+    access_token = str(_config_value(config, "accessToken") or "").strip()
+    if not access_token:
+        raise PreparedPublishError("TikTok publish requires accessToken or accessTokenEnv")
+
+    http = _get_session(session)
+    creator_info = query_tiktok_creator_info(config, session=http)
+    media = _extract_media(payload)
+    message = _payload_message(payload)
+    publish_mode = str(config.get("publishMode") or "direct").strip().lower()
+    post_mode = "DIRECT_POST" if publish_mode == "direct" else "MEDIA_UPLOAD"
+    privacy_level = str(config.get("privacyLevel") or "PUBLIC_TO_EVERYONE")
+
+    if media["videos"]:
+        public_url = media["videos"][0].get("public_url") or ""
+        if not public_url:
+            raise PreparedPublishError("TikTok video publish requires a public_url")
+        request_body = {
+            "post_info": {
+                "title": message[:2200],
+                "privacy_level": privacy_level,
+                "disable_duet": bool(config.get("disableDuet", False)),
+                "disable_comment": bool(config.get("disableComment", False)),
+                "disable_stitch": bool(config.get("disableStitch", False)),
+            },
+            "source_info": {
+                "source": "PULL_FROM_URL",
+                "video_url": public_url,
+            },
+            "post_mode": post_mode,
+        }
+        if config.get("videoCoverTimestampMs") not in (None, ""):
+            request_body["post_info"]["video_cover_timestamp_ms"] = int(config["videoCoverTimestampMs"])
+        response = http.post(
+            TIKTOK_VIDEO_INIT_URL,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=request_body,
+            timeout=120,
+        )
+        _raise_for_status(response)
+        return {
+            "creator_info": creator_info,
+            "publish": _response_payload(response),
+            "request": request_body,
+        }
+
+    if media["images"]:
+        public_urls = [item.get("public_url") or "" for item in media["images"][:35]]
+        if not all(public_urls):
+            raise PreparedPublishError("TikTok photo publish requires public image URLs")
+        request_body = {
+            "post_info": {
+                "title": _message_title(payload),
+                "description": message[:4000],
+                "privacy_level": privacy_level,
+                "disable_comment": bool(config.get("disableComment", False)),
+                "auto_add_music": bool(config.get("autoAddMusic", True)),
+            },
+            "source_info": {
+                "source": "PULL_FROM_URL",
+                "photo_images": public_urls,
+                "photo_cover_index": int(config.get("photoCoverIndex", 0) or 0),
+            },
+            "post_mode": post_mode,
+            "media_type": "PHOTO",
+        }
+        response = http.post(
+            TIKTOK_CONTENT_INIT_URL,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=request_body,
+            timeout=120,
+        )
+        _raise_for_status(response)
+        return {
+            "creator_info": creator_info,
+            "publish": _response_payload(response),
+            "request": request_body,
+        }
+
+    raise PreparedPublishError("TikTok publish requires at least one video or image")
 
 
 def _reddit_access_token(config: dict[str, Any], *, session=None) -> str:

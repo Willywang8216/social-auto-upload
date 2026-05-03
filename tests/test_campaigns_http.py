@@ -134,6 +134,34 @@ class CampaignApiTests(unittest.TestCase):
             "queued",
         )
 
+    def test_validate_account_config_reports_tiktok_watermark_conflict(self) -> None:
+        profile_response = self.client.post(
+            "/profiles",
+            json={
+                "name": "TikTok Brand",
+                "settings": {"watermark": "Brand watermark"},
+            },
+        )
+        self.assertEqual(profile_response.status_code, 200)
+        profile_id = profile_response.get_json()["data"]["id"]
+
+        response = self.client.post(
+            "/accounts/validate-config",
+            json={
+                "profileId": profile_id,
+                "platform": "tiktok",
+                "authType": "oauth",
+                "config": {
+                    "accessTokenEnv": "TIKTOK_ACCESS_TOKEN",
+                    "publishMode": "direct",
+                },
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()["data"]
+        self.assertFalse(body["valid"])
+        self.assertIn("浮水印", body["errors"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

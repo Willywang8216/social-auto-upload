@@ -445,6 +445,19 @@ async def _publish_prepared_youtube(
     await asyncio.to_thread(prepared_publishers.publish_youtube_sync, account, payload)
 
 
+async def _publish_prepared_tiktok(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account,
+    account_file: Path | None,
+) -> None:
+    if account is None:
+        raise ValueError("Prepared TikTok publish requires a structured account")
+    await asyncio.to_thread(prepared_publishers.publish_tiktok_sync, account, payload)
+
+
 async def _publish_prepared_facebook(
     platform: str,
     payload: dict,
@@ -519,7 +532,7 @@ PREPARED_PUBLISHER_REGISTRY: dict[str, Callable[..., Awaitable[None]]] = {
     "reddit": _publish_prepared_reddit,
     "telegram": _publish_prepared_telegram,
     "youtube": _publish_prepared_youtube,
-    "tiktok": _publish_prepared_not_implemented,
+    "tiktok": _publish_prepared_tiktok,
     "threads": _publish_prepared_threads,
     "discord": _publish_prepared_discord,
 }

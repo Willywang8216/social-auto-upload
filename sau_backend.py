@@ -10,6 +10,7 @@ from pathlib import Path
 from queue import Queue
 from flask_cors import CORS
 from myUtils.auth import check_cookie
+from myUtils import account_validation
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory
 from conf import BASE_DIR
 from myUtils import campaigns as campaign_store
@@ -1054,6 +1055,30 @@ def _read_json_body() -> dict:
     return data
 
 
+def _account_profile_settings(profile_id: int | None, *, db_path: Path) -> dict:
+    if not profile_id:
+        return {}
+    try:
+        return profile_registry.get_profile(profile_id, db_path=db_path).settings or {}
+    except LookupError:
+        return {}
+
+
+def _validate_account_payload(data: dict, *, db_path: Path, profile_id: int | None = None, perform_live_checks: bool = False):
+    platform = str(data.get("platform", "") or "").strip().lower()
+    auth_type = str(data.get("authType", "cookie") or "cookie")
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    cookie_path = str(data.get("cookiePath", "") or "")
+    return account_validation.validate_structured_account_config(
+        platform=platform,
+        auth_type=auth_type,
+        config=config,
+        cookie_path=cookie_path,
+        profile_settings=_account_profile_settings(profile_id, db_path=db_path),
+        perform_live_checks=perform_live_checks,
+    )
+
+
 def _load_file_record(file_record_id: int, *, db_path: Path) -> dict:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -1447,6 +1472,23 @@ def profile_accounts_list(profile_id):
     ), 200
 
 
+@app.route("/accounts/validate-config", methods=["POST"])
+def accounts_validate_config():
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        profile_id = data.get("profileId")
+        result = _validate_account_payload(
+            data,
+            db_path=db_path,
+            profile_id=int(profile_id) if profile_id not in (None, "") else None,
+            perform_live_checks=bool(data.get("performLiveChecks", False)),
+        )
+    except (ValueError, TypeError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "ok", "data": result.to_dict()}), 200
+
+
 @app.route("/profiles/<int:profile_id>/accounts", methods=["POST"])
 def profile_accounts_create(profile_id):
     try:
@@ -1457,6 +1499,9 @@ def profile_accounts_create(profile_id):
             raise ValueError("accountName is required")
         if not platform:
             raise ValueError("platform is required")
+        validation = _validate_account_payload(data, db_path=_current_db_path(), profile_id=profile_id)
+        if not validation.valid:
+            raise ValueError("; ".join(validation.errors))
         account = profile_registry.add_account(
             profile_id,
             platform,
@@ -1479,6 +1524,16 @@ def profile_accounts_create(profile_id):
 def accounts_patch(account_id):
     try:
         data = _read_json_body()
+        existing = profile_registry.get_account(account_id, db_path=_current_db_path())
+        merged = {
+            "platform": existing.platform,
+            "authType": data.get("authType", existing.auth_type),
+            "config": data.get("config") if isinstance(data.get("config"), dict) else (existing.config or {}),
+            "cookiePath": data.get("cookiePath", existing.cookie_path),
+        }
+        validation = _validate_account_payload(merged, db_path=_current_db_path(), profile_id=existing.profile_id)
+        if not validation.valid:
+            raise ValueError("; ".join(validation.errors))
         account = profile_registry.update_account(
             account_id,
             account_name=data.get("accountName"),
@@ -1589,6 +1644,26 @@ def campaigns_prepare():
             ]
         if not account_rows:
             raise ValueError("No enabled accounts selected for this profile")
+
+        watermark_spec = _derive_watermark_spec(profile, data)
+        if watermark_spec and any(account.platform == profile_registry.PLATFORM_TIKTOK for account in account_rows):
+            raise ValueError(
+                "TikTok Content Posting API 不允許品牌/促銷浮水印內容；請移除 Profile 浮水印或不要選 TikTok 帳號"
+            )
+
+        invalid_accounts = []
+        for account in account_rows:
+            validation = account_validation.validate_structured_account_config(
+                platform=account.platform,
+                auth_type=account.auth_type,
+                config=account.config or {},
+                cookie_path=account.cookie_path,
+                profile_settings=profile.settings or {},
+            )
+            if not validation.valid:
+                invalid_accounts.append(f"{account.account_name} ({account.platform}): {'; '.join(validation.errors)}")
+        if invalid_accounts:
+            raise ValueError("選取帳號設定不完整：" + " | ".join(invalid_accounts))
 
         campaign = campaign_store.create_campaign(
             profile_id,

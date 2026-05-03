@@ -25,6 +25,10 @@ export const profilesApi = {
     return http.post(`/profiles/${profileId}/accounts`, payload)
   },
 
+  validateAccountConfig(payload) {
+    return http.post('/accounts/validate-config', payload)
+  },
+
   updateAccount(accountId, payload) {
     return http.patch(`/accounts/${accountId}`, payload)
   }
