@@ -41,6 +41,10 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/",
     "/favicon.ico",
     "/vite.svg",
+    "/oauth/tiktok/callback",
+    "/oauth/tiktok/callback/",
+    "/webhooks/tiktok",
+    "/webhooks/tiktok/",
 })
 
 # Path prefixes that are public (e.g. static asset folders). Kept as a tuple

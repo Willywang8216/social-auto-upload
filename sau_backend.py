@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 import sqlite3
@@ -78,6 +80,79 @@ def _get_legacy_db_path() -> Path:
     """Resolve the legacy SQLite path from the current BASE_DIR value."""
 
     return Path(BASE_DIR) / "db" / "database.db"
+
+
+def _tiktok_client_key() -> str:
+    return str(
+        os.environ.get("TIKTOK_CLIENT_KEY")
+        or os.environ.get("TIKTOK_APP_CLIENT_KEY")
+        or os.environ.get("TIKTOK_APP_KEY")
+        or ""
+    ).strip()
+
+
+def _tiktok_client_secret() -> str:
+    return str(
+        os.environ.get("TIKTOK_CLIENT_SECRET")
+        or os.environ.get("SAU_TIKTOK_CLIENT_SECRET")
+        or os.environ.get("TIKTOK_APP_SECRET")
+        or ""
+    ).strip()
+
+
+def _tiktok_callback_base_url() -> str:
+    configured = str(os.environ.get("SAU_TIKTOK_CALLBACK_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return "https://up.iamwillywang.com/oauth/tiktok/callback"
+
+
+def _tiktok_webhook_log_path() -> Path:
+    path = Path(BASE_DIR) / "logs" / "webhooks" / "tiktok-events.ndjson"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _append_tiktok_webhook_event(event: dict) -> None:
+    log_path = _tiktok_webhook_log_path()
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def _parse_tiktok_signature(header_value: str | None) -> tuple[str | None, str | None]:
+    if not header_value:
+        return None, None
+    timestamp = None
+    signature = None
+    for part in header_value.split(","):
+        key, _, value = part.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "t":
+            timestamp = value
+        elif key == "s":
+            signature = value
+    return timestamp, signature
+
+
+def _verify_tiktok_signature(raw_body: bytes, header_value: str | None) -> tuple[bool, str]:
+    timestamp, signature = _parse_tiktok_signature(header_value)
+    secret = _tiktok_client_secret()
+    if not timestamp or not signature:
+        return False, "missing_signature"
+    if not secret:
+        return False, "missing_secret"
+    signed_payload = f"{timestamp}.".encode("utf-8") + raw_body
+    expected = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        return False, "signature_mismatch"
+    try:
+        age_seconds = abs(int(time.time()) - int(timestamp))
+    except ValueError:
+        return False, "invalid_timestamp"
+    if age_seconds > 300:
+        return False, "stale_timestamp"
+    return True, "verified"
 
 
 def _legacy_db_missing_required_tables(db_path: Path) -> bool:
@@ -171,6 +246,116 @@ def vite_svg():
 @app.route('/')
 def index():  # put application's code here
     return send_from_directory(current_dir, 'index.html')
+
+@app.route('/oauth/tiktok/callback', methods=['GET'])
+@app.route('/oauth/tiktok/callback/', methods=['GET'])
+def oauth_tiktok_callback():
+    error = request.args.get('error')
+    error_description = request.args.get('error_description')
+    code = request.args.get('code')
+    state = request.args.get('state', '')
+    if error:
+        return Response(
+            f"""
+            <html><body style='font-family: sans-serif; padding: 24px;'>
+            <h1>TikTok OAuth failed</h1>
+            <p><strong>Error:</strong> {error}</p>
+            <p>{error_description or ''}</p>
+            </body></html>
+            """,
+            mimetype='text/html',
+        )
+    if not code:
+        return jsonify({"code": 400, "msg": "missing code", "data": None}), 400
+
+    payload = {
+        "client_key": _tiktok_client_key(),
+        "client_secret": _tiktok_client_secret(),
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": _tiktok_callback_base_url(),
+    }
+    token_result = None
+    token_error = None
+    if payload["client_key"] and payload["client_secret"]:
+        try:
+            import requests
+            response = requests.post(
+                "https://open.tiktokapis.com/v2/oauth/token/",
+                data=payload,
+                timeout=120,
+            )
+            response.raise_for_status()
+            token_result = response.json()
+        except Exception as exc:  # noqa: BLE001
+            token_error = str(exc)
+
+    body = {
+        "received": True,
+        "state": state,
+        "code": code,
+        "token": token_result,
+        "tokenError": token_error,
+    }
+    return Response(
+        f"""
+        <html><body style='font-family: sans-serif; padding: 24px;'>
+        <h1>TikTok OAuth callback received</h1>
+        <p>The authorization code was received successfully for <strong>up.iamwillywang.com</strong>.</p>
+        <pre style='white-space: pre-wrap; background: #f5f5f5; padding: 12px; border-radius: 8px;'>{json.dumps(body, ensure_ascii=False, indent=2)}</pre>
+        </body></html>
+        """,
+        mimetype='text/html',
+    )
+
+
+@app.route('/webhooks/tiktok', methods=['GET', 'POST'])
+@app.route('/webhooks/tiktok/', methods=['GET', 'POST'])
+def webhook_tiktok():
+    if request.method == 'GET':
+        return jsonify({
+            "code": 200,
+            "msg": "ok",
+            "data": {
+                "service": "tiktok-webhook",
+                "status": "ready",
+            }
+        }), 200
+
+    raw_body = request.get_data(cache=False)
+    signature_header = request.headers.get('Tiktok-Signature') or request.headers.get('TikTok-Signature')
+    signature_valid, signature_reason = _verify_tiktok_signature(raw_body, signature_header)
+    try:
+        parsed_body = request.get_json(silent=True)
+    except Exception:  # noqa: BLE001
+        parsed_body = None
+
+    event = {
+        "received_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "path": request.path,
+        "signature_valid": signature_valid,
+        "signature_reason": signature_reason,
+        "headers": {
+            "Tiktok-Signature": signature_header or "",
+            "User-Agent": request.headers.get('User-Agent', ''),
+            "Content-Type": request.headers.get('Content-Type', ''),
+        },
+        "body": parsed_body if parsed_body is not None else raw_body.decode('utf-8', errors='replace'),
+    }
+    _append_tiktok_webhook_event(event)
+
+    if signature_header and not signature_valid and _tiktok_client_secret():
+        return jsonify({"code": 401, "msg": f"invalid webhook signature: {signature_reason}", "data": None}), 401
+
+    return jsonify({
+        "code": 200,
+        "msg": "accepted",
+        "data": {
+            "signatureValid": signature_valid,
+            "signatureReason": signature_reason,
+        }
+    }), 200
+
 
 @app.route('/upload', methods=['POST'])
 def upload_file():

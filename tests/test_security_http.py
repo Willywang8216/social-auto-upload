@@ -82,8 +82,8 @@ class AuthGateTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
     def test_public_paths_skip_the_gate(self) -> None:
-        # The static SPA shell paths must remain reachable.
-        for path in ("/favicon.ico", "/vite.svg"):
+        # The static SPA shell paths and TikTok callback/webhook endpoints must remain reachable.
+        for path in ("/favicon.ico", "/vite.svg", "/oauth/tiktok/callback", "/webhooks/tiktok"):
             response = self.client.get(path)
             self.assertNotEqual(
                 response.status_code,
@@ -185,6 +185,40 @@ class UploadCookieValidationTests(unittest.TestCase):
         response = self._post_cookie(json.dumps({"hello": "world"}).encode())
         self.assertEqual(response.status_code, 400)
         self.assertFalse(self.cookie_target.exists())
+
+
+@unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
+class TikTokWebhookEndpointTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import sau_backend
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base_dir = Path(self._tmp.name)
+        self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
+        self._base_dir_patch.start()
+        sau_backend.app.config["TESTING"] = True
+        self.client = sau_backend.app.test_client()
+
+    def tearDown(self) -> None:
+        self._base_dir_patch.stop()
+        self._tmp.cleanup()
+
+    def test_webhook_get_returns_ready(self) -> None:
+        response = self.client.get('/webhooks/tiktok')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['data']['service'], 'tiktok-webhook')
+
+    def test_webhook_post_logs_event_without_secret(self) -> None:
+        with patch.dict('os.environ', {}, clear=False):
+            response = self.client.post(
+                '/webhooks/tiktok',
+                data=b'{"event":"post.publish.publicly_available"}',
+                headers={'Content-Type': 'application/json'},
+            )
+        self.assertEqual(response.status_code, 200)
+        log_path = self.base_dir / 'logs' / 'webhooks' / 'tiktok-events.ndjson'
+        self.assertTrue(log_path.exists())
+        self.assertIn('post.publish.publicly_available', log_path.read_text(encoding='utf-8'))
 
 
 if __name__ == "__main__":
