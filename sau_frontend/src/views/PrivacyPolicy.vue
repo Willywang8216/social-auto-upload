@@ -6,8 +6,7 @@
         <p class="meta">Last updated: 2026-05-04</p>
         <p class="summary">
           This Privacy Policy applies to the Social Auto Upload service made available through
-          <strong>up.iamwillywang.com</strong> and <strong>up.sexualwill.com</strong>.
-          Both domains operate the same underlying tool for different audience groups.
+          <strong>up.iamwillywang.com</strong>.
         </p>
       </div>
 
@@ -36,7 +35,7 @@
         <ul>
           <li>To provide account management, media management, content generation, scheduling, and publishing features.</li>
           <li>To process uploaded media, including optional watermarking, transcription, formatting, or platform-specific preparation.</li>
-          <li>To send content or media to third-party services you choose to use, such as social platforms, cloud storage providers, LLM providers, or Google Sheets.</li>
+          <li>To send content or media to third-party services you choose to use, such as social platforms, cloud storage providers, LLM providers, TikTok, Google Sheets, or other publishing-related services.</li>
           <li>To monitor reliability, troubleshoot failures, improve the service, and protect the service from misuse or security incidents.</li>
           <li>To comply with legal obligations, enforce service rules, or respond to valid lawful requests.</li>
         </ul>
@@ -47,7 +46,7 @@
         <p>
           The service may transmit data to third-party services only as needed to perform the actions you request.
           Depending on your configuration, that may include social media platforms, cloud storage providers,
-          LLM or transcription providers, Google Sheets, or other publishing-related services.
+          LLM or transcription providers, Google Sheets, TikTok, Meta, Telegram, Reddit, or other publishing-related services.
         </p>
         <p>
           You are responsible for reviewing the privacy terms, API terms, and policy requirements of every platform
@@ -56,12 +55,11 @@
       </section>
 
       <section>
-        <h2>5. Sensitive or restricted content</h2>
+        <h2>5. Content and compliance responsibility</h2>
         <p>
-          Some deployments of the service may be used for different audience segments or content categories.
-          You remain solely responsible for ensuring that your content, account usage, audience targeting,
-          and publishing behavior comply with applicable law, platform rules, age-gating requirements,
-          intellectual property rules, and advertising or disclosure requirements.
+          You remain solely responsible for ensuring that your content, credentials, account usage, and publishing behavior
+          comply with applicable law, platform rules, intellectual property rules, age-gating requirements,
+          disclosure requirements, and export or sanctions restrictions that apply to your jurisdiction and audience.
         </p>
       </section>
 
@@ -113,8 +111,8 @@
       <section>
         <h2>11. Contact</h2>
         <p>
-          For privacy-related questions, deletion requests, or legal notices, please contact the operator through the
-          support or contact method provided on the active service deployment.
+          For privacy-related questions, deletion requests, or legal notices, please use the support or contact method
+          provided on <strong>up.iamwillywang.com</strong>.
         </p>
       </section>
 

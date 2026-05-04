@@ -6,7 +6,7 @@
         <p class="meta">Last updated: 2026-05-04</p>
         <p class="summary">
           These Terms of Use govern access to and use of the Social Auto Upload service made available through
-          <strong>up.iamwillywang.com</strong> and <strong>up.sexualwill.com</strong>.
+          <strong>up.iamwillywang.com</strong>.
         </p>
       </div>
 
@@ -55,11 +55,11 @@
       </section>
 
       <section>
-        <h2>6. Sensitive content and audience separation</h2>
+        <h2>6. Sensitive content and restricted workflows</h2>
         <p>
-          The service may be deployed to different domains for different audience groups. You are responsible for using
-          the appropriate deployment, maintaining any necessary audience separation, and complying with any age,
-          sensitive-content, or jurisdiction-specific restrictions applicable to your content.
+          You are responsible for ensuring that your content, targeting, and use of connected platforms comply with any
+          age restrictions, sensitive-content requirements, advertising rules, sanctions restrictions, export controls,
+          or local legal requirements that apply to your audience or jurisdiction.
         </p>
       </section>
 
@@ -125,8 +125,8 @@
       <section>
         <h2>14. Contact</h2>
         <p>
-          For questions about these terms, please contact the operator through the support or contact method provided on
-          the active deployment.
+          For questions about these terms, please use the support or contact method provided on
+          <strong>up.iamwillywang.com</strong>.
         </p>
       </section>
 

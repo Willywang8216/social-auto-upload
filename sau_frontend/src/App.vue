@@ -54,13 +54,29 @@
                 <el-icon class="toggle-sidebar" @click="toggleSidebar"><Fold /></el-icon>
               </div>
               <div class="header-right">
-                <!-- 账号信息已移除 -->
+                <div class="header-links">
+                  <a class="domain-link" href="https://up.iamwillywang.com" target="_blank" rel="noreferrer">up.iamwillywang.com</a>
+                  <span>·</span>
+                  <router-link to="/privacy">Privacy</router-link>
+                  <span>·</span>
+                  <router-link to="/terms">Terms</router-link>
+                </div>
               </div>
             </div>
           </el-header>
           <el-main>
             <router-view />
           </el-main>
+          <el-footer>
+            <div class="app-footer">
+              <span>Operated via up.iamwillywang.com</span>
+              <div class="footer-links">
+                <router-link to="/privacy">Privacy Policy</router-link>
+                <span>·</span>
+                <router-link to="/terms">Terms of Use</router-link>
+              </div>
+            </div>
+          </el-footer>
         </el-container>
       </el-container>
     </template>
@@ -77,17 +93,10 @@ import {
 
 const route = useRoute()
 
-// 当前激活的菜单项
-const activeMenu = computed(() => {
-  return route.path
-})
-
+const activeMenu = computed(() => route.path)
 const usePublicLayout = computed(() => Boolean(route.meta?.publicLayout))
-
-// 侧边栏折叠状态
 const isCollapse = ref(false)
 
-// 切换侧边栏折叠状态
 const toggleSidebar = () => {
   isCollapse.value = !isCollapse.value
 }
@@ -110,12 +119,12 @@ const toggleSidebar = () => {
   height: 100vh;
   overflow: hidden;
   transition: width 0.3s;
-  
+
   .sidebar {
     display: flex;
     flex-direction: column;
     height: 100%;
-    
+
     .logo {
       height: 60px;
       padding: 0 16px;
@@ -123,13 +132,13 @@ const toggleSidebar = () => {
       align-items: center;
       background-color: #002140;
       overflow: hidden;
-      
+
       .logo-img {
         width: 32px;
         height: 32px;
         margin-right: 12px;
       }
-      
+
       h2 {
         color: #fff;
         font-size: 16px;
@@ -138,15 +147,15 @@ const toggleSidebar = () => {
         margin: 0;
       }
     }
-    
+
     .sidebar-menu {
       border-right: none;
       flex: 1;
-      
+
       .el-menu-item {
         display: flex;
         align-items: center;
-        
+
         .el-icon {
           margin-right: 10px;
           font-size: 18px;
@@ -161,40 +170,45 @@ const toggleSidebar = () => {
   box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
   padding: 0;
   height: 60px;
-  
+
   .header-content {
     display: flex;
     justify-content: space-between;
     align-items: center;
     height: 100%;
     padding: 0 16px;
-    
+
     .header-left {
       .toggle-sidebar {
         font-size: 20px;
         cursor: pointer;
         color: $text-regular;
-        
+
         &:hover {
           color: $primary-color;
         }
       }
     }
-    
+
     .header-right {
-      .user-dropdown {
+      .header-links {
         display: flex;
         align-items: center;
-        cursor: pointer;
-        
-        .username {
-          margin: 0 8px;
-          color: $text-regular;
-        }
-        
-        .el-icon {
-          font-size: 12px;
+        gap: 8px;
+        font-size: 13px;
+
+        a,
+        :deep(a) {
           color: $text-secondary;
+          text-decoration: none;
+
+          &:hover {
+            color: $primary-color;
+          }
+        }
+
+        .domain-link {
+          font-weight: 500;
         }
       }
     }
@@ -205,5 +219,37 @@ const toggleSidebar = () => {
   background-color: $bg-color-page;
   padding: 20px;
   overflow-y: auto;
+}
+
+.el-footer {
+  height: 52px;
+  background: #fff;
+  border-top: 1px solid #ebeef5;
+  padding: 0 20px;
+
+  .app-footer {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: $text-secondary;
+    font-size: 13px;
+
+    .footer-links {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+
+      a,
+      :deep(a) {
+        color: $text-secondary;
+        text-decoration: none;
+
+        &:hover {
+          color: $primary-color;
+        }
+      }
+    }
+  }
 }
 </style>
