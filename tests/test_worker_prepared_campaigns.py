@@ -113,10 +113,11 @@ class PreparedWorkerDispatchTests(unittest.TestCase):
         with self.assertRaises(NotImplementedError) as ctx:
             asyncio.run(
                 worker._run_prepared_campaign_upload(
-                    "facebook",
+                    "patreon",
                     {"campaignId": 1, "campaignPostId": 2},
                     target,
-                    account_file=Path("/tmp/fb-cookie.json"),
+                    account=None,
+                    account_file=None,
                 )
             )
         self.assertIn("publisher not implemented", str(ctx.exception))

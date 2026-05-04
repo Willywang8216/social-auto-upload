@@ -35,15 +35,16 @@ class AccountValidationTests(unittest.TestCase):
         self.assertTrue(result.valid)
         self.assertEqual(result.errors, [])
 
-    def test_tiktok_rejects_profile_watermark(self) -> None:
+    def test_tiktok_profile_watermark_becomes_warning(self) -> None:
         result = account_validation.validate_structured_account_config(
             platform=profiles.PLATFORM_TIKTOK,
             auth_type='oauth',
             config={'accessTokenEnv': 'TIKTOK_ACCESS_TOKEN', 'publishMode': 'direct'},
             profile_settings={'watermark': 'Brand watermark'},
         )
-        self.assertFalse(result.valid)
-        self.assertIn('浮水印', result.errors[0])
+        self.assertTrue(result.valid)
+        self.assertTrue(result.warnings)
+        self.assertIn('TikTok', result.warnings[0])
 
     def test_patreon_warns_content_only(self) -> None:
         result = account_validation.validate_structured_account_config(

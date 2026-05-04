@@ -145,7 +145,7 @@ def validate_structured_account_config(
         if publish_mode not in {"direct", "draft"}:
             errors.append("TikTok publishMode 只支援 direct 或 draft")
         if profile_settings.get("watermark"):
-            errors.append("TikTok Content Posting API 不允許帶有品牌/促銷浮水印的內容；請移除 Profile 浮水印或不要選 TikTok")
+            warnings.append("TikTok 會改用原始未加浮水印素材；請確認原始素材符合 TikTok 發佈規範")
 
     if perform_live_checks and not errors:
         try:

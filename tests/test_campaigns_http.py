@@ -134,7 +134,7 @@ class CampaignApiTests(unittest.TestCase):
             "queued",
         )
 
-    def test_validate_account_config_reports_tiktok_watermark_conflict(self) -> None:
+    def test_validate_account_config_warns_when_tiktok_profile_has_watermark(self) -> None:
         profile_response = self.client.post(
             "/profiles",
             json={
@@ -159,8 +159,78 @@ class CampaignApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         body = response.get_json()["data"]
-        self.assertFalse(body["valid"])
-        self.assertIn("浮水印", body["errors"][0])
+        self.assertTrue(body["valid"])
+        self.assertTrue(body["warnings"])
+        self.assertIn("TikTok", body["warnings"][0])
+
+    def test_campaign_prepare_tiktok_with_watermark_uses_raw_remote_artifacts(self) -> None:
+        source_file = self.base_dir / "clip.jpg"
+        source_file.write_bytes(b"img")
+        file_record_id = self._insert_file_record("clip.jpg", str(source_file))
+
+        profile_response = self.client.post(
+            "/profiles",
+            json={
+                "name": "TikTok Brand",
+                "settings": {"watermark": "Brand watermark"},
+            },
+        )
+        profile_id = profile_response.get_json()["data"]["id"]
+
+        account_response = self.client.post(
+            f"/profiles/{profile_id}/accounts",
+            json={
+                "platform": "tiktok",
+                "accountName": "brand-main",
+                "authType": "oauth",
+                "enabled": True,
+                "config": {"accessTokenEnv": "TIKTOK_ACCESS_TOKEN", "publishMode": "direct"},
+            },
+        )
+        self.assertEqual(account_response.status_code, 200)
+        account_id = account_response.get_json()["data"]["id"]
+
+        media_group_response = self.client.post(
+            "/media-groups",
+            json={
+                "name": "Launch batch",
+                "items": [{"fileRecordId": file_record_id, "role": "image"}],
+            },
+        )
+        media_group_id = media_group_response.get_json()["data"]["id"]
+
+        uploads = []
+
+        class _RemoteArtifact:
+            def __init__(self, local_path):
+                self.local_path = str(local_path)
+                self.remote_path = f"remote/{Path(local_path).name}"
+                self.public_url = f"https://cdn.example/{Path(local_path).name}"
+
+        def fake_upload(local_path, **kwargs):
+            uploads.append(Path(local_path).name)
+            return _RemoteArtifact(local_path)
+
+        with patch.object(self.sau_backend.rclone_storage, "upload_artifact", side_effect=fake_upload),              patch.dict("os.environ", {"SAU_DEFAULT_RCLONE_REMOTE": "demo-remote", "TIKTOK_ACCESS_TOKEN": "token"}, clear=False):
+            prepare_response = self.client.post(
+                "/campaigns/prepare",
+                json={
+                    "profileId": profile_id,
+                    "mediaGroupId": media_group_id,
+                    "selectedAccountIds": [account_id],
+                    "title": "Launch day",
+                    "useLlm": False,
+                    "exportToSheet": False,
+                    "uploadToRemote": True,
+                },
+            )
+        self.assertEqual(prepare_response.status_code, 200)
+        self.assertGreaterEqual(len(uploads), 2)
+        campaign_payload = prepare_response.get_json()["data"]
+        artifacts = self.sau_backend._artifact_payloads_for_platform(campaign_payload["artifacts"], "tiktok")
+        artifact_kinds = {artifact["artifact_kind"] for artifact in artifacts}
+        self.assertIn("raw_remote_upload", artifact_kinds)
+        self.assertTrue(any(artifact["artifact_kind"] == "raw_remote_upload" for artifact in artifacts))
 
 
 if __name__ == "__main__":

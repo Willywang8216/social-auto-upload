@@ -1048,6 +1048,28 @@ def _campaign_payload(campaign: campaign_store.Campaign, *, db_path: Path) -> di
     return payload
 
 
+def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> list[dict]:
+    if platform != profile_registry.PLATFORM_TIKTOK:
+        return [artifact for artifact in artifacts if artifact.get("artifact_kind") != "raw_remote_upload"]
+
+    grouped: dict[tuple[object, object], list[dict]] = {}
+    passthrough: list[dict] = []
+    for artifact in artifacts:
+        kind = artifact.get("artifact_kind") or ""
+        source_id = artifact.get("source_file_record_id")
+        if kind in {"remote_upload", "raw_remote_upload"} and source_id is not None:
+            role = ((artifact.get("metadata") or {}).get("role"))
+            grouped.setdefault((source_id, role), []).append(artifact)
+        elif kind not in {"watermarked_image", "watermarked_video"}:
+            passthrough.append(artifact)
+
+    selected = []
+    for items in grouped.values():
+        raw = next((item for item in items if item.get("artifact_kind") == "raw_remote_upload"), None)
+        selected.append(raw or items[0])
+    return [*passthrough, *selected]
+
+
 def _read_json_body() -> dict:
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
@@ -1176,6 +1198,10 @@ def _prepare_campaign_media_artifacts(
         "videoUrl": "",
         "imageLocalPaths": [],
         "videoLocalPath": "",
+        "rawImageUrls": [],
+        "rawVideoUrl": "",
+        "rawImageLocalPaths": [],
+        "rawVideoLocalPath": "",
         "transcriptText": str(request_data.get("transcriptText", "") or "").strip(),
     }
 
@@ -1225,6 +1251,7 @@ def _prepare_campaign_media_artifacts(
             )
 
         public_url = None
+        raw_public_url = None
         if upload_to_remote:
             remote_artifact = rclone_storage.upload_artifact(
                 publish_path,
@@ -1242,15 +1269,38 @@ def _prepare_campaign_media_artifacts(
                 metadata={"role": media_file["role"]},
                 db_path=db_path,
             )
+            if publish_path != source_path:
+                raw_remote_artifact = rclone_storage.upload_artifact(
+                    source_path,
+                    campaign_id=campaign_id,
+                    artifact_subdir="videos" if _is_video_file(source_path) else "images",
+                )
+                raw_public_url = raw_remote_artifact.public_url
+                campaign_store.add_campaign_artifact(
+                    campaign_id,
+                    source_file_record_id=media_file["file_record_id"],
+                    artifact_kind="raw_remote_upload",
+                    local_path=str(source_path),
+                    public_url=raw_remote_artifact.public_url,
+                    remote_path=raw_remote_artifact.remote_path,
+                    metadata={"role": media_file["role"]},
+                    db_path=db_path,
+                )
 
         if _is_image_file(publish_path):
             artifacts_context["imageLocalPaths"].append(str(publish_path))
+            artifacts_context["rawImageLocalPaths"].append(str(source_path))
             if public_url:
                 artifacts_context["imageUrls"].append(public_url)
+            if raw_public_url:
+                artifacts_context["rawImageUrls"].append(raw_public_url)
         elif _is_video_file(publish_path):
             artifacts_context["videoLocalPath"] = str(publish_path)
+            artifacts_context["rawVideoLocalPath"] = str(source_path)
             if public_url:
                 artifacts_context["videoUrl"] = public_url
+            if raw_public_url:
+                artifacts_context["rawVideoUrl"] = raw_public_url
 
     should_transcribe = bool(
         request_data.get("transcribe", False)
@@ -1646,10 +1696,14 @@ def campaigns_prepare():
             raise ValueError("No enabled accounts selected for this profile")
 
         watermark_spec = _derive_watermark_spec(profile, data)
-        if watermark_spec and any(account.platform == profile_registry.PLATFORM_TIKTOK for account in account_rows):
-            raise ValueError(
-                "TikTok Content Posting API 不允許品牌/促銷浮水印內容；請移除 Profile 浮水印或不要選 TikTok 帳號"
+        if any(account.platform == profile_registry.PLATFORM_TIKTOK for account in account_rows):
+            upload_to_remote = bool(
+                data.get("uploadToRemote", os.environ.get("SAU_DEFAULT_RCLONE_REMOTE"))
             )
+            if not upload_to_remote:
+                raise ValueError(
+                    "TikTok direct post 需要可公開存取的媒體 URL；請啟用 OneDrive/rclone 上傳或提供可公開讀取的媒體來源"
+                )
 
         invalid_accounts = []
         for account in account_rows:
@@ -1853,7 +1907,7 @@ def campaigns_publish(campaign_id):
             "draft": post.draft,
             "message": post.draft.get("message", ""),
             "sheetRow": post.sheet_row,
-            "artifacts": artifacts,
+            "artifacts": _artifact_payloads_for_platform(artifacts, post.platform),
         }
         targets = [
             (f"account:{account.id}", f"campaign_post:{post.id}", None)
