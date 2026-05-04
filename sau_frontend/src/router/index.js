@@ -6,6 +6,8 @@ import PublishCenter from '../views/PublishCenter.vue'
 import JobsView from '../views/JobsView.vue'
 import LoginView from '../views/LoginView.vue'
 import About from '../views/About.vue'
+import PrivacyPolicy from '../views/PrivacyPolicy.vue'
+import TermsOfUse from '../views/TermsOfUse.vue'
 
 import { getToken } from '@/utils/auth'
 
@@ -14,7 +16,7 @@ const routes = [
     path: '/login',
     name: 'Login',
     component: LoginView,
-    meta: { public: true }
+    meta: { public: true, publicLayout: true }
   },
   {
     path: '/',
@@ -45,6 +47,19 @@ const routes = [
     path: '/about',
     name: 'About',
     component: About
+  }
+  ,
+  {
+    path: '/privacy',
+    name: 'PrivacyPolicy',
+    component: PrivacyPolicy,
+    meta: { public: true, publicLayout: true }
+  },
+  {
+    path: '/terms',
+    name: 'TermsOfUse',
+    component: TermsOfUse,
+    meta: { public: true, publicLayout: true }
   }
 ]
 

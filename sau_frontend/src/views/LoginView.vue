@@ -41,6 +41,12 @@
         <div v-else-if="openModeNotice" class="login-hint">
           後端目前為開放模式，可直接進入。正式部署請設定 <code>SAU_API_TOKENS</code>。
         </div>
+
+        <div class="legal-links">
+          <router-link to="/privacy">Privacy Policy</router-link>
+          <span>·</span>
+          <router-link to="/terms">Terms of Use</router-link>
+        </div>
       </el-form>
     </el-card>
   </div>
@@ -161,6 +167,22 @@ async function onSubmit() {
         background: #f4f4f5;
         padding: 0 4px;
         border-radius: 2px;
+      }
+    }
+
+    .legal-links {
+      margin-top: 16px;
+      text-align: center;
+      font-size: 13px;
+      color: #909399;
+
+      a {
+        color: #409eff;
+        text-decoration: none;
+      }
+
+      span {
+        margin: 0 8px;
       }
     }
   }

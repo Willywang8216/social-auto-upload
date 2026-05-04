@@ -1,64 +1,69 @@
 <template>
   <div id="app">
-    <el-container>
-      <el-aside :width="isCollapse ? '64px' : '200px'">
-        <div class="sidebar">
-          <div class="logo">
-            <img v-show="isCollapse" src="/vite.svg" alt="Logo" class="logo-img">
-            <h2 v-show="!isCollapse">自媒體自動化營運系統</h2>
-          </div>
-          <el-menu
-            :router="true"
-            :default-active="activeMenu"
-            :collapse="isCollapse"
-            class="sidebar-menu"
-            background-color="#001529"
-            text-color="#fff"
-            active-text-color="#409EFF"
-          >
-            <el-menu-item index="/">
-              <el-icon><HomeFilled /></el-icon>
-              <span>儀表板</span>
-            </el-menu-item>
-            <el-menu-item index="/account-management">
-              <el-icon><User /></el-icon>
-              <span>帳號管理</span>
-            </el-menu-item>
-            <el-menu-item index="/material-management">
-              <el-icon><Picture /></el-icon>
-              <span>素材庫</span>
-            </el-menu-item>
-            <el-menu-item index="/publish-center">
-              <el-icon><Upload /></el-icon>
-              <span>發佈中心</span>
-            </el-menu-item>
-            <el-menu-item index="/jobs">
-              <el-icon><List /></el-icon>
-              <span>任務中心</span>
-            </el-menu-item>
-            <el-menu-item index="/about">
-              <el-icon><DataAnalysis /></el-icon>
-              <span>說明</span>
-            </el-menu-item>
-          </el-menu>
-        </div>
-      </el-aside>
+    <template v-if="usePublicLayout">
+      <router-view />
+    </template>
+    <template v-else>
       <el-container>
-        <el-header>
-          <div class="header-content">
-            <div class="header-left">
-              <el-icon class="toggle-sidebar" @click="toggleSidebar"><Fold /></el-icon>
+        <el-aside :width="isCollapse ? '64px' : '200px'">
+          <div class="sidebar">
+            <div class="logo">
+              <img v-show="isCollapse" src="/vite.svg" alt="Logo" class="logo-img">
+              <h2 v-show="!isCollapse">自媒體自動化營運系統</h2>
             </div>
-            <div class="header-right">
-              <!-- 账号信息已移除 -->
-            </div>
+            <el-menu
+              :router="true"
+              :default-active="activeMenu"
+              :collapse="isCollapse"
+              class="sidebar-menu"
+              background-color="#001529"
+              text-color="#fff"
+              active-text-color="#409EFF"
+            >
+              <el-menu-item index="/">
+                <el-icon><HomeFilled /></el-icon>
+                <span>儀表板</span>
+              </el-menu-item>
+              <el-menu-item index="/account-management">
+                <el-icon><User /></el-icon>
+                <span>帳號管理</span>
+              </el-menu-item>
+              <el-menu-item index="/material-management">
+                <el-icon><Picture /></el-icon>
+                <span>素材庫</span>
+              </el-menu-item>
+              <el-menu-item index="/publish-center">
+                <el-icon><Upload /></el-icon>
+                <span>發佈中心</span>
+              </el-menu-item>
+              <el-menu-item index="/jobs">
+                <el-icon><List /></el-icon>
+                <span>任務中心</span>
+              </el-menu-item>
+              <el-menu-item index="/about">
+                <el-icon><DataAnalysis /></el-icon>
+                <span>說明</span>
+              </el-menu-item>
+            </el-menu>
           </div>
-        </el-header>
-        <el-main>
-          <router-view />
-        </el-main>
+        </el-aside>
+        <el-container>
+          <el-header>
+            <div class="header-content">
+              <div class="header-left">
+                <el-icon class="toggle-sidebar" @click="toggleSidebar"><Fold /></el-icon>
+              </div>
+              <div class="header-right">
+                <!-- 账号信息已移除 -->
+              </div>
+            </div>
+          </el-header>
+          <el-main>
+            <router-view />
+          </el-main>
+        </el-container>
       </el-container>
-    </el-container>
+    </template>
   </div>
 </template>
 
@@ -76,6 +81,8 @@ const route = useRoute()
 const activeMenu = computed(() => {
   return route.path
 })
+
+const usePublicLayout = computed(() => Boolean(route.meta?.publicLayout))
 
 // 侧边栏折叠状态
 const isCollapse = ref(false)
