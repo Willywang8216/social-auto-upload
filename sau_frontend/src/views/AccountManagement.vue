@@ -20,6 +20,13 @@
           <el-option label="已逾期" value="overdue" />
           <el-option label="需要重連" value="reconnect_required" />
         </el-select>
+        <el-select v-model="selectedSortMode" style="width: 200px" placeholder="排序方式">
+          <el-option label="依風險" value="urgency" />
+          <el-option label="依到期時間" value="expiry" />
+          <el-option label="依平台" value="platform" />
+          <el-option label="依 Profile" value="profile" />
+          <el-option label="依名稱" value="name" />
+        </el-select>
         <el-button plain :loading="maintenanceLoading" :disabled="bulkRefreshTargets.length < 1 && selectedProfileFilter === 'legacy'" @click="runMaintenanceSweep">維護刷新</el-button>
         <el-button type="primary" plain @click="openProfileDialog">新增 Profile</el-button>
       </div>
@@ -587,6 +594,7 @@ const activeTab = ref('all')
 const searchKeyword = ref('')
 const selectedProfileFilter = ref('all')
 const selectedRiskFilter = ref('all')
+const selectedSortMode = ref('urgency')
 
 const accountPlatformTabs = PROFILE_PLATFORM_OPTIONS
 const profileOptions = computed(() => profilesStore.profiles)
@@ -695,6 +703,60 @@ let eventSource = null
 
 const filteredAccounts = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
+  const compareUrgency = (left, right) => {
+    const leftRank = Number(left.urgencyRank ?? 99)
+    const rightRank = Number(right.urgencyRank ?? 99)
+    if (leftRank !== rightRank) return leftRank - rightRank
+
+    const leftSeconds = left.secondsRemaining ?? Number.POSITIVE_INFINITY
+    const rightSeconds = right.secondsRemaining ?? Number.POSITIVE_INFINITY
+    if (leftSeconds !== rightSeconds) return leftSeconds - rightSeconds
+
+    const leftProfile = String(left.profileName || '')
+    const rightProfile = String(right.profileName || '')
+    if (leftProfile !== rightProfile) return leftProfile.localeCompare(rightProfile)
+
+    return String(left.name || '').localeCompare(String(right.name || ''))
+  }
+
+  const compareExpiry = (left, right) => {
+    const leftSeconds = left.secondsRemaining ?? Number.POSITIVE_INFINITY
+    const rightSeconds = right.secondsRemaining ?? Number.POSITIVE_INFINITY
+    if (leftSeconds !== rightSeconds) return leftSeconds - rightSeconds
+    return compareUrgency(left, right)
+  }
+
+  const comparePlatform = (left, right) => {
+    const leftPlatform = String(left.platform || '')
+    const rightPlatform = String(right.platform || '')
+    if (leftPlatform !== rightPlatform) return leftPlatform.localeCompare(rightPlatform)
+    return compareUrgency(left, right)
+  }
+
+  const compareProfile = (left, right) => {
+    const leftProfile = String(left.profileName || '')
+    const rightProfile = String(right.profileName || '')
+    if (leftProfile !== rightProfile) return leftProfile.localeCompare(rightProfile)
+    return compareUrgency(left, right)
+  }
+
+  const compareName = (left, right) => {
+    const leftName = String(left.name || '')
+    const rightName = String(right.name || '')
+    if (leftName !== rightName) return leftName.localeCompare(rightName)
+    return compareUrgency(left, right)
+  }
+
+  const comparatorByMode = {
+    urgency: compareUrgency,
+    expiry: compareExpiry,
+    platform: comparePlatform,
+    profile: compareProfile,
+    name: compareName,
+  }
+
+  const comparator = comparatorByMode[selectedSortMode.value] || compareUrgency
+
   return accountStore.accounts
     .filter((account) => {
       if (selectedProfileFilter.value === 'legacy' && account.profileId != null) return false
@@ -712,21 +774,7 @@ const filteredAccounts = computed(() => {
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(keyword))
     })
-    .sort((left, right) => {
-      const leftRank = Number(left.urgencyRank ?? 99)
-      const rightRank = Number(right.urgencyRank ?? 99)
-      if (leftRank !== rightRank) return leftRank - rightRank
-
-      const leftSeconds = left.secondsRemaining ?? Number.POSITIVE_INFINITY
-      const rightSeconds = right.secondsRemaining ?? Number.POSITIVE_INFINITY
-      if (leftSeconds !== rightSeconds) return leftSeconds - rightSeconds
-
-      const leftProfile = String(left.profileName || '')
-      const rightProfile = String(right.profileName || '')
-      if (leftProfile !== rightProfile) return leftProfile.localeCompare(rightProfile)
-
-      return String(left.name || '').localeCompare(String(right.name || ''))
-    })
+    .sort(comparator)
 })
 
 const getFilteredAccountsByPlatform = (platformLabel) =>
@@ -765,6 +813,7 @@ const applyRouteFilters = () => {
   const risk = Array.isArray(route.query.risk) ? route.query.risk[0] : route.query.risk
   const profile = Array.isArray(route.query.profile) ? route.query.profile[0] : route.query.profile
   const platform = Array.isArray(route.query.platform) ? route.query.platform[0] : route.query.platform
+  const sort = Array.isArray(route.query.sort) ? route.query.sort[0] : route.query.sort
 
   const allowedRisk = new Set(['all', 'expiring_24h', 'expiring_7d', 'overdue', 'reconnect_required'])
   selectedRiskFilter.value = allowedRisk.has(String(risk || 'all')) ? String(risk || 'all') : 'all'
@@ -779,6 +828,9 @@ const applyRouteFilters = () => {
 
   const allowedPlatforms = new Set(['all', ...accountPlatformTabs.map((item) => item.value)])
   activeTab.value = allowedPlatforms.has(String(platform || 'all')) ? String(platform || 'all') : 'all'
+
+  const allowedSort = new Set(['urgency', 'expiry', 'platform', 'profile', 'name'])
+  selectedSortMode.value = allowedSort.has(String(sort || 'urgency')) ? String(sort || 'urgency') : 'urgency'
 }
 
 const onSearchChange = (value) => {
