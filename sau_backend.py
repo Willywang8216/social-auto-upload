@@ -1814,6 +1814,10 @@ def tiktok_oauth_callback():
             'scope': token_payload.get('scope') or ','.join(request_state.scopes),
             'displayName': user_info.get('data', {}).get('user', {}).get('display_name') or '',
             'avatarUrl': user_info.get('data', {}).get('user', {}).get('avatar_url') or '',
+            'accessTokenExpiresAt': merged_config.get('accessTokenExpiresAt', '') if account_id else '',
+            'refreshTokenExpiresAt': merged_config.get('refreshTokenExpiresAt', '') if account_id else '',
+            'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', '') if account_id else '',
+            'connectedAt': merged_config.get('connectedAt', '') if account_id else '',
         }
         persisted_callback_payload = {
             'state': state_token,
@@ -2122,6 +2126,140 @@ def accounts_refresh_token(account_id):
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
 
     return jsonify({"code": 200, "msg": "refreshed", "data": _account_payload(updated)}), 200
+
+
+@app.route("/accounts/tiktok/refresh-stale", methods=["POST"])
+def accounts_refresh_stale_tiktok_tokens():
+    db_path = _current_db_path()
+    data = request.get_json(silent=True) or {}
+    raw_account_id = data.get('accountId')
+    raw_profile_id = data.get('profileId')
+    dry_run = bool(data.get('dryRun', False))
+    expiring_within_seconds = int(data.get('expiringWithinSeconds', 300) or 300)
+    max_accounts = max(1, min(int(data.get('maxAccounts', 50) or 50), 200))
+
+    account_id = int(raw_account_id) if raw_account_id not in (None, '') else None
+    profile_id = int(raw_profile_id) if raw_profile_id not in (None, '') else None
+
+    accounts = profile_registry.list_accounts(
+        profile_id=profile_id,
+        platform=profile_registry.PLATFORM_TIKTOK,
+        enabled=True,
+        db_path=db_path,
+    )
+    if account_id is not None:
+        accounts = [account for account in accounts if account.id == account_id]
+
+    results = []
+    refreshed = 0
+    stale = 0
+    skipped = 0
+    examined = 0
+
+    for account in accounts[:max_accounts]:
+        examined += 1
+        config = dict(account.config or {})
+        is_stale = prepared_publishers._is_tiktok_access_token_stale(
+            config,
+            skew_seconds=expiring_within_seconds,
+        )
+        if not is_stale:
+            skipped += 1
+            results.append({
+                'accountId': account.id,
+                'accountName': account.account_name,
+                'status': 'up_to_date',
+            })
+            continue
+        stale += 1
+        refresh_token = str(config.get('refreshToken') or '').strip()
+        if not refresh_token:
+            skipped += 1
+            results.append({
+                'accountId': account.id,
+                'accountName': account.account_name,
+                'status': 'missing_refresh_token',
+            })
+            continue
+        if dry_run:
+            results.append({
+                'accountId': account.id,
+                'accountName': account.account_name,
+                'status': 'would_refresh',
+            })
+            continue
+        try:
+            token_payload = tiktok_auth.refresh_access_token(refresh_token=refresh_token)
+            access_token = str(token_payload.get('access_token') or '')
+            user_info = tiktok_auth.fetch_user_info(access_token=access_token) if access_token else {}
+            updated_config = prepared_publishers._apply_tiktok_token_payload(config, token_payload, user_info)
+            updated_config['lastAutoRefreshAt'] = datetime.now().isoformat(timespec='seconds')
+            updated = profile_registry.update_account(
+                account.id,
+                config=updated_config,
+                auth_type='oauth',
+                db_path=db_path,
+            )
+            refreshed += 1
+            _append_tiktok_review_event(
+                'refresh',
+                {
+                    'status': 'ok',
+                    'mode': 'auto',
+                    'accountId': updated.id,
+                    'accountName': updated.account_name,
+                    'openId': updated_config.get('openId', ''),
+                    'scope': updated_config.get('scope', ''),
+                    'displayName': updated_config.get('displayName', ''),
+                    'avatarUrl': updated_config.get('avatarUrl', ''),
+                },
+                account_id=updated.id,
+                account_name=updated.account_name,
+                status='ok',
+                metadata={'mode': 'auto'},
+                db_path=db_path,
+            )
+            results.append({
+                'accountId': updated.id,
+                'accountName': updated.account_name,
+                'status': 'refreshed',
+            })
+        except Exception as exc:  # noqa: BLE001
+            skipped += 1
+            _append_tiktok_review_event(
+                'refresh',
+                {
+                    'status': 'error',
+                    'mode': 'auto',
+                    'accountId': account.id,
+                    'accountName': account.account_name,
+                    'error': str(exc),
+                },
+                account_id=account.id,
+                account_name=account.account_name,
+                status='error',
+                metadata={'mode': 'auto'},
+                db_path=db_path,
+            )
+            results.append({
+                'accountId': account.id,
+                'accountName': account.account_name,
+                'status': 'error',
+                'error': str(exc),
+            })
+
+    return jsonify({
+        'code': 200,
+        'msg': 'ok',
+        'data': {
+            'dryRun': dry_run,
+            'examined': examined,
+            'stale': stale,
+            'refreshed': refreshed,
+            'skipped': skipped,
+            'results': results,
+        },
+    }), 200
 
 
 @app.route("/accounts/<int:account_id>", methods=["PATCH"])

@@ -299,6 +299,12 @@
                 <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : 'missing' }}</strong></div>
                 <div class="health-row"><span>Refresh token</span><strong>{{ accountForm.refreshToken ? 'present' : 'missing' }}</strong></div>
                 <div class="health-row"><span>Last OAuth start</span><strong>{{ tiktokHealth.lastRequest?.requestedAt || '—' }}</strong></div>
+                <div class="health-row"><span>Token expires</span><strong>{{ accountForm.accessTokenExpiresAt || '—' }}</strong></div>
+                <div class="health-row"><span>Refresh expires</span><strong>{{ accountForm.refreshTokenExpiresAt || '—' }}</strong></div>
+                <div class="health-row"><span>Connected at</span><strong>{{ accountForm.connectedAt || '—' }}</strong></div>
+                <div class="health-row"><span>Last token update</span><strong>{{ accountForm.accessTokenUpdatedAt || '—' }}</strong></div>
+                <div class="health-row"><span>Last auto refresh</span><strong>{{ accountForm.lastAutoRefreshAt || '—' }}</strong></div>
+                <div class="health-row"><span>Last manual refresh</span><strong>{{ accountForm.lastManualRefreshAt || '—' }}</strong></div>
                 <div class="health-row"><span>Last callback</span><strong>{{ tiktokHealth.lastCallback?.receivedAt || '—' }}</strong></div>
                 <div class="health-row"><span>Last refresh</span><strong>{{ tiktokHealth.lastRefresh?.receivedAt || '—' }}</strong></div>
                 <div class="health-row"><span>Last webhook</span><strong>{{ tiktokHealth.lastWebhook?.receivedAt || '—' }}</strong></div>
@@ -477,6 +483,12 @@ const makeEmptyAccountForm = () => ({
   tiktokScope: '',
   tiktokDisplayName: '',
   tiktokAvatarUrl: '',
+  accessTokenExpiresAt: '',
+  refreshTokenExpiresAt: '',
+  accessTokenUpdatedAt: '',
+  connectedAt: '',
+  lastManualRefreshAt: '',
+  lastAutoRefreshAt: '',
   accessTokenEnv: '',
   publishMode: 'direct',
   privacyLevel: 'PUBLIC_TO_EVERYONE',
@@ -589,6 +601,12 @@ const loadStructuredFieldsFromConfig = (config) => {
   accountForm.tiktokScope = config.scope || ''
   accountForm.tiktokDisplayName = config.displayName || ''
   accountForm.tiktokAvatarUrl = config.avatarUrl || ''
+  accountForm.accessTokenExpiresAt = config.accessTokenExpiresAt || ''
+  accountForm.refreshTokenExpiresAt = config.refreshTokenExpiresAt || ''
+  accountForm.accessTokenUpdatedAt = config.accessTokenUpdatedAt || ''
+  accountForm.connectedAt = config.connectedAt || ''
+  accountForm.lastManualRefreshAt = config.lastManualRefreshAt || ''
+  accountForm.lastAutoRefreshAt = config.lastAutoRefreshAt || ''
   accountForm.accessTokenEnv = config.accessTokenEnv || ''
   accountForm.publishMode = config.publishMode || 'direct'
   accountForm.privacyLevel = config.privacyLevel || 'PUBLIC_TO_EVERYONE'
@@ -905,6 +923,12 @@ async function refreshTikTokToken() {
     accountForm.tiktokScope = config.scope || accountForm.tiktokScope
     accountForm.tiktokDisplayName = config.displayName || accountForm.tiktokDisplayName
     accountForm.tiktokAvatarUrl = config.avatarUrl || accountForm.tiktokAvatarUrl
+    accountForm.accessTokenExpiresAt = config.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
+    accountForm.refreshTokenExpiresAt = config.refreshTokenExpiresAt || accountForm.refreshTokenExpiresAt
+    accountForm.accessTokenUpdatedAt = config.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
+    accountForm.connectedAt = config.connectedAt || accountForm.connectedAt
+    accountForm.lastManualRefreshAt = config.lastManualRefreshAt || accountForm.lastManualRefreshAt
+    accountForm.lastAutoRefreshAt = config.lastAutoRefreshAt || accountForm.lastAutoRefreshAt
     await loadTikTokHealth(accountForm.id)
     ElMessage.success('TikTok token 已刷新')
   } catch (error) {
@@ -935,6 +959,10 @@ function handleTikTokOauthMessage(event) {
   accountForm.tiktokScope = data.scope || ''
   accountForm.tiktokDisplayName = data.displayName || ''
   accountForm.tiktokAvatarUrl = data.avatarUrl || ''
+  accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || ''
+  accountForm.refreshTokenExpiresAt = data.refreshTokenExpiresAt || ''
+  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || ''
+  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
   loadTikTokHealth(accountForm.id || null)
   ElMessage.success('TikTok 已連線，可直接儲存帳號設定')
 }

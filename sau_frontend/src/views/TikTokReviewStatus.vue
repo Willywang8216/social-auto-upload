@@ -2,7 +2,10 @@
   <div class="tiktok-review-status">
     <div class="page-header">
       <h1>TikTok callback status</h1>
+      <div class="header-actions">
+      <el-button plain @click="refreshStaleTokens" :loading="refreshingStale">Refresh stale tokens</el-button>
       <el-button type="primary" @click="refreshStatus" :loading="loading">Refresh</el-button>
+    </div>
     </div>
 
     <el-row :gutter="20">
@@ -35,12 +38,12 @@
           <div v-if="status.lastCallback || status.lastRequest" class="event-card">
             <div class="kv"><span>Last request</span><strong>{{ status.lastRequest?.requestedAt || '—' }}</strong></div>
             <div class="kv"><span>Request status</span><strong>{{ status.lastRequest?.status || '—' }}</strong></div>
-            <div class="kv"><span>Received</span><strong>{{ status.lastCallback.receivedAt }}</strong></div>
-            <div class="kv"><span>Status</span><strong>{{ status.lastCallback.status }}</strong></div>
-            <div class="kv"><span>Account</span><strong>{{ status.lastCallback.accountName || '—' }}</strong></div>
-            <div class="kv"><span>Display name</span><strong>{{ status.lastCallback.displayName || '—' }}</strong></div>
-            <div class="kv"><span>Open ID</span><code>{{ status.lastCallback.openId || '—' }}</code></div>
-            <div class="kv"><span>Scope</span><code>{{ status.lastCallback.scope || '—' }}</code></div>
+            <div class="kv"><span>Received</span><strong>{{ status.lastCallback?.receivedAt || '—' }}</strong></div>
+            <div class="kv"><span>Status</span><strong>{{ status.lastCallback?.status || '—' }}</strong></div>
+            <div class="kv"><span>Account</span><strong>{{ status.lastCallback?.accountName || status.lastRequest?.accountName || '—' }}</strong></div>
+            <div class="kv"><span>Display name</span><strong>{{ status.lastCallback?.displayName || '—' }}</strong></div>
+            <div class="kv"><span>Open ID</span><code>{{ status.lastCallback?.openId || '—' }}</code></div>
+            <div class="kv"><span>Scope</span><code>{{ status.lastCallback?.scope || status.lastRequest?.scopes?.join(', ') || '—' }}</code></div>
           </div>
           <el-empty v-else description="No callback received yet" />
         </el-card>
@@ -51,11 +54,11 @@
           <div v-if="status.lastWebhook || status.lastRefresh" class="event-card">
             <div class="kv"><span>Last refresh</span><strong>{{ status.lastRefresh?.receivedAt || '—' }}</strong></div>
             <div class="kv"><span>Refresh status</span><strong>{{ status.lastRefresh?.status || '—' }}</strong></div>
-            <div class="kv"><span>Received</span><strong>{{ status.lastWebhook.receivedAt }}</strong></div>
-            <div class="kv"><span>Signature</span><strong>{{ status.lastWebhook.signatureStatus || '—' }}</strong></div>
-            <div class="kv"><span>Verified</span><strong>{{ status.lastWebhook.signatureVerified ? 'yes' : 'no' }}</strong></div>
+            <div class="kv"><span>Received</span><strong>{{ status.lastWebhook?.receivedAt || '—' }}</strong></div>
+            <div class="kv"><span>Signature</span><strong>{{ status.lastWebhook?.signatureStatus || '—' }}</strong></div>
+            <div class="kv"><span>Verified</span><strong>{{ status.lastWebhook?.signatureVerified ? 'yes' : 'no' }}</strong></div>
             <div class="payload-preview">
-              <pre>{{ pretty(status.lastWebhook.payload) }}</pre>
+              <pre>{{ pretty(status.lastWebhook?.payload) }}</pre>
             </div>
           </div>
           <el-empty v-else description="No webhook or refresh yet" />
@@ -87,6 +90,7 @@ import { tiktokApi } from '@/api/tiktok'
 
 const route = useRoute()
 const loading = ref(false)
+const refreshingStale = ref(false)
 const status = reactive({
   domain: '',
   redirectUri: '',
@@ -126,6 +130,23 @@ const scopedAccountId = computed(() => {
   return value ? Number(value) : null
 })
 
+async function refreshStaleTokens() {
+  refreshingStale.value = true
+  try {
+    const response = await tiktokApi.refreshStaleTokens(
+      scopedAccountId.value ? { accountId: scopedAccountId.value } : {}
+    )
+    const data = response?.data || {}
+    ElMessage.success(`Checked ${data.examined || 0} account(s), refreshed ${data.refreshed || 0}`)
+    await refreshStatus()
+  } catch (error) {
+    console.error('刷新 stale TikTok tokens 失敗:', error)
+    ElMessage.error(error?.message || '刷新 stale TikTok tokens 失敗')
+  } finally {
+    refreshingStale.value = false
+  }
+}
+
 async function refreshStatus() {
   loading.value = true
   try {
@@ -164,6 +185,12 @@ onBeforeUnmount(() => {
     h1 {
       margin: 0;
       font-size: 24px;
+    }
+
+    .header-actions {
+      display: flex;
+      gap: 12px;
+      align-items: center;
     }
   }
 

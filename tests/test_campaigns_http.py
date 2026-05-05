@@ -387,5 +387,41 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(body['lastRefresh']['type'], 'refresh')
 
 
+    def test_refresh_stale_tiktok_tokens_endpoint_refreshes_stale_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'TikTok Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'tiktok',
+                'accountName': 'brand-tiktok',
+                'authType': 'oauth',
+                'config': {
+                    'accessToken': 'old-token',
+                    'refreshToken': 'refresh-token',
+                    'accessTokenExpiresAt': '2000-01-01T00:00:00+00:00',
+                    'publishMode': 'direct',
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+
+        with patch.object(self.sau_backend.tiktok_auth, 'refresh_access_token', return_value={
+            'access_token': 'fresh-token',
+            'refresh_token': 'fresh-refresh',
+            'expires_in': 3600,
+            'scope': 'user.info.basic,video.publish',
+            'open_id': 'open-xyz',
+        }), patch.object(self.sau_backend.tiktok_auth, 'fetch_user_info', return_value={
+            'data': {'user': {'display_name': 'TikTok Demo', 'avatar_url': 'https://example.com/avatar.jpg'}}
+        }):
+            response = self.client.post('/accounts/tiktok/refresh-stale', json={'accountId': account_id})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['refreshed'], 1)
+        self.assertEqual(body['results'][0]['status'], 'refreshed')
+
+
 if __name__ == "__main__":
     unittest.main()

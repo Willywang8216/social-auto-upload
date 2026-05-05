@@ -7,5 +7,9 @@ export const tiktokApi = {
 
   getStatus(accountId = null) {
     return http.get('/admin/tiktok/status', accountId ? { accountId } : undefined)
+  },
+
+  refreshStaleTokens(payload = {}) {
+    return http.post('/accounts/tiktok/refresh-stale', payload)
   }
 }
