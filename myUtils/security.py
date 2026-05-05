@@ -43,6 +43,8 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/vite.svg",
     "/oauth/tiktok/callback",
     "/oauth/tiktok/callback/",
+    "/oauth/reddit/callback",
+    "/oauth/reddit/callback/",
     "/webhooks/tiktok",
     "/webhooks/tiktok/",
 })

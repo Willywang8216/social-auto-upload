@@ -222,6 +222,7 @@
                 <div class="health-row"><span>Last manual refresh</span><strong>{{ accountForm.lastManualRefreshAt || '—' }}</strong></div>
               </div>
               <div class="oauth-actions-row">
+                <el-button type="primary" plain @click="connectWithReddit" :disabled="!accountForm.id">Connect with Reddit</el-button>
                 <el-button plain @click="refreshStructuredToken('reddit')" :disabled="!accountForm.id">Refresh Reddit token</el-button>
               </div>
             </el-form-item>
@@ -541,6 +542,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { accountApi } from '@/api/account'
 import { profilesApi } from '@/api/profiles'
+import { redditApi } from '@/api/reddit'
 import { tiktokApi } from '@/api/tiktok'
 import AccountTabPane from '@/components/AccountTabPane.vue'
 import { useAccountStore } from '@/stores/account'
@@ -929,6 +931,7 @@ onMounted(() => {
   fetchRecentAccountEvents()
   fetchMaintenanceStatus()
   window.addEventListener('message', handleTikTokOauthMessage)
+  window.addEventListener('message', handleRedditOauthMessage)
   setTimeout(() => {
     fetchAccounts(true)
   }, 100)
@@ -1219,6 +1222,32 @@ async function connectWithTikTok() {
   }
 }
 
+async function connectWithReddit() {
+  if (!accountForm.id) {
+    ElMessage.warning('請先儲存 Reddit 帳號，再使用 Connect with Reddit')
+    return
+  }
+  const popup = window.open('', 'reddit-connect', 'width=720,height=820')
+  if (!popup) {
+    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
+    return
+  }
+  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to Reddit...</p>')
+  try {
+    const response = await redditApi.startOAuth({
+      profileId: accountForm.profileId,
+      accountId: accountForm.id,
+      accountName: accountForm.name,
+      scopes: ['identity', 'submit', 'read']
+    })
+    popup.location = response.data.authorizeUrl
+  } catch (error) {
+    popup.close()
+    console.error('Reddit connect 啟動失敗:', error)
+    ElMessage.error(error?.message || 'Reddit connect 啟動失敗')
+  }
+}
+
 async function checkStructuredConnection(expectedPlatform) {
   if (!accountForm.id) {
     ElMessage.warning('請先儲存帳號，再檢查連線')
@@ -1308,6 +1337,23 @@ function openTikTokReviewStatus() {
     return
   }
   router.push('/tiktok-review')
+}
+
+function handleRedditOauthMessage(event) {
+  const payload = event?.data
+  if (!payload || payload.type !== 'sau:reddit-oauth') return
+  if (!payload.ok) {
+    ElMessage.error(payload.error || 'Reddit 授權失敗')
+    return
+  }
+  const data = payload.data || {}
+  accountForm.accessToken = data.accessToken || accountForm.accessToken
+  accountForm.refreshToken = data.refreshToken || accountForm.refreshToken
+  accountForm.redditUserName = data.redditUserName || accountForm.redditUserName
+  accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
+  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
+  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
+  ElMessage.success('Reddit 已連線，可直接儲存帳號設定')
 }
 
 function handleTikTokOauthMessage(event) {
@@ -1407,6 +1453,12 @@ const buildStructuredConfig = () => {
       assignIfValue(config, 'clientSecretEnv', accountForm.clientSecretEnv.trim())
       assignIfValue(config, 'refreshTokenEnv', accountForm.refreshTokenEnv.trim())
       assignIfValue(config, 'userAgent', accountForm.userAgent.trim())
+      assignIfValue(config, 'accessToken', accountForm.accessToken.trim())
+      assignIfValue(config, 'refreshToken', accountForm.refreshToken.trim())
+      assignIfValue(config, 'accessTokenExpiresAt', accountForm.accessTokenExpiresAt.trim())
+      assignIfValue(config, 'accessTokenUpdatedAt', accountForm.accessTokenUpdatedAt.trim())
+      assignIfValue(config, 'connectedAt', accountForm.connectedAt.trim())
+      assignIfValue(config, 'redditUserName', accountForm.redditUserName.trim())
       break
     case 'telegram':
       assignIfValue(config, 'chatId', accountForm.chatId.trim())
@@ -1543,6 +1595,7 @@ const submitAccountForm = () => {
 onBeforeUnmount(() => {
   closeSSEConnection()
   window.removeEventListener('message', handleTikTokOauthMessage)
+  window.removeEventListener('message', handleRedditOauthMessage)
 })
 </script>
 

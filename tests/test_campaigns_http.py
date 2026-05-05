@@ -777,6 +777,72 @@ class CampaignApiTests(unittest.TestCase):
         self.assertIn('enabled', body)
         self.assertIn('lastResult', body)
 
+    def test_reddit_oauth_start_persists_request_and_returns_authorize_url(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Reddit Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'reddit',
+                'accountName': 'brand-reddit',
+                'authType': 'oauth',
+                'config': {
+                    'clientIdEnv': 'REDDIT_CLIENT_ID',
+                    'clientSecretEnv': 'REDDIT_CLIENT_SECRET',
+                    'subreddits': ['suba'],
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.reddit_auth, 'build_authorize_url_from_env', return_value='https://www.reddit.com/api/v1/authorize?demo=1'):
+            response = self.client.post('/oauth/reddit/start', json={
+                'profileId': profile_id,
+                'accountId': account_id,
+                'accountName': 'brand-reddit',
+                'scopes': ['identity', 'submit', 'read'],
+            })
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['authorizeUrl'], 'https://www.reddit.com/api/v1/authorize?demo=1')
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute('SELECT COUNT(*) FROM reddit_oauth_requests WHERE account_id = ?', (account_id,)).fetchone()
+        self.assertEqual(row[0], 1)
+
+    def test_reddit_oauth_callback_updates_structured_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Reddit Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'reddit',
+                'accountName': 'brand-reddit',
+                'authType': 'oauth',
+                'config': {
+                    'clientIdEnv': 'REDDIT_CLIENT_ID',
+                    'clientSecretEnv': 'REDDIT_CLIENT_SECRET',
+                    'subreddits': ['suba'],
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                'INSERT INTO reddit_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                ('reddit-state-1', profile_id, account_id, 'brand-reddit', 'https://up.iamwillywang.com/oauth/reddit/callback', '["identity", "submit", "read"]', 'started'),
+            )
+            conn.commit()
+        with patch.object(self.sau_backend.reddit_auth, 'exchange_code_for_token', return_value={
+            'access_token': 'reddit-access',
+            'refresh_token': 'reddit-refresh',
+            'expires_in': 3600,
+            'scope': 'identity submit read',
+        }), patch.object(self.sau_backend.reddit_auth, 'fetch_user_info', return_value={'name': 'reddit-user'}):
+            response = self.client.get('/oauth/reddit/callback?state=reddit-state-1&code=demo-code')
+        self.assertEqual(response.status_code, 200)
+        account = self.client.get(f'/profiles/{profile_id}/accounts').get_json()['data'][0]
+        self.assertEqual(account['config']['refreshToken'], 'reddit-refresh')
+        self.assertEqual(account['config']['redditUserName'], 'reddit-user')
+
 
 if __name__ == "__main__":
     unittest.main()

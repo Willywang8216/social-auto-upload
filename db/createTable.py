@@ -220,6 +220,24 @@ CREATE TABLE IF NOT EXISTS tiktok_oauth_requests (
 )
 """
 
+REDDIT_OAUTH_REQUESTS = """
+CREATE TABLE IF NOT EXISTS reddit_oauth_requests (
+    state_token TEXT PRIMARY KEY,
+    profile_id INTEGER,
+    account_id INTEGER,
+    account_name TEXT,
+    redirect_uri TEXT NOT NULL,
+    scopes_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'started',
+    requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at DATETIME,
+    error_text TEXT,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE SET NULL
+)
+"""
+
 TIKTOK_REVIEW_EVENTS = """
 CREATE TABLE IF NOT EXISTS tiktok_review_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -278,6 +296,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_campaign_posts_status ON campaign_posts(status)",
     "CREATE INDEX IF NOT EXISTS idx_tiktok_oauth_requests_account ON tiktok_oauth_requests(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_tiktok_oauth_requests_status ON tiktok_oauth_requests(status)",
+    "CREATE INDEX IF NOT EXISTS idx_reddit_oauth_requests_account ON reddit_oauth_requests(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_reddit_oauth_requests_status ON reddit_oauth_requests(status)",
     "CREATE INDEX IF NOT EXISTS idx_tiktok_review_events_type ON tiktok_review_events(event_type)",
     "CREATE INDEX IF NOT EXISTS idx_tiktok_review_events_received_at ON tiktok_review_events(received_at)",
     "CREATE INDEX IF NOT EXISTS idx_account_events_account ON account_events(account_id)",
@@ -386,6 +406,7 @@ def bootstrap(db_path: Path = DB_PATH) -> None:
         cursor.execute(CAMPAIGN_ARTIFACTS)
         cursor.execute(CAMPAIGN_POSTS)
         cursor.execute(TIKTOK_OAUTH_REQUESTS)
+        cursor.execute(REDDIT_OAUTH_REQUESTS)
         cursor.execute(TIKTOK_REVIEW_EVENTS)
         cursor.execute(ACCOUNT_EVENTS)
         _ensure_required_columns(conn)
