@@ -29,6 +29,7 @@
       <span>Scheduler：{{ maintenanceStatus.enabled ? 'enabled' : 'disabled' }}</span>
       <span>Running：{{ maintenanceStatus.running ? 'yes' : 'no' }}</span>
       <span>Last run：{{ maintenanceStatus.lastFinishedAt || '—' }}</span>
+      <span>Next run：{{ nextMaintenanceRunLabel }}</span>
       <span v-if="maintenanceStatus.lastResult">Refreshed：{{ maintenanceStatus.lastResult.refreshed || 0 }}</span>
     </div>
 
@@ -730,6 +731,17 @@ const bulkCheckTargets = computed(() =>
 const bulkRefreshTargets = computed(() =>
   currentVisibleAccounts.value.filter((account) => account.supportsHealthAction && account.healthActionKind === 'refresh')
 )
+
+const nextMaintenanceRunLabel = computed(() => {
+  const intervalSeconds = Number(maintenanceStatus.value?.intervalSeconds || 0)
+  if (!maintenanceStatus.value?.enabled || intervalSeconds <= 0) return '—'
+  if (maintenanceStatus.value?.running) return 'running now'
+  const reference = maintenanceStatus.value?.lastFinishedAt || maintenanceStatus.value?.lastStartedAt
+  if (!reference) return 'waiting for first run'
+  const parsed = new Date(reference)
+  if (Number.isNaN(parsed.getTime())) return '—'
+  return new Date(parsed.getTime() + intervalSeconds * 1000).toISOString()
+})
 
 const onSearchChange = (value) => {
   searchKeyword.value = value

@@ -79,8 +79,16 @@
               <el-tag :type="scope.row.connectionTagType || 'info'" effect="plain">
                 {{ scope.row.connectionLabel || '—' }}
               </el-tag>
+              <div class="risk-tags">
+                <el-tag v-if="scope.row.reconnectRequired" size="small" type="danger" effect="plain">需重連</el-tag>
+                <el-tag v-else-if="scope.row.isOverdue" size="small" type="danger" effect="plain">已逾期</el-tag>
+                <el-tag v-else-if="scope.row.isExpiringWithin24h" size="small" type="warning" effect="plain">24h</el-tag>
+                <el-tag v-else-if="scope.row.isExpiringWithin7d" size="small" effect="plain">7d</el-tag>
+              </div>
               <div v-if="scope.row.connectionDetail" class="connection-detail">{{ scope.row.connectionDetail }}</div>
               <div v-if="scope.row.connectionTimestamp" class="connection-timestamp">{{ scope.row.connectionTimestamp }}</div>
+              <div v-if="scope.row.expiresAt" class="connection-expiry">到期：{{ scope.row.expiresAt }}</div>
+              <div v-if="scope.row.secondsRemaining != null" class="connection-expiry">剩餘：{{ formatRemaining(scope.row.secondsRemaining) }}</div>
             </div>
           </template>
         </el-table-column>
@@ -178,6 +186,15 @@ function onStatusClick(row) {
   }
 }
 
+function formatRemaining(seconds) {
+  if (seconds == null) return '—'
+  if (seconds <= 0) return 'expired'
+  const hours = Math.floor(seconds / 3600)
+  if (hours < 24) return `${hours}h`
+  const days = Math.floor(hours / 24)
+  return `${days}d`
+}
+
 function getDefaultAvatar(name) {
   return `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random`
 }
@@ -213,8 +230,15 @@ function getDefaultAvatar(name) {
       flex-direction: column;
       gap: 4px;
 
+      .risk-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+
       .connection-detail,
-      .connection-timestamp {
+      .connection-timestamp,
+      .connection-expiry {
         font-size: 12px;
         color: #909399;
         line-height: 1.4;
