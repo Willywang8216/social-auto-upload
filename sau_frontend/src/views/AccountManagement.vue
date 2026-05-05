@@ -521,6 +521,7 @@ const selectedProfileFilter = ref('all')
 const selectedRiskFilter = ref('all')
 const selectedSortMode = ref('urgency')
 const selectedSortOrder = ref('ascending')
+const syncingRouteFilters = ref(false)
 
 const accountPlatformTabs = PROFILE_PLATFORM_OPTIONS
 const profileOptions = computed(() => profilesStore.profiles)
@@ -865,6 +866,37 @@ const applyRouteFilters = () => {
   selectedSortOrder.value = allowedSortOrder.has(String(sortOrder || 'ascending')) ? String(sortOrder || 'ascending') : 'ascending'
 }
 
+const syncRouteFilters = async () => {
+  if (syncingRouteFilters.value) return
+
+  const nextQuery = { ...route.query }
+  if (selectedRiskFilter.value !== 'all') nextQuery.risk = selectedRiskFilter.value
+  else delete nextQuery.risk
+
+  if (selectedProfileFilter.value !== 'all') nextQuery.profile = selectedProfileFilter.value
+  else delete nextQuery.profile
+
+  if (activeTab.value !== 'all') nextQuery.platform = activeTab.value
+  else delete nextQuery.platform
+
+  if (selectedSortMode.value !== 'urgency') nextQuery.sort = selectedSortMode.value
+  else delete nextQuery.sort
+
+  if (selectedSortOrder.value !== 'ascending') nextQuery.sortOrder = selectedSortOrder.value
+  else delete nextQuery.sortOrder
+
+  const currentQuery = { ...route.query }
+  const unchanged = ['risk', 'profile', 'platform', 'sort', 'sortOrder'].every((key) => String(currentQuery[key] || '') === String(nextQuery[key] || ''))
+  if (unchanged) return
+
+  syncingRouteFilters.value = true
+  try {
+    await router.replace({ path: route.path, query: nextQuery })
+  } finally {
+    syncingRouteFilters.value = false
+  }
+}
+
 const onSearchChange = (value) => {
   searchKeyword.value = value
 }
@@ -1093,7 +1125,12 @@ watch([activeTab, selectedProfileFilter], () => {
   fetchRecentAccountEvents()
 })
 
+watch([selectedRiskFilter, selectedProfileFilter, activeTab, selectedSortMode, selectedSortOrder], () => {
+  syncRouteFilters()
+})
+
 watch(() => route.fullPath, () => {
+  if (syncingRouteFilters.value) return
   applyRouteFilters()
 })
 
