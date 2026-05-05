@@ -4,8 +4,7 @@ This script is tailored to the current web deployment at **https://up.iamwillywa
 
 Important review guidance:
 - Only keep the TikTok products/scopes you actually use in the Developer Portal.
-- If you are only demonstrating **Login Kit for Web** and **Content Posting API / video.publish**, remove Share Kit, Display API, and unused scopes before submission.
-- If your app has not been approved before, use the TikTok Developer Portal sandbox where required.
+- For the implementation currently in this codebase, the review configuration should match the real app surface shown in the UI.
 
 ## Domain shown in the recording
 The website shown in the video must be:
@@ -17,21 +16,29 @@ The website shown in the video must be:
 ## Webhook callback URL
 - `https://up.iamwillywang.com/webhooks/tiktok`
 
-## What the review video should prove
-1. The reviewer can see the real web app domain.
-2. The user logs in or connects TikTok via TikTok for Developers capabilities.
-3. The user prepares content in the actual app UI.
-4. The user selects a TikTok account configured in the app.
-5. The app prepares and submits a TikTok Content Posting API request.
-6. The user can see the result in the app, including any publish/job status.
+## Products and scopes selected right now
+For the current implementation, keep only:
+- **Login Kit for Web**
+- **Content Posting API**
+- **Webhooks**
 
-## Recommended products/scopes to keep enabled for this review
-If you are reviewing the implementation currently closest to this codebase, keep only:
-- Login Kit for Web
-- Content Posting API
+Scopes actively used in the current flow:
+- `user.info.basic`
 - `video.publish`
 
-If you do **not** actively demonstrate Share Kit or Display API in the video, remove them before submission.
+If Share Kit, Display API, Research API, or other products are enabled in the TikTok portal but are not shown in the review video, remove them before submission.
+
+---
+
+## What the review video should prove
+1. The reviewer can see the real web app domain.
+2. The user opens the real authenticated web UI.
+3. The user clicks a real **Connect with TikTok** button inside the app.
+4. TikTok redirects back to the registered callback URL on `up.iamwillywang.com`.
+5. The app shows a callback/webhook receipt status page in the web UI.
+6. The user configures a TikTok account under a Profile.
+7. The user prepares content in the actual app UI.
+8. The app submits a TikTok Content Posting API request using `video.publish`.
 
 ---
 
@@ -43,42 +50,53 @@ If you do **not** actively demonstrate Share Kit or Display API in the video, re
 - Keep the full domain visible in the address bar.
 
 Narration:
-> This is the production web app deployed at up.iamwillywang.com. This is the website where the TikTok integration is actually used.
+> This is the production web app deployed at up.iamwillywang.com. This is the exact website where the TikTok integration is used.
 
 ### Shot 2 — Show login / access gate
 - Show the login screen or authenticated landing flow.
 - Log in to the app.
 
 Narration:
-> The user first enters the web app and signs in. The TikTok integration is only available inside the real production website.
+> The user first enters the real web application and signs in. The TikTok integration is only available inside this production website.
 
-### Shot 3 — Go to account management
+### Shot 3 — Go to Account Management
 - Open **Account Management**.
-- Show the TikTok account entry or create one.
-- Show TikTok-specific fields such as access token env, publish mode, privacy level, and comment/duet/stitch options.
+- Show the TikTok account form.
+- Show TikTok-specific fields such as publish mode, privacy level, interaction controls, and token status.
 
 Narration:
-> In Account Management, the operator configures a TikTok account for the profile. The app validates TikTok-specific settings before allowing the account to be used.
+> In Account Management, the operator configures a TikTok account under a Profile. The app validates TikTok-specific settings before the account can be saved or used.
 
-### Shot 4 — Show TikTok Login Kit / OAuth callback flow
-- If you have a real Login Kit flow wired in your review build, show the user clicking the TikTok connect or authorize action.
+### Shot 4 — Show real Login Kit for Web flow
+- In the TikTok section, click **Connect with TikTok**.
+- Show the popup or redirect leaving the app and opening the TikTok authorization screen.
+- Approve access.
 - Show the redirect landing on `https://up.iamwillywang.com/oauth/tiktok/callback`.
-- Show the app receiving the TikTok authorization code and token exchange result.
 
 Narration:
-> This step demonstrates TikTok Login Kit for Web. After the user authorizes access on TikTok, TikTok redirects back to the registered callback URL on up.iamwillywang.com.
+> This step demonstrates TikTok Login Kit for Web. The user clicks Connect with TikTok inside the real application, authorizes access on TikTok, and TikTok redirects back to the registered callback URL on up.iamwillywang.com.
 
-If you are **not** actually using Login Kit in the current review build, do **not** claim it in the video. Remove Login Kit from the selected products before submission.
+### Shot 5 — Show callback status page
+- Open the tiny **TikTok callback status** admin page in the app.
+- Show:
+  - redirect URI
+  - webhook URI
+  - selected products
+  - selected scopes
+  - latest callback receipt
 
-### Shot 5 — Upload media in the actual app
+Narration:
+> This admin view shows the latest TikTok callback receipt on the same production domain, including the configured callback URL and the exact products and scopes used in this implementation.
+
+### Shot 6 — Upload media in the actual app
 - Go to **Material Management** or **Publish Center**.
-- Upload one video file to the real UI.
+- Upload one video file in the actual UI.
 - Show that the media appears inside the app.
 
 Narration:
-> The operator uploads a video inside the actual application interface. This media will be used for TikTok content preparation and posting.
+> The operator uploads media inside the real application interface. This video is used for TikTok content preparation and posting.
 
-### Shot 6 — Prepare a TikTok campaign
+### Shot 7 — Prepare a TikTok campaign
 - Go to **Publish Center**.
 - Select the prepared Profile.
 - Select the TikTok account.
@@ -86,57 +104,60 @@ Narration:
 - Make sure the selected Profile does not use a prohibited watermark for TikTok.
 
 Narration:
-> In Publish Center, the user selects the Profile and the connected TikTok account, then enters the content details that will be sent to TikTok through the Content Posting API.
+> In Publish Center, the user selects the Profile and the connected TikTok account, then enters the content details that will be sent through TikTok’s Content Posting API.
 
-### Shot 7 — Show content preparation and TikTok posting
+### Shot 8 — Submit the TikTok post
 - Click publish.
 - Show that the app creates a campaign and queues the TikTok posting job.
-- If available in your environment, show the job progressing in **Jobs**.
+- If available, show the job progressing in **Jobs**.
 
 Narration:
-> The application prepares the content and sends a TikTok Content Posting API request. The post is submitted through the user-authorized TikTok account using the approved video.publish scope.
+> The application prepares the content and sends a TikTok Content Posting API request through the connected TikTok account using the approved video.publish scope.
 
-### Shot 8 — Show callback/webhook handling
-- Show the configured webhook callback URL in documentation or admin config if helpful.
-- If you can demonstrate it live, show the server receiving TikTok webhook events at `/webhooks/tiktok`.
+### Shot 9 — Show webhook receipt
+- Return to the TikTok callback status page.
+- If a webhook was received, show the latest webhook receipt and its signature-verification status.
 
 Narration:
-> The application is configured to receive TikTok webhook events at the registered callback URL on the same production domain.
+> The application is configured to receive TikTok webhook events on the same production domain, and the admin status page shows receipt of the latest webhook callback.
 
-### Shot 9 — Final summary
+### Shot 10 — Final summary
 - Return to the app UI and show the final job/result state.
 
 Narration:
-> This demonstrates the end-to-end TikTok integration on the real production website, including account configuration, media preparation, TikTok authorization flow where applicable, content posting, and server-side callback handling.
+> This demonstrates the end-to-end TikTok integration on the real production website, including Login Kit for Web, callback handling, account configuration, content posting with the Content Posting API, and webhook receipt visibility.
 
 ---
 
 ## Short review-safe transcript
 
-Use this if you want a concise spoken script:
-
 > This is the production web app deployed at up.iamwillywang.com.
 >
-> First, the user enters the web application and signs in.
+> First, the user enters the real web application and signs in.
 >
 > Next, we open Account Management and configure a TikTok account under a Profile. The app validates TikTok-specific settings such as publish mode, privacy level, and required credentials.
 >
-> If Login Kit for Web is enabled for this review, the user authorizes TikTok and TikTok redirects back to the registered callback URL on up.iamwillywang.com.
+> Then the user clicks Connect with TikTok inside the app. This uses TikTok Login Kit for Web.
 >
-> Then we upload media inside the real application interface.
+> After the user authorizes access on TikTok, TikTok redirects back to the registered callback URL on up.iamwillywang.com.
+>
+> We then open the TikTok callback status page in the app, which shows the latest callback receipt, the webhook URL, and the exact selected products and scopes for this integration.
+>
+> Next, the user uploads media inside the real application interface.
 >
 > In Publish Center, the user selects the Profile and the TikTok account, enters the content details, and submits the campaign.
 >
 > The application sends the post through TikTok’s Content Posting API using the approved video.publish scope.
 >
-> The app also supports a TikTok webhook callback URL on the same production domain for receiving TikTok events.
+> The application is also configured to receive TikTok webhook events on the same production domain.
 >
 > This completes the end-to-end TikTok integration demonstration on the real production website.
 
 ---
 
 ## Notes for you before submission
-- If Login Kit is not actually demonstrated in your build, remove it from the selected TikTok products before review.
-- If Share Kit or Display API are not actively shown, remove them too.
+- Keep only the products actually used in this flow: **Login Kit for Web**, **Content Posting API**, and **Webhooks**.
+- Keep only the scopes actually used in this flow: **user.info.basic** and **video.publish**.
+- Remove Share Kit, Display API, and any unused scopes or products before submission.
 - Make sure the domain visible in the browser bar is exactly `up.iamwillywang.com`.
 - Use a non-watermarked TikTok profile configuration in the demo, because TikTok prohibits unwanted promotional watermarks in Content Posting API uploads.

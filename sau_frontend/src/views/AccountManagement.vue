@@ -276,14 +276,37 @@
 
           <template v-else-if="accountForm.platform === 'tiktok'">
             <el-divider content-position="left">TikTok 設定</el-divider>
+            <el-form-item label="Connect with TikTok">
+              <div class="tiktok-connect-row">
+                <el-button type="primary" @click="connectWithTikTok">Connect with TikTok</el-button>
+                <el-button plain @click="openTikTokReviewStatus">Open callback status</el-button>
+              </div>
+              <div class="field-hint">這會走 TikTok Login Kit for Web，並使用 https://up.iamwillywang.com/oauth/tiktok/callback。</div>
+            </el-form-item>
+            <el-form-item label="Connected account">
+              <div class="tiktok-connected-preview">
+                <el-avatar v-if="accountForm.tiktokAvatarUrl" :src="accountForm.tiktokAvatarUrl" :size="40" />
+                <div class="tiktok-connected-text">
+                  <div><strong>{{ accountForm.tiktokDisplayName || 'Not connected yet' }}</strong></div>
+                  <div class="field-hint">Open ID: {{ accountForm.openId || '—' }}</div>
+                  <div class="field-hint">Scope: {{ accountForm.tiktokScope || '—' }}</div>
+                </div>
+              </div>
+            </el-form-item>
+            <el-form-item label="Access Token">
+              <el-input v-model="accountForm.accessToken" placeholder="由 TikTok Connect 自動填入，或手動貼上" type="textarea" :rows="2" />
+            </el-form-item>
+            <el-form-item label="Refresh Token">
+              <el-input v-model="accountForm.refreshToken" placeholder="由 TikTok Connect 自動填入" type="textarea" :rows="2" />
+            </el-form-item>
+            <el-form-item label="Access Token Env">
+              <el-input v-model="accountForm.accessTokenEnv" placeholder="例如：TIKTOK_ACCESS_TOKEN；若已直連可留空" />
+            </el-form-item>
             <el-form-item label="Publish Mode">
               <el-select v-model="accountForm.publishMode" style="width: 100%">
                 <el-option label="direct" value="direct" />
                 <el-option label="draft" value="draft" />
               </el-select>
-            </el-form-item>
-            <el-form-item label="Access Token Env">
-              <el-input v-model="accountForm.accessTokenEnv" placeholder="例如：TIKTOK_ACCESS_TOKEN" />
             </el-form-item>
             <el-form-item label="Privacy Level">
               <el-select v-model="accountForm.privacyLevel" style="width: 100%">
@@ -376,11 +399,13 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 import { CircleCheckFilled, CircleCloseFilled, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { accountApi } from '@/api/account'
 import { profilesApi } from '@/api/profiles'
+import { tiktokApi } from '@/api/tiktok'
 import AccountTabPane from '@/components/AccountTabPane.vue'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
@@ -390,6 +415,7 @@ import { appendAuthQuery, getToken } from '@/utils/auth'
 import { http } from '@/utils/request'
 import { PROFILE_PLATFORM_OPTIONS, getLegacyPlatformType } from '@/utils/platforms'
 
+const router = useRouter()
 const accountStore = useAccountStore()
 const appStore = useAppStore()
 const profilesStore = useProfilesStore()
@@ -433,6 +459,12 @@ const makeEmptyAccountForm = () => ({
   pageId: '',
   igUserId: '',
   threadUserId: '',
+  accessToken: '',
+  refreshToken: '',
+  openId: '',
+  tiktokScope: '',
+  tiktokDisplayName: '',
+  tiktokAvatarUrl: '',
   accessTokenEnv: '',
   publishMode: 'direct',
   privacyLevel: 'PUBLIC_TO_EVERYONE',
@@ -532,6 +564,12 @@ const loadStructuredFieldsFromConfig = (config) => {
   accountForm.pageId = config.pageId || ''
   accountForm.igUserId = config.igUserId || ''
   accountForm.threadUserId = config.threadUserId || ''
+  accountForm.accessToken = config.accessToken || ''
+  accountForm.refreshToken = config.refreshToken || ''
+  accountForm.openId = config.openId || ''
+  accountForm.tiktokScope = config.scope || ''
+  accountForm.tiktokDisplayName = config.displayName || ''
+  accountForm.tiktokAvatarUrl = config.avatarUrl || ''
   accountForm.accessTokenEnv = config.accessTokenEnv || ''
   accountForm.publishMode = config.publishMode || 'direct'
   accountForm.privacyLevel = config.privacyLevel || 'PUBLIC_TO_EVERYONE'
@@ -622,6 +660,7 @@ const refreshAccounts = () => fetchAccounts(true)
 
 onMounted(() => {
   fetchAccounts(false)
+  window.addEventListener('message', handleTikTokOauthMessage)
   setTimeout(() => {
     fetchAccounts(true)
   }, 100)
@@ -768,6 +807,59 @@ const handleReLogin = (row) => {
   }, 300)
 }
 
+async function connectWithTikTok() {
+  if (!accountForm.profileId) {
+    ElMessage.warning('請先選擇 Profile，再使用 TikTok Connect')
+    return
+  }
+  if (!accountForm.name.trim()) {
+    ElMessage.warning('請先輸入帳號名稱')
+    return
+  }
+
+  const popup = window.open('', 'tiktok-connect', 'width=560,height=760')
+  if (!popup) {
+    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
+    return
+  }
+  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to TikTok...</p>')
+
+  try {
+    const response = await tiktokApi.startOAuth({
+      profileId: accountForm.profileId,
+      accountId: accountForm.id,
+      accountName: accountForm.name,
+      scopes: ['user.info.basic', 'video.publish']
+    })
+    popup.location = response.data.authorizeUrl
+  } catch (error) {
+    popup.close()
+    console.error('TikTok connect 啟動失敗:', error)
+    ElMessage.error(error?.message || 'TikTok connect 啟動失敗')
+  }
+}
+
+function openTikTokReviewStatus() {
+  router.push('/tiktok-review')
+}
+
+function handleTikTokOauthMessage(event) {
+  const payload = event?.data
+  if (!payload || payload.type !== 'sau:tiktok-oauth') return
+  if (!payload.ok) {
+    ElMessage.error(payload.error || 'TikTok 授權失敗')
+    return
+  }
+  const data = payload.data || {}
+  accountForm.accessToken = data.accessToken || ''
+  accountForm.refreshToken = data.refreshToken || ''
+  accountForm.openId = data.openId || ''
+  accountForm.tiktokScope = data.scope || ''
+  accountForm.tiktokDisplayName = data.displayName || ''
+  accountForm.tiktokAvatarUrl = data.avatarUrl || ''
+  ElMessage.success('TikTok 已連線，可直接儲存帳號設定')
+}
+
 const closeSSEConnection = () => {
   if (eventSource) {
     eventSource.close()
@@ -874,6 +966,12 @@ const buildStructuredConfig = () => {
       break
     case 'tiktok':
       assignIfValue(config, 'publishMode', accountForm.publishMode)
+      assignIfValue(config, 'accessToken', accountForm.accessToken.trim())
+      assignIfValue(config, 'refreshToken', accountForm.refreshToken.trim())
+      assignIfValue(config, 'openId', accountForm.openId.trim())
+      assignIfValue(config, 'scope', accountForm.tiktokScope.trim())
+      assignIfValue(config, 'displayName', accountForm.tiktokDisplayName.trim())
+      assignIfValue(config, 'avatarUrl', accountForm.tiktokAvatarUrl.trim())
       assignIfValue(config, 'accessTokenEnv', accountForm.accessTokenEnv.trim())
       assignIfValue(config, 'privacyLevel', accountForm.privacyLevel)
       if (accountForm.disableComment) config.disableComment = true
@@ -972,6 +1070,7 @@ const submitAccountForm = () => {
 
 onBeforeUnmount(() => {
   closeSSEConnection()
+  window.removeEventListener('message', handleTikTokOauthMessage)
 })
 </script>
 
@@ -1031,6 +1130,22 @@ onBeforeUnmount(() => {
     padding: 10px 12px;
     background: #f5f7fa;
     border-radius: 4px;
+  }
+
+  .tiktok-connect-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .tiktok-connected-preview {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+
+    .tiktok-connected-text {
+      min-width: 0;
+    }
   }
 
   .qrcode-container {

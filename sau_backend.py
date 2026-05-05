@@ -24,6 +24,7 @@ from myUtils import media_groups as media_group_store
 from myUtils import media_pipeline
 from myUtils import profiles as profile_registry
 from myUtils import rclone_storage
+from myUtils import tiktok_auth
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.postVideo import (
     post_video_DouYin,
@@ -51,6 +52,12 @@ TWITTER_PLATFORM_ALIASES = {"twitter", "x"}
 
 active_queues = {}
 app = Flask(__name__)
+app.config['TIKTOK_REVIEW_STATE'] = {
+    'auth_requests': {},
+    'last_callback': None,
+    'last_webhook': None,
+    'recent_events': [],
+}
 
 # Security policy is loaded once from the environment at import time. Tests
 # can rebind ``app.config['SECURITY_POLICY']`` to override the live policy
@@ -1271,6 +1278,25 @@ def _account_profile_settings(profile_id: int | None, *, db_path: Path) -> dict:
         return {}
 
 
+def _tiktok_review_state() -> dict:
+    return app.config['TIKTOK_REVIEW_STATE']
+
+
+def _append_tiktok_review_event(event_type: str, payload: dict) -> None:
+    state = _tiktok_review_state()
+    event = {
+        'type': event_type,
+        'receivedAt': datetime.now().isoformat(timespec='seconds'),
+        **payload,
+    }
+    state['recent_events'].insert(0, event)
+    del state['recent_events'][25:]
+    if event_type == 'callback':
+        state['last_callback'] = event
+    elif event_type == 'webhook':
+        state['last_webhook'] = event
+
+
 def _validate_account_payload(data: dict, *, db_path: Path, profile_id: int | None = None, perform_live_checks: bool = False):
     platform = str(data.get("platform", "") or "").strip().lower()
     auth_type = str(data.get("authType", "cookie") or "cookie")
@@ -1628,6 +1654,171 @@ def _generate_platform_draft(
 
 def _default_sheet_title(profile: profile_registry.Profile) -> str:
     return f"{datetime.now().strftime('%Y-%m-%d')}-{profile.slug}"
+
+
+@app.route('/oauth/tiktok/start', methods=['POST'])
+def tiktok_oauth_start():
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        state_token = tiktok_auth.build_state_token()
+        redirect_uri = str(data.get('redirectUri') or tiktok_auth.default_redirect_uri()).strip()
+        scopes = data.get('scopes') if isinstance(data.get('scopes'), list) and data.get('scopes') else list(tiktok_auth.DEFAULT_SCOPES)
+        authorize_url = tiktok_auth.build_authorize_url_from_env(
+            state=state_token,
+            redirect_uri=redirect_uri,
+            scopes=tuple(str(scope) for scope in scopes),
+        )
+        _tiktok_review_state()['auth_requests'][state_token] = {
+            'profileId': data.get('profileId'),
+            'accountId': data.get('accountId'),
+            'accountName': data.get('accountName'),
+            'platform': 'tiktok',
+            'redirectUri': redirect_uri,
+            'scopes': scopes,
+            'requestedAt': datetime.now().isoformat(timespec='seconds'),
+        }
+        _append_tiktok_review_event('start', {
+            'state': state_token,
+            'redirectUri': redirect_uri,
+            'scopes': scopes,
+            'accountName': data.get('accountName'),
+        })
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({'code': 400, 'msg': str(exc), 'data': None}), 400
+    return jsonify({'code': 200, 'msg': 'ok', 'data': {'authorizeUrl': authorize_url, 'state': state_token}}), 200
+
+
+@app.route('/oauth/tiktok/callback', methods=['GET'])
+def tiktok_oauth_callback():
+    db_path = _current_db_path()
+    state_token = str(request.args.get('state', '') or '')
+    code = str(request.args.get('code', '') or '')
+    error = str(request.args.get('error', '') or '')
+    request_state = _tiktok_review_state()['auth_requests'].get(state_token)
+    if not request_state:
+        return Response('Unknown TikTok OAuth state', status=400, mimetype='text/plain')
+
+    if error:
+        _append_tiktok_review_event('callback', {
+            'state': state_token,
+            'status': 'error',
+            'error': error,
+        })
+        return Response(
+            """<html><body><script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'sau:tiktok-oauth', ok: false, error: %r }, '*');
+            }
+            window.close();
+            </script><p>TikTok authorization failed. You may close this window.</p></body></html>""" % error,
+            mimetype='text/html',
+        )
+
+    try:
+        token_payload = tiktok_auth.exchange_code_for_token(
+            code=code,
+            redirect_uri=request_state['redirectUri'],
+        )
+        access_token = str(token_payload.get('access_token') or '')
+        refresh_token = str(token_payload.get('refresh_token') or '')
+        user_info = tiktok_auth.fetch_user_info(access_token=access_token) if access_token else {}
+        account_id = request_state.get('accountId')
+        if account_id:
+            account = profile_registry.get_account(int(account_id), db_path=db_path)
+            merged_config = dict(account.config or {})
+            merged_config.update({
+                'accessToken': access_token,
+                'refreshToken': refresh_token,
+                'openId': token_payload.get('open_id') or user_info.get('data', {}).get('user', {}).get('open_id') or '',
+                'scope': token_payload.get('scope') or ','.join(request_state.get('scopes', [])),
+            })
+            profile_registry.update_account(
+                int(account_id),
+                config=merged_config,
+                auth_type='oauth',
+                db_path=db_path,
+            )
+        callback_payload = {
+            'state': state_token,
+            'status': 'ok',
+            'accountId': account_id,
+            'accountName': request_state.get('accountName'),
+            'accessToken': access_token,
+            'refreshToken': refresh_token,
+            'openId': token_payload.get('open_id') or user_info.get('data', {}).get('user', {}).get('open_id') or '',
+            'scope': token_payload.get('scope') or ','.join(request_state.get('scopes', [])),
+            'displayName': user_info.get('data', {}).get('user', {}).get('display_name') or '',
+            'avatarUrl': user_info.get('data', {}).get('user', {}).get('avatar_url') or '',
+        }
+        _append_tiktok_review_event('callback', callback_payload)
+        html = f"""<html><body><script>
+        if (window.opener) {{
+          window.opener.postMessage({{ type: 'sau:tiktok-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
+        }}
+        window.close();
+        </script><p>TikTok authorization completed. You may close this window.</p></body></html>"""
+        return Response(html, mimetype='text/html')
+    except Exception as exc:  # noqa: BLE001
+        _append_tiktok_review_event('callback', {
+            'state': state_token,
+            'status': 'error',
+            'error': str(exc),
+        })
+        return Response(
+            f"<html><body><p>TikTok callback failed: {exc}</p></body></html>",
+            status=500,
+            mimetype='text/html',
+        )
+
+
+@app.route('/webhooks/tiktok', methods=['GET', 'POST'])
+def tiktok_webhook():
+    if request.method == 'GET':
+        challenge = request.args.get('challenge')
+        if challenge:
+            _append_tiktok_review_event('webhook', {'status': 'challenge', 'challenge': challenge})
+            return Response(challenge, mimetype='text/plain')
+        return jsonify({'code': 200, 'msg': 'ok', 'data': {'path': '/webhooks/tiktok'}}), 200
+
+    raw_body = request.get_data()
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {'raw': raw_body.decode('utf-8', errors='replace')}
+    signature_header = request.headers.get('Tiktok-Signature', '')
+    signature_verified, signature_reason = _verify_tiktok_signature(raw_body, signature_header)
+    event_payload = {
+        'status': 'received',
+        'headers': {
+            'Tiktok-Signature': signature_header,
+            'Content-Type': request.headers.get('Content-Type', ''),
+        },
+        'signatureVerified': signature_verified,
+        'signatureStatus': signature_reason,
+        'payload': payload,
+    }
+    _append_tiktok_review_event('webhook', event_payload)
+    _append_tiktok_webhook_event(event_payload)
+    return jsonify({'code': 200, 'msg': 'received', 'data': {'signatureVerified': signature_verified, 'signatureStatus': signature_reason}}), 200
+
+
+@app.route('/admin/tiktok/status', methods=['GET'])
+def tiktok_admin_status():
+    state = _tiktok_review_state()
+    return jsonify({
+        'code': 200,
+        'msg': 'ok',
+        'data': {
+            'domain': 'up.iamwillywang.com',
+            'redirectUri': tiktok_auth.default_redirect_uri(),
+            'webhookUri': 'https://up.iamwillywang.com/webhooks/tiktok',
+            'selectedProducts': ['Login Kit for Web', 'Content Posting API', 'Webhooks'],
+            'selectedScopes': ['user.info.basic', 'video.publish'],
+            'lastCallback': state.get('last_callback'),
+            'lastWebhook': state.get('last_webhook'),
+            'recentEvents': state.get('recent_events', []),
+        },
+    }), 200
 
 
 @app.route("/profiles", methods=["GET"])

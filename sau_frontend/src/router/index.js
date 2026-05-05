@@ -8,6 +8,7 @@ import LoginView from '../views/LoginView.vue'
 import About from '../views/About.vue'
 import PrivacyPolicy from '../views/PrivacyPolicy.vue'
 import TermsOfUse from '../views/TermsOfUse.vue'
+import TikTokReviewStatus from '../views/TikTokReviewStatus.vue'
 
 import { getToken } from '@/utils/auth'
 
@@ -47,8 +48,12 @@ const routes = [
     path: '/about',
     name: 'About',
     component: About
-  }
-  ,
+  },
+  {
+    path: '/tiktok-review',
+    name: 'TikTokReviewStatus',
+    component: TikTokReviewStatus
+  },
   {
     path: '/privacy',
     name: 'PrivacyPolicy',
