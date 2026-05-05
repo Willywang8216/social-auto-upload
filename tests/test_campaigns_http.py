@@ -1162,6 +1162,61 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(body['refreshed'], 1)
         self.assertEqual(body['accounts'][0]['config']['threadsUserName'], 'threads-user-2')
 
+    def test_oauth_status_reports_reddit_request_and_events(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Reddit Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'reddit',
+                'accountName': 'brand-reddit',
+                'authType': 'oauth',
+                'config': {'clientIdEnv': 'REDDIT_CLIENT_ID', 'clientSecretEnv': 'REDDIT_CLIENT_SECRET', 'subreddits': ['suba']},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                'INSERT INTO reddit_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                ('reddit-state-2', profile_id, account_id, 'brand-reddit', 'https://up.iamwillywang.com/oauth/reddit/callback', '["identity", "submit"]', 'started'),
+            )
+            conn.commit()
+        with patch.object(self.sau_backend.prepared_publishers, 'refresh_reddit_access_token', return_value={
+            'access_token': 'reddit-token', 'expires_in': 3600, 'scope': 'submit identity read', 'me': {'name': 'reddit-user'}
+        }):
+            self.client.post(f'/accounts/{account_id}/refresh-token')
+        response = self.client.get(f'/admin/oauth/status?platform=reddit&accountId={account_id}')
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['platform'], 'reddit')
+        self.assertEqual(body['lastRequest']['state'], 'reddit-state-2')
+        self.assertTrue(body['recentEvents'])
+
+    def test_oauth_status_reports_threads_request_and_events(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Threads Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'threads',
+                'accountName': 'brand-threads',
+                'authType': 'oauth',
+                'config': {},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                'INSERT INTO threads_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                ('threads-state-2', profile_id, account_id, 'brand-threads', 'https://up.iamwillywang.com/oauth/threads/callback', '["threads_basic"]', 'started'),
+            )
+            conn.commit()
+        response = self.client.get(f'/admin/oauth/status?platform=threads&accountId={account_id}')
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['platform'], 'threads')
+        self.assertEqual(body['lastRequest']['state'], 'threads-state-2')
+
 
 if __name__ == "__main__":
     unittest.main()

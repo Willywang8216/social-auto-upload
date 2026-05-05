@@ -224,6 +224,7 @@
               <div class="oauth-actions-row">
                 <el-button type="primary" plain @click="connectWithReddit" :disabled="!accountForm.id">Connect with Reddit</el-button>
                 <el-button plain @click="refreshStructuredToken('reddit')" :disabled="!accountForm.id">Refresh Reddit token</el-button>
+                <el-button plain @click="openOauthReviewStatus('reddit')" :disabled="!accountForm.id">Open OAuth status</el-button>
               </div>
             </el-form-item>
             <el-form-item label="Subreddits">
@@ -294,6 +295,7 @@
               <div class="oauth-actions-row">
                 <el-button type="primary" plain @click="connectWithYouTube" :disabled="!accountForm.id">Connect with YouTube</el-button>
                 <el-button plain @click="refreshStructuredToken('youtube')" :disabled="!accountForm.id">Refresh YouTube token</el-button>
+                <el-button plain @click="openOauthReviewStatus('youtube')" :disabled="!accountForm.id">Open OAuth status</el-button>
               </div>
             </el-form-item>
             <el-form-item label="Channel ID">
@@ -334,6 +336,7 @@
               <div class="oauth-actions-row">
                 <el-button type="primary" plain @click="connectWithMeta('facebook')" :disabled="!accountForm.id">Connect with Facebook</el-button>
                 <el-button plain @click="checkStructuredConnection('facebook')" :disabled="!accountForm.id">Check Facebook connection</el-button>
+                <el-button plain @click="openOauthReviewStatus('facebook')" :disabled="!accountForm.id">Open OAuth status</el-button>
               </div>
             </el-form-item>
             <el-form-item label="Page ID">
@@ -355,6 +358,7 @@
               <div class="oauth-actions-row">
                 <el-button type="primary" plain @click="connectWithMeta('instagram')" :disabled="!accountForm.id">Connect with Instagram</el-button>
                 <el-button plain @click="checkStructuredConnection('instagram')" :disabled="!accountForm.id">Check Instagram connection</el-button>
+                <el-button plain @click="openOauthReviewStatus('instagram')" :disabled="!accountForm.id">Open OAuth status</el-button>
               </div>
             </el-form-item>
             <el-form-item label="IG User ID">
@@ -377,6 +381,7 @@
                 <el-button type="primary" plain @click="connectWithThreads" :disabled="!accountForm.id">Connect with Threads</el-button>
                 <el-button plain @click="refreshStructuredToken('threads')" :disabled="!accountForm.id">Refresh Threads token</el-button>
                 <el-button plain @click="checkStructuredConnection('threads')" :disabled="!accountForm.id">Check Threads connection</el-button>
+                <el-button plain @click="openOauthReviewStatus('threads')" :disabled="!accountForm.id">Open OAuth status</el-button>
               </div>
             </el-form-item>
             <el-form-item label="User ID">
@@ -1427,6 +1432,14 @@ async function refreshTikTokToken() {
     console.error('刷新 TikTok token 失敗:', error)
     ElMessage.error(error?.message || '刷新 TikTok token 失敗')
   }
+}
+
+function openOauthReviewStatus(platform) {
+  const query = { platform }
+  if (accountForm.id) {
+    query.accountId = String(accountForm.id)
+  }
+  router.push({ path: `/oauth-review/${platform}`, query })
 }
 
 function openTikTokReviewStatus() {

@@ -1369,7 +1369,7 @@ def _event_payload_to_status(event: tiktok_review.TikTokReviewEvent | None) -> d
     return payload
 
 
-def _oauth_request_to_status(request_state: tiktok_review.TikTokOAuthRequest | None) -> dict | None:
+def _oauth_request_to_status(request_state) -> dict | None:
     if request_state is None:
         return None
     payload = dict(request_state.result or {})
@@ -1380,10 +1380,12 @@ def _oauth_request_to_status(request_state: tiktok_review.TikTokOAuthRequest | N
     payload['error'] = request_state.error_text
     payload['redirectUri'] = request_state.redirect_uri
     payload['scopes'] = request_state.scopes
-    if request_state.account_id is not None:
+    if getattr(request_state, 'account_id', None) is not None:
         payload.setdefault('accountId', request_state.account_id)
-    if request_state.account_name:
+    if getattr(request_state, 'account_name', None):
         payload.setdefault('accountName', request_state.account_name)
+    if getattr(request_state, 'platform', None):
+        payload.setdefault('platform', request_state.platform)
     return payload
 
 
@@ -2752,6 +2754,64 @@ def reddit_oauth_callback():
                 db_path=db_path,
             )
         return Response(f"<html><body><p>Reddit callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
+
+
+@app.route('/admin/oauth/status', methods=['GET'])
+def oauth_admin_status():
+    db_path = _current_db_path()
+    platform = str(request.args.get('platform', '') or '').strip().lower()
+    raw_account_id = request.args.get('accountId')
+    account_id = int(raw_account_id) if raw_account_id not in (None, '') and str(raw_account_id).isdigit() else None
+    if platform not in {
+        profile_registry.PLATFORM_REDDIT,
+        profile_registry.PLATFORM_YOUTUBE,
+        profile_registry.PLATFORM_FACEBOOK,
+        profile_registry.PLATFORM_INSTAGRAM,
+        profile_registry.PLATFORM_THREADS,
+    }:
+        return jsonify({'code': 400, 'msg': 'Unsupported platform for OAuth status', 'data': None}), 400
+
+    redirect_uri = ''
+    request_state = None
+    products = []
+    if platform == profile_registry.PLATFORM_REDDIT:
+        redirect_uri = _reddit_callback_base_url()
+        request_state = reddit_review.latest_oauth_request(account_id=account_id, db_path=db_path)
+        products = ['Reddit OAuth']
+    elif platform == profile_registry.PLATFORM_YOUTUBE:
+        redirect_uri = _youtube_callback_base_url()
+        request_state = youtube_review.latest_oauth_request(account_id=account_id, db_path=db_path)
+        products = ['Google OAuth', 'YouTube Data API']
+    elif platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
+        redirect_uri = _meta_callback_base_url()
+        request_state = meta_review.latest_oauth_request(account_id=account_id, db_path=db_path)
+        products = ['Meta Graph API OAuth']
+    elif platform == profile_registry.PLATFORM_THREADS:
+        redirect_uri = _threads_callback_base_url()
+        request_state = threads_review.latest_oauth_request(account_id=account_id, db_path=db_path)
+        products = ['Threads API OAuth']
+
+    events = account_events.list_events(limit=25, account_id=account_id, platform=platform, db_path=db_path)
+    last_start = next((event for event in events if event.action == 'oauth_start'), None)
+    last_callback = next((event for event in events if event.action == 'oauth_callback'), None)
+    last_refresh = next((event for event in events if event.action == 'refresh_token'), None)
+
+    return jsonify({
+        'code': 200,
+        'msg': 'ok',
+        'data': {
+            'platform': platform,
+            'accountId': account_id,
+            'redirectUri': redirect_uri,
+            'selectedProducts': products,
+            'selectedScopes': request_state.scopes if request_state else [],
+            'lastRequest': _oauth_request_to_status(request_state),
+            'lastStart': last_start.to_dict() if last_start else None,
+            'lastCallback': last_callback.to_dict() if last_callback else None,
+            'lastRefresh': last_refresh.to_dict() if last_refresh else None,
+            'recentEvents': [event.to_dict() for event in events],
+        },
+    }), 200
 
 
 @app.route('/oauth/threads/start', methods=['POST'])

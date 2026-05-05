@@ -9,6 +9,7 @@ import About from '../views/About.vue'
 import PrivacyPolicy from '../views/PrivacyPolicy.vue'
 import TermsOfUse from '../views/TermsOfUse.vue'
 import TikTokReviewStatus from '../views/TikTokReviewStatus.vue'
+import OAuthReviewStatus from '../views/OAuthReviewStatus.vue'
 
 import { getToken } from '@/utils/auth'
 
@@ -53,6 +54,11 @@ const routes = [
     path: '/tiktok-review',
     name: 'TikTokReviewStatus',
     component: TikTokReviewStatus
+  },
+  {
+    path: '/oauth-review/:platform?',
+    name: 'OAuthReviewStatus',
+    component: OAuthReviewStatus
   },
   {
     path: '/privacy',
