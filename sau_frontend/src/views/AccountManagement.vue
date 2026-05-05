@@ -954,19 +954,20 @@ const runRowHealthCheck = async (row) => {
 const runBulkHealthCheck = async () => {
   if (bulkCheckTargets.value.length < 1 || bulkCheckLoading.value) return
   bulkCheckLoading.value = true
-  let success = 0
-  let failed = 0
   try {
-    for (const row of bulkCheckTargets.value) {
-      const result = await executeHealthAction(row, { silent: true })
-      if (result.ok) success += 1
-      else if (result.reason !== 'unsupported') failed += 1
+    const response = await profilesApi.batchCheckConnections(bulkCheckTargets.value.map((row) => row.id))
+    const data = response?.data || {}
+    for (const account of data.accounts || []) {
+      accountStore.updateAccount(account.id, account)
     }
-    if (failed > 0) {
-      ElMessage.warning(`批次檢查完成：${success} 個成功，${failed} 個失敗`)
+    if ((data.failed || 0) > 0) {
+      ElMessage.warning(`批次檢查完成：${data.succeeded || 0} 個成功，${data.failed || 0} 個失敗`)
     } else {
-      ElMessage.success(`批次檢查完成：${success} 個成功`)
+      ElMessage.success(`批次檢查完成：${data.succeeded || 0} 個成功`)
     }
+  } catch (error) {
+    console.error('批次檢查失敗:', error)
+    ElMessage.error(error?.message || '批次檢查失敗')
   } finally {
     bulkCheckLoading.value = false
   }
@@ -975,19 +976,20 @@ const runBulkHealthCheck = async () => {
 const runBulkRefresh = async () => {
   if (bulkRefreshTargets.value.length < 1 || bulkRefreshLoading.value) return
   bulkRefreshLoading.value = true
-  let success = 0
-  let failed = 0
   try {
-    for (const row of bulkRefreshTargets.value) {
-      const result = await executeHealthAction(row, { silent: true })
-      if (result.ok) success += 1
-      else if (result.reason !== 'unsupported') failed += 1
+    const response = await profilesApi.batchRefreshTokens(bulkRefreshTargets.value.map((row) => row.id))
+    const data = response?.data || {}
+    for (const account of data.accounts || []) {
+      accountStore.updateAccount(account.id, account)
     }
-    if (failed > 0) {
-      ElMessage.warning(`批次刷新完成：${success} 個成功，${failed} 個失敗`)
+    if ((data.failed || 0) > 0) {
+      ElMessage.warning(`批次刷新完成：${data.succeeded || 0} 個成功，${data.failed || 0} 個失敗`)
     } else {
-      ElMessage.success(`批次刷新完成：${success} 個成功`)
+      ElMessage.success(`批次刷新完成：${data.succeeded || 0} 個成功`)
     }
+  } catch (error) {
+    console.error('批次刷新失敗:', error)
+    ElMessage.error(error?.message || '批次刷新失敗')
   } finally {
     bulkRefreshLoading.value = false
   }

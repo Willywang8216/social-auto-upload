@@ -39,5 +39,13 @@ export const profilesApi = {
 
   checkAccountConnection(accountId) {
     return http.post(`/accounts/${accountId}/check-connection`)
+  },
+
+  batchCheckConnections(accountIds) {
+    return http.post('/accounts/batch/check-connections', { accountIds })
+  },
+
+  batchRefreshTokens(accountIds) {
+    return http.post('/accounts/batch/refresh-tokens', { accountIds })
   }
 }

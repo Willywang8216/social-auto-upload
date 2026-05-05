@@ -585,6 +585,84 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(config['discordWebhookChannel'], '999')
         self.assertTrue(config['lastConnectionCheckAt'])
 
+    def test_batch_check_connections_returns_summary_and_updated_accounts(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Ops Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        facebook_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'facebook',
+                'accountName': 'brand-facebook',
+                'authType': 'oauth',
+                'config': {'pageId': '123', 'accessTokenEnv': 'FB_PAGE_TOKEN'},
+            },
+        )
+        telegram_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'telegram',
+                'accountName': 'brand-telegram',
+                'authType': 'manual',
+                'config': {'chatId': '@brand', 'botTokenEnv': 'TELEGRAM_BOT_TOKEN'},
+            },
+        )
+        facebook_id = facebook_response.get_json()['data']['id']
+        telegram_id = telegram_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.prepared_publishers, 'validate_facebook_config_live', return_value={'id': '123', 'name': 'Brand Page'}),              patch.object(self.sau_backend.prepared_publishers, 'validate_telegram_config_live', return_value={'bot': {'result': {'username': 'brand_bot'}}, 'chat': {'result': {'title': 'Brand Chat'}}}):
+            response = self.client.post('/accounts/batch/check-connections', json={'accountIds': [facebook_id, telegram_id]})
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['operation'], 'check')
+        self.assertEqual(body['succeeded'], 2)
+        self.assertEqual(body['failed'], 0)
+        self.assertEqual(len(body['accounts']), 2)
+
+    def test_batch_refresh_tokens_returns_summary_and_updated_accounts(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Ops Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        reddit_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'reddit',
+                'accountName': 'brand-reddit',
+                'authType': 'oauth',
+                'config': {
+                    'clientIdEnv': 'REDDIT_CLIENT_ID',
+                    'clientSecretEnv': 'REDDIT_CLIENT_SECRET',
+                    'refreshTokenEnv': 'REDDIT_REFRESH_TOKEN',
+                    'subreddits': ['suba'],
+                },
+            },
+        )
+        youtube_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'youtube',
+                'accountName': 'brand-youtube',
+                'authType': 'oauth',
+                'config': {
+                    'channelId': 'UC123',
+                    'clientIdEnv': 'YT_CLIENT_ID',
+                    'clientSecretEnv': 'YT_CLIENT_SECRET',
+                    'refreshTokenEnv': 'YT_REFRESH_TOKEN',
+                },
+            },
+        )
+        reddit_id = reddit_response.get_json()['data']['id']
+        youtube_id = youtube_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.prepared_publishers, 'refresh_reddit_access_token', return_value={
+            'access_token': 'reddit-token', 'expires_in': 3600, 'scope': 'submit identity read', 'me': {'name': 'reddit-user'}
+        }), patch.object(self.sau_backend.prepared_publishers, 'refresh_youtube_access_token', return_value={
+            'access_token': 'yt-token', 'expires_in': 3600, 'channel': {'items': [{'snippet': {'title': 'Demo Channel'}}]}
+        }):
+            response = self.client.post('/accounts/batch/refresh-tokens', json={'accountIds': [reddit_id, youtube_id]})
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['operation'], 'refresh')
+        self.assertEqual(body['succeeded'], 2)
+        self.assertEqual(body['failed'], 0)
+        self.assertEqual(len(body['accounts']), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
