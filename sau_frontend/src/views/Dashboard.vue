@@ -103,6 +103,38 @@
 
       <div class="recent-tasks">
         <div class="section-header">
+          <h2>憑證到期風險</h2>
+          <el-button text @click="navigateTo('/account-management')">前往處理</el-button>
+        </div>
+
+        <div class="expiry-summary">
+          <el-tag type="danger">Overdue: {{ healthSummary.expirySummary?.overdue || 0 }}</el-tag>
+          <el-tag type="warning">24h: {{ healthSummary.expirySummary?.expiringWithin24h || 0 }}</el-tag>
+          <el-tag>7d: {{ healthSummary.expirySummary?.expiringWithin7d || 0 }}</el-tag>
+          <el-tag type="danger">Reconnect: {{ healthSummary.expirySummary?.reconnectRequired || 0 }}</el-tag>
+        </div>
+
+        <el-table :data="healthSummary.expiringAccounts || []" style="width: 100%" v-loading="loading">
+          <el-table-column prop="platform" label="平台" width="120" />
+          <el-table-column prop="accountName" label="帳號" min-width="180" />
+          <el-table-column prop="expiresAt" label="到期時間" width="220" />
+          <el-table-column label="剩餘" width="140">
+            <template #default="scope">
+              {{ formatRemaining(scope.row.secondsRemaining) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="建議" width="120">
+            <template #default="scope">
+              <el-tag :type="scope.row.requiresReconnect ? 'danger' : 'warning'" effect="plain">{{ scope.row.recommendedAction }}</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <el-empty v-if="!loading && (healthSummary.expiringAccounts || []).length === 0" description="目前沒有 7 天內到期的帳號" />
+      </div>
+
+      <div class="recent-tasks">
+        <div class="section-header">
           <h2>最近帳號操作</h2>
           <el-button text @click="navigateTo('/account-management')">帳號管理</el-button>
         </div>
@@ -224,7 +256,7 @@ const router = useRouter()
 const accountStore = useAccountStore()
 const appStore = useAppStore()
 const loading = ref(false)
-const healthSummary = ref({ total: 0, ready: 0, configured: 0, missing: 0, refreshable: 0, checkable: 0, recentEventTotals: { total: 0, ok: 0, error: 0 }, recentEvents: [] })
+const healthSummary = ref({ total: 0, ready: 0, configured: 0, missing: 0, refreshable: 0, checkable: 0, expirySummary: { overdue: 0, expiringWithin24h: 0, expiringWithin7d: 0, reconnectRequired: 0 }, recentEventTotals: { total: 0, ok: 0, error: 0 }, expiringAccounts: [], recentEvents: [] })
 const dashboardPlatforms = LEGACY_ACCOUNT_PLATFORM_ORDER
   .map((publishSlug) =>
     ACCOUNT_PLATFORM_OPTIONS.find((platform) => platform.publishSlug === publishSlug)
@@ -296,6 +328,15 @@ const getFileType = (filename) => {
 const getFileTypeTag = (filename) => {
   const type = getFileType(filename)
   return { '影片': 'success', '圖片': 'warning', '其他': 'info' }[type] || 'info'
+}
+
+const formatRemaining = (seconds) => {
+  if (seconds == null) return '—'
+  if (seconds <= 0) return 'expired'
+  const hours = Math.floor(seconds / 3600)
+  if (hours < 24) return `${hours}h`
+  const days = Math.floor(hours / 24)
+  return `${days}d`
 }
 
 // 导航到指定路由
@@ -480,6 +521,13 @@ onMounted(() => {
 
     .recent-tasks {
       margin-top: 30px;
+
+      .expiry-summary {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
 
       .section-header {
         display: flex;

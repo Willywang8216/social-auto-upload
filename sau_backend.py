@@ -3522,6 +3522,7 @@ def accounts_health_summary():
             return 'configured'
         return 'missing'
 
+    now_utc = prepared_publishers._utc_now()
     summary = {
         'total': len(accounts),
         'ready': 0,
@@ -3530,18 +3531,66 @@ def accounts_health_summary():
         'refreshable': 0,
         'checkable': 0,
         'byPlatform': {},
+        'expirySummary': {
+            'overdue': 0,
+            'expiringWithin24h': 0,
+            'expiringWithin7d': 0,
+            'reconnectRequired': 0,
+        },
+        'expiringAccounts': [],
     }
+
+    def _account_expiry_snapshot(account):
+        config = dict(account.config or {})
+        is_meta = account.platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}
+        if is_meta and not config.get('metaUserAccessToken'):
+            return None, False, False
+        refreshable = account.platform in refresh_platforms or (is_meta and bool(config.get('metaUserAccessToken')))
+        if not refreshable:
+            return None, False, False
+        expiry_raw = config.get('metaUserAccessTokenExpiresAt') if is_meta else config.get('accessTokenExpiresAt')
+        if not expiry_raw:
+            expiry_raw = config.get('accessTokenExpiresAt')
+        expires_at = prepared_publishers._parse_iso_datetime(str(expiry_raw or ''))
+        reconnect_required = bool(is_meta and expires_at is not None and expires_at <= now_utc)
+        return expires_at, refreshable, reconnect_required
+
     for account in accounts:
         state = _derive_state(account)
         summary[state] += 1
-        is_meta_refreshable = account.platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM} and bool((account.config or {}).get('metaUserAccessToken'))
-        if account.platform in refresh_platforms or is_meta_refreshable:
+        expires_at, is_refreshable, reconnect_required = _account_expiry_snapshot(account)
+        if is_refreshable:
             summary['refreshable'] += 1
-        if account.platform in check_platforms and not is_meta_refreshable:
+        if account.platform in check_platforms and not is_refreshable:
             summary['checkable'] += 1
-        bucket = summary['byPlatform'].setdefault(account.platform, {'total': 0, 'ready': 0, 'configured': 0, 'missing': 0})
+        bucket = summary['byPlatform'].setdefault(account.platform, {'total': 0, 'ready': 0, 'configured': 0, 'missing': 0, 'overdue': 0, 'expiringWithin7d': 0})
         bucket['total'] += 1
         bucket[state] += 1
+        if expires_at is not None:
+            seconds_remaining = int((expires_at - now_utc).total_seconds())
+            if seconds_remaining <= 0:
+                summary['expirySummary']['overdue'] += 1
+                bucket['overdue'] += 1
+                if reconnect_required:
+                    summary['expirySummary']['reconnectRequired'] += 1
+            elif seconds_remaining <= 24 * 3600:
+                summary['expirySummary']['expiringWithin24h'] += 1
+                summary['expirySummary']['expiringWithin7d'] += 1
+                bucket['expiringWithin7d'] += 1
+            elif seconds_remaining <= 7 * 24 * 3600:
+                summary['expirySummary']['expiringWithin7d'] += 1
+                bucket['expiringWithin7d'] += 1
+            if seconds_remaining <= 7 * 24 * 3600:
+                summary['expiringAccounts'].append({
+                    'accountId': account.id,
+                    'profileId': account.profile_id,
+                    'platform': account.platform,
+                    'accountName': account.account_name,
+                    'expiresAt': expires_at.isoformat(),
+                    'secondsRemaining': seconds_remaining,
+                    'requiresReconnect': reconnect_required,
+                    'recommendedAction': 'reconnect' if reconnect_required else 'refresh',
+                })
 
     recent_events = account_events.list_events(limit=10, db_path=db_path)
     event_totals = {'total': len(recent_events), 'ok': 0, 'error': 0}
@@ -3557,6 +3606,7 @@ def accounts_health_summary():
         "data": {
             **summary,
             'recentEventTotals': event_totals,
+            'expiringAccounts': sorted(summary['expiringAccounts'], key=lambda item: item['secondsRemaining'])[:10],
             'recentEvents': [event.to_dict() for event in recent_events],
         },
     }), 200

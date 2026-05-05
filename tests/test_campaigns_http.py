@@ -1295,6 +1295,49 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(body['refreshed'], 0)
         self.assertEqual(body['results'][0]['status'], 'error')
 
+    def test_health_summary_reports_expiring_accounts_and_reconnect_required(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Ops Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'reddit',
+                'accountName': 'brand-reddit',
+                'authType': 'oauth',
+                'config': {
+                    'accessToken': 'reddit-token',
+                    'redditUserName': 'reddit-user',
+                    'accessTokenExpiresAt': '2099-01-02T00:00:00+00:00',
+                    'subreddits': ['suba'],
+                    'clientIdEnv': 'REDDIT_CLIENT_ID',
+                    'clientSecretEnv': 'REDDIT_CLIENT_SECRET',
+                    'refreshTokenEnv': 'REDDIT_REFRESH_TOKEN',
+                },
+            },
+        )
+        self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'facebook',
+                'accountName': 'brand-facebook',
+                'authType': 'oauth',
+                'config': {
+                    'pageId': '123',
+                    'facebookPageName': 'Brand Page',
+                    'accessToken': 'page-token',
+                    'metaUserAccessToken': 'meta-user-token',
+                    'metaUserAccessTokenExpiresAt': '2000-01-01T00:00:00+00:00',
+                },
+            },
+        )
+        response = self.client.get('/accounts/health-summary')
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertIn('expirySummary', body)
+        self.assertGreaterEqual(body['expirySummary']['overdue'], 1)
+        self.assertGreaterEqual(body['expirySummary']['reconnectRequired'], 1)
+        self.assertTrue(any(item['recommendedAction'] in {'refresh', 'reconnect'} for item in body['expiringAccounts']))
+
 
 if __name__ == "__main__":
     unittest.main()
