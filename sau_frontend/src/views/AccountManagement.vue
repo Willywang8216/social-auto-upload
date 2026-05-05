@@ -556,7 +556,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { CircleCheckFilled, CircleCloseFilled, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -577,6 +577,7 @@ import { http } from '@/utils/request'
 import { PROFILE_PLATFORM_OPTIONS, getLegacyPlatformType } from '@/utils/platforms'
 
 const router = useRouter()
+const route = useRoute()
 const accountStore = useAccountStore()
 const appStore = useAppStore()
 const profilesStore = useProfilesStore()
@@ -742,6 +743,26 @@ const nextMaintenanceRunLabel = computed(() => {
   if (Number.isNaN(parsed.getTime())) return '—'
   return new Date(parsed.getTime() + intervalSeconds * 1000).toISOString()
 })
+
+const applyRouteFilters = () => {
+  const risk = Array.isArray(route.query.risk) ? route.query.risk[0] : route.query.risk
+  const profile = Array.isArray(route.query.profile) ? route.query.profile[0] : route.query.profile
+  const platform = Array.isArray(route.query.platform) ? route.query.platform[0] : route.query.platform
+
+  const allowedRisk = new Set(['all', 'expiring_24h', 'expiring_7d', 'overdue', 'reconnect_required'])
+  selectedRiskFilter.value = allowedRisk.has(String(risk || 'all')) ? String(risk || 'all') : 'all'
+
+  if (profile === 'legacy' || profile === 'all') {
+    selectedProfileFilter.value = String(profile)
+  } else if (profile != null && profile !== '') {
+    selectedProfileFilter.value = String(profile)
+  } else {
+    selectedProfileFilter.value = 'all'
+  }
+
+  const allowedPlatforms = new Set(['all', ...accountPlatformTabs.map((item) => item.value)])
+  activeTab.value = allowedPlatforms.has(String(platform || 'all')) ? String(platform || 'all') : 'all'
+}
 
 const onSearchChange = (value) => {
   searchKeyword.value = value
@@ -966,7 +987,12 @@ watch([activeTab, selectedProfileFilter], () => {
   fetchRecentAccountEvents()
 })
 
+watch(() => route.fullPath, () => {
+  applyRouteFilters()
+})
+
 onMounted(() => {
+  applyRouteFilters()
   fetchAccounts(false)
   fetchRecentAccountEvents()
   fetchMaintenanceStatus()

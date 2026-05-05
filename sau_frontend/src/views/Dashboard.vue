@@ -104,7 +104,7 @@
       <div class="recent-tasks">
         <div class="section-header">
           <h2>憑證到期風險</h2>
-          <el-button text @click="navigateTo('/account-management')">前往處理</el-button>
+          <el-button text @click="goToAccountQueue()">前往處理</el-button>
         </div>
 
         <div class="expiry-summary">
@@ -112,6 +112,13 @@
           <el-tag type="warning">24h: {{ healthSummary.expirySummary?.expiringWithin24h || 0 }}</el-tag>
           <el-tag>7d: {{ healthSummary.expirySummary?.expiringWithin7d || 0 }}</el-tag>
           <el-tag type="danger">Reconnect: {{ healthSummary.expirySummary?.reconnectRequired || 0 }}</el-tag>
+        </div>
+
+        <div class="expiry-actions">
+          <el-button text @click="goToAccountQueue({ risk: 'expiring_24h' })">查看 24h</el-button>
+          <el-button text @click="goToAccountQueue({ risk: 'expiring_7d' })">查看 7d</el-button>
+          <el-button text @click="goToAccountQueue({ risk: 'overdue' })">查看逾期</el-button>
+          <el-button text @click="goToAccountQueue({ risk: 'reconnect_required' })">查看需重連</el-button>
         </div>
 
         <el-table :data="healthSummary.expiringAccounts || []" style="width: 100%" v-loading="loading">
@@ -126,6 +133,11 @@
           <el-table-column label="建議" width="120">
             <template #default="scope">
               <el-tag :type="scope.row.requiresReconnect ? 'danger' : 'warning'" effect="plain">{{ scope.row.recommendedAction }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="120">
+            <template #default="scope">
+              <el-button text @click="goToAccountQueue({ risk: scope.row.requiresReconnect ? 'reconnect_required' : (scope.row.secondsRemaining <= 24 * 3600 ? 'expiring_24h' : 'expiring_7d'), platform: scope.row.platform })">前往</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -344,6 +356,17 @@ const navigateTo = (path) => {
   router.push(path)
 }
 
+const platformValueByLabel = computed(() => Object.fromEntries(dashboardPlatforms.map((platform) => [platform.label, platform.key])))
+
+const goToAccountQueue = ({ risk = 'all', platform = 'all', profile = 'all' } = {}) => {
+  const query = {}
+  if (risk && risk !== 'all') query.risk = risk
+  const normalizedPlatform = platform && platform !== 'all' ? (platformValueByLabel.value[platform] || platform) : 'all'
+  if (normalizedPlatform !== 'all') query.platform = normalizedPlatform
+  if (profile && profile !== 'all') query.profile = profile
+  router.push({ path: '/account-management', query })
+}
+
 // 加载数据
 const fetchDashboardData = async () => {
   loading.value = true
@@ -523,6 +546,13 @@ onMounted(() => {
       margin-top: 30px;
 
       .expiry-summary {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+
+      .expiry-actions {
         display: flex;
         flex-wrap: wrap;
         gap: 8px;
