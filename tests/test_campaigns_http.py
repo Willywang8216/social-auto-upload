@@ -926,6 +926,86 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(account['config']['channelId'], 'UC123')
         self.assertEqual(account['config']['channelTitle'], 'Demo Channel')
 
+    def test_meta_oauth_start_persists_request_and_returns_authorize_url(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'facebook',
+                'accountName': 'brand-facebook',
+                'authType': 'oauth',
+                'config': {'pageId': '123'},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.meta_auth, 'build_authorize_url_from_env', return_value='https://facebook.com/dialog/oauth?demo=1'):
+            response = self.client.post('/oauth/meta/start', json={
+                'profileId': profile_id,
+                'accountId': account_id,
+                'accountName': 'brand-facebook',
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['data']['authorizeUrl'], 'https://facebook.com/dialog/oauth?demo=1')
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute('SELECT COUNT(*) FROM meta_oauth_requests WHERE account_id = ?', (account_id,)).fetchone()
+        self.assertEqual(row[0], 1)
+
+    def test_meta_oauth_callback_updates_facebook_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'facebook',
+                'accountName': 'brand-facebook',
+                'authType': 'oauth',
+                'config': {'pageId': '123'},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                'INSERT INTO meta_oauth_requests (state_token, profile_id, account_id, account_name, platform, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                ('meta-state-1', profile_id, account_id, 'brand-facebook', 'facebook', 'https://up.iamwillywang.com/oauth/meta/callback', '["pages_show_list"]', 'started'),
+            )
+            conn.commit()
+        with patch.object(self.sau_backend.meta_auth, 'exchange_code_for_token', return_value={'access_token': 'short-token', 'expires_in': 3600}),              patch.object(self.sau_backend.meta_auth, 'exchange_for_long_lived_token', return_value={'access_token': 'long-token', 'expires_in': 5184000}),              patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '123', 'name': 'Brand Page', 'access_token': 'page-token'}]}):
+            response = self.client.get('/oauth/meta/callback?state=meta-state-1&code=demo-code')
+        self.assertEqual(response.status_code, 200)
+        account = self.client.get(f'/profiles/{profile_id}/accounts').get_json()['data'][0]
+        self.assertEqual(account['config']['pageId'], '123')
+        self.assertEqual(account['config']['facebookPageName'], 'Brand Page')
+        self.assertEqual(account['config']['accessToken'], 'page-token')
+
+    def test_meta_oauth_callback_updates_instagram_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'instagram',
+                'accountName': 'brand-instagram',
+                'authType': 'oauth',
+                'config': {},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                'INSERT INTO meta_oauth_requests (state_token, profile_id, account_id, account_name, platform, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                ('meta-state-2', profile_id, account_id, 'brand-instagram', 'instagram', 'https://up.iamwillywang.com/oauth/meta/callback', '["instagram_basic"]', 'started'),
+            )
+            conn.commit()
+        with patch.object(self.sau_backend.meta_auth, 'exchange_code_for_token', return_value={'access_token': 'short-token', 'expires_in': 3600}),              patch.object(self.sau_backend.meta_auth, 'exchange_for_long_lived_token', return_value={'access_token': 'long-token', 'expires_in': 5184000}),              patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '321', 'name': 'Brand Page', 'access_token': 'page-token', 'instagram_business_account': {'id': 'ig-1', 'username': 'brand_ig'}}]}):
+            response = self.client.get('/oauth/meta/callback?state=meta-state-2&code=demo-code')
+        self.assertEqual(response.status_code, 200)
+        account = self.client.get(f'/profiles/{profile_id}/accounts').get_json()['data'][0]
+        self.assertEqual(account['config']['pageId'], '321')
+        self.assertEqual(account['config']['igUserId'], 'ig-1')
+        self.assertEqual(account['config']['instagramUserName'], 'brand_ig')
+        self.assertEqual(account['config']['accessToken'], 'page-token')
+
 
 if __name__ == "__main__":
     unittest.main()

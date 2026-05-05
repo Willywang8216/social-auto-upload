@@ -26,6 +26,8 @@ from myUtils import profiles as profile_registry
 from myUtils import prepared_publishers
 from myUtils import account_events
 from myUtils import rclone_storage
+from myUtils import meta_auth
+from myUtils import meta_review
 from myUtils import reddit_auth
 from myUtils import reddit_review
 from myUtils import youtube_auth
@@ -123,6 +125,13 @@ def _youtube_callback_base_url() -> str:
     if configured:
         return configured.rstrip("/")
     return "https://up.iamwillywang.com/oauth/youtube/callback"
+
+
+def _meta_callback_base_url() -> str:
+    configured = str(os.environ.get("SAU_META_CALLBACK_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return "https://up.iamwillywang.com/oauth/meta/callback"
 
 
 def _reddit_callback_base_url() -> str:
@@ -2104,6 +2113,236 @@ def _generate_platform_draft(
 
 def _default_sheet_title(profile: profile_registry.Profile) -> str:
     return f"{datetime.now().strftime('%Y-%m-%d')}-{profile.slug}"
+
+
+@app.route('/oauth/meta/start', methods=['POST'])
+def meta_oauth_start():
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        raw_account_id = data.get('accountId')
+        if raw_account_id in (None, ''):
+            raise ValueError('Please save the Meta account before connecting OAuth')
+        account_id = int(raw_account_id)
+        account = profile_registry.get_account(account_id, db_path=db_path)
+        if account.platform not in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
+            raise ValueError('OAuth connect is only available for Facebook and Instagram accounts on this route')
+        state_token = meta_auth.build_state_token()
+        redirect_uri = str(data.get('redirectUri') or _meta_callback_base_url() or meta_auth.default_redirect_uri()).strip()
+        scopes = data.get('scopes') if isinstance(data.get('scopes'), list) and data.get('scopes') else list(meta_auth.default_scopes_for_platform(account.platform))
+        authorize_url = meta_auth.build_authorize_url_from_env(
+            state=state_token,
+            redirect_uri=redirect_uri,
+            scopes=tuple(str(scope) for scope in scopes),
+        )
+        meta_review.create_oauth_request(
+            state_token=state_token,
+            profile_id=account.profile_id,
+            account_id=account.id,
+            account_name=account.account_name,
+            platform=account.platform,
+            redirect_uri=redirect_uri,
+            scopes=[str(scope) for scope in scopes],
+            db_path=db_path,
+        )
+        account_events.record_event(
+            account_id=account.id,
+            profile_id=account.profile_id,
+            platform=account.platform,
+            account_name=account.account_name,
+            action='oauth_start',
+            status='ok',
+            summary=f"{account.platform} OAuth flow started",
+            metadata={'state': state_token, 'redirectUri': redirect_uri, 'scopes': scopes},
+            db_path=db_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({'code': 400, 'msg': str(exc), 'data': None}), 400
+    return jsonify({'code': 200, 'msg': 'ok', 'data': {'authorizeUrl': authorize_url, 'state': state_token}}), 200
+
+
+@app.route('/oauth/meta/callback', methods=['GET'])
+def meta_oauth_callback():
+    db_path = _current_db_path()
+    state_token = str(request.args.get('state', '') or '')
+    code = str(request.args.get('code', '') or '')
+    error = str(request.args.get('error', '') or '')
+    request_state = meta_review.get_oauth_request(state_token, db_path=db_path)
+    if not request_state:
+        return Response('Unknown Meta OAuth state', status=400, mimetype='text/plain')
+
+    if error:
+        meta_review.complete_oauth_request(state_token, status='error', error_text=error, result={'state': state_token, 'error': error}, db_path=db_path)
+        if request_state.account_id:
+            account_events.record_event(
+                account_id=request_state.account_id,
+                profile_id=request_state.profile_id,
+                platform=request_state.platform,
+                account_name=request_state.account_name or '',
+                action='oauth_callback',
+                status='error',
+                summary='Meta OAuth callback failed',
+                error_text=error,
+                metadata={'state': state_token},
+                db_path=db_path,
+            )
+        return Response("""<html><body><script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'sau:meta-oauth', ok: false, error: %r }, '*');
+            }
+            window.close();
+            </script><p>Meta authorization failed. You may close this window.</p></body></html>""" % error, mimetype='text/html')
+
+    try:
+        if not request_state.account_id:
+            raise ValueError('Meta OAuth request is missing accountId')
+        account = profile_registry.get_account(int(request_state.account_id), db_path=db_path)
+        config = dict(account.config or {})
+        token_payload = meta_auth.exchange_code_for_token(code=code, redirect_uri=request_state.redirect_uri)
+        short_lived_access_token = str(token_payload.get('access_token') or '')
+        long_lived_payload = meta_auth.exchange_for_long_lived_token(access_token=short_lived_access_token) if short_lived_access_token else {}
+        user_access_token = str(long_lived_payload.get('access_token') or short_lived_access_token)
+        pages_payload = meta_auth.fetch_managed_pages(access_token=user_access_token) if user_access_token else {}
+        pages = pages_payload.get('data', []) if isinstance(pages_payload, dict) else []
+        if not isinstance(pages, list):
+            pages = []
+        selected_page = None
+        if account.platform == profile_registry.PLATFORM_FACEBOOK:
+            wanted_page_id = str(config.get('pageId') or '').strip()
+            if wanted_page_id:
+                selected_page = next((page for page in pages if str(page.get('id') or '') == wanted_page_id), None)
+            if selected_page is None and pages:
+                selected_page = pages[0]
+            if selected_page is None:
+                raise ValueError('Meta OAuth did not return any manageable Facebook Pages')
+            merged_config = dict(config)
+            merged_config['pageId'] = str(selected_page.get('id') or merged_config.get('pageId') or '')
+            merged_config['facebookPageName'] = str(selected_page.get('name') or merged_config.get('facebookPageName') or '')
+            merged_config['accessToken'] = str(selected_page.get('access_token') or user_access_token or '')
+            merged_config['metaUserAccessToken'] = user_access_token
+            merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
+            expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
+            if expires_in not in (None, ''):
+                merged_config['metaUserAccessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+            merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
+            updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', db_path=db_path)
+            callback_payload = {
+                'platform': updated.platform,
+                'state': state_token,
+                'status': 'ok',
+                'accountId': updated.id,
+                'accountName': updated.account_name,
+                'pageId': merged_config.get('pageId', ''),
+                'facebookPageName': merged_config.get('facebookPageName', ''),
+                'accessToken': merged_config.get('accessToken', ''),
+                'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
+                'connectedAt': merged_config.get('connectedAt', ''),
+            }
+            persisted = {
+                'platform': updated.platform,
+                'state': state_token,
+                'status': 'ok',
+                'accountId': updated.id,
+                'accountName': updated.account_name,
+                'pageId': merged_config.get('pageId', ''),
+                'facebookPageName': merged_config.get('facebookPageName', ''),
+            }
+            summary = f"Facebook connected: {merged_config.get('facebookPageName') or updated.account_name}"
+        else:
+            wanted_ig_user_id = str(config.get('igUserId') or '').strip()
+            selected_pair = None
+            for page in pages:
+                ig_user = page.get('instagram_business_account') if isinstance(page, dict) else None
+                if not isinstance(ig_user, dict):
+                    continue
+                if wanted_ig_user_id and str(ig_user.get('id') or '') != wanted_ig_user_id:
+                    continue
+                selected_pair = (page, ig_user)
+                break
+            if selected_pair is None:
+                for page in pages:
+                    ig_user = page.get('instagram_business_account') if isinstance(page, dict) else None
+                    if isinstance(ig_user, dict):
+                        selected_pair = (page, ig_user)
+                        break
+            if selected_pair is None:
+                raise ValueError('Meta OAuth did not return a page-linked Instagram business account')
+            page, ig_user = selected_pair
+            merged_config = dict(config)
+            merged_config['pageId'] = str(page.get('id') or merged_config.get('pageId') or '')
+            merged_config['facebookPageName'] = str(page.get('name') or merged_config.get('facebookPageName') or '')
+            merged_config['igUserId'] = str(ig_user.get('id') or merged_config.get('igUserId') or '')
+            merged_config['instagramUserName'] = str(ig_user.get('username') or merged_config.get('instagramUserName') or '')
+            merged_config['accessToken'] = str(page.get('access_token') or user_access_token or '')
+            merged_config['metaUserAccessToken'] = user_access_token
+            merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
+            expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
+            if expires_in not in (None, ''):
+                merged_config['metaUserAccessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+            merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
+            updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', db_path=db_path)
+            callback_payload = {
+                'platform': updated.platform,
+                'state': state_token,
+                'status': 'ok',
+                'accountId': updated.id,
+                'accountName': updated.account_name,
+                'pageId': merged_config.get('pageId', ''),
+                'facebookPageName': merged_config.get('facebookPageName', ''),
+                'igUserId': merged_config.get('igUserId', ''),
+                'instagramUserName': merged_config.get('instagramUserName', ''),
+                'accessToken': merged_config.get('accessToken', ''),
+                'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
+                'connectedAt': merged_config.get('connectedAt', ''),
+            }
+            persisted = {
+                'platform': updated.platform,
+                'state': state_token,
+                'status': 'ok',
+                'accountId': updated.id,
+                'accountName': updated.account_name,
+                'pageId': merged_config.get('pageId', ''),
+                'facebookPageName': merged_config.get('facebookPageName', ''),
+                'igUserId': merged_config.get('igUserId', ''),
+                'instagramUserName': merged_config.get('instagramUserName', ''),
+            }
+            summary = f"Instagram connected: {merged_config.get('instagramUserName') or updated.account_name}"
+
+        meta_review.complete_oauth_request(state_token, status='completed', result=persisted, db_path=db_path)
+        account_events.record_event(
+            account_id=updated.id,
+            profile_id=updated.profile_id,
+            platform=updated.platform,
+            account_name=updated.account_name,
+            action='oauth_callback',
+            status='ok',
+            summary=summary,
+            metadata={'state': state_token},
+            db_path=db_path,
+        )
+        html = f"""<html><body><script>
+        if (window.opener) {{
+          window.opener.postMessage({{ type: 'sau:meta-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
+        }}
+        window.close();
+        </script><p>Meta authorization completed. You may close this window.</p></body></html>"""
+        return Response(html, mimetype='text/html')
+    except Exception as exc:  # noqa: BLE001
+        meta_review.complete_oauth_request(state_token, status='error', error_text=str(exc), result={'state': state_token, 'error': str(exc)}, db_path=db_path)
+        if request_state.account_id:
+            account_events.record_event(
+                account_id=request_state.account_id,
+                profile_id=request_state.profile_id,
+                platform=request_state.platform,
+                account_name=request_state.account_name or '',
+                action='oauth_callback',
+                status='error',
+                summary='Meta OAuth callback failed',
+                error_text=str(exc),
+                metadata={'state': state_token},
+                db_path=db_path,
+            )
+        return Response(f"<html><body><p>Meta callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
 
 
 @app.route('/oauth/youtube/start', methods=['POST'])

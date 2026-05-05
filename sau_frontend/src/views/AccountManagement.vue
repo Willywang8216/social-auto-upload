@@ -332,6 +332,7 @@
                 <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
               </div>
               <div class="oauth-actions-row">
+                <el-button type="primary" plain @click="connectWithMeta('facebook')" :disabled="!accountForm.id">Connect with Facebook</el-button>
                 <el-button plain @click="checkStructuredConnection('facebook')" :disabled="!accountForm.id">Check Facebook connection</el-button>
               </div>
             </el-form-item>
@@ -352,6 +353,7 @@
                 <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
               </div>
               <div class="oauth-actions-row">
+                <el-button type="primary" plain @click="connectWithMeta('instagram')" :disabled="!accountForm.id">Connect with Instagram</el-button>
                 <el-button plain @click="checkStructuredConnection('instagram')" :disabled="!accountForm.id">Check Instagram connection</el-button>
               </div>
             </el-form-item>
@@ -542,6 +544,7 @@ import { CircleCheckFilled, CircleCloseFilled, Refresh } from '@element-plus/ico
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { accountApi } from '@/api/account'
+import { metaApi } from '@/api/meta'
 import { profilesApi } from '@/api/profiles'
 import { redditApi } from '@/api/reddit'
 import { tiktokApi } from '@/api/tiktok'
@@ -935,6 +938,7 @@ onMounted(() => {
   window.addEventListener('message', handleTikTokOauthMessage)
   window.addEventListener('message', handleRedditOauthMessage)
   window.addEventListener('message', handleYouTubeOauthMessage)
+  window.addEventListener('message', handleMetaOauthMessage)
   setTimeout(() => {
     fetchAccounts(true)
   }, 100)
@@ -1225,6 +1229,39 @@ async function connectWithTikTok() {
   }
 }
 
+async function connectWithMeta(expectedPlatform) {
+  if (!accountForm.id) {
+    ElMessage.warning(`請先儲存 ${expectedPlatform === 'facebook' ? 'Facebook' : 'Instagram'} 帳號，再使用 Connect`)
+    return
+  }
+  if (!['facebook', 'instagram'].includes(expectedPlatform) || accountForm.platform !== expectedPlatform) {
+    ElMessage.warning('目前帳號平台與 Connect 操作不符')
+    return
+  }
+  const popup = window.open('', `meta-connect-${expectedPlatform}`, 'width=720,height=820')
+  if (!popup) {
+    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
+    return
+  }
+  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to Meta...</p>')
+  try {
+    const scopes = expectedPlatform === 'instagram'
+      ? ['pages_show_list', 'instagram_basic', 'instagram_content_publish', 'business_management']
+      : ['pages_show_list', 'pages_manage_posts', 'pages_read_engagement', 'pages_manage_metadata', 'business_management']
+    const response = await metaApi.startOAuth({
+      profileId: accountForm.profileId,
+      accountId: accountForm.id,
+      accountName: accountForm.name,
+      scopes,
+    })
+    popup.location = response.data.authorizeUrl
+  } catch (error) {
+    popup.close()
+    console.error('Meta connect 啟動失敗:', error)
+    ElMessage.error(error?.message || 'Meta connect 啟動失敗')
+  }
+}
+
 async function connectWithReddit() {
   if (!accountForm.id) {
     ElMessage.warning('請先儲存 Reddit 帳號，再使用 Connect with Reddit')
@@ -1401,6 +1438,32 @@ function handleYouTubeOauthMessage(event) {
   accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
   ElMessage.success('YouTube 已連線，可直接儲存帳號設定')
+}
+
+function handleMetaOauthMessage(event) {
+  const payload = event?.data
+  if (!payload || payload.type !== 'sau:meta-oauth') return
+  if (!payload.ok) {
+    ElMessage.error(payload.error || 'Meta 授權失敗')
+    return
+  }
+  const data = payload.data || {}
+  accountForm.accessToken = data.accessToken || accountForm.accessToken
+  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
+  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
+  if (data.platform === 'facebook') {
+    accountForm.pageId = data.pageId || accountForm.pageId
+    accountForm.facebookPageName = data.facebookPageName || accountForm.facebookPageName
+    ElMessage.success('Facebook 已連線，可直接儲存帳號設定')
+    return
+  }
+  if (data.platform === 'instagram') {
+    accountForm.pageId = data.pageId || accountForm.pageId
+    accountForm.facebookPageName = data.facebookPageName || accountForm.facebookPageName
+    accountForm.igUserId = data.igUserId || accountForm.igUserId
+    accountForm.instagramUserName = data.instagramUserName || accountForm.instagramUserName
+    ElMessage.success('Instagram 已連線，可直接儲存帳號設定')
+  }
 }
 
 function handleTikTokOauthMessage(event) {
