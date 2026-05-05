@@ -2084,8 +2084,16 @@ def accounts_check_connection(account_id):
         elif account.platform == profile_registry.PLATFORM_THREADS:
             result = prepared_publishers.validate_threads_config_live(config)
             config['threadsUserName'] = result.get('username', config.get('threadsUserName', ''))
+        elif account.platform == profile_registry.PLATFORM_TELEGRAM:
+            result = prepared_publishers.validate_telegram_config_live(config)
+            config['telegramBotName'] = result.get('bot', {}).get('result', {}).get('username', config.get('telegramBotName', ''))
+            config['telegramChatTitle'] = result.get('chat', {}).get('result', {}).get('title', config.get('telegramChatTitle', '')) or result.get('chat', {}).get('result', {}).get('username', config.get('telegramChatTitle', ''))
+        elif account.platform == profile_registry.PLATFORM_DISCORD:
+            result = prepared_publishers.validate_discord_config_live(config)
+            config['discordWebhookName'] = result.get('name', config.get('discordWebhookName', ''))
+            config['discordWebhookChannel'] = result.get('channel_id', config.get('discordWebhookChannel', ''))
         else:
-            return jsonify({"code": 400, "msg": "Connection check is implemented only for Facebook, Instagram, and Threads", "data": None}), 400
+            return jsonify({"code": 400, "msg": "Connection check is implemented only for Facebook, Instagram, Threads, Telegram, and Discord", "data": None}), 400
 
         config['lastConnectionCheckAt'] = now
         updated = profile_registry.update_account(

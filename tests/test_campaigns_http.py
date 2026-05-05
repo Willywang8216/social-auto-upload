@@ -543,6 +543,48 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(config['threadsUserName'], 'threads-demo')
         self.assertTrue(config['lastConnectionCheckAt'])
 
+    def test_check_telegram_connection_updates_structured_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Telegram Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'telegram',
+                'accountName': 'brand-telegram',
+                'authType': 'manual',
+                'config': {'chatId': '@brand', 'botTokenEnv': 'TELEGRAM_BOT_TOKEN'},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.prepared_publishers, 'validate_telegram_config_live', return_value={'bot': {'result': {'username': 'brand_bot'}}, 'chat': {'result': {'title': 'Brand Chat'}}}):
+            response = self.client.post(f'/accounts/{account_id}/check-connection')
+        self.assertEqual(response.status_code, 200)
+        config = response.get_json()['data']['config']
+        self.assertEqual(config['telegramBotName'], 'brand_bot')
+        self.assertEqual(config['telegramChatTitle'], 'Brand Chat')
+        self.assertTrue(config['lastConnectionCheckAt'])
+
+    def test_check_discord_connection_updates_structured_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Discord Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'discord',
+                'accountName': 'brand-discord',
+                'authType': 'manual',
+                'config': {'webhookUrlEnv': 'DISCORD_WEBHOOK_URL'},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.prepared_publishers, 'validate_discord_config_live', return_value={'name': 'Brand Hook', 'channel_id': '999'}):
+            response = self.client.post(f'/accounts/{account_id}/check-connection')
+        self.assertEqual(response.status_code, 200)
+        config = response.get_json()['data']['config']
+        self.assertEqual(config['discordWebhookName'], 'Brand Hook')
+        self.assertEqual(config['discordWebhookChannel'], '999')
+        self.assertTrue(config['lastConnectionCheckAt'])
+
 
 if __name__ == "__main__":
     unittest.main()

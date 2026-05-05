@@ -207,6 +207,17 @@
 
           <template v-else-if="accountForm.platform === 'telegram'">
             <el-divider content-position="left">Telegram 設定</el-divider>
+            <el-form-item label="Connection health">
+              <div class="oauth-health-card">
+                <div class="health-row"><span>Bot</span><strong>{{ accountForm.telegramBotName || '—' }}</strong></div>
+                <div class="health-row"><span>Chat</span><strong>{{ accountForm.telegramChatTitle || '—' }}</strong></div>
+                <div class="health-row"><span>Bot token</span><strong>{{ accountForm.botTokenEnv ? 'env-backed' : 'missing' }}</strong></div>
+                <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
+              </div>
+              <div class="oauth-actions-row">
+                <el-button plain @click="checkStructuredConnection('telegram')" :disabled="!accountForm.id">Check Telegram connection</el-button>
+              </div>
+            </el-form-item>
             <el-form-item label="Chat ID">
               <el-input v-model="accountForm.chatId" placeholder="例如：@channel_name 或 -100123456" />
             </el-form-item>
@@ -407,6 +418,17 @@
 
           <template v-else-if="accountForm.platform === 'discord'">
             <el-divider content-position="left">Discord 設定</el-divider>
+            <el-form-item label="Connection health">
+              <div class="oauth-health-card">
+                <div class="health-row"><span>Webhook name</span><strong>{{ accountForm.discordWebhookName || '—' }}</strong></div>
+                <div class="health-row"><span>Channel ID</span><strong>{{ accountForm.discordWebhookChannel || '—' }}</strong></div>
+                <div class="health-row"><span>Webhook URL</span><strong>{{ accountForm.webhookUrlEnv ? 'env-backed' : 'missing' }}</strong></div>
+                <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
+              </div>
+              <div class="oauth-actions-row">
+                <el-button plain @click="checkStructuredConnection('discord')" :disabled="!accountForm.id">Check Discord connection</el-button>
+              </div>
+            </el-form-item>
             <el-form-item label="Webhook URL Env">
               <el-input v-model="accountForm.webhookUrlEnv" placeholder="例如：DISCORD_WEBHOOK_URL" />
             </el-form-item>
@@ -548,6 +570,10 @@ const makeEmptyAccountForm = () => ({
   facebookPageName: '',
   instagramUserName: '',
   threadsUserName: '',
+  telegramBotName: '',
+  telegramChatTitle: '',
+  discordWebhookName: '',
+  discordWebhookChannel: '',
   lastConnectionCheckAt: '',
   accessTokenEnv: '',
   publishMode: 'direct',
@@ -672,6 +698,10 @@ const loadStructuredFieldsFromConfig = (config) => {
   accountForm.facebookPageName = config.facebookPageName || ''
   accountForm.instagramUserName = config.instagramUserName || ''
   accountForm.threadsUserName = config.threadsUserName || ''
+  accountForm.telegramBotName = config.telegramBotName || ''
+  accountForm.telegramChatTitle = config.telegramChatTitle || ''
+  accountForm.discordWebhookName = config.discordWebhookName || ''
+  accountForm.discordWebhookChannel = config.discordWebhookChannel || ''
   accountForm.lastConnectionCheckAt = config.lastConnectionCheckAt || ''
   accountForm.accessTokenEnv = config.accessTokenEnv || ''
   accountForm.publishMode = config.publishMode || 'direct'
@@ -990,6 +1020,10 @@ async function checkStructuredConnection(expectedPlatform) {
     accountForm.facebookPageName = config.facebookPageName || accountForm.facebookPageName
     accountForm.instagramUserName = config.instagramUserName || accountForm.instagramUserName
     accountForm.threadsUserName = config.threadsUserName || accountForm.threadsUserName
+    accountForm.telegramBotName = config.telegramBotName || accountForm.telegramBotName
+    accountForm.telegramChatTitle = config.telegramChatTitle || accountForm.telegramChatTitle
+    accountForm.discordWebhookName = config.discordWebhookName || accountForm.discordWebhookName
+    accountForm.discordWebhookChannel = config.discordWebhookChannel || accountForm.discordWebhookChannel
     accountForm.lastConnectionCheckAt = config.lastConnectionCheckAt || accountForm.lastConnectionCheckAt
     ElMessage.success(`${account.platform} connection checked`)
   } catch (error) {
