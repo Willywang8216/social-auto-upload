@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 import mimetypes
 import os
 from pathlib import Path
 from typing import Any
+
+from myUtils import tiktok_auth
 
 try:
     import requests
@@ -77,6 +80,88 @@ def _response_payload(response):
         return response.json()
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        if value.endswith('Z'):
+            value = value[:-1] + '+00:00'
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _token_expiry_from_payload(payload: dict, key: str) -> str:
+    seconds = payload.get(key)
+    try:
+        seconds_int = int(seconds)
+    except (TypeError, ValueError):
+        return ''
+    return (_utc_now() + timedelta(seconds=seconds_int)).replace(microsecond=0).isoformat()
+
+
+def _apply_tiktok_token_payload(config: dict[str, Any], token_payload: dict, user_info: dict | None = None) -> dict[str, Any]:
+    next_config = dict(config)
+    access_token = str(token_payload.get('access_token') or '').strip()
+    refresh_token = str(token_payload.get('refresh_token') or '').strip()
+    if access_token:
+        next_config['accessToken'] = access_token
+    if refresh_token:
+        next_config['refreshToken'] = refresh_token
+    if token_payload.get('open_id'):
+        next_config['openId'] = token_payload.get('open_id')
+    if token_payload.get('scope'):
+        next_config['scope'] = token_payload.get('scope')
+    next_config['accessTokenUpdatedAt'] = _utc_now().replace(microsecond=0).isoformat()
+    access_expires_at = _token_expiry_from_payload(token_payload, 'expires_in')
+    refresh_expires_at = _token_expiry_from_payload(token_payload, 'refresh_expires_in')
+    if access_expires_at:
+        next_config['accessTokenExpiresAt'] = access_expires_at
+    if refresh_expires_at:
+        next_config['refreshTokenExpiresAt'] = refresh_expires_at
+    if user_info:
+        user = user_info.get('data', {}).get('user', {})
+        if user.get('display_name'):
+            next_config['displayName'] = user['display_name']
+        if user.get('avatar_url'):
+            next_config['avatarUrl'] = user['avatar_url']
+        if user.get('open_id'):
+            next_config['openId'] = user['open_id']
+    return next_config
+
+
+def _is_tiktok_access_token_stale(config: dict[str, Any], *, skew_seconds: int = 300) -> bool:
+    access_token = str(config.get('accessToken') or '').strip()
+    if not access_token:
+        return True
+    expires_at = _parse_iso_datetime(str(config.get('accessTokenExpiresAt') or ''))
+    if expires_at is None:
+        return False
+    return expires_at <= (_utc_now() + timedelta(seconds=skew_seconds))
+
+
+def _ensure_tiktok_access_token(config: dict[str, Any], *, session=None) -> tuple[str, dict[str, Any] | None]:
+    access_token = str(_config_value(config, 'accessToken') or '').strip()
+    refresh_token = str(_config_value(config, 'refreshToken') or '').strip()
+    if access_token and not _is_tiktok_access_token_stale(config):
+        return access_token, None
+    if not refresh_token:
+        if access_token:
+            return access_token, None
+        raise PreparedPublishError('TikTok publish requires accessToken or a refreshable TikTok connection')
+    http = _get_session(session)
+    token_payload = tiktok_auth.refresh_access_token(refresh_token=refresh_token, session=http)
+    next_config = _apply_tiktok_token_payload(config, token_payload)
+    return str(next_config.get('accessToken') or ''), next_config
 
 
 def _extract_media(payload: dict) -> dict[str, list[dict[str, str]]]:
@@ -650,9 +735,9 @@ def validate_youtube_config_live(config: dict[str, Any], *, session=None) -> dic
     return {"access_token": access_token, "channel": _response_payload(response)}
 
 
-def query_tiktok_creator_info(config: dict[str, Any], *, session=None) -> dict:
-    access_token = str(_config_value(config, "accessToken") or "").strip()
-    if not access_token:
+def query_tiktok_creator_info(config: dict[str, Any], *, access_token: str | None = None, session=None) -> dict:
+    resolved_access_token = str(access_token or _config_value(config, "accessToken") or "").strip()
+    if not resolved_access_token:
         raise PreparedPublishError("TikTok creator info query requires accessToken or accessTokenEnv")
     http = _get_session(session)
     response = http.post(
@@ -670,13 +755,12 @@ def query_tiktok_creator_info(config: dict[str, Any], *, session=None) -> dict:
 
 
 def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
-    config = account.config or {}
-    access_token = str(_config_value(config, "accessToken") or "").strip()
-    if not access_token:
-        raise PreparedPublishError("TikTok publish requires accessToken or accessTokenEnv")
-
+    config = dict(account.config or {})
     http = _get_session(session)
-    creator_info = query_tiktok_creator_info(config, session=http)
+    access_token, updated_config = _ensure_tiktok_access_token(config, session=http)
+    creator_info = query_tiktok_creator_info(config, access_token=access_token, session=http)
+    if updated_config is not None:
+        updated_config = _apply_tiktok_token_payload(updated_config, {'access_token': access_token}, creator_info)
     media = _extract_media(payload)
     message = _payload_message(payload)
     publish_mode = str(config.get("publishMode") or "direct").strip().lower()
@@ -717,6 +801,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             "creator_info": creator_info,
             "publish": _response_payload(response),
             "request": request_body,
+            "updated_config": updated_config,
         }
 
     if media["images"]:
@@ -753,6 +838,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             "creator_info": creator_info,
             "publish": _response_payload(response),
             "request": request_body,
+            "updated_config": updated_config,
         }
 
     raise PreparedPublishError("TikTok publish requires at least one video or image")

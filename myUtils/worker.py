@@ -455,7 +455,14 @@ async def _publish_prepared_tiktok(
 ) -> None:
     if account is None:
         raise ValueError("Prepared TikTok publish requires a structured account")
-    await asyncio.to_thread(prepared_publishers.publish_tiktok_sync, account, payload)
+    result = await asyncio.to_thread(prepared_publishers.publish_tiktok_sync, account, payload)
+    updated_config = result.get('updated_config') if isinstance(result, dict) else None
+    if isinstance(updated_config, dict) and updated_config:
+        profile_registry.update_account(
+            account.id,
+            config=updated_config,
+            auth_type='oauth',
+        )
 
 
 async def _publish_prepared_facebook(

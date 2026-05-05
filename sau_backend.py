@@ -23,6 +23,7 @@ from myUtils import llm_client
 from myUtils import media_groups as media_group_store
 from myUtils import media_pipeline
 from myUtils import profiles as profile_registry
+from myUtils import prepared_publishers
 from myUtils import rclone_storage
 from myUtils import tiktok_auth
 from myUtils import tiktok_review
@@ -1790,11 +1791,11 @@ def tiktok_oauth_callback():
         if account_id:
             account = profile_registry.get_account(int(account_id), db_path=db_path)
             merged_config = dict(account.config or {})
+            merged_config = prepared_publishers._apply_tiktok_token_payload(merged_config, token_payload, user_info)
             merged_config.update({
-                'accessToken': access_token,
-                'refreshToken': refresh_token,
-                'openId': token_payload.get('open_id') or user_info.get('data', {}).get('user', {}).get('open_id') or '',
+                'openId': token_payload.get('open_id') or user_info.get('data', {}).get('user', {}).get('open_id') or merged_config.get('openId') or '',
                 'scope': token_payload.get('scope') or ','.join(request_state.scopes),
+                'connectedAt': merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds'),
             })
             profile_registry.update_account(
                 int(account_id),
@@ -2079,13 +2080,13 @@ def accounts_refresh_token(account_id):
         access_token = str(token_payload.get('access_token') or '')
         next_refresh_token = str(token_payload.get('refresh_token') or refresh_token)
         user_info = tiktok_auth.fetch_user_info(access_token=access_token) if access_token else {}
+        config = prepared_publishers._apply_tiktok_token_payload(config, token_payload, user_info)
         config.update({
-            'accessToken': access_token,
-            'refreshToken': next_refresh_token,
             'openId': token_payload.get('open_id') or config.get('openId') or '',
             'scope': token_payload.get('scope') or config.get('scope') or '',
             'displayName': user_info.get('data', {}).get('user', {}).get('display_name') or config.get('displayName') or '',
             'avatarUrl': user_info.get('data', {}).get('user', {}).get('avatar_url') or config.get('avatarUrl') or '',
+            'lastManualRefreshAt': datetime.now().isoformat(timespec='seconds'),
         })
         updated = profile_registry.update_account(
             account_id,

@@ -186,6 +186,31 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[0][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads")
         self.assertEqual(session.calls[1][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads_publish")
 
+    def test_tiktok_publish_auto_refreshes_stale_token(self):
+        session = _RecordingSession([
+            _FakeResponse({'access_token': 'fresh-token', 'refresh_token': 'fresh-refresh', 'expires_in': 3600}),
+            _FakeResponse({'data': {'user': {'display_name': 'Demo', 'avatar_url': 'https://example.com/a.jpg'}}}),
+            _FakeResponse({'data': {'creator_avatar_url': 'x'}}),
+            _FakeResponse({'data': {'publish_id': 'tt-video-2'}}),
+        ])
+        account = SimpleNamespace(config={
+            'accessToken': 'stale-token',
+            'refreshToken': 'refresh-token',
+            'accessTokenExpiresAt': '2000-01-01T00:00:00+00:00',
+        })
+        with patch.dict(os.environ, {'TIKTOK_CLIENT_KEY': 'client-key', 'TIKTOK_CLIENT_SECRET': 'client-secret'}, clear=False):
+            result = prepared_publishers.publish_tiktok_sync(
+                account,
+                {
+                    'message': 'TikTok refreshed publish',
+                    'artifacts': [{'public_url': 'https://cdn.example/video.mp4', 'artifact_kind': 'remote_upload'}],
+                },
+                session=session,
+            )
+        self.assertEqual(session.calls[0][1], prepared_publishers.tiktok_auth.TIKTOK_OAUTH_TOKEN_URL)
+        self.assertEqual(result['updated_config']['accessToken'], 'fresh-token')
+        self.assertEqual(result['request']['source_info']['video_url'], 'https://cdn.example/video.mp4')
+
     def test_tiktok_video_direct_post_uses_video_init(self):
         session = _RecordingSession([
             _FakeResponse({'data': {'creator_avatar_url': 'x'}}),
