@@ -232,6 +232,58 @@ class CampaignApiTests(unittest.TestCase):
         self.assertIn("raw_remote_upload", artifact_kinds)
         self.assertTrue(any(artifact["artifact_kind"] == "raw_remote_upload" for artifact in artifacts))
 
+    def test_tiktok_admin_status_reports_expected_review_configuration(self) -> None:
+        response = self.client.get('/admin/tiktok/status')
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['redirectUri'], 'https://up.iamwillywang.com/oauth/tiktok/callback')
+        self.assertIn('Login Kit for Web', body['selectedProducts'])
+        self.assertIn('video.publish', body['selectedScopes'])
+
+    def test_refresh_tiktok_token_updates_structured_account(self) -> None:
+        profile_response = self.client.post(
+            '/profiles',
+            json={'name': 'TikTok Brand'},
+        )
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'tiktok',
+                'accountName': 'brand-tiktok',
+                'authType': 'oauth',
+                'config': {
+                    'accessToken': 'old-token',
+                    'refreshToken': 'refresh-token',
+                    'publishMode': 'direct',
+                },
+            },
+        )
+        self.assertEqual(account_response.status_code, 200)
+        account_id = account_response.get_json()['data']['id']
+
+        with patch.object(self.sau_backend.tiktok_auth, 'refresh_access_token', return_value={
+            'access_token': 'new-token',
+            'refresh_token': 'new-refresh',
+            'scope': 'user.info.basic,video.publish',
+            'open_id': 'open-123',
+        }), patch.object(self.sau_backend.tiktok_auth, 'fetch_user_info', return_value={
+            'data': {
+                'user': {
+                    'display_name': 'TikTok Demo',
+                    'avatar_url': 'https://example.com/avatar.jpg',
+                }
+            }
+        }):
+            response = self.client.post(f'/accounts/{account_id}/refresh-token')
+
+        self.assertEqual(response.status_code, 200)
+        config = response.get_json()['data']['config']
+        self.assertEqual(config['accessToken'], 'new-token')
+        self.assertEqual(config['refreshToken'], 'new-refresh')
+        self.assertEqual(config['openId'], 'open-123')
+        self.assertEqual(config['displayName'], 'TikTok Demo')
+
 
 if __name__ == "__main__":
     unittest.main()

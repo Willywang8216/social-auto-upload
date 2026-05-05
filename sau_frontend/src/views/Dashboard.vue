@@ -111,6 +111,15 @@
             </el-card>
           </el-col>
           <el-col :span="6">
+            <el-card class="action-card" @click="navigateTo('/tiktok-review')">
+              <div class="action-icon">
+                <el-icon><Connection /></el-icon>
+              </div>
+              <div class="action-title">TikTok callback</div>
+              <div class="action-desc">查看 callback / webhook 收件狀態</div>
+            </el-card>
+          </el-col>
+          <el-col :span="6">
             <el-card class="action-card" @click="navigateTo('/about')">
               <div class="action-icon">
                 <el-icon><DataAnalysis /></el-icon>
@@ -161,7 +170,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   User, UserFilled, Platform, Document,
-  Upload, Timer, DataAnalysis
+  Upload, Timer, DataAnalysis, Connection
 } from '@element-plus/icons-vue'
 import { accountApi } from '@/api/account'
 import { materialApi } from '@/api/material'
