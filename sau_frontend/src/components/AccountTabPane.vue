@@ -61,7 +61,18 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" min-width="320">
+        <el-table-column label="連線健康" min-width="180">
+          <template #default="scope">
+            <div class="connection-cell">
+              <el-tag :type="scope.row.connectionTagType || 'info'" effect="plain">
+                {{ scope.row.connectionLabel || '—' }}
+              </el-tag>
+              <div v-if="scope.row.connectionDetail" class="connection-detail">{{ scope.row.connectionDetail }}</div>
+              <div v-if="scope.row.connectionTimestamp" class="connection-timestamp">{{ scope.row.connectionTimestamp }}</div>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" min-width="360">
           <template #default="scope">
             <div class="row-actions">
               <el-button size="small" @click="$emit('edit', scope.row)">編輯</el-button>
@@ -79,6 +90,11 @@
                 :icon="Upload"
                 @click="$emit('upload-cookie', scope.row)"
               >上傳 Cookie</el-button>
+              <el-button
+                v-if="scope.row.supportsHealthAction"
+                size="small"
+                @click="$emit('health-check', scope.row)"
+              >{{ scope.row.healthActionKind === 'refresh' ? '刷新' : '檢查' }}</el-button>
               <el-button
                 v-if="scope.row.supportsRelogin"
                 size="small"
@@ -120,6 +136,7 @@ const emit = defineEmits([
   'upload-cookie',
   'refresh',
   'relogin',
+  'health-check',
   'search'
 ])
 
@@ -172,6 +189,20 @@ function getDefaultAvatar(name) {
 
   .account-list {
     margin-bottom: 20px;
+
+    .connection-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+
+      .connection-detail,
+      .connection-timestamp {
+        font-size: 12px;
+        color: #909399;
+        line-height: 1.4;
+        word-break: break-word;
+      }
+    }
 
     .row-actions {
       display: flex;

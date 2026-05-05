@@ -32,6 +32,7 @@
             @upload-cookie="handleUploadCookie"
             @refresh="refreshAccounts"
             @relogin="handleReLogin"
+            @health-check="runRowHealthCheck"
             @search="onSearchChange"
           />
         </el-tab-pane>
@@ -53,6 +54,7 @@
             @upload-cookie="handleUploadCookie"
             @refresh="refreshAccounts"
             @relogin="handleReLogin"
+            @health-check="runRowHealthCheck"
             @search="onSearchChange"
           />
         </el-tab-pane>
@@ -881,6 +883,34 @@ const handleDelete = (row) => {
       }
     })
     .catch(() => {})
+}
+
+const runRowHealthCheck = async (row) => {
+  if (!row || !row.id) return
+  try {
+    if (row.platformSlug === 'tiktok') {
+      const response = await profilesApi.refreshAccountToken(row.id)
+      accountStore.updateAccount(row.id, response?.data || row)
+      ElMessage.success('TikTok token 已刷新')
+      return
+    }
+    if (['reddit', 'youtube'].includes(row.platformSlug)) {
+      const response = await profilesApi.refreshAccountToken(row.id)
+      accountStore.updateAccount(row.id, response?.data || row)
+      ElMessage.success(`${row.platform} token 已刷新`)
+      return
+    }
+    if (['facebook', 'instagram', 'threads', 'telegram', 'discord'].includes(row.platformSlug)) {
+      const response = await profilesApi.checkAccountConnection(row.id)
+      accountStore.updateAccount(row.id, response?.data || row)
+      ElMessage.success(`${row.platform} connection checked`)
+      return
+    }
+    ElMessage.info('此帳號目前沒有可執行的健康檢查')
+  } catch (error) {
+    console.error('執行帳號健康檢查失敗:', error)
+    ElMessage.error(error?.message || '執行帳號健康檢查失敗')
+  }
 }
 
 const handleDownloadCookie = async (row) => {

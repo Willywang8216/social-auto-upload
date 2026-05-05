@@ -2,6 +2,9 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { getLegacyPlatformType, getPlatformLabel, getPublishPlatformSlug } from '@/utils/platforms'
 
+const HEALTH_REFRESH_PLATFORMS = new Set(['tiktok', 'reddit', 'youtube'])
+const HEALTH_CHECK_PLATFORMS = new Set(['facebook', 'instagram', 'threads', 'telegram', 'discord'])
+
 export const useAccountStore = defineStore('account', () => {
   const accounts = ref([])
 
@@ -9,6 +12,57 @@ export const useAccountStore = defineStore('account', () => {
     if (value === -1) return '驗證中'
     if (value === 1 || value === 'ok' || value === 'ready') return '正常'
     return '異常'
+  }
+
+  const deriveConnectionMeta = (platformSlug, config = {}, isLegacy = false) => {
+    if (isLegacy) {
+      return {
+        connectionLabel: 'Legacy',
+        connectionTagType: 'info',
+        connectionTimestamp: '',
+        connectionDetail: '',
+        supportsHealthAction: false,
+        healthActionKind: null
+      }
+    }
+
+    const timestamp = config.lastConnectionCheckAt || config.lastManualRefreshAt || config.lastAutoRefreshAt || config.connectedAt || config.accessTokenUpdatedAt || ''
+    let detail = ''
+    if (platformSlug === 'facebook') detail = config.facebookPageName || ''
+    else if (platformSlug === 'instagram') detail = config.instagramUserName || ''
+    else if (platformSlug === 'threads') detail = config.threadsUserName || ''
+    else if (platformSlug === 'telegram') detail = config.telegramChatTitle || config.telegramBotName || ''
+    else if (platformSlug === 'discord') detail = config.discordWebhookName || config.discordWebhookChannel || ''
+    else if (platformSlug === 'reddit') detail = config.redditUserName || ''
+    else if (platformSlug === 'youtube') detail = config.channelTitle || ''
+    else if (platformSlug === 'tiktok') detail = config.displayName || config.openId || ''
+
+    const hasCredential = Boolean(
+      config.accessToken ||
+      config.accessTokenEnv ||
+      config.botTokenEnv ||
+      config.webhookUrlEnv
+    )
+    const hasValidatedIdentity = Boolean(detail)
+
+    let connectionLabel = 'Missing'
+    let connectionTagType = 'danger'
+    if (hasValidatedIdentity || timestamp) {
+      connectionLabel = 'Ready'
+      connectionTagType = 'success'
+    } else if (hasCredential) {
+      connectionLabel = 'Configured'
+      connectionTagType = 'warning'
+    }
+
+    return {
+      connectionLabel,
+      connectionTagType,
+      connectionTimestamp: timestamp,
+      connectionDetail: detail,
+      supportsHealthAction: HEALTH_REFRESH_PLATFORMS.has(platformSlug) || HEALTH_CHECK_PLATFORMS.has(platformSlug),
+      healthActionKind: HEALTH_REFRESH_PLATFORMS.has(platformSlug) ? 'refresh' : (HEALTH_CHECK_PLATFORMS.has(platformSlug) ? 'check' : null)
+    }
   }
 
   const normalizeAccount = (item) => {
@@ -41,6 +95,7 @@ export const useAccountStore = defineStore('account', () => {
     const profileId = item.profileId ?? item.profile_id ?? null
     const filePath = item.filePath || item.cookiePath || item.cookie_path || ''
     const isLegacy = item.isLegacy ?? profileId == null
+    const config = item.config || {}
     return {
       id: item.id,
       type: item.type ?? getLegacyPlatformType(platformSlug),
@@ -54,11 +109,12 @@ export const useAccountStore = defineStore('account', () => {
       profileId,
       profileName: item.profileName || item.profile_name || (profileId == null ? 'Legacy' : ''),
       authType: item.authType || item.auth_type || 'cookie',
-      config: item.config || {},
+      config,
       enabled: item.enabled ?? true,
       isLegacy,
       supportsCookieActions: Boolean(filePath),
-      supportsRelogin: Boolean(isLegacy && getLegacyPlatformType(platformSlug) != null)
+      supportsRelogin: Boolean(isLegacy && getLegacyPlatformType(platformSlug) != null),
+      ...deriveConnectionMeta(platformSlug, config, isLegacy)
     }
   }
 
