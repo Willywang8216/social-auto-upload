@@ -55,13 +55,14 @@ export const useAccountStore = defineStore('account', () => {
       connectionTagType = 'warning'
     }
 
+    const metaRefreshable = ['facebook', 'instagram'].includes(platformSlug) && Boolean(config.metaUserAccessToken)
     return {
       connectionLabel,
       connectionTagType,
       connectionTimestamp: timestamp,
       connectionDetail: detail,
       supportsHealthAction: HEALTH_REFRESH_PLATFORMS.has(platformSlug) || HEALTH_CHECK_PLATFORMS.has(platformSlug),
-      healthActionKind: HEALTH_REFRESH_PLATFORMS.has(platformSlug) ? 'refresh' : (HEALTH_CHECK_PLATFORMS.has(platformSlug) ? 'check' : null)
+      healthActionKind: HEALTH_REFRESH_PLATFORMS.has(platformSlug) || metaRefreshable ? 'refresh' : (HEALTH_CHECK_PLATFORMS.has(platformSlug) ? 'check' : null)
     }
   }
 

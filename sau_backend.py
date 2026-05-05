@@ -1572,8 +1572,64 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 db_path=db_path,
             )
             summary = f"Threads refreshed: {config.get('threadsUserName') or updated.account_name}"
+        elif account.platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
+            meta_user_access_token = str(config.get('metaUserAccessToken') or '').strip()
+            if not meta_user_access_token:
+                raise ValueError(f"{account.platform.capitalize()} account is missing metaUserAccessToken; reconnect required")
+            meta_expiry = prepared_publishers._parse_iso_datetime(str(config.get('metaUserAccessTokenExpiresAt') or config.get('accessTokenExpiresAt') or ''))
+            if meta_expiry is not None and meta_expiry <= prepared_publishers._utc_now():
+                raise ValueError(f"{account.platform.capitalize()} Meta user access token expired; reconnect required")
+            pages_payload = meta_auth.fetch_managed_pages(access_token=meta_user_access_token)
+            pages = pages_payload.get('data', []) if isinstance(pages_payload, dict) else []
+            if not isinstance(pages, list):
+                pages = []
+            config['accessTokenUpdatedAt'] = now
+            config[('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt')] = now
+            if account.platform == profile_registry.PLATFORM_FACEBOOK:
+                wanted_page_id = str(config.get('pageId') or '').strip()
+                selected_page = next((page for page in pages if str(page.get('id') or '') == wanted_page_id), None) if wanted_page_id else None
+                if selected_page is None and pages:
+                    selected_page = pages[0]
+                if selected_page is None:
+                    raise ValueError('Meta refresh did not return any manageable Facebook Pages')
+                config['pageId'] = str(selected_page.get('id') or config.get('pageId') or '')
+                config['facebookPageName'] = str(selected_page.get('name') or config.get('facebookPageName') or '')
+                config['accessToken'] = str(selected_page.get('access_token') or config.get('accessToken') or '')
+                if config.get('metaUserAccessTokenExpiresAt'):
+                    config['accessTokenExpiresAt'] = str(config.get('metaUserAccessTokenExpiresAt'))
+                updated = profile_registry.update_account(account_id, config=config, auth_type='oauth', db_path=db_path)
+                summary = f"Facebook credentials re-synced: {config.get('facebookPageName') or updated.account_name}"
+            else:
+                wanted_ig_user_id = str(config.get('igUserId') or '').strip()
+                selected_pair = None
+                for page in pages:
+                    ig_user = page.get('instagram_business_account') if isinstance(page, dict) else None
+                    if not isinstance(ig_user, dict):
+                        continue
+                    if wanted_ig_user_id and str(ig_user.get('id') or '') != wanted_ig_user_id:
+                        continue
+                    selected_pair = (page, ig_user)
+                    break
+                if selected_pair is None:
+                    for page in pages:
+                        ig_user = page.get('instagram_business_account') if isinstance(page, dict) else None
+                        if isinstance(ig_user, dict):
+                            selected_pair = (page, ig_user)
+                            break
+                if selected_pair is None:
+                    raise ValueError('Meta refresh did not return a page-linked Instagram business account')
+                page, ig_user = selected_pair
+                config['pageId'] = str(page.get('id') or config.get('pageId') or '')
+                config['facebookPageName'] = str(page.get('name') or config.get('facebookPageName') or '')
+                config['igUserId'] = str(ig_user.get('id') or config.get('igUserId') or '')
+                config['instagramUserName'] = str(ig_user.get('username') or config.get('instagramUserName') or '')
+                config['accessToken'] = str(page.get('access_token') or config.get('accessToken') or '')
+                if config.get('metaUserAccessTokenExpiresAt'):
+                    config['accessTokenExpiresAt'] = str(config.get('metaUserAccessTokenExpiresAt'))
+                updated = profile_registry.update_account(account_id, config=config, auth_type='oauth', db_path=db_path)
+                summary = f"Instagram credentials re-synced: {config.get('instagramUserName') or updated.account_name}"
         else:
-            raise ValueError('Refresh is implemented only for TikTok, Reddit, YouTube, and Threads')
+            raise ValueError('Refresh is implemented only for TikTok, Reddit, YouTube, Threads, Facebook, and Instagram')
 
         account_events.record_event(
             account_id=updated.id,
@@ -1658,6 +1714,8 @@ _REFRESHABLE_PLATFORMS = (
     profile_registry.PLATFORM_REDDIT,
     profile_registry.PLATFORM_YOUTUBE,
     profile_registry.PLATFORM_THREADS,
+    profile_registry.PLATFORM_FACEBOOK,
+    profile_registry.PLATFORM_INSTAGRAM,
 )
 
 
@@ -1665,6 +1723,17 @@ def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_sec
     config = dict(account.config or {})
     if account.platform == profile_registry.PLATFORM_TIKTOK:
         return prepared_publishers._is_tiktok_access_token_stale(config, skew_seconds=skew_seconds)
+    if account.platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
+        meta_user_access_token = str(config.get('metaUserAccessToken') or '').strip()
+        if not meta_user_access_token:
+            return False
+        access_token = str(config.get('accessToken') or '').strip()
+        if not access_token:
+            return True
+        expires_at = prepared_publishers._parse_iso_datetime(str(config.get('metaUserAccessTokenExpiresAt') or config.get('accessTokenExpiresAt') or ''))
+        if expires_at is None:
+            return False
+        return expires_at <= (prepared_publishers._utc_now() + timedelta(seconds=skew_seconds))
     access_token = str(config.get('accessToken') or '').strip()
     if not access_token:
         return True
@@ -2262,7 +2331,9 @@ def meta_oauth_callback():
             merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
             expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
             if expires_in not in (None, ''):
-                merged_config['metaUserAccessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+                expiry = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+                merged_config['metaUserAccessTokenExpiresAt'] = expiry
+                merged_config['accessTokenExpiresAt'] = expiry
             merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
             updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', db_path=db_path)
             callback_payload = {
@@ -2317,7 +2388,9 @@ def meta_oauth_callback():
             merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
             expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
             if expires_in not in (None, ''):
-                merged_config['metaUserAccessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+                expiry = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+                merged_config['metaUserAccessTokenExpiresAt'] = expiry
+                merged_config['accessTokenExpiresAt'] = expiry
             merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
             updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', db_path=db_path)
             callback_payload = {
@@ -3461,9 +3534,10 @@ def accounts_health_summary():
     for account in accounts:
         state = _derive_state(account)
         summary[state] += 1
-        if account.platform in refresh_platforms:
+        is_meta_refreshable = account.platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM} and bool((account.config or {}).get('metaUserAccessToken'))
+        if account.platform in refresh_platforms or is_meta_refreshable:
             summary['refreshable'] += 1
-        if account.platform in check_platforms:
+        if account.platform in check_platforms and not is_meta_refreshable:
             summary['checkable'] += 1
         bucket = summary['byPlatform'].setdefault(account.platform, {'total': 0, 'ready': 0, 'configured': 0, 'missing': 0})
         bucket['total'] += 1

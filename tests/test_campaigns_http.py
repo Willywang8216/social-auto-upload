@@ -1217,6 +1217,84 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(body['platform'], 'threads')
         self.assertEqual(body['lastRequest']['state'], 'threads-state-2')
 
+    def test_refresh_facebook_token_resyncs_page_credentials(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'facebook',
+                'accountName': 'brand-facebook',
+                'authType': 'oauth',
+                'config': {
+                    'pageId': '123',
+                    'accessToken': 'page-token',
+                    'metaUserAccessToken': 'meta-user-token',
+                    'metaUserAccessTokenExpiresAt': '2099-01-01T00:00:00+00:00',
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '123', 'name': 'Brand Page 2', 'access_token': 'page-token-2'}]}):
+            response = self.client.post(f'/accounts/{account_id}/refresh-token')
+        self.assertEqual(response.status_code, 200)
+        config = response.get_json()['data']['config']
+        self.assertEqual(config['facebookPageName'], 'Brand Page 2')
+        self.assertEqual(config['accessToken'], 'page-token-2')
+        self.assertTrue(config['lastManualRefreshAt'])
+
+    def test_refresh_instagram_token_resyncs_page_backed_credentials(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'instagram',
+                'accountName': 'brand-instagram',
+                'authType': 'oauth',
+                'config': {
+                    'igUserId': 'ig-1',
+                    'accessToken': 'page-token',
+                    'metaUserAccessToken': 'meta-user-token',
+                    'metaUserAccessTokenExpiresAt': '2099-01-01T00:00:00+00:00',
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '321', 'name': 'Brand Page', 'access_token': 'page-token-2', 'instagram_business_account': {'id': 'ig-1', 'username': 'brand_ig_2'}}]}):
+            response = self.client.post(f'/accounts/{account_id}/refresh-token')
+        self.assertEqual(response.status_code, 200)
+        config = response.get_json()['data']['config']
+        self.assertEqual(config['pageId'], '321')
+        self.assertEqual(config['instagramUserName'], 'brand_ig_2')
+        self.assertEqual(config['accessToken'], 'page-token-2')
+        self.assertTrue(config['lastManualRefreshAt'])
+
+    def test_accounts_maintenance_run_resyncs_facebook_credentials(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'facebook',
+                'accountName': 'brand-facebook',
+                'authType': 'oauth',
+                'config': {
+                    'pageId': '123',
+                    'accessToken': 'page-token',
+                    'metaUserAccessToken': 'meta-user-token',
+                    'metaUserAccessTokenExpiresAt': '2000-01-01T00:00:00+00:00',
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '123', 'name': 'Brand Page 2', 'access_token': 'page-token-2'}]}):
+            response = self.client.post('/accounts/maintenance/run', json={'accountIds': [account_id], 'platforms': ['facebook']})
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['refreshed'], 0)
+        self.assertEqual(body['results'][0]['status'], 'error')
+
 
 if __name__ == "__main__":
     unittest.main()

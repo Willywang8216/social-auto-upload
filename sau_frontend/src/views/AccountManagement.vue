@@ -335,6 +335,7 @@
               </div>
               <div class="oauth-actions-row">
                 <el-button type="primary" plain @click="connectWithMeta('facebook')" :disabled="!accountForm.id">Connect with Facebook</el-button>
+                <el-button plain @click="refreshStructuredToken('facebook')" :disabled="!accountForm.id">Refresh Facebook token</el-button>
                 <el-button plain @click="checkStructuredConnection('facebook')" :disabled="!accountForm.id">Check Facebook connection</el-button>
                 <el-button plain @click="openOauthReviewStatus('facebook')" :disabled="!accountForm.id">Open OAuth status</el-button>
               </div>
@@ -357,6 +358,7 @@
               </div>
               <div class="oauth-actions-row">
                 <el-button type="primary" plain @click="connectWithMeta('instagram')" :disabled="!accountForm.id">Connect with Instagram</el-button>
+                <el-button plain @click="refreshStructuredToken('instagram')" :disabled="!accountForm.id">Refresh Instagram token</el-button>
                 <el-button plain @click="checkStructuredConnection('instagram')" :disabled="!accountForm.id">Check Instagram connection</el-button>
                 <el-button plain @click="openOauthReviewStatus('instagram')" :disabled="!accountForm.id">Open OAuth status</el-button>
               </div>
@@ -1398,6 +1400,10 @@ async function refreshStructuredToken(expectedPlatform) {
     accountForm.channelTitle = config.channelTitle || accountForm.channelTitle
     accountForm.threadUserId = config.threadUserId || accountForm.threadUserId
     accountForm.threadsUserName = config.threadsUserName || accountForm.threadsUserName
+    accountForm.pageId = config.pageId || accountForm.pageId
+    accountForm.facebookPageName = config.facebookPageName || accountForm.facebookPageName
+    accountForm.igUserId = config.igUserId || accountForm.igUserId
+    accountForm.instagramUserName = config.instagramUserName || accountForm.instagramUserName
     ElMessage.success(`${account.platform} token 已刷新`)
   } catch (error) {
     console.error('刷新平台 token 失敗:', error)
