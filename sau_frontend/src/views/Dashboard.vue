@@ -98,6 +98,27 @@
             </div>
           </el-card>
         </el-col>
+        <el-col :span="8">
+          <el-card class="stat-card">
+            <div class="stat-card-content">
+              <div class="stat-icon platform-icon">
+                <el-icon><Timer /></el-icon>
+              </div>
+              <div class="stat-info">
+                <div class="stat-value">{{ maintenanceStatus.running ? 'Running' : (maintenanceStatus.enabled ? 'Ready' : 'Off') }}</div>
+                <div class="stat-label">維護排程</div>
+              </div>
+            </div>
+            <div class="stat-footer">
+              <div class="stat-detail maintenance-detail">
+                <span>Next：{{ nextMaintenanceRunLabel }}</span>
+                <span>Last：{{ maintenanceStatus.lastFinishedAt || '—' }}</span>
+                <span v-if="maintenanceStatus.lastResult">Refreshed：{{ maintenanceStatus.lastResult.refreshed || 0 }}</span>
+                <span v-if="maintenanceStatus.lastError" class="maintenance-error">Error：{{ maintenanceStatus.lastError }}</span>
+              </div>
+            </div>
+          </el-card>
+        </el-col>
 
       </el-row>
 
@@ -269,6 +290,7 @@ const accountStore = useAccountStore()
 const appStore = useAppStore()
 const loading = ref(false)
 const healthSummary = ref({ total: 0, ready: 0, configured: 0, missing: 0, refreshable: 0, checkable: 0, expirySummary: { overdue: 0, expiringWithin24h: 0, expiringWithin7d: 0, reconnectRequired: 0 }, recentEventTotals: { total: 0, ok: 0, error: 0 }, expiringAccounts: [], recentEvents: [] })
+const maintenanceStatus = ref({ enabled: false, running: false, intervalSeconds: 0, lastFinishedAt: '', lastStartedAt: '', lastResult: null, lastError: null })
 const dashboardPlatforms = LEGACY_ACCOUNT_PLATFORM_ORDER
   .map((publishSlug) =>
     ACCOUNT_PLATFORM_OPTIONS.find((platform) => platform.publishSlug === publishSlug)
@@ -351,6 +373,17 @@ const formatRemaining = (seconds) => {
   return `${days}d`
 }
 
+const nextMaintenanceRunLabel = computed(() => {
+  const intervalSeconds = Number(maintenanceStatus.value?.intervalSeconds || 0)
+  if (!maintenanceStatus.value?.enabled || intervalSeconds <= 0) return '—'
+  if (maintenanceStatus.value?.running) return 'running now'
+  const reference = maintenanceStatus.value?.lastFinishedAt || maintenanceStatus.value?.lastStartedAt
+  if (!reference) return 'waiting for first run'
+  const parsed = new Date(reference)
+  if (Number.isNaN(parsed.getTime())) return '—'
+  return new Date(parsed.getTime() + intervalSeconds * 1000).toISOString()
+})
+
 // 导航到指定路由
 const navigateTo = (path) => {
   router.push(path)
@@ -373,10 +406,11 @@ const fetchDashboardData = async () => {
   loading.value = true
   try {
     // 并行获取账号和素材数据
-    const [accountRes, materialRes, healthRes] = await Promise.allSettled([
+    const [accountRes, materialRes, healthRes, maintenanceRes] = await Promise.allSettled([
       accountApi.getAccounts(),
       materialApi.getAllMaterials(),
-      accountApi.getHealthSummary()
+      accountApi.getHealthSummary(),
+      accountApi.getMaintenanceStatus()
     ])
 
     if (accountRes.status === 'fulfilled' && accountRes.value.code === 200) {
@@ -387,6 +421,9 @@ const fetchDashboardData = async () => {
     }
     if (healthRes.status === 'fulfilled' && healthRes.value.code === 200) {
       healthSummary.value = healthRes.value.data
+    }
+    if (maintenanceRes.status === 'fulfilled' && maintenanceRes.value.code === 200) {
+      maintenanceStatus.value = maintenanceRes.value.data
     }
   } catch (error) {
     console.error('取得儀表板資料失敗:', error)
@@ -481,6 +518,16 @@ onMounted(() => {
           gap: 8px;
           color: $text-secondary;
           font-size: 13px;
+
+          &.maintenance-detail {
+            span {
+              word-break: break-word;
+            }
+          }
+
+          .maintenance-error {
+            color: $danger-color;
+          }
 
           .el-tag {
             margin-right: 5px;
