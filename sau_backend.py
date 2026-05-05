@@ -2869,6 +2869,28 @@ def oauth_admin_status():
     last_callback = next((event for event in events if event.action == 'oauth_callback'), None)
     last_refresh = next((event for event in events if event.action == 'refresh_token'), None)
 
+    account_payload = None
+    expiry = None
+    recommended_action = ''
+    reconnect_required = False
+    if account_id is not None:
+        try:
+            account = profile_registry.get_account(account_id, db_path=db_path)
+            account_payload = _account_payload(account)
+            config = dict(account.config or {})
+            if platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
+                expiry = str(config.get('metaUserAccessTokenExpiresAt') or config.get('accessTokenExpiresAt') or '')
+                expires_at = prepared_publishers._parse_iso_datetime(expiry)
+                reconnect_required = bool(expires_at and expires_at <= prepared_publishers._utc_now())
+                recommended_action = 'reconnect' if reconnect_required else ('refresh' if config.get('metaUserAccessToken') else 'connect')
+            else:
+                expiry = str(config.get('accessTokenExpiresAt') or '')
+                expires_at = prepared_publishers._parse_iso_datetime(expiry)
+                recommended_action = 'refresh' if expiry or config.get('accessToken') else 'connect'
+                reconnect_required = False
+        except LookupError:
+            account_payload = None
+
     return jsonify({
         'code': 200,
         'msg': 'ok',
@@ -2882,6 +2904,10 @@ def oauth_admin_status():
             'lastStart': last_start.to_dict() if last_start else None,
             'lastCallback': last_callback.to_dict() if last_callback else None,
             'lastRefresh': last_refresh.to_dict() if last_refresh else None,
+            'account': account_payload,
+            'expiresAt': expiry,
+            'reconnectRequired': reconnect_required,
+            'recommendedAction': recommended_action,
             'recentEvents': [event.to_dict() for event in events],
         },
     }), 200

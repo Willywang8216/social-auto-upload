@@ -30,6 +30,22 @@
     <el-row :gutter="20" class="status-row">
       <el-col :span="12">
         <el-card>
+          <template #header>Account lifecycle</template>
+          <div v-if="status.account" class="event-card">
+            <div class="kv"><span>Account</span><strong>{{ status.account.account_name || status.account.accountName || '—' }}</strong></div>
+            <div class="kv"><span>Connected</span><strong>{{ status.account.config?.connectedAt || '—' }}</strong></div>
+            <div class="kv"><span>Expires</span><strong>{{ status.expiresAt || '—' }}</strong></div>
+            <div class="kv"><span>Reconnect</span><strong>{{ status.reconnectRequired ? 'yes' : 'no' }}</strong></div>
+            <div class="kv"><span>Action</span><strong>{{ status.recommendedAction || '—' }}</strong></div>
+            <div class="jump-actions">
+              <el-button plain size="small" @click="goToAccountQueue">Open account queue</el-button>
+            </div>
+          </div>
+          <el-empty v-else description="No account snapshot available" />
+        </el-card>
+      </el-col>
+      <el-col :span="12">
+        <el-card>
           <template #header>Last request / callback</template>
           <div v-if="status.lastRequest || status.lastCallback" class="event-card">
             <div class="kv"><span>Last request</span><strong>{{ status.lastRequest?.requestedAt || '—' }}</strong></div>
@@ -68,11 +84,12 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { oauthApi } from '@/api/oauth'
 
 const route = useRoute()
+const router = useRouter()
 const loading = ref(false)
 const status = reactive({
   platform: '',
@@ -84,7 +101,11 @@ const status = reactive({
   lastStart: null,
   lastCallback: null,
   lastRefresh: null,
-  recentEvents: []
+  recentEvents: [],
+  account: null,
+  expiresAt: '',
+  reconnectRequired: false,
+  recommendedAction: ''
 })
 
 const platform = computed(() => {
@@ -98,6 +119,15 @@ const accountId = computed(() => {
   return value ? Number(value) : null
 })
 const title = computed(() => `${platform.value || 'OAuth'} status`)
+
+function goToAccountQueue() {
+  const query = {}
+  if (status.reconnectRequired) query.risk = 'reconnect_required'
+  else if (status.recommendedAction === 'refresh' && status.expiresAt) query.risk = 'expiring_7d'
+  if (platform.value) query.platform = platform.value
+  if (status.account?.profile_id != null) query.profile = String(status.account.profile_id)
+  router.push({ path: '/account-management', query })
+}
 
 async function refreshStatus() {
   if (!platform.value) return
@@ -134,6 +164,10 @@ watch([platform, accountId], refreshStatus)
   .status-row,
   .events-card {
     margin-top: 20px;
+  }
+
+  .jump-actions {
+    margin-top: 12px;
   }
 
   .kv {
