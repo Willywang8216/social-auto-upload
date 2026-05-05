@@ -45,6 +45,8 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/oauth/tiktok/callback/",
     "/oauth/reddit/callback",
     "/oauth/reddit/callback/",
+    "/oauth/youtube/callback",
+    "/oauth/youtube/callback/",
     "/webhooks/tiktok",
     "/webhooks/tiktok/",
 })

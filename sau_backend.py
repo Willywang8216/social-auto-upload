@@ -28,6 +28,8 @@ from myUtils import account_events
 from myUtils import rclone_storage
 from myUtils import reddit_auth
 from myUtils import reddit_review
+from myUtils import youtube_auth
+from myUtils import youtube_review
 from myUtils import tiktok_auth
 from myUtils import tiktok_review
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
@@ -114,6 +116,13 @@ def _tiktok_client_secret() -> str:
         or os.environ.get("TIKTOK_APP_SECRET")
         or ""
     ).strip()
+
+
+def _youtube_callback_base_url() -> str:
+    configured = str(os.environ.get("SAU_YOUTUBE_CALLBACK_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return "https://up.iamwillywang.com/oauth/youtube/callback"
 
 
 def _reddit_callback_base_url() -> str:
@@ -2095,6 +2104,185 @@ def _generate_platform_draft(
 
 def _default_sheet_title(profile: profile_registry.Profile) -> str:
     return f"{datetime.now().strftime('%Y-%m-%d')}-{profile.slug}"
+
+
+@app.route('/oauth/youtube/start', methods=['POST'])
+def youtube_oauth_start():
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        raw_account_id = data.get('accountId')
+        if raw_account_id in (None, ''):
+            raise ValueError('Please save the YouTube account before connecting OAuth')
+        account_id = int(raw_account_id)
+        account = profile_registry.get_account(account_id, db_path=db_path)
+        if account.platform != profile_registry.PLATFORM_YOUTUBE:
+            raise ValueError('OAuth connect is only available for YouTube accounts on this route')
+        state_token = youtube_auth.build_state_token()
+        redirect_uri = str(data.get('redirectUri') or _youtube_callback_base_url() or youtube_auth.default_redirect_uri()).strip()
+        scopes = data.get('scopes') if isinstance(data.get('scopes'), list) and data.get('scopes') else list(youtube_auth.DEFAULT_SCOPES)
+        config = dict(account.config or {})
+        client_id_env = str(config.get('clientIdEnv') or youtube_auth.CLIENT_ID_ENV)
+        authorize_url = youtube_auth.build_authorize_url_from_env(
+            state=state_token,
+            redirect_uri=redirect_uri,
+            scopes=tuple(str(scope) for scope in scopes),
+            client_id_env=client_id_env,
+        )
+        youtube_review.create_oauth_request(
+            state_token=state_token,
+            profile_id=account.profile_id,
+            account_id=account.id,
+            account_name=account.account_name,
+            redirect_uri=redirect_uri,
+            scopes=[str(scope) for scope in scopes],
+            db_path=db_path,
+        )
+        account_events.record_event(
+            account_id=account.id,
+            profile_id=account.profile_id,
+            platform=account.platform,
+            account_name=account.account_name,
+            action='oauth_start',
+            status='ok',
+            summary='YouTube OAuth flow started',
+            metadata={'state': state_token, 'redirectUri': redirect_uri, 'scopes': scopes},
+            db_path=db_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({'code': 400, 'msg': str(exc), 'data': None}), 400
+    return jsonify({'code': 200, 'msg': 'ok', 'data': {'authorizeUrl': authorize_url, 'state': state_token}}), 200
+
+
+@app.route('/oauth/youtube/callback', methods=['GET'])
+def youtube_oauth_callback():
+    db_path = _current_db_path()
+    state_token = str(request.args.get('state', '') or '')
+    code = str(request.args.get('code', '') or '')
+    error = str(request.args.get('error', '') or '')
+    request_state = youtube_review.get_oauth_request(state_token, db_path=db_path)
+    if not request_state:
+        return Response('Unknown YouTube OAuth state', status=400, mimetype='text/plain')
+
+    if error:
+        youtube_review.complete_oauth_request(state_token, status='error', error_text=error, result={'state': state_token, 'error': error}, db_path=db_path)
+        if request_state.account_id:
+            account_events.record_event(
+                account_id=request_state.account_id,
+                profile_id=request_state.profile_id,
+                platform=profile_registry.PLATFORM_YOUTUBE,
+                account_name=request_state.account_name or '',
+                action='oauth_callback',
+                status='error',
+                summary='YouTube OAuth callback failed',
+                error_text=error,
+                metadata={'state': state_token},
+                db_path=db_path,
+            )
+        return Response("""<html><body><script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'sau:youtube-oauth', ok: false, error: %r }, '*');
+            }
+            window.close();
+            </script><p>YouTube authorization failed. You may close this window.</p></body></html>""" % error, mimetype='text/html')
+
+    try:
+        if not request_state.account_id:
+            raise ValueError('YouTube OAuth request is missing accountId')
+        account = profile_registry.get_account(int(request_state.account_id), db_path=db_path)
+        config = dict(account.config or {})
+        client_id_env = str(config.get('clientIdEnv') or youtube_auth.CLIENT_ID_ENV)
+        client_secret_env = str(config.get('clientSecretEnv') or youtube_auth.CLIENT_SECRET_ENV)
+        token_payload = youtube_auth.exchange_code_for_token(
+            code=code,
+            redirect_uri=request_state.redirect_uri,
+            client_id_env=client_id_env,
+            client_secret_env=client_secret_env,
+        )
+        access_token = str(token_payload.get('access_token') or '')
+        refresh_token = str(token_payload.get('refresh_token') or '')
+        channels = youtube_auth.fetch_my_channels(access_token=access_token) if access_token else {}
+        items = channels.get('items', []) if isinstance(channels, dict) else []
+        first = items[0] if items and isinstance(items[0], dict) else {}
+        snippet = first.get('snippet', {}) if isinstance(first, dict) else {}
+        merged_config = dict(config)
+        if access_token:
+            merged_config['accessToken'] = access_token
+        if refresh_token:
+            merged_config['refreshToken'] = refresh_token
+        merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
+        expires_in = token_payload.get('expires_in')
+        if expires_in not in (None, ''):
+            merged_config['accessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+        if first.get('id'):
+            merged_config['channelId'] = first.get('id')
+        if snippet.get('title'):
+            merged_config['channelTitle'] = snippet.get('title')
+        merged_config['scope'] = str(token_payload.get('scope') or merged_config.get('scope') or ' '.join(request_state.scopes))
+        merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
+        updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', db_path=db_path)
+        callback_payload = {
+            'state': state_token,
+            'status': 'ok',
+            'accountId': updated.id,
+            'accountName': updated.account_name,
+            'accessToken': merged_config.get('accessToken', ''),
+            'refreshToken': merged_config.get('refreshToken', ''),
+            'channelId': merged_config.get('channelId', ''),
+            'channelTitle': merged_config.get('channelTitle', ''),
+            'scope': merged_config.get('scope', ''),
+            'accessTokenExpiresAt': merged_config.get('accessTokenExpiresAt', ''),
+            'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
+            'connectedAt': merged_config.get('connectedAt', ''),
+        }
+        youtube_review.complete_oauth_request(
+            state_token,
+            status='completed',
+            result={
+                'state': state_token,
+                'status': 'ok',
+                'accountId': updated.id,
+                'accountName': updated.account_name,
+                'channelId': merged_config.get('channelId', ''),
+                'channelTitle': merged_config.get('channelTitle', ''),
+                'scope': merged_config.get('scope', ''),
+            },
+            db_path=db_path,
+        )
+        account_events.record_event(
+            account_id=updated.id,
+            profile_id=updated.profile_id,
+            platform=updated.platform,
+            account_name=updated.account_name,
+            action='oauth_callback',
+            status='ok',
+            summary=f"YouTube connected: {merged_config.get('channelTitle') or updated.account_name}",
+            metadata={'state': state_token, 'scope': merged_config.get('scope', '')},
+            db_path=db_path,
+        )
+        html = f"""<html><body><script>
+        if (window.opener) {{
+          window.opener.postMessage({{ type: 'sau:youtube-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
+        }}
+        window.close();
+        </script><p>YouTube authorization completed. You may close this window.</p></body></html>"""
+        return Response(html, mimetype='text/html')
+    except Exception as exc:  # noqa: BLE001
+        youtube_review.complete_oauth_request(state_token, status='error', error_text=str(exc), result={'state': state_token, 'error': str(exc)}, db_path=db_path)
+        if request_state.account_id:
+            account_events.record_event(
+                account_id=request_state.account_id,
+                profile_id=request_state.profile_id,
+                platform=profile_registry.PLATFORM_YOUTUBE,
+                account_name=request_state.account_name or '',
+                action='oauth_callback',
+                status='error',
+                summary='YouTube OAuth callback failed',
+                error_text=str(exc),
+                metadata={'state': state_token},
+                db_path=db_path,
+            )
+        return Response(f"<html><body><p>YouTube callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
 
 
 @app.route('/oauth/reddit/start', methods=['POST'])

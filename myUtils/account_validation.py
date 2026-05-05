@@ -106,15 +106,19 @@ def validate_structured_account_config(
             errors.append("Telegram 帳號缺少 botToken 或 botTokenEnv")
 
     if platform == profiles.PLATFORM_YOUTUBE:
-        if not _present(config.get("channelId")):
-            errors.append("YouTube 帳號缺少 channelId")
+        has_channel_id = _present(config.get("channelId"))
         has_access_token = _present(_config_value(config, "accessToken"))
         has_oauth_triplet = all(
             _present(_config_value(config, key))
-            for key in ("clientId", "clientSecret", "refreshToken")
+            for key in ("clientId", "clientSecret")
         )
-        if not has_access_token and not has_oauth_triplet:
+        has_refresh_token = _present(_config_value(config, "refreshToken"))
+        if not has_access_token and not (has_oauth_triplet and has_refresh_token):
             errors.append("YouTube 帳號需要 accessToken 或 clientId/clientSecret/refreshToken")
+        if not has_channel_id and has_oauth_triplet:
+            warnings.append("YouTube channelId 可在 OAuth Connect 完成後自動回填")
+        elif not has_channel_id:
+            errors.append("YouTube 帳號缺少 channelId")
 
     if platform == profiles.PLATFORM_FACEBOOK:
         if not _present(config.get("pageId")):
@@ -154,7 +158,10 @@ def validate_structured_account_config(
             elif platform == profiles.PLATFORM_REDDIT:
                 metadata["reddit"] = prepared_publishers.validate_reddit_config_live(config, session=session)
             elif platform == profiles.PLATFORM_YOUTUBE:
-                metadata["youtube"] = prepared_publishers.validate_youtube_config_live(config, session=session)
+                if _present(config.get('channelId')):
+                    metadata["youtube"] = prepared_publishers.validate_youtube_config_live(config, session=session)
+                else:
+                    warnings.append('YouTube live 驗證已略過，等待 OAuth Connect 自動填入 channelId')
             elif platform == profiles.PLATFORM_FACEBOOK:
                 metadata["facebook"] = prepared_publishers.validate_facebook_config_live(config, session=session)
             elif platform == profiles.PLATFORM_INSTAGRAM:

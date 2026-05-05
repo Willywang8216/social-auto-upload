@@ -843,6 +843,89 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(account['config']['refreshToken'], 'reddit-refresh')
         self.assertEqual(account['config']['redditUserName'], 'reddit-user')
 
+    def test_validate_account_config_allows_youtube_oauth_without_channel_id(self) -> None:
+        response = self.client.post(
+            '/accounts/validate-config',
+            json={
+                'platform': 'youtube',
+                'authType': 'oauth',
+                'config': {
+                    'clientIdEnv': 'YT_CLIENT_ID',
+                    'clientSecretEnv': 'YT_CLIENT_SECRET',
+                    'refreshTokenEnv': 'YT_REFRESH_TOKEN',
+                },
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertTrue(body['valid'])
+        self.assertTrue(body['warnings'])
+
+    def test_youtube_oauth_start_persists_request_and_returns_authorize_url(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'YouTube Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'youtube',
+                'accountName': 'brand-youtube',
+                'authType': 'oauth',
+                'config': {
+                    'clientIdEnv': 'YT_CLIENT_ID',
+                    'clientSecretEnv': 'YT_CLIENT_SECRET',
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.youtube_auth, 'build_authorize_url_from_env', return_value='https://accounts.google.com/o/oauth2/v2/auth?demo=1'):
+            response = self.client.post('/oauth/youtube/start', json={
+                'profileId': profile_id,
+                'accountId': account_id,
+                'accountName': 'brand-youtube',
+                'scopes': ['https://www.googleapis.com/auth/youtube.upload'],
+            })
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['authorizeUrl'], 'https://accounts.google.com/o/oauth2/v2/auth?demo=1')
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute('SELECT COUNT(*) FROM youtube_oauth_requests WHERE account_id = ?', (account_id,)).fetchone()
+        self.assertEqual(row[0], 1)
+
+    def test_youtube_oauth_callback_updates_structured_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'YouTube Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'youtube',
+                'accountName': 'brand-youtube',
+                'authType': 'oauth',
+                'config': {
+                    'clientIdEnv': 'YT_CLIENT_ID',
+                    'clientSecretEnv': 'YT_CLIENT_SECRET',
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                'INSERT INTO youtube_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                ('youtube-state-1', profile_id, account_id, 'brand-youtube', 'https://up.iamwillywang.com/oauth/youtube/callback', '["https://www.googleapis.com/auth/youtube.upload"]', 'started'),
+            )
+            conn.commit()
+        with patch.object(self.sau_backend.youtube_auth, 'exchange_code_for_token', return_value={
+            'access_token': 'yt-access',
+            'refresh_token': 'yt-refresh',
+            'expires_in': 3600,
+            'scope': 'https://www.googleapis.com/auth/youtube.upload',
+        }), patch.object(self.sau_backend.youtube_auth, 'fetch_my_channels', return_value={'items': [{'id': 'UC123', 'snippet': {'title': 'Demo Channel'}}]}):
+            response = self.client.get('/oauth/youtube/callback?state=youtube-state-1&code=demo-code')
+        self.assertEqual(response.status_code, 200)
+        account = self.client.get(f'/profiles/{profile_id}/accounts').get_json()['data'][0]
+        self.assertEqual(account['config']['refreshToken'], 'yt-refresh')
+        self.assertEqual(account['config']['channelId'], 'UC123')
+        self.assertEqual(account['config']['channelTitle'], 'Demo Channel')
+
 
 if __name__ == "__main__":
     unittest.main()

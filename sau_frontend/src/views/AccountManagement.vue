@@ -292,6 +292,7 @@
                 <div class="health-row"><span>Last manual refresh</span><strong>{{ accountForm.lastManualRefreshAt || '—' }}</strong></div>
               </div>
               <div class="oauth-actions-row">
+                <el-button type="primary" plain @click="connectWithYouTube" :disabled="!accountForm.id">Connect with YouTube</el-button>
                 <el-button plain @click="refreshStructuredToken('youtube')" :disabled="!accountForm.id">Refresh YouTube token</el-button>
               </div>
             </el-form-item>
@@ -544,6 +545,7 @@ import { accountApi } from '@/api/account'
 import { profilesApi } from '@/api/profiles'
 import { redditApi } from '@/api/reddit'
 import { tiktokApi } from '@/api/tiktok'
+import { youtubeApi } from '@/api/youtube'
 import AccountTabPane from '@/components/AccountTabPane.vue'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
@@ -932,6 +934,7 @@ onMounted(() => {
   fetchMaintenanceStatus()
   window.addEventListener('message', handleTikTokOauthMessage)
   window.addEventListener('message', handleRedditOauthMessage)
+  window.addEventListener('message', handleYouTubeOauthMessage)
   setTimeout(() => {
     fetchAccounts(true)
   }, 100)
@@ -1248,6 +1251,32 @@ async function connectWithReddit() {
   }
 }
 
+async function connectWithYouTube() {
+  if (!accountForm.id) {
+    ElMessage.warning('請先儲存 YouTube 帳號，再使用 Connect with YouTube')
+    return
+  }
+  const popup = window.open('', 'youtube-connect', 'width=720,height=820')
+  if (!popup) {
+    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
+    return
+  }
+  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to YouTube...</p>')
+  try {
+    const response = await youtubeApi.startOAuth({
+      profileId: accountForm.profileId,
+      accountId: accountForm.id,
+      accountName: accountForm.name,
+      scopes: ['https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly']
+    })
+    popup.location = response.data.authorizeUrl
+  } catch (error) {
+    popup.close()
+    console.error('YouTube connect 啟動失敗:', error)
+    ElMessage.error(error?.message || 'YouTube connect 啟動失敗')
+  }
+}
+
 async function checkStructuredConnection(expectedPlatform) {
   if (!accountForm.id) {
     ElMessage.warning('請先儲存帳號，再檢查連線')
@@ -1354,6 +1383,24 @@ function handleRedditOauthMessage(event) {
   accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
   ElMessage.success('Reddit 已連線，可直接儲存帳號設定')
+}
+
+function handleYouTubeOauthMessage(event) {
+  const payload = event?.data
+  if (!payload || payload.type !== 'sau:youtube-oauth') return
+  if (!payload.ok) {
+    ElMessage.error(payload.error || 'YouTube 授權失敗')
+    return
+  }
+  const data = payload.data || {}
+  accountForm.accessToken = data.accessToken || accountForm.accessToken
+  accountForm.refreshToken = data.refreshToken || accountForm.refreshToken
+  accountForm.channelId = data.channelId || accountForm.channelId
+  accountForm.channelTitle = data.channelTitle || accountForm.channelTitle
+  accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
+  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
+  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
+  ElMessage.success('YouTube 已連線，可直接儲存帳號設定')
 }
 
 function handleTikTokOauthMessage(event) {
@@ -1469,12 +1516,18 @@ const buildStructuredConfig = () => {
       break
     case 'youtube':
       assignIfValue(config, 'channelId', accountForm.channelId.trim())
+      assignIfValue(config, 'channelTitle', accountForm.channelTitle.trim())
       assignIfValue(config, 'privacyStatus', accountForm.privacyStatus)
       assignIfValue(config, 'playlistId', accountForm.playlistId.trim())
       assignIfValue(config, 'categoryId', accountForm.categoryId.trim())
       assignIfValue(config, 'clientIdEnv', accountForm.clientIdEnv.trim())
       assignIfValue(config, 'clientSecretEnv', accountForm.clientSecretEnv.trim())
       assignIfValue(config, 'refreshTokenEnv', accountForm.refreshTokenEnv.trim())
+      assignIfValue(config, 'accessToken', accountForm.accessToken.trim())
+      assignIfValue(config, 'refreshToken', accountForm.refreshToken.trim())
+      assignIfValue(config, 'accessTokenExpiresAt', accountForm.accessTokenExpiresAt.trim())
+      assignIfValue(config, 'accessTokenUpdatedAt', accountForm.accessTokenUpdatedAt.trim())
+      assignIfValue(config, 'connectedAt', accountForm.connectedAt.trim())
       break
     case 'facebook':
       assignIfValue(config, 'pageId', accountForm.pageId.trim())
@@ -1596,6 +1649,7 @@ onBeforeUnmount(() => {
   closeSSEConnection()
   window.removeEventListener('message', handleTikTokOauthMessage)
   window.removeEventListener('message', handleRedditOauthMessage)
+  window.removeEventListener('message', handleYouTubeOauthMessage)
 })
 </script>
 
