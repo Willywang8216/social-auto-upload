@@ -284,6 +284,80 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(config['openId'], 'open-123')
         self.assertEqual(config['displayName'], 'TikTok Demo')
 
+    def test_tiktok_oauth_start_persists_request_and_returns_authorize_url(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'TikTok Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'tiktok',
+                'accountName': 'brand-tiktok',
+                'authType': 'oauth',
+                'config': {'publishMode': 'direct', 'accessTokenEnv': 'TIKTOK_ACCESS_TOKEN'},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+
+        with patch.object(self.sau_backend.tiktok_auth, 'build_authorize_url_from_env', return_value='https://www.tiktok.com/v2/auth/authorize/?demo=1'):
+            response = self.client.post('/oauth/tiktok/start', json={
+                'profileId': profile_id,
+                'accountId': account_id,
+                'accountName': 'brand-tiktok',
+                'scopes': ['user.info.basic', 'video.publish'],
+            })
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['authorizeUrl'], 'https://www.tiktok.com/v2/auth/authorize/?demo=1')
+        status = self.client.get('/admin/tiktok/status').get_json()['data']
+        self.assertTrue(any(event['type'] == 'start' for event in status['recentEvents']))
+
+    def test_tiktok_oauth_callback_updates_account_and_status(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'TikTok Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'tiktok',
+                'accountName': 'brand-tiktok',
+                'authType': 'oauth',
+                'config': {'publishMode': 'direct', 'accessTokenEnv': 'TIKTOK_ACCESS_TOKEN'},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                'INSERT INTO tiktok_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                ('state-123', profile_id, account_id, 'brand-tiktok', 'https://up.iamwillywang.com/oauth/tiktok/callback', '["user.info.basic", "video.publish"]', 'started'),
+            )
+            conn.commit()
+
+        with patch.object(self.sau_backend.tiktok_auth, 'exchange_code_for_token', return_value={
+            'access_token': 'token-1',
+            'refresh_token': 'refresh-1',
+            'open_id': 'open-1',
+            'scope': 'user.info.basic,video.publish',
+        }), patch.object(self.sau_backend.tiktok_auth, 'fetch_user_info', return_value={
+            'data': {'user': {'display_name': 'TikTok Demo', 'avatar_url': 'https://example.com/avatar.jpg'}}
+        }):
+            response = self.client.get('/oauth/tiktok/callback?state=state-123&code=demo-code')
+
+        self.assertEqual(response.status_code, 200)
+        account = self.client.get(f'/profiles/{profile_id}/accounts').get_json()['data'][0]
+        self.assertEqual(account['config']['accessToken'], 'token-1')
+        status = self.client.get('/admin/tiktok/status').get_json()['data']
+        self.assertEqual(status['lastCallback']['status'], 'ok')
+        self.assertEqual(status['lastCallback']['displayName'], 'TikTok Demo')
+
+    def test_tiktok_webhook_records_signature_status(self) -> None:
+        response = self.client.post('/webhooks/tiktok', json={'event': 'demo'})
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertFalse(body['signatureVerified'])
+        status = self.client.get('/admin/tiktok/status').get_json()['data']
+        self.assertEqual(status['lastWebhook']['type'], 'webhook')
+        self.assertIn(status['lastWebhook']['signatureStatus'], {'missing_signature', 'missing_secret'})
+
 
 if __name__ == "__main__":
     unittest.main()
