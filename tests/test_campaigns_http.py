@@ -483,6 +483,66 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(config['channelTitle'], 'Demo Channel')
         self.assertTrue(config['lastManualRefreshAt'])
 
+    def test_check_facebook_connection_updates_structured_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'facebook',
+                'accountName': 'brand-facebook',
+                'authType': 'oauth',
+                'config': {'pageId': '123', 'accessTokenEnv': 'FB_PAGE_TOKEN'},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.prepared_publishers, 'validate_facebook_config_live', return_value={'id': '123', 'name': 'Brand Page'}):
+            response = self.client.post(f'/accounts/{account_id}/check-connection')
+        self.assertEqual(response.status_code, 200)
+        config = response.get_json()['data']['config']
+        self.assertEqual(config['facebookPageName'], 'Brand Page')
+        self.assertTrue(config['lastConnectionCheckAt'])
+
+    def test_check_instagram_connection_updates_structured_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'instagram',
+                'accountName': 'brand-instagram',
+                'authType': 'oauth',
+                'config': {'igUserId': '1789', 'accessTokenEnv': 'IG_ACCESS_TOKEN'},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.prepared_publishers, 'validate_instagram_config_live', return_value={'id': '1789', 'username': 'ig-demo'}):
+            response = self.client.post(f'/accounts/{account_id}/check-connection')
+        self.assertEqual(response.status_code, 200)
+        config = response.get_json()['data']['config']
+        self.assertEqual(config['instagramUserName'], 'ig-demo')
+        self.assertTrue(config['lastConnectionCheckAt'])
+
+    def test_check_threads_connection_updates_structured_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'threads',
+                'accountName': 'brand-threads',
+                'authType': 'oauth',
+                'config': {'userId': '42', 'accessTokenEnv': 'THREADS_ACCESS_TOKEN'},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.prepared_publishers, 'validate_threads_config_live', return_value={'id': '42', 'username': 'threads-demo'}):
+            response = self.client.post(f'/accounts/{account_id}/check-connection')
+        self.assertEqual(response.status_code, 200)
+        config = response.get_json()['data']['config']
+        self.assertEqual(config['threadsUserName'], 'threads-demo')
+        self.assertTrue(config['lastConnectionCheckAt'])
+
 
 if __name__ == "__main__":
     unittest.main()

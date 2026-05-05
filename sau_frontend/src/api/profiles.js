@@ -35,5 +35,9 @@ export const profilesApi = {
 
   refreshAccountToken(accountId) {
     return http.post(`/accounts/${accountId}/refresh-token`)
+  },
+
+  checkAccountConnection(accountId) {
+    return http.post(`/accounts/${accountId}/check-connection`)
   }
 }

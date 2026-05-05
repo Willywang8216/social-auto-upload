@@ -2063,6 +2063,43 @@ def profile_accounts_create(profile_id):
     return jsonify({"code": 200, "msg": "created", "data": _account_payload(account)}), 200
 
 
+@app.route("/accounts/<int:account_id>/check-connection", methods=["POST"])
+def accounts_check_connection(account_id):
+    db_path = _current_db_path()
+    try:
+        account = profile_registry.get_account(account_id, db_path=db_path)
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
+
+    config = dict(account.config or {})
+    now = datetime.now().isoformat(timespec='seconds')
+
+    try:
+        if account.platform == profile_registry.PLATFORM_FACEBOOK:
+            result = prepared_publishers.validate_facebook_config_live(config)
+            config['facebookPageName'] = result.get('name', config.get('facebookPageName', ''))
+        elif account.platform == profile_registry.PLATFORM_INSTAGRAM:
+            result = prepared_publishers.validate_instagram_config_live(config)
+            config['instagramUserName'] = result.get('username', config.get('instagramUserName', ''))
+        elif account.platform == profile_registry.PLATFORM_THREADS:
+            result = prepared_publishers.validate_threads_config_live(config)
+            config['threadsUserName'] = result.get('username', config.get('threadsUserName', ''))
+        else:
+            return jsonify({"code": 400, "msg": "Connection check is implemented only for Facebook, Instagram, and Threads", "data": None}), 400
+
+        config['lastConnectionCheckAt'] = now
+        updated = profile_registry.update_account(
+            account_id,
+            config=config,
+            auth_type=account.auth_type,
+            db_path=db_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    return jsonify({"code": 200, "msg": "checked", "data": _account_payload(updated)}), 200
+
+
 @app.route("/accounts/<int:account_id>/refresh-token", methods=["POST"])
 def accounts_refresh_token(account_id):
     db_path = _current_db_path()

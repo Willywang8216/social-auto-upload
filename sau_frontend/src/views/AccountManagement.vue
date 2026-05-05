@@ -270,6 +270,16 @@
 
           <template v-else-if="accountForm.platform === 'facebook'">
             <el-divider content-position="left">Facebook 設定</el-divider>
+            <el-form-item label="Connection health">
+              <div class="oauth-health-card">
+                <div class="health-row"><span>Page name</span><strong>{{ accountForm.facebookPageName || '—' }}</strong></div>
+                <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : (accountForm.accessTokenEnv ? 'env-backed' : 'missing') }}</strong></div>
+                <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
+              </div>
+              <div class="oauth-actions-row">
+                <el-button plain @click="checkStructuredConnection('facebook')" :disabled="!accountForm.id">Check Facebook connection</el-button>
+              </div>
+            </el-form-item>
             <el-form-item label="Page ID">
               <el-input v-model="accountForm.pageId" />
             </el-form-item>
@@ -280,6 +290,16 @@
 
           <template v-else-if="accountForm.platform === 'instagram'">
             <el-divider content-position="left">Instagram 設定</el-divider>
+            <el-form-item label="Connection health">
+              <div class="oauth-health-card">
+                <div class="health-row"><span>Username</span><strong>{{ accountForm.instagramUserName || '—' }}</strong></div>
+                <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : (accountForm.accessTokenEnv ? 'env-backed' : 'missing') }}</strong></div>
+                <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
+              </div>
+              <div class="oauth-actions-row">
+                <el-button plain @click="checkStructuredConnection('instagram')" :disabled="!accountForm.id">Check Instagram connection</el-button>
+              </div>
+            </el-form-item>
             <el-form-item label="IG User ID">
               <el-input v-model="accountForm.igUserId" />
             </el-form-item>
@@ -290,6 +310,16 @@
 
           <template v-else-if="accountForm.platform === 'threads'">
             <el-divider content-position="left">Threads 設定</el-divider>
+            <el-form-item label="Connection health">
+              <div class="oauth-health-card">
+                <div class="health-row"><span>Username</span><strong>{{ accountForm.threadsUserName || '—' }}</strong></div>
+                <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : (accountForm.accessTokenEnv ? 'env-backed' : 'missing') }}</strong></div>
+                <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
+              </div>
+              <div class="oauth-actions-row">
+                <el-button plain @click="checkStructuredConnection('threads')" :disabled="!accountForm.id">Check Threads connection</el-button>
+              </div>
+            </el-form-item>
             <el-form-item label="User ID">
               <el-input v-model="accountForm.threadUserId" />
             </el-form-item>
@@ -515,6 +545,10 @@ const makeEmptyAccountForm = () => ({
   lastAutoRefreshAt: '',
   redditUserName: '',
   channelTitle: '',
+  facebookPageName: '',
+  instagramUserName: '',
+  threadsUserName: '',
+  lastConnectionCheckAt: '',
   accessTokenEnv: '',
   publishMode: 'direct',
   privacyLevel: 'PUBLIC_TO_EVERYONE',
@@ -635,6 +669,10 @@ const loadStructuredFieldsFromConfig = (config) => {
   accountForm.lastAutoRefreshAt = config.lastAutoRefreshAt || ''
   accountForm.redditUserName = config.redditUserName || ''
   accountForm.channelTitle = config.channelTitle || ''
+  accountForm.facebookPageName = config.facebookPageName || ''
+  accountForm.instagramUserName = config.instagramUserName || ''
+  accountForm.threadsUserName = config.threadsUserName || ''
+  accountForm.lastConnectionCheckAt = config.lastConnectionCheckAt || ''
   accountForm.accessTokenEnv = config.accessTokenEnv || ''
   accountForm.publishMode = config.publishMode || 'direct'
   accountForm.privacyLevel = config.privacyLevel || 'PUBLIC_TO_EVERYONE'
@@ -933,6 +971,30 @@ async function connectWithTikTok() {
     popup.close()
     console.error('TikTok connect 啟動失敗:', error)
     ElMessage.error(error?.message || 'TikTok connect 啟動失敗')
+  }
+}
+
+async function checkStructuredConnection(expectedPlatform) {
+  if (!accountForm.id) {
+    ElMessage.warning('請先儲存帳號，再檢查連線')
+    return
+  }
+  if (accountForm.platform !== expectedPlatform) {
+    ElMessage.warning('目前帳號平台與檢查操作不符')
+    return
+  }
+  try {
+    const response = await profilesApi.checkAccountConnection(accountForm.id)
+    const account = response?.data || {}
+    const config = account.config || {}
+    accountForm.facebookPageName = config.facebookPageName || accountForm.facebookPageName
+    accountForm.instagramUserName = config.instagramUserName || accountForm.instagramUserName
+    accountForm.threadsUserName = config.threadsUserName || accountForm.threadsUserName
+    accountForm.lastConnectionCheckAt = config.lastConnectionCheckAt || accountForm.lastConnectionCheckAt
+    ElMessage.success(`${account.platform} connection checked`)
+  } catch (error) {
+    console.error('檢查平台連線失敗:', error)
+    ElMessage.error(error?.message || '檢查平台連線失敗')
   }
 }
 
