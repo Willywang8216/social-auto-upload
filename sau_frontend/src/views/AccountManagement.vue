@@ -73,6 +73,26 @@
       </el-tabs>
     </div>
 
+    <div class="recent-account-events">
+      <div class="section-header">
+        <h2>最近帳號操作</h2>
+        <el-button text @click="fetchRecentAccountEvents">重新載入</el-button>
+      </div>
+      <el-table :data="recentAccountEvents" style="width: 100%" v-loading="eventsLoading">
+        <el-table-column prop="created_at" label="時間" width="180" />
+        <el-table-column prop="platform" label="平台" width="120" />
+        <el-table-column prop="account_name" label="帳號" min-width="180" />
+        <el-table-column prop="action" label="操作" width="140" />
+        <el-table-column label="結果" width="100">
+          <template #default="scope">
+            <el-tag :type="scope.row.status === 'ok' ? 'success' : 'danger'" effect="plain">{{ scope.row.status }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="summary" label="摘要" min-width="260" />
+      </el-table>
+    </div>
+
+
     <el-dialog
       v-model="profileDialogVisible"
       title="新增 Profile"
@@ -506,7 +526,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { CircleCheckFilled, CircleCloseFilled, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -631,6 +651,8 @@ const tiktokHealth = reactive({
   lastRefresh: null,
   lastWebhook: null,
 })
+const recentAccountEvents = ref([])
+const eventsLoading = ref(false)
 let eventSource = null
 
 const filteredAccounts = computed(() => {
@@ -823,8 +845,32 @@ const fetchAccounts = async (validateLegacy = true) => {
 
 const refreshAccounts = () => fetchAccounts(true)
 
+const fetchRecentAccountEvents = async () => {
+  eventsLoading.value = true
+  try {
+    const params = { limit: 20 }
+    if (selectedProfileFilter.value !== 'all' && selectedProfileFilter.value !== 'legacy') {
+      params.profileId = Number(selectedProfileFilter.value)
+    }
+    if (activeTab.value !== 'all') {
+      params.platform = activeTab.value
+    }
+    const response = await accountApi.getRecentEvents(params)
+    recentAccountEvents.value = response?.data || []
+  } catch (error) {
+    console.error('取得帳號操作紀錄失敗:', error)
+  } finally {
+    eventsLoading.value = false
+  }
+}
+
+watch([activeTab, selectedProfileFilter], () => {
+  fetchRecentAccountEvents()
+})
+
 onMounted(() => {
   fetchAccounts(false)
+  fetchRecentAccountEvents()
   window.addEventListener('message', handleTikTokOauthMessage)
   setTimeout(() => {
     fetchAccounts(true)
@@ -1473,6 +1519,23 @@ onBeforeUnmount(() => {
       display: flex;
       align-items: center;
       gap: 12px;
+    }
+  }
+
+  .recent-account-events {
+    margin-top: 24px;
+
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+
+      h2 {
+        margin: 0;
+        font-size: 18px;
+        color: $text-primary;
+      }
     }
   }
 

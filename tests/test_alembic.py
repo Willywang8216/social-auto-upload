@@ -61,6 +61,7 @@ class AlembicBaselineTests(unittest.TestCase):
             "campaign_posts",
             "tiktok_oauth_requests",
             "tiktok_review_events",
+            "account_events",
         ):
             self.assertIn(expected, tables)
 

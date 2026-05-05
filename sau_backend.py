@@ -24,6 +24,7 @@ from myUtils import media_groups as media_group_store
 from myUtils import media_pipeline
 from myUtils import profiles as profile_registry
 from myUtils import prepared_publishers
+from myUtils import account_events
 from myUtils import rclone_storage
 from myUtils import tiktok_auth
 from myUtils import tiktok_review
@@ -1345,34 +1346,65 @@ def _run_account_connection_check(*, account_id: int, db_path: Path):
     config = dict(account.config or {})
     now = datetime.now().isoformat(timespec='seconds')
 
-    if account.platform == profile_registry.PLATFORM_FACEBOOK:
-        result = prepared_publishers.validate_facebook_config_live(config)
-        config['facebookPageName'] = result.get('name', config.get('facebookPageName', ''))
-    elif account.platform == profile_registry.PLATFORM_INSTAGRAM:
-        result = prepared_publishers.validate_instagram_config_live(config)
-        config['instagramUserName'] = result.get('username', config.get('instagramUserName', ''))
-    elif account.platform == profile_registry.PLATFORM_THREADS:
-        result = prepared_publishers.validate_threads_config_live(config)
-        config['threadsUserName'] = result.get('username', config.get('threadsUserName', ''))
-    elif account.platform == profile_registry.PLATFORM_TELEGRAM:
-        result = prepared_publishers.validate_telegram_config_live(config)
-        config['telegramBotName'] = result.get('bot', {}).get('result', {}).get('username', config.get('telegramBotName', ''))
-        config['telegramChatTitle'] = result.get('chat', {}).get('result', {}).get('title', config.get('telegramChatTitle', '')) or result.get('chat', {}).get('result', {}).get('username', config.get('telegramChatTitle', ''))
-    elif account.platform == profile_registry.PLATFORM_DISCORD:
-        result = prepared_publishers.validate_discord_config_live(config)
-        config['discordWebhookName'] = result.get('name', config.get('discordWebhookName', ''))
-        config['discordWebhookChannel'] = result.get('channel_id', config.get('discordWebhookChannel', ''))
-    else:
-        raise ValueError('Connection check is implemented only for Facebook, Instagram, Threads, Telegram, and Discord')
+    try:
+        if account.platform == profile_registry.PLATFORM_FACEBOOK:
+            result = prepared_publishers.validate_facebook_config_live(config)
+            config['facebookPageName'] = result.get('name', config.get('facebookPageName', ''))
+            summary = f"Facebook page: {config.get('facebookPageName') or account.account_name}"
+        elif account.platform == profile_registry.PLATFORM_INSTAGRAM:
+            result = prepared_publishers.validate_instagram_config_live(config)
+            config['instagramUserName'] = result.get('username', config.get('instagramUserName', ''))
+            summary = f"Instagram user: {config.get('instagramUserName') or account.account_name}"
+        elif account.platform == profile_registry.PLATFORM_THREADS:
+            result = prepared_publishers.validate_threads_config_live(config)
+            config['threadsUserName'] = result.get('username', config.get('threadsUserName', ''))
+            summary = f"Threads user: {config.get('threadsUserName') or account.account_name}"
+        elif account.platform == profile_registry.PLATFORM_TELEGRAM:
+            result = prepared_publishers.validate_telegram_config_live(config)
+            config['telegramBotName'] = result.get('bot', {}).get('result', {}).get('username', config.get('telegramBotName', ''))
+            config['telegramChatTitle'] = result.get('chat', {}).get('result', {}).get('title', config.get('telegramChatTitle', '')) or result.get('chat', {}).get('result', {}).get('username', config.get('telegramChatTitle', ''))
+            summary = f"Telegram chat: {config.get('telegramChatTitle') or account.account_name}"
+        elif account.platform == profile_registry.PLATFORM_DISCORD:
+            result = prepared_publishers.validate_discord_config_live(config)
+            config['discordWebhookName'] = result.get('name', config.get('discordWebhookName', ''))
+            config['discordWebhookChannel'] = result.get('channel_id', config.get('discordWebhookChannel', ''))
+            summary = f"Discord webhook: {config.get('discordWebhookName') or account.account_name}"
+        else:
+            raise ValueError('Connection check is implemented only for Facebook, Instagram, Threads, Telegram, and Discord')
 
-    config['lastConnectionCheckAt'] = now
-    updated = profile_registry.update_account(
-        account_id,
-        config=config,
-        auth_type=account.auth_type,
-        db_path=db_path,
-    )
-    return updated
+        config['lastConnectionCheckAt'] = now
+        updated = profile_registry.update_account(
+            account_id,
+            config=config,
+            auth_type=account.auth_type,
+            db_path=db_path,
+        )
+        account_events.record_event(
+            account_id=updated.id,
+            profile_id=updated.profile_id,
+            platform=updated.platform,
+            account_name=updated.account_name,
+            action='check_connection',
+            status='ok',
+            summary=summary,
+            metadata={'timestamp': now},
+            db_path=db_path,
+        )
+        return updated
+    except Exception as exc:
+        account_events.record_event(
+            account_id=account.id,
+            profile_id=account.profile_id,
+            platform=account.platform,
+            account_name=account.account_name,
+            action='check_connection',
+            status='error',
+            summary='Connection check failed',
+            error_text=str(exc),
+            metadata={'timestamp': now},
+            db_path=db_path,
+        )
+        raise
 
 
 def _run_account_token_refresh(*, account_id: int, db_path: Path):
@@ -1380,90 +1412,127 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path):
     config = dict(account.config or {})
     now = datetime.now().isoformat(timespec='seconds')
 
-    if account.platform == profile_registry.PLATFORM_TIKTOK:
-        refresh_token = str(config.get('refreshToken') or '').strip()
-        if not refresh_token:
-            raise ValueError('TikTok account is missing refreshToken')
-        token_payload = tiktok_auth.refresh_access_token(refresh_token=refresh_token)
-        access_token = str(token_payload.get('access_token') or '')
-        user_info = tiktok_auth.fetch_user_info(access_token=access_token) if access_token else {}
-        config = prepared_publishers._apply_tiktok_token_payload(config, token_payload, user_info)
-        config.update({
-            'openId': token_payload.get('open_id') or config.get('openId') or '',
-            'scope': token_payload.get('scope') or config.get('scope') or '',
-            'displayName': user_info.get('data', {}).get('user', {}).get('display_name') or config.get('displayName') or '',
-            'avatarUrl': user_info.get('data', {}).get('user', {}).get('avatar_url') or config.get('avatarUrl') or '',
-            'lastManualRefreshAt': now,
-        })
-        updated = profile_registry.update_account(
-            account_id,
-            config=config,
-            auth_type='oauth',
-            db_path=db_path,
-        )
-        _append_tiktok_review_event(
-            'refresh',
-            {
-                'status': 'ok',
-                'accountId': account_id,
-                'accountName': updated.account_name,
-                'openId': config.get('openId', ''),
-                'scope': config.get('scope', ''),
-                'displayName': config.get('displayName', ''),
-                'avatarUrl': config.get('avatarUrl', ''),
-            },
-            account_id=account_id,
+    try:
+        if account.platform == profile_registry.PLATFORM_TIKTOK:
+            refresh_token = str(config.get('refreshToken') or '').strip()
+            if not refresh_token:
+                raise ValueError('TikTok account is missing refreshToken')
+            token_payload = tiktok_auth.refresh_access_token(refresh_token=refresh_token)
+            access_token = str(token_payload.get('access_token') or '')
+            user_info = tiktok_auth.fetch_user_info(access_token=access_token) if access_token else {}
+            config = prepared_publishers._apply_tiktok_token_payload(config, token_payload, user_info)
+            config.update({
+                'openId': token_payload.get('open_id') or config.get('openId') or '',
+                'scope': token_payload.get('scope') or config.get('scope') or '',
+                'displayName': user_info.get('data', {}).get('user', {}).get('display_name') or config.get('displayName') or '',
+                'avatarUrl': user_info.get('data', {}).get('user', {}).get('avatar_url') or config.get('avatarUrl') or '',
+                'lastManualRefreshAt': now,
+            })
+            updated = profile_registry.update_account(
+                account_id,
+                config=config,
+                auth_type='oauth',
+                db_path=db_path,
+            )
+            _append_tiktok_review_event(
+                'refresh',
+                {
+                    'status': 'ok',
+                    'accountId': account_id,
+                    'accountName': updated.account_name,
+                    'openId': config.get('openId', ''),
+                    'scope': config.get('scope', ''),
+                    'displayName': config.get('displayName', ''),
+                    'avatarUrl': config.get('avatarUrl', ''),
+                },
+                account_id=account_id,
+                account_name=updated.account_name,
+                status='ok',
+                db_path=db_path,
+            )
+            summary = f"TikTok refreshed: {config.get('displayName') or updated.account_name}"
+        elif account.platform == profile_registry.PLATFORM_REDDIT:
+            refreshed = prepared_publishers.refresh_reddit_access_token(config)
+            config.update({
+                'accessToken': refreshed['access_token'],
+                'scope': refreshed.get('scope', config.get('scope', '')),
+                'accessTokenUpdatedAt': now,
+                'lastManualRefreshAt': now,
+                'redditUserName': refreshed.get('me', {}).get('name', config.get('redditUserName', '')),
+            })
+            expires_in = refreshed.get('expires_in')
+            if expires_in:
+                config['accessTokenExpiresAt'] = (
+                    datetime.now() + timedelta(seconds=int(expires_in))
+                ).isoformat(timespec='seconds')
+            updated = profile_registry.update_account(
+                account_id,
+                config=config,
+                auth_type='oauth',
+                db_path=db_path,
+            )
+            summary = f"Reddit refreshed: {config.get('redditUserName') or updated.account_name}"
+        elif account.platform == profile_registry.PLATFORM_YOUTUBE:
+            refreshed = prepared_publishers.refresh_youtube_access_token(config)
+            config.update({
+                'accessToken': refreshed['access_token'],
+                'accessTokenUpdatedAt': now,
+                'lastManualRefreshAt': now,
+            })
+            expires_in = refreshed.get('expires_in')
+            if expires_in:
+                config['accessTokenExpiresAt'] = (
+                    datetime.now() + timedelta(seconds=int(expires_in))
+                ).isoformat(timespec='seconds')
+            channel_items = refreshed.get('channel', {}).get('items', []) if isinstance(refreshed.get('channel'), dict) else []
+            if channel_items:
+                snippet = channel_items[0].get('snippet', {}) if isinstance(channel_items[0], dict) else {}
+                config['channelTitle'] = snippet.get('title', config.get('channelTitle', ''))
+            updated = profile_registry.update_account(
+                account_id,
+                config=config,
+                auth_type='oauth',
+                db_path=db_path,
+            )
+            summary = f"YouTube refreshed: {config.get('channelTitle') or updated.account_name}"
+        else:
+            raise ValueError('Refresh is implemented only for TikTok, Reddit, and YouTube')
+
+        account_events.record_event(
+            account_id=updated.id,
+            profile_id=updated.profile_id,
+            platform=updated.platform,
             account_name=updated.account_name,
+            action='refresh_token',
             status='ok',
+            summary=summary,
+            metadata={'timestamp': now},
             db_path=db_path,
         )
         return updated
-
-    if account.platform == profile_registry.PLATFORM_REDDIT:
-        refreshed = prepared_publishers.refresh_reddit_access_token(config)
-        config.update({
-            'accessToken': refreshed['access_token'],
-            'scope': refreshed.get('scope', config.get('scope', '')),
-            'accessTokenUpdatedAt': now,
-            'lastManualRefreshAt': now,
-            'redditUserName': refreshed.get('me', {}).get('name', config.get('redditUserName', '')),
-        })
-        expires_in = refreshed.get('expires_in')
-        if expires_in:
-            config['accessTokenExpiresAt'] = (
-                datetime.now() + timedelta(seconds=int(expires_in))
-            ).isoformat(timespec='seconds')
-        return profile_registry.update_account(
-            account_id,
-            config=config,
-            auth_type='oauth',
+    except Exception as exc:
+        if account.platform == profile_registry.PLATFORM_TIKTOK:
+            _append_tiktok_review_event(
+                'refresh',
+                {'status': 'error', 'accountId': account_id, 'accountName': account.account_name, 'error': str(exc)},
+                account_id=account_id,
+                account_name=account.account_name,
+                status='error',
+                db_path=db_path,
+            )
+        account_events.record_event(
+            account_id=account.id,
+            profile_id=account.profile_id,
+            platform=account.platform,
+            account_name=account.account_name,
+            action='refresh_token',
+            status='error',
+            summary='Token refresh failed',
+            error_text=str(exc),
+            metadata={'timestamp': now},
             db_path=db_path,
         )
-
-    if account.platform == profile_registry.PLATFORM_YOUTUBE:
-        refreshed = prepared_publishers.refresh_youtube_access_token(config)
-        config.update({
-            'accessToken': refreshed['access_token'],
-            'accessTokenUpdatedAt': now,
-            'lastManualRefreshAt': now,
-        })
-        expires_in = refreshed.get('expires_in')
-        if expires_in:
-            config['accessTokenExpiresAt'] = (
-                datetime.now() + timedelta(seconds=int(expires_in))
-            ).isoformat(timespec='seconds')
-        channel_items = refreshed.get('channel', {}).get('items', []) if isinstance(refreshed.get('channel'), dict) else []
-        if channel_items:
-            snippet = channel_items[0].get('snippet', {}) if isinstance(channel_items[0], dict) else {}
-            config['channelTitle'] = snippet.get('title', config.get('channelTitle', ''))
-        return profile_registry.update_account(
-            account_id,
-            config=config,
-            auth_type='oauth',
-            db_path=db_path,
-        )
-
-    raise ValueError('Refresh is implemented only for TikTok, Reddit, and YouTube')
+        raise
 
 
 def _batch_account_operation(*, account_ids: list[int], db_path: Path, operation: str) -> dict:
@@ -2283,6 +2352,97 @@ def accounts_batch_refresh_tokens():
         return jsonify({"code": 400, "msg": "accountIds must contain integers", "data": None}), 400
     result = _batch_account_operation(account_ids=account_ids, db_path=db_path, operation='refresh')
     return jsonify({"code": 200, "msg": "ok", "data": result}), 200
+
+
+@app.route("/accounts/events", methods=["GET"])
+def accounts_events_list():
+    db_path = _current_db_path()
+    raw_account_id = request.args.get('accountId')
+    raw_profile_id = request.args.get('profileId')
+    platform = str(request.args.get('platform') or '').strip().lower() or None
+    limit = max(1, min(int(request.args.get('limit', 25) or 25), 200))
+    account_id = int(raw_account_id) if raw_account_id not in (None, '') else None
+    profile_id = int(raw_profile_id) if raw_profile_id not in (None, '') else None
+    events = account_events.list_events(
+        limit=limit,
+        account_id=account_id,
+        profile_id=profile_id,
+        platform=platform,
+        db_path=db_path,
+    )
+    return jsonify({"code": 200, "msg": "ok", "data": [event.to_dict() for event in events]}), 200
+
+
+@app.route("/accounts/health-summary", methods=["GET"])
+def accounts_health_summary():
+    db_path = _current_db_path()
+    accounts = profile_registry.list_accounts(db_path=db_path)
+    refresh_platforms = {profile_registry.PLATFORM_TIKTOK, profile_registry.PLATFORM_REDDIT, profile_registry.PLATFORM_YOUTUBE}
+    check_platforms = {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM, profile_registry.PLATFORM_THREADS, profile_registry.PLATFORM_TELEGRAM, profile_registry.PLATFORM_DISCORD}
+
+    def _derive_state(account):
+        config = dict(account.config or {})
+        detail = ''
+        if account.platform == profile_registry.PLATFORM_FACEBOOK:
+            detail = config.get('facebookPageName', '')
+        elif account.platform == profile_registry.PLATFORM_INSTAGRAM:
+            detail = config.get('instagramUserName', '')
+        elif account.platform == profile_registry.PLATFORM_THREADS:
+            detail = config.get('threadsUserName', '')
+        elif account.platform == profile_registry.PLATFORM_TELEGRAM:
+            detail = config.get('telegramChatTitle', '') or config.get('telegramBotName', '')
+        elif account.platform == profile_registry.PLATFORM_DISCORD:
+            detail = config.get('discordWebhookName', '') or config.get('discordWebhookChannel', '')
+        elif account.platform == profile_registry.PLATFORM_REDDIT:
+            detail = config.get('redditUserName', '')
+        elif account.platform == profile_registry.PLATFORM_YOUTUBE:
+            detail = config.get('channelTitle', '')
+        elif account.platform == profile_registry.PLATFORM_TIKTOK:
+            detail = config.get('displayName', '') or config.get('openId', '')
+        has_credential = bool(config.get('accessToken') or config.get('accessTokenEnv') or config.get('botTokenEnv') or config.get('webhookUrlEnv'))
+        if detail or config.get('lastConnectionCheckAt') or config.get('lastManualRefreshAt') or config.get('lastAutoRefreshAt') or config.get('connectedAt') or config.get('accessTokenUpdatedAt'):
+            return 'ready'
+        if has_credential:
+            return 'configured'
+        return 'missing'
+
+    summary = {
+        'total': len(accounts),
+        'ready': 0,
+        'configured': 0,
+        'missing': 0,
+        'refreshable': 0,
+        'checkable': 0,
+        'byPlatform': {},
+    }
+    for account in accounts:
+        state = _derive_state(account)
+        summary[state] += 1
+        if account.platform in refresh_platforms:
+            summary['refreshable'] += 1
+        if account.platform in check_platforms:
+            summary['checkable'] += 1
+        bucket = summary['byPlatform'].setdefault(account.platform, {'total': 0, 'ready': 0, 'configured': 0, 'missing': 0})
+        bucket['total'] += 1
+        bucket[state] += 1
+
+    recent_events = account_events.list_events(limit=10, db_path=db_path)
+    event_totals = {'total': len(recent_events), 'ok': 0, 'error': 0}
+    for event in recent_events:
+        if event.status == 'ok':
+            event_totals['ok'] += 1
+        elif event.status == 'error':
+            event_totals['error'] += 1
+
+    return jsonify({
+        "code": 200,
+        "msg": "ok",
+        "data": {
+            **summary,
+            'recentEventTotals': event_totals,
+            'recentEvents': [event.to_dict() for event in recent_events],
+        },
+    }), 200
 
 
 @app.route("/accounts/tiktok/refresh-stale", methods=["POST"])

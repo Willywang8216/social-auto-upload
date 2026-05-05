@@ -77,7 +77,49 @@
             </div>
           </el-card>
         </el-col>
+        <el-col :span="8">
+          <el-card class="stat-card">
+            <div class="stat-card-content">
+              <div class="stat-icon platform-icon">
+                <el-icon><Connection /></el-icon>
+              </div>
+              <div class="stat-info">
+                <div class="stat-value">{{ healthSummary.ready }}</div>
+                <div class="stat-label">已就緒連線</div>
+              </div>
+            </div>
+            <div class="stat-footer">
+              <div class="stat-detail">
+                <span>Configured：{{ healthSummary.configured }}</span>
+                <span>Missing：{{ healthSummary.missing }}</span>
+                <span>Refresh：{{ healthSummary.refreshable }}</span>
+                <span>Check：{{ healthSummary.checkable }}</span>
+              </div>
+            </div>
+          </el-card>
+        </el-col>
+
       </el-row>
+
+      <div class="recent-tasks">
+        <div class="section-header">
+          <h2>最近帳號操作</h2>
+          <el-button text @click="navigateTo('/account-management')">帳號管理</el-button>
+        </div>
+
+        <el-table :data="healthSummary.recentEvents || []" style="width: 100%" v-loading="loading">
+          <el-table-column prop="created_at" label="時間" width="180" />
+          <el-table-column prop="platform" label="平台" width="120" />
+          <el-table-column prop="account_name" label="帳號" min-width="180" />
+          <el-table-column prop="action" label="操作" width="140" />
+          <el-table-column label="結果" width="100">
+            <template #default="scope">
+              <el-tag :type="scope.row.status === 'ok' ? 'success' : 'danger'" effect="plain">{{ scope.row.status }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="summary" label="摘要" min-width="240" />
+        </el-table>
+      </div>
 
       <!-- 快速操作区域 -->
       <div class="quick-actions">
@@ -182,6 +224,7 @@ const router = useRouter()
 const accountStore = useAccountStore()
 const appStore = useAppStore()
 const loading = ref(false)
+const healthSummary = ref({ total: 0, ready: 0, configured: 0, missing: 0, refreshable: 0, checkable: 0, recentEventTotals: { total: 0, ok: 0, error: 0 }, recentEvents: [] })
 const dashboardPlatforms = LEGACY_ACCOUNT_PLATFORM_ORDER
   .map((publishSlug) =>
     ACCOUNT_PLATFORM_OPTIONS.find((platform) => platform.publishSlug === publishSlug)
@@ -265,9 +308,10 @@ const fetchDashboardData = async () => {
   loading.value = true
   try {
     // 并行获取账号和素材数据
-    const [accountRes, materialRes] = await Promise.allSettled([
+    const [accountRes, materialRes, healthRes] = await Promise.allSettled([
       accountApi.getAccounts(),
-      materialApi.getAllMaterials()
+      materialApi.getAllMaterials(),
+      accountApi.getHealthSummary()
     ])
 
     if (accountRes.status === 'fulfilled' && accountRes.value.code === 200) {
@@ -275,6 +319,9 @@ const fetchDashboardData = async () => {
     }
     if (materialRes.status === 'fulfilled' && materialRes.value.code === 200) {
       appStore.setMaterials(materialRes.value.data)
+    }
+    if (healthRes.status === 'fulfilled' && healthRes.value.code === 200) {
+      healthSummary.value = healthRes.value.data
     }
   } catch (error) {
     console.error('取得儀表板資料失敗:', error)

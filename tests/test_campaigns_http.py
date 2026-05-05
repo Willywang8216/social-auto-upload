@@ -663,6 +663,57 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(body['failed'], 0)
         self.assertEqual(len(body['accounts']), 2)
 
+    def test_check_connection_writes_account_event_and_events_endpoint_lists_it(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'facebook',
+                'accountName': 'brand-facebook',
+                'authType': 'oauth',
+                'config': {'pageId': '123', 'accessTokenEnv': 'FB_PAGE_TOKEN'},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.prepared_publishers, 'validate_facebook_config_live', return_value={'id': '123', 'name': 'Brand Page'}):
+            self.client.post(f'/accounts/{account_id}/check-connection')
+        response = self.client.get(f'/accounts/events?accountId={account_id}')
+        self.assertEqual(response.status_code, 200)
+        events = response.get_json()['data']
+        self.assertGreaterEqual(len(events), 1)
+        self.assertEqual(events[0]['action'], 'check_connection')
+        self.assertEqual(events[0]['status'], 'ok')
+
+    def test_health_summary_reports_recent_events(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Ops Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'reddit',
+                'accountName': 'brand-reddit',
+                'authType': 'oauth',
+                'config': {
+                    'clientIdEnv': 'REDDIT_CLIENT_ID',
+                    'clientSecretEnv': 'REDDIT_CLIENT_SECRET',
+                    'refreshTokenEnv': 'REDDIT_REFRESH_TOKEN',
+                    'subreddits': ['suba'],
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.prepared_publishers, 'refresh_reddit_access_token', return_value={
+            'access_token': 'reddit-token', 'expires_in': 3600, 'scope': 'submit identity read', 'me': {'name': 'reddit-user'}
+        }):
+            self.client.post(f'/accounts/{account_id}/refresh-token')
+        response = self.client.get('/accounts/health-summary')
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertGreaterEqual(body['total'], 1)
+        self.assertGreaterEqual(body['recentEventTotals']['total'], 1)
+        self.assertIn('reddit', body['byPlatform'])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -237,6 +237,24 @@ CREATE TABLE IF NOT EXISTS tiktok_review_events (
 )
 """
 
+ACCOUNT_EVENTS = """
+CREATE TABLE IF NOT EXISTS account_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER,
+    profile_id INTEGER,
+    platform TEXT NOT NULL,
+    account_name TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ok',
+    summary TEXT NOT NULL DEFAULT '',
+    error_text TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE SET NULL,
+    FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE SET NULL
+)
+"""
+
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_accounts_profile ON accounts(profile_id)",
     "CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform)",
@@ -262,6 +280,11 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_tiktok_oauth_requests_status ON tiktok_oauth_requests(status)",
     "CREATE INDEX IF NOT EXISTS idx_tiktok_review_events_type ON tiktok_review_events(event_type)",
     "CREATE INDEX IF NOT EXISTS idx_tiktok_review_events_received_at ON tiktok_review_events(received_at)",
+    "CREATE INDEX IF NOT EXISTS idx_account_events_account ON account_events(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_account_events_profile ON account_events(profile_id)",
+    "CREATE INDEX IF NOT EXISTS idx_account_events_platform ON account_events(platform)",
+    "CREATE INDEX IF NOT EXISTS idx_account_events_action ON account_events(action)",
+    "CREATE INDEX IF NOT EXISTS idx_account_events_created_at ON account_events(created_at)",
 ]
 
 
@@ -364,6 +387,7 @@ def bootstrap(db_path: Path = DB_PATH) -> None:
         cursor.execute(CAMPAIGN_POSTS)
         cursor.execute(TIKTOK_OAUTH_REQUESTS)
         cursor.execute(TIKTOK_REVIEW_EVENTS)
+        cursor.execute(ACCOUNT_EVENTS)
         _ensure_required_columns(conn)
         for statement in INDEXES:
             cursor.execute(statement)
