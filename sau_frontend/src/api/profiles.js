@@ -31,5 +31,9 @@ export const profilesApi = {
 
   updateAccount(accountId, payload) {
     return http.patch(`/accounts/${accountId}`, payload)
+  },
+
+  refreshAccountToken(accountId) {
+    return http.post(`/accounts/${accountId}/refresh-token`)
   }
 }

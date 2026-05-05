@@ -109,6 +109,25 @@ def exchange_code_for_token(
     return payload
 
 
+def refresh_access_token(*, refresh_token: str, session=None) -> dict[str, Any]:
+    http = _get_session(session)
+    response = http.post(
+        TIKTOK_OAUTH_TOKEN_URL,
+        data={
+            "client_key": _required_env(CLIENT_KEY_ENV),
+            "client_secret": _required_env(CLIENT_SECRET_ENV),
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        },
+        timeout=120,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("error"):
+        raise TikTokOAuthError(str(payload.get("error_description") or payload["error"]))
+    return payload
+
+
 def fetch_user_info(
     *,
     access_token: str,

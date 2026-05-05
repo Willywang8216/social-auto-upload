@@ -62,6 +62,17 @@ class TikTokAuthTests(unittest.TestCase):
         self.assertEqual(session.calls[0][1], tiktok_auth.TIKTOK_OAUTH_TOKEN_URL)
         self.assertEqual(session.calls[0][2]['data']['grant_type'], 'authorization_code')
 
+    def test_refresh_access_token_uses_expected_endpoint(self):
+        session = _FakeSession([_FakeResponse({'access_token': 'new-token', 'refresh_token': 'new-refresh'})])
+        with patch.dict(os.environ, {
+            'TIKTOK_CLIENT_KEY': 'client-key',
+            'TIKTOK_CLIENT_SECRET': 'client-secret',
+        }, clear=False):
+            payload = tiktok_auth.refresh_access_token(refresh_token='refresh-token', session=session)
+        self.assertEqual(payload['access_token'], 'new-token')
+        self.assertEqual(session.calls[0][1], tiktok_auth.TIKTOK_OAUTH_TOKEN_URL)
+        self.assertEqual(session.calls[0][2]['data']['grant_type'], 'refresh_token')
+
     def test_fetch_user_info_uses_expected_endpoint(self):
         session = _FakeSession([_FakeResponse({'data': {'user': {'display_name': 'Demo'}}})])
         payload = tiktok_auth.fetch_user_info(access_token='token', session=session)

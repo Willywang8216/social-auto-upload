@@ -279,6 +279,7 @@
             <el-form-item label="Connect with TikTok">
               <div class="tiktok-connect-row">
                 <el-button type="primary" @click="connectWithTikTok">Connect with TikTok</el-button>
+                <el-button plain @click="refreshTikTokToken" :disabled="!accountForm.id">Refresh TikTok token</el-button>
                 <el-button plain @click="openTikTokReviewStatus">Open callback status</el-button>
               </div>
               <div class="field-hint">這會走 TikTok Login Kit for Web，並使用 https://up.iamwillywang.com/oauth/tiktok/callback。</div>
@@ -836,6 +837,28 @@ async function connectWithTikTok() {
     popup.close()
     console.error('TikTok connect 啟動失敗:', error)
     ElMessage.error(error?.message || 'TikTok connect 啟動失敗')
+  }
+}
+
+async function refreshTikTokToken() {
+  if (!accountForm.id) {
+    ElMessage.warning('請先儲存 TikTok 帳號，再刷新 token')
+    return
+  }
+  try {
+    const response = await profilesApi.refreshAccountToken(accountForm.id)
+    const account = response?.data || {}
+    const config = account.config || {}
+    accountForm.accessToken = config.accessToken || accountForm.accessToken
+    accountForm.refreshToken = config.refreshToken || accountForm.refreshToken
+    accountForm.openId = config.openId || accountForm.openId
+    accountForm.tiktokScope = config.scope || accountForm.tiktokScope
+    accountForm.tiktokDisplayName = config.displayName || accountForm.tiktokDisplayName
+    accountForm.tiktokAvatarUrl = config.avatarUrl || accountForm.tiktokAvatarUrl
+    ElMessage.success('TikTok token 已刷新')
+  } catch (error) {
+    console.error('刷新 TikTok token 失敗:', error)
+    ElMessage.error(error?.message || '刷新 TikTok token 失敗')
   }
 }
 
