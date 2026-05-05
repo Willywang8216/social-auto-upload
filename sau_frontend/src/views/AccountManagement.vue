@@ -52,6 +52,8 @@
             :bulk-refresh-loading="bulkRefreshLoading"
             :bulk-check-count="bulkCheckTargets.length"
             :bulk-refresh-count="bulkRefreshTargets.length"
+            :sort-mode="selectedSortMode"
+            :sort-order="selectedSortOrder"
             empty-text="目前沒有帳號資料"
             @add="handleAddAccount"
             @edit="handleEdit"
@@ -64,6 +66,7 @@
             @bulk-check="runBulkHealthCheck"
             @bulk-refresh="runBulkRefresh"
             @search="onSearchChange"
+            @sort-change="onTableSortChange"
           />
         </el-tab-pane>
         <el-tab-pane
@@ -80,6 +83,8 @@
             :bulk-refresh-loading="bulkRefreshLoading"
             :bulk-check-count="bulkCheckTargets.length"
             :bulk-refresh-count="bulkRefreshTargets.length"
+            :sort-mode="selectedSortMode"
+            :sort-order="selectedSortOrder"
             :empty-text="`目前沒有${platform.label}帳號資料`"
             @add="handleAddAccount"
             @edit="handleEdit"
@@ -92,6 +97,7 @@
             @bulk-check="runBulkHealthCheck"
             @bulk-refresh="runBulkRefresh"
             @search="onSearchChange"
+            @sort-change="onTableSortChange"
           />
         </el-tab-pane>
       </el-tabs>
@@ -595,6 +601,7 @@ const searchKeyword = ref('')
 const selectedProfileFilter = ref('all')
 const selectedRiskFilter = ref('all')
 const selectedSortMode = ref('urgency')
+const selectedSortOrder = ref('ascending')
 
 const accountPlatformTabs = PROFILE_PLATFORM_OPTIONS
 const profileOptions = computed(() => profilesStore.profiles)
@@ -752,10 +759,13 @@ const filteredAccounts = computed(() => {
     expiry: compareExpiry,
     platform: comparePlatform,
     profile: compareProfile,
-    name: compareName,
+    name: compareName
   }
 
-  const comparator = comparatorByMode[selectedSortMode.value] || compareUrgency
+  const baseComparator = comparatorByMode[selectedSortMode.value] || compareUrgency
+  const comparator = selectedSortOrder.value === 'descending'
+    ? (left, right) => baseComparator(right, left)
+    : baseComparator
 
   return accountStore.accounts
     .filter((account) => {
@@ -814,6 +824,7 @@ const applyRouteFilters = () => {
   const profile = Array.isArray(route.query.profile) ? route.query.profile[0] : route.query.profile
   const platform = Array.isArray(route.query.platform) ? route.query.platform[0] : route.query.platform
   const sort = Array.isArray(route.query.sort) ? route.query.sort[0] : route.query.sort
+  const sortOrder = Array.isArray(route.query.sortOrder) ? route.query.sortOrder[0] : route.query.sortOrder
 
   const allowedRisk = new Set(['all', 'expiring_24h', 'expiring_7d', 'overdue', 'reconnect_required'])
   selectedRiskFilter.value = allowedRisk.has(String(risk || 'all')) ? String(risk || 'all') : 'all'
@@ -831,10 +842,17 @@ const applyRouteFilters = () => {
 
   const allowedSort = new Set(['urgency', 'expiry', 'platform', 'profile', 'name'])
   selectedSortMode.value = allowedSort.has(String(sort || 'urgency')) ? String(sort || 'urgency') : 'urgency'
+  const allowedSortOrder = new Set(['ascending', 'descending'])
+  selectedSortOrder.value = allowedSortOrder.has(String(sortOrder || 'ascending')) ? String(sortOrder || 'ascending') : 'ascending'
 }
 
 const onSearchChange = (value) => {
   searchKeyword.value = value
+}
+
+const onTableSortChange = ({ mode, order }) => {
+  selectedSortMode.value = mode || 'urgency'
+  selectedSortOrder.value = order || 'ascending'
 }
 
 const assignIfValue = (target, key, value) => {

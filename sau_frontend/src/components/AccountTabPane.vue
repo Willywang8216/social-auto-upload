@@ -32,21 +32,21 @@
     </div>
 
     <div v-if="accounts.length > 0" class="account-list">
-      <el-table :data="accounts" style="width: 100%">
+      <el-table :data="accounts" style="width: 100%" :default-sort="defaultSort" @sort-change="onSortChange">
         <el-table-column label="頭像" width="80">
           <template #default="scope">
             <el-avatar :src="getDefaultAvatar(scope.row.name)" :size="40" />
           </template>
         </el-table-column>
-        <el-table-column prop="name" label="名稱" min-width="180" />
-        <el-table-column prop="profileName" label="Profile" min-width="120">
+        <el-table-column prop="name" label="名稱" min-width="180" sortable="custom" />
+        <el-table-column prop="profileName" label="Profile" min-width="120" sortable="custom">
           <template #default="scope">
             <el-tag :type="scope.row.profileId ? 'primary' : 'info'" effect="plain">
               {{ scope.row.profileName || 'Legacy' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="platform" label="平台" min-width="120">
+        <el-table-column prop="platform" label="平台" min-width="120" sortable="custom">
           <template #default="scope">
             <el-tag :type="platformTagType(scope.row.platform)" effect="plain">
               {{ scope.row.platform }}
@@ -73,7 +73,7 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="連線健康" min-width="180">
+        <el-table-column label="連線健康" min-width="180" prop="expiresAt" sortable="custom">
           <template #default="scope">
             <div class="connection-cell">
               <el-tag :type="scope.row.connectionTagType || 'info'" effect="plain">
@@ -138,10 +138,11 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import { Refresh, Download, Upload, Loading } from '@element-plus/icons-vue'
 import { getPlatformTagType } from '@/utils/platforms'
 
-defineProps({
+const props = defineProps({
   accounts: { type: Array, required: true },
   searchKeyword: { type: String, default: '' },
   refreshing: { type: Boolean, default: false },
@@ -149,7 +150,9 @@ defineProps({
   bulkRefreshLoading: { type: Boolean, default: false },
   bulkCheckCount: { type: Number, default: 0 },
   bulkRefreshCount: { type: Number, default: 0 },
-  emptyText: { type: String, default: '目前沒有帳號資料' }
+  emptyText: { type: String, default: '目前沒有帳號資料' },
+  sortMode: { type: String, default: 'urgency' },
+  sortOrder: { type: String, default: 'ascending' }
 })
 
 const emit = defineEmits([
@@ -163,8 +166,40 @@ const emit = defineEmits([
   'health-check',
   'bulk-check',
   'bulk-refresh',
-  'search'
+  'search',
+  'sort-change'
 ])
+
+const columnSortModeMap = {
+  name: 'name',
+  profileName: 'profile',
+  platform: 'platform',
+  expiresAt: 'expiry'
+}
+
+const columnBySortMode = {
+  urgency: undefined,
+  name: 'name',
+  profile: 'profileName',
+  platform: 'platform',
+  expiry: 'expiresAt'
+}
+
+const defaultSort = computed(() => ({
+  prop: columnBySortMode[props.sortMode],
+  order: columnBySortMode[props.sortMode] ? props.sortOrder : null
+}))
+
+function onSortChange({ prop, order }) {
+  if (!prop || !order) {
+    emit('sort-change', { mode: 'urgency', order: 'ascending' })
+    return
+  }
+  emit('sort-change', {
+    mode: columnSortModeMap[prop] || 'urgency',
+    order
+  })
+}
 
 function platformTagType(platform) {
   return getPlatformTagType(platform)
