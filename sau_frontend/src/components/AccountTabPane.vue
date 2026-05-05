@@ -16,6 +16,18 @@
           <span v-if="refreshing">重新整理中</span>
           <span v-else>重新整理</span>
         </el-button>
+        <el-button
+          plain
+          :disabled="bulkCheckCount < 1"
+          :loading="bulkCheckLoading"
+          @click="$emit('bulk-check')"
+        >檢查全部</el-button>
+        <el-button
+          plain
+          :disabled="bulkRefreshCount < 1"
+          :loading="bulkRefreshLoading"
+          @click="$emit('bulk-refresh')"
+        >刷新全部</el-button>
       </div>
     </div>
 
@@ -125,6 +137,10 @@ defineProps({
   accounts: { type: Array, required: true },
   searchKeyword: { type: String, default: '' },
   refreshing: { type: Boolean, default: false },
+  bulkCheckLoading: { type: Boolean, default: false },
+  bulkRefreshLoading: { type: Boolean, default: false },
+  bulkCheckCount: { type: Number, default: 0 },
+  bulkRefreshCount: { type: Number, default: 0 },
   emptyText: { type: String, default: '目前沒有帳號資料' }
 })
 
@@ -137,6 +153,8 @@ const emit = defineEmits([
   'refresh',
   'relogin',
   'health-check',
+  'bulk-check',
+  'bulk-refresh',
   'search'
 ])
 

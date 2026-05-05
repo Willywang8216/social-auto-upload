@@ -24,6 +24,10 @@
             :accounts="filteredAccounts"
             :search-keyword="searchKeyword"
             :refreshing="appStore.isAccountRefreshing"
+            :bulk-check-loading="bulkCheckLoading"
+            :bulk-refresh-loading="bulkRefreshLoading"
+            :bulk-check-count="bulkCheckTargets.length"
+            :bulk-refresh-count="bulkRefreshTargets.length"
             empty-text="目前沒有帳號資料"
             @add="handleAddAccount"
             @edit="handleEdit"
@@ -33,6 +37,8 @@
             @refresh="refreshAccounts"
             @relogin="handleReLogin"
             @health-check="runRowHealthCheck"
+            @bulk-check="runBulkHealthCheck"
+            @bulk-refresh="runBulkRefresh"
             @search="onSearchChange"
           />
         </el-tab-pane>
@@ -46,6 +52,10 @@
             :accounts="getFilteredAccountsByPlatform(platform.label)"
             :search-keyword="searchKeyword"
             :refreshing="appStore.isAccountRefreshing"
+            :bulk-check-loading="bulkCheckLoading"
+            :bulk-refresh-loading="bulkRefreshLoading"
+            :bulk-check-count="bulkCheckTargets.length"
+            :bulk-refresh-count="bulkRefreshTargets.length"
             :empty-text="`目前沒有${platform.label}帳號資料`"
             @add="handleAddAccount"
             @edit="handleEdit"
@@ -55,6 +65,8 @@
             @refresh="refreshAccounts"
             @relogin="handleReLogin"
             @health-check="runRowHealthCheck"
+            @bulk-check="runBulkHealthCheck"
+            @bulk-refresh="runBulkRefresh"
             @search="onSearchChange"
           />
         </el-tab-pane>
@@ -639,6 +651,24 @@ const filteredAccounts = computed(() => {
 const getFilteredAccountsByPlatform = (platformLabel) =>
   filteredAccounts.value.filter((account) => account.platform === platformLabel)
 
+const bulkCheckLoading = ref(false)
+const bulkRefreshLoading = ref(false)
+
+const currentVisibleAccounts = computed(() => {
+  if (activeTab.value === 'all') return filteredAccounts.value
+  const tab = accountPlatformTabs.find((item) => item.value === activeTab.value)
+  if (!tab) return filteredAccounts.value
+  return getFilteredAccountsByPlatform(tab.label)
+})
+
+const bulkCheckTargets = computed(() =>
+  currentVisibleAccounts.value.filter((account) => account.supportsHealthAction && account.healthActionKind === 'check')
+)
+
+const bulkRefreshTargets = computed(() =>
+  currentVisibleAccounts.value.filter((account) => account.supportsHealthAction && account.healthActionKind === 'refresh')
+)
+
 const onSearchChange = (value) => {
   searchKeyword.value = value
 }
@@ -885,31 +915,81 @@ const handleDelete = (row) => {
     .catch(() => {})
 }
 
-const runRowHealthCheck = async (row) => {
-  if (!row || !row.id) return
+const executeHealthAction = async (row, { silent = false } = {}) => {
+  if (!row || !row.id) return { ok: false, reason: 'missing_id', row }
   try {
-    if (row.platformSlug === 'tiktok') {
+    if (row.healthActionKind === 'refresh') {
       const response = await profilesApi.refreshAccountToken(row.id)
       accountStore.updateAccount(row.id, response?.data || row)
-      ElMessage.success('TikTok token 已刷新')
-      return
+      if (!silent) {
+        ElMessage.success(`${row.platform} token 已刷新`)
+      }
+      return { ok: true, kind: 'refresh', row, data: response?.data || row }
     }
-    if (['reddit', 'youtube'].includes(row.platformSlug)) {
-      const response = await profilesApi.refreshAccountToken(row.id)
-      accountStore.updateAccount(row.id, response?.data || row)
-      ElMessage.success(`${row.platform} token 已刷新`)
-      return
-    }
-    if (['facebook', 'instagram', 'threads', 'telegram', 'discord'].includes(row.platformSlug)) {
+    if (row.healthActionKind === 'check') {
       const response = await profilesApi.checkAccountConnection(row.id)
       accountStore.updateAccount(row.id, response?.data || row)
-      ElMessage.success(`${row.platform} connection checked`)
-      return
+      if (!silent) {
+        ElMessage.success(`${row.platform} connection checked`)
+      }
+      return { ok: true, kind: 'check', row, data: response?.data || row }
     }
-    ElMessage.info('此帳號目前沒有可執行的健康檢查')
+    if (!silent) {
+      ElMessage.info('此帳號目前沒有可執行的健康檢查')
+    }
+    return { ok: false, reason: 'unsupported', row }
   } catch (error) {
     console.error('執行帳號健康檢查失敗:', error)
-    ElMessage.error(error?.message || '執行帳號健康檢查失敗')
+    if (!silent) {
+      ElMessage.error(error?.message || '執行帳號健康檢查失敗')
+    }
+    return { ok: false, reason: 'error', row, error }
+  }
+}
+
+const runRowHealthCheck = async (row) => {
+  await executeHealthAction(row)
+}
+
+const runBulkHealthCheck = async () => {
+  if (bulkCheckTargets.value.length < 1 || bulkCheckLoading.value) return
+  bulkCheckLoading.value = true
+  let success = 0
+  let failed = 0
+  try {
+    for (const row of bulkCheckTargets.value) {
+      const result = await executeHealthAction(row, { silent: true })
+      if (result.ok) success += 1
+      else if (result.reason !== 'unsupported') failed += 1
+    }
+    if (failed > 0) {
+      ElMessage.warning(`批次檢查完成：${success} 個成功，${failed} 個失敗`)
+    } else {
+      ElMessage.success(`批次檢查完成：${success} 個成功`)
+    }
+  } finally {
+    bulkCheckLoading.value = false
+  }
+}
+
+const runBulkRefresh = async () => {
+  if (bulkRefreshTargets.value.length < 1 || bulkRefreshLoading.value) return
+  bulkRefreshLoading.value = true
+  let success = 0
+  let failed = 0
+  try {
+    for (const row of bulkRefreshTargets.value) {
+      const result = await executeHealthAction(row, { silent: true })
+      if (result.ok) success += 1
+      else if (result.reason !== 'unsupported') failed += 1
+    }
+    if (failed > 0) {
+      ElMessage.warning(`批次刷新完成：${success} 個成功，${failed} 個失敗`)
+    } else {
+      ElMessage.success(`批次刷新完成：${success} 個成功`)
+    }
+  } finally {
+    bulkRefreshLoading.value = false
   }
 }
 
