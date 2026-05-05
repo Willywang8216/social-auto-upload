@@ -46,6 +46,15 @@
       </el-col>
       <el-col :span="12">
         <el-card>
+          <template #header>Credential snapshot</template>
+          <div v-if="credentialRows.length > 0" class="event-card">
+            <div v-for="row in credentialRows" :key="row.label" class="kv"><span>{{ row.label }}</span><strong>{{ row.value || '—' }}</strong></div>
+          </div>
+          <el-empty v-else description="No credential details available" />
+        </el-card>
+      </el-col>
+      <el-col :span="12">
+        <el-card>
           <template #header>Last request / callback</template>
           <div v-if="status.lastRequest || status.lastCallback" class="event-card">
             <div class="kv"><span>Last request</span><strong>{{ status.lastRequest?.requestedAt || '—' }}</strong></div>
@@ -118,6 +127,45 @@ const accountId = computed(() => {
   const value = Array.isArray(raw) ? raw[0] : raw
   return value ? Number(value) : null
 })
+const credentialRows = computed(() => {
+  const config = status.account?.config || {}
+  const rows = [
+    { label: 'Access token updated', value: config.accessTokenUpdatedAt || '' },
+    { label: 'Last manual refresh', value: config.lastManualRefreshAt || '' },
+    { label: 'Last auto refresh', value: config.lastAutoRefreshAt || '' },
+    { label: 'Last connection check', value: config.lastConnectionCheckAt || '' }
+  ]
+
+  if (platform.value === 'reddit') {
+    rows.unshift(
+      { label: 'Username', value: config.redditUserName || '' },
+      { label: 'Scope', value: config.scope || '' }
+    )
+  } else if (platform.value === 'youtube') {
+    rows.unshift(
+      { label: 'Channel title', value: config.channelTitle || '' },
+      { label: 'Channel ID', value: config.channelId || '' }
+    )
+  } else if (platform.value === 'facebook') {
+    rows.unshift(
+      { label: 'Page name', value: config.facebookPageName || '' },
+      { label: 'Page ID', value: config.pageId || '' }
+    )
+  } else if (platform.value === 'instagram') {
+    rows.unshift(
+      { label: 'Username', value: config.instagramUserName || '' },
+      { label: 'IG user ID', value: config.igUserId || '' }
+    )
+  } else if (platform.value === 'threads') {
+    rows.unshift(
+      { label: 'Username', value: config.threadsUserName || '' },
+      { label: 'User ID', value: config.threadUserId || config.userId || '' }
+    )
+  }
+
+  return rows.filter((row) => row.value)
+})
+
 const title = computed(() => `${platform.value || 'OAuth'} status`)
 
 function goToAccountQueue() {
