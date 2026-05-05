@@ -122,8 +122,13 @@ const title = computed(() => `${platform.value || 'OAuth'} status`)
 
 function goToAccountQueue() {
   const query = {}
-  if (status.reconnectRequired) query.risk = 'reconnect_required'
-  else if (status.recommendedAction === 'refresh' && status.expiresAt) query.risk = 'expiring_7d'
+  if (status.reconnectRequired) {
+    query.risk = 'reconnect_required'
+    query.sort = 'urgency'
+  } else if (status.recommendedAction === 'refresh' && status.expiresAt) {
+    query.risk = 'expiring_7d'
+    query.sort = 'expiry'
+  }
   if (platform.value) query.platform = platform.value
   if (status.account?.profile_id != null) query.profile = String(status.account.profile_id)
   router.push({ path: '/account-management', query })
