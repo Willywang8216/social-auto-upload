@@ -236,18 +236,7 @@
           <template v-if="accountForm.platform === 'reddit'">
             <el-divider content-position="left">Reddit 設定</el-divider>
             <el-form-item label="OAuth health">
-              <div class="oauth-health-card">
-                <div class="health-row"><span>Username</span><strong>{{ accountForm.redditUserName || '—' }}</strong></div>
-                <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : 'missing' }}</strong></div>
-                <div class="health-row"><span>Token updated</span><strong>{{ accountForm.accessTokenUpdatedAt || '—' }}</strong></div>
-                <div class="health-row"><span>Token expires</span><strong>{{ accountForm.accessTokenExpiresAt || '—' }}</strong></div>
-                <div class="health-row"><span>Last manual refresh</span><strong>{{ accountForm.lastManualRefreshAt || '—' }}</strong></div>
-              </div>
-              <div class="oauth-actions-row">
-                <el-button type="primary" plain @click="connectWithReddit" :disabled="!accountForm.id">Connect with Reddit</el-button>
-                <el-button plain @click="refreshStructuredToken('reddit')" :disabled="!accountForm.id">Refresh Reddit token</el-button>
-                <el-button plain @click="openOauthReviewStatus('reddit')" :disabled="!accountForm.id">Open OAuth status</el-button>
-              </div>
+              <AccountConnectionPanel :rows="redditHealthRows" :actions="redditHealthActions" />
             </el-form-item>
             <el-form-item label="Subreddits">
               <el-input
@@ -274,15 +263,7 @@
           <template v-else-if="accountForm.platform === 'telegram'">
             <el-divider content-position="left">Telegram 設定</el-divider>
             <el-form-item label="Connection health">
-              <div class="oauth-health-card">
-                <div class="health-row"><span>Bot</span><strong>{{ accountForm.telegramBotName || '—' }}</strong></div>
-                <div class="health-row"><span>Chat</span><strong>{{ accountForm.telegramChatTitle || '—' }}</strong></div>
-                <div class="health-row"><span>Bot token</span><strong>{{ accountForm.botTokenEnv ? 'env-backed' : 'missing' }}</strong></div>
-                <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
-              </div>
-              <div class="oauth-actions-row">
-                <el-button plain @click="checkStructuredConnection('telegram')" :disabled="!accountForm.id">Check Telegram connection</el-button>
-              </div>
+              <AccountConnectionPanel :rows="telegramHealthRows" :actions="telegramHealthActions" />
             </el-form-item>
             <el-form-item label="Chat ID">
               <el-input v-model="accountForm.chatId" placeholder="例如：@channel_name 或 -100123456" />
@@ -307,18 +288,7 @@
           <template v-else-if="accountForm.platform === 'youtube'">
             <el-divider content-position="left">YouTube 設定</el-divider>
             <el-form-item label="OAuth health">
-              <div class="oauth-health-card">
-                <div class="health-row"><span>Channel title</span><strong>{{ accountForm.channelTitle || '—' }}</strong></div>
-                <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : 'missing' }}</strong></div>
-                <div class="health-row"><span>Token updated</span><strong>{{ accountForm.accessTokenUpdatedAt || '—' }}</strong></div>
-                <div class="health-row"><span>Token expires</span><strong>{{ accountForm.accessTokenExpiresAt || '—' }}</strong></div>
-                <div class="health-row"><span>Last manual refresh</span><strong>{{ accountForm.lastManualRefreshAt || '—' }}</strong></div>
-              </div>
-              <div class="oauth-actions-row">
-                <el-button type="primary" plain @click="connectWithYouTube" :disabled="!accountForm.id">Connect with YouTube</el-button>
-                <el-button plain @click="refreshStructuredToken('youtube')" :disabled="!accountForm.id">Refresh YouTube token</el-button>
-                <el-button plain @click="openOauthReviewStatus('youtube')" :disabled="!accountForm.id">Open OAuth status</el-button>
-              </div>
+              <AccountConnectionPanel :rows="youtubeHealthRows" :actions="youtubeHealthActions" />
             </el-form-item>
             <el-form-item label="Channel ID">
               <el-input v-model="accountForm.channelId" placeholder="例如：UCxxxx" />
@@ -350,17 +320,7 @@
           <template v-else-if="accountForm.platform === 'facebook'">
             <el-divider content-position="left">Facebook 設定</el-divider>
             <el-form-item label="Connection health">
-              <div class="oauth-health-card">
-                <div class="health-row"><span>Page name</span><strong>{{ accountForm.facebookPageName || '—' }}</strong></div>
-                <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : (accountForm.accessTokenEnv ? 'env-backed' : 'missing') }}</strong></div>
-                <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
-              </div>
-              <div class="oauth-actions-row">
-                <el-button type="primary" plain @click="connectWithMeta('facebook')" :disabled="!accountForm.id">Connect with Facebook</el-button>
-                <el-button plain @click="refreshStructuredToken('facebook')" :disabled="!accountForm.id">Refresh Facebook token</el-button>
-                <el-button plain @click="checkStructuredConnection('facebook')" :disabled="!accountForm.id">Check Facebook connection</el-button>
-                <el-button plain @click="openOauthReviewStatus('facebook')" :disabled="!accountForm.id">Open OAuth status</el-button>
-              </div>
+              <AccountConnectionPanel :rows="facebookHealthRows" :actions="facebookHealthActions" />
             </el-form-item>
             <el-form-item label="Page ID">
               <el-input v-model="accountForm.pageId" />
@@ -373,17 +333,7 @@
           <template v-else-if="accountForm.platform === 'instagram'">
             <el-divider content-position="left">Instagram 設定</el-divider>
             <el-form-item label="Connection health">
-              <div class="oauth-health-card">
-                <div class="health-row"><span>Username</span><strong>{{ accountForm.instagramUserName || '—' }}</strong></div>
-                <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : (accountForm.accessTokenEnv ? 'env-backed' : 'missing') }}</strong></div>
-                <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
-              </div>
-              <div class="oauth-actions-row">
-                <el-button type="primary" plain @click="connectWithMeta('instagram')" :disabled="!accountForm.id">Connect with Instagram</el-button>
-                <el-button plain @click="refreshStructuredToken('instagram')" :disabled="!accountForm.id">Refresh Instagram token</el-button>
-                <el-button plain @click="checkStructuredConnection('instagram')" :disabled="!accountForm.id">Check Instagram connection</el-button>
-                <el-button plain @click="openOauthReviewStatus('instagram')" :disabled="!accountForm.id">Open OAuth status</el-button>
-              </div>
+              <AccountConnectionPanel :rows="instagramHealthRows" :actions="instagramHealthActions" />
             </el-form-item>
             <el-form-item label="IG User ID">
               <el-input v-model="accountForm.igUserId" />
@@ -396,17 +346,7 @@
           <template v-else-if="accountForm.platform === 'threads'">
             <el-divider content-position="left">Threads 設定</el-divider>
             <el-form-item label="Connection health">
-              <div class="oauth-health-card">
-                <div class="health-row"><span>Username</span><strong>{{ accountForm.threadsUserName || '—' }}</strong></div>
-                <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : (accountForm.accessTokenEnv ? 'env-backed' : 'missing') }}</strong></div>
-                <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
-              </div>
-              <div class="oauth-actions-row">
-                <el-button type="primary" plain @click="connectWithThreads" :disabled="!accountForm.id">Connect with Threads</el-button>
-                <el-button plain @click="refreshStructuredToken('threads')" :disabled="!accountForm.id">Refresh Threads token</el-button>
-                <el-button plain @click="checkStructuredConnection('threads')" :disabled="!accountForm.id">Check Threads connection</el-button>
-                <el-button plain @click="openOauthReviewStatus('threads')" :disabled="!accountForm.id">Open OAuth status</el-button>
-              </div>
+              <AccountConnectionPanel :rows="threadsHealthRows" :actions="threadsHealthActions" />
             </el-form-item>
             <el-form-item label="User ID">
               <el-input v-model="accountForm.threadUserId" />
@@ -437,21 +377,7 @@
               </div>
             </el-form-item>
             <el-form-item label="Connection health">
-              <div class="tiktok-health-card">
-                <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : 'missing' }}</strong></div>
-                <div class="health-row"><span>Refresh token</span><strong>{{ accountForm.refreshToken ? 'present' : 'missing' }}</strong></div>
-                <div class="health-row"><span>Last OAuth start</span><strong>{{ tiktokHealth.lastRequest?.requestedAt || '—' }}</strong></div>
-                <div class="health-row"><span>Token expires</span><strong>{{ accountForm.accessTokenExpiresAt || '—' }}</strong></div>
-                <div class="health-row"><span>Refresh expires</span><strong>{{ accountForm.refreshTokenExpiresAt || '—' }}</strong></div>
-                <div class="health-row"><span>Connected at</span><strong>{{ accountForm.connectedAt || '—' }}</strong></div>
-                <div class="health-row"><span>Last token update</span><strong>{{ accountForm.accessTokenUpdatedAt || '—' }}</strong></div>
-                <div class="health-row"><span>Last auto refresh</span><strong>{{ accountForm.lastAutoRefreshAt || '—' }}</strong></div>
-                <div class="health-row"><span>Last manual refresh</span><strong>{{ accountForm.lastManualRefreshAt || '—' }}</strong></div>
-                <div class="health-row"><span>Last callback</span><strong>{{ tiktokHealth.lastCallback?.receivedAt || '—' }}</strong></div>
-                <div class="health-row"><span>Last refresh</span><strong>{{ tiktokHealth.lastRefresh?.receivedAt || '—' }}</strong></div>
-                <div class="health-row"><span>Last webhook</span><strong>{{ tiktokHealth.lastWebhook?.receivedAt || '—' }}</strong></div>
-                <div class="health-row"><span>Webhook signature</span><strong>{{ tiktokHealth.lastWebhook?.signatureStatus || '—' }}</strong></div>
-              </div>
+              <AccountConnectionPanel :rows="tiktokHealthRows" />
             </el-form-item>
             <el-form-item label="Access Token">
               <el-input v-model="accountForm.accessToken" placeholder="由 TikTok Connect 自動填入，或手動貼上" type="textarea" :rows="2" />
@@ -496,15 +422,7 @@
           <template v-else-if="accountForm.platform === 'discord'">
             <el-divider content-position="left">Discord 設定</el-divider>
             <el-form-item label="Connection health">
-              <div class="oauth-health-card">
-                <div class="health-row"><span>Webhook name</span><strong>{{ accountForm.discordWebhookName || '—' }}</strong></div>
-                <div class="health-row"><span>Channel ID</span><strong>{{ accountForm.discordWebhookChannel || '—' }}</strong></div>
-                <div class="health-row"><span>Webhook URL</span><strong>{{ accountForm.webhookUrlEnv ? 'env-backed' : 'missing' }}</strong></div>
-                <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
-              </div>
-              <div class="oauth-actions-row">
-                <el-button plain @click="checkStructuredConnection('discord')" :disabled="!accountForm.id">Check Discord connection</el-button>
-              </div>
+              <AccountConnectionPanel :rows="discordHealthRows" :actions="discordHealthActions" />
             </el-form-item>
             <el-form-item label="Webhook URL Env">
               <el-input v-model="accountForm.webhookUrlEnv" placeholder="例如：DISCORD_WEBHOOK_URL" />
@@ -582,6 +500,7 @@ import { threadsApi } from '@/api/threads'
 import { tiktokApi } from '@/api/tiktok'
 import { youtubeApi } from '@/api/youtube'
 import AccountTabPane from '@/components/AccountTabPane.vue'
+import AccountConnectionPanel from '@/components/AccountConnectionPanel.vue'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { useProfilesStore } from '@/stores/profiles'
@@ -702,6 +621,106 @@ const tiktokHealth = reactive({
   lastRefresh: null,
   lastWebhook: null,
 })
+const presentLabel = (value, whenPresent = 'present', whenMissing = 'missing') => (value ? whenPresent : whenMissing)
+
+const redditHealthRows = computed(() => [
+  { label: 'Username', value: accountForm.redditUserName || '—' },
+  { label: 'Access token', value: presentLabel(accountForm.accessToken) },
+  { label: 'Token updated', value: accountForm.accessTokenUpdatedAt || '—' },
+  { label: 'Token expires', value: accountForm.accessTokenExpiresAt || '—' },
+  { label: 'Last manual refresh', value: accountForm.lastManualRefreshAt || '—' }
+])
+const redditHealthActions = computed(() => [
+  { label: 'Connect with Reddit', type: 'primary', disabled: !accountForm.id, onClick: connectWithReddit },
+  { label: 'Refresh Reddit token', disabled: !accountForm.id, onClick: () => refreshStructuredToken('reddit') },
+  { label: 'Open OAuth status', disabled: !accountForm.id, onClick: () => openOauthReviewStatus('reddit') }
+])
+
+const telegramHealthRows = computed(() => [
+  { label: 'Bot', value: accountForm.telegramBotName || '—' },
+  { label: 'Chat', value: accountForm.telegramChatTitle || '—' },
+  { label: 'Bot token', value: presentLabel(accountForm.botTokenEnv, 'env-backed') },
+  { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
+])
+const telegramHealthActions = computed(() => [
+  { label: 'Check Telegram connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('telegram') }
+])
+
+const youtubeHealthRows = computed(() => [
+  { label: 'Channel title', value: accountForm.channelTitle || '—' },
+  { label: 'Access token', value: presentLabel(accountForm.accessToken) },
+  { label: 'Token updated', value: accountForm.accessTokenUpdatedAt || '—' },
+  { label: 'Token expires', value: accountForm.accessTokenExpiresAt || '—' },
+  { label: 'Last manual refresh', value: accountForm.lastManualRefreshAt || '—' }
+])
+const youtubeHealthActions = computed(() => [
+  { label: 'Connect with YouTube', type: 'primary', disabled: !accountForm.id, onClick: connectWithYouTube },
+  { label: 'Refresh YouTube token', disabled: !accountForm.id, onClick: () => refreshStructuredToken('youtube') },
+  { label: 'Open OAuth status', disabled: !accountForm.id, onClick: () => openOauthReviewStatus('youtube') }
+])
+
+const facebookHealthRows = computed(() => [
+  { label: 'Page name', value: accountForm.facebookPageName || '—' },
+  { label: 'Access token', value: accountForm.accessToken ? 'present' : presentLabel(accountForm.accessTokenEnv, 'env-backed') },
+  { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
+])
+const facebookHealthActions = computed(() => [
+  { label: 'Connect with Facebook', type: 'primary', disabled: !accountForm.id, onClick: () => connectWithMeta('facebook') },
+  { label: 'Refresh Facebook token', disabled: !accountForm.id, onClick: () => refreshStructuredToken('facebook') },
+  { label: 'Check Facebook connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('facebook') },
+  { label: 'Open OAuth status', disabled: !accountForm.id, onClick: () => openOauthReviewStatus('facebook') }
+])
+
+const instagramHealthRows = computed(() => [
+  { label: 'Username', value: accountForm.instagramUserName || '—' },
+  { label: 'Access token', value: accountForm.accessToken ? 'present' : presentLabel(accountForm.accessTokenEnv, 'env-backed') },
+  { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
+])
+const instagramHealthActions = computed(() => [
+  { label: 'Connect with Instagram', type: 'primary', disabled: !accountForm.id, onClick: () => connectWithMeta('instagram') },
+  { label: 'Refresh Instagram token', disabled: !accountForm.id, onClick: () => refreshStructuredToken('instagram') },
+  { label: 'Check Instagram connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('instagram') },
+  { label: 'Open OAuth status', disabled: !accountForm.id, onClick: () => openOauthReviewStatus('instagram') }
+])
+
+const threadsHealthRows = computed(() => [
+  { label: 'Username', value: accountForm.threadsUserName || '—' },
+  { label: 'Access token', value: accountForm.accessToken ? 'present' : presentLabel(accountForm.accessTokenEnv, 'env-backed') },
+  { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
+])
+const threadsHealthActions = computed(() => [
+  { label: 'Connect with Threads', type: 'primary', disabled: !accountForm.id, onClick: connectWithThreads },
+  { label: 'Refresh Threads token', disabled: !accountForm.id, onClick: () => refreshStructuredToken('threads') },
+  { label: 'Check Threads connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('threads') },
+  { label: 'Open OAuth status', disabled: !accountForm.id, onClick: () => openOauthReviewStatus('threads') }
+])
+
+const discordHealthRows = computed(() => [
+  { label: 'Webhook name', value: accountForm.discordWebhookName || '—' },
+  { label: 'Channel ID', value: accountForm.discordWebhookChannel || '—' },
+  { label: 'Webhook URL', value: presentLabel(accountForm.webhookUrlEnv, 'env-backed') },
+  { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
+])
+const discordHealthActions = computed(() => [
+  { label: 'Check Discord connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('discord') }
+])
+
+const tiktokHealthRows = computed(() => [
+  { label: 'Access token', value: presentLabel(accountForm.accessToken) },
+  { label: 'Refresh token', value: presentLabel(accountForm.refreshToken) },
+  { label: 'Last OAuth start', value: tiktokHealth.lastRequest?.requestedAt || '—' },
+  { label: 'Token expires', value: accountForm.accessTokenExpiresAt || '—' },
+  { label: 'Refresh expires', value: accountForm.refreshTokenExpiresAt || '—' },
+  { label: 'Connected at', value: accountForm.connectedAt || '—' },
+  { label: 'Last token update', value: accountForm.accessTokenUpdatedAt || '—' },
+  { label: 'Last auto refresh', value: accountForm.lastAutoRefreshAt || '—' },
+  { label: 'Last manual refresh', value: accountForm.lastManualRefreshAt || '—' },
+  { label: 'Last callback', value: tiktokHealth.lastCallback?.receivedAt || '—' },
+  { label: 'Last refresh', value: tiktokHealth.lastRefresh?.receivedAt || '—' },
+  { label: 'Last webhook', value: tiktokHealth.lastWebhook?.receivedAt || '—' },
+  { label: 'Webhook signature', value: tiktokHealth.lastWebhook?.signatureStatus || '—' }
+])
+
 const recentAccountEvents = ref([])
 const eventsLoading = ref(false)
 const maintenanceLoading = ref(false)
@@ -2014,41 +2033,6 @@ onBeforeUnmount(() => {
     border-radius: 4px;
   }
 
-  .oauth-health-card,
-  .tiktok-health-card {
-    width: 100%;
-    background: #f5f7fa;
-    border-radius: 6px;
-    padding: 12px;
-
-    .health-row {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 8px;
-
-      &:last-child {
-        margin-bottom: 0;
-      }
-
-      span {
-        color: #909399;
-      }
-
-      strong {
-        text-align: right;
-        word-break: break-word;
-      }
-    }
-  }
-
-  .oauth-actions-row {
-    margin-top: 12px;
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-
   .tiktok-connect-row {
     display: flex;
     gap: 12px;
@@ -2062,35 +2046,6 @@ onBeforeUnmount(() => {
 
     .tiktok-connected-text {
       min-width: 0;
-    }
-  }
-
-  .tiktok-health-card {
-    width: 100%;
-    background: #f5f7fa;
-    border-radius: 6px;
-    padding: 12px;
-
-    .health-row {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      font-size: 13px;
-      color: #606266;
-      margin-bottom: 8px;
-
-      &:last-child {
-        margin-bottom: 0;
-      }
-
-      span {
-        color: #909399;
-      }
-
-      strong {
-        text-align: right;
-        word-break: break-word;
-      }
     }
   }
 
