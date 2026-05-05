@@ -359,5 +359,33 @@ class CampaignApiTests(unittest.TestCase):
         self.assertIn(status['lastWebhook']['signatureStatus'], {'missing_signature', 'missing_secret'})
 
 
+    def test_tiktok_admin_status_can_filter_by_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'TikTok Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'tiktok',
+                'accountName': 'brand-tiktok',
+                'authType': 'oauth',
+                'config': {'accessTokenEnv': 'TIKTOK_ACCESS_TOKEN', 'publishMode': 'direct'},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                'INSERT INTO tiktok_review_events (event_type, status, account_id, account_name, payload_json, headers_json, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                ('refresh', 'ok', account_id, 'brand-tiktok', '{"status":"ok"}', '{}', '{}'),
+            )
+            conn.commit()
+
+        response = self.client.get(f'/admin/tiktok/status?accountId={account_id}')
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['accountId'], account_id)
+        self.assertEqual(body['lastRefresh']['type'], 'refresh')
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1321,6 +1321,24 @@ def _event_payload_to_status(event: tiktok_review.TikTokReviewEvent | None) -> d
     return payload
 
 
+def _oauth_request_to_status(request_state: tiktok_review.TikTokOAuthRequest | None) -> dict | None:
+    if request_state is None:
+        return None
+    payload = dict(request_state.result or {})
+    payload.setdefault('state', request_state.state_token)
+    payload['status'] = request_state.status
+    payload['requestedAt'] = request_state.requested_at
+    payload['completedAt'] = request_state.completed_at
+    payload['error'] = request_state.error_text
+    payload['redirectUri'] = request_state.redirect_uri
+    payload['scopes'] = request_state.scopes
+    if request_state.account_id is not None:
+        payload.setdefault('accountId', request_state.account_id)
+    if request_state.account_name:
+        payload.setdefault('accountName', request_state.account_name)
+    return payload
+
+
 def _validate_account_payload(data: dict, *, db_path: Path, profile_id: int | None = None, perform_live_checks: bool = False):
     platform = str(data.get("platform", "") or "").strip().lower()
     auth_type = str(data.get("authType", "cookie") or "cookie")
@@ -1894,6 +1912,8 @@ def tiktok_webhook():
 @app.route('/admin/tiktok/status', methods=['GET'])
 def tiktok_admin_status():
     db_path = _current_db_path()
+    raw_account_id = request.args.get('accountId')
+    account_id = int(raw_account_id) if raw_account_id and str(raw_account_id).isdigit() else None
     return jsonify({
         'code': 200,
         'msg': 'ok',
@@ -1903,9 +1923,12 @@ def tiktok_admin_status():
             'webhookUri': 'https://up.iamwillywang.com/webhooks/tiktok',
             'selectedProducts': ['Login Kit for Web', 'Content Posting API', 'Webhooks'],
             'selectedScopes': ['user.info.basic', 'video.publish'],
-            'lastCallback': _event_payload_to_status(tiktok_review.latest_review_event('callback', db_path=db_path)),
+            'accountId': account_id,
+            'lastRequest': _oauth_request_to_status(tiktok_review.latest_oauth_request(account_id=account_id, db_path=db_path)),
+            'lastCallback': _event_payload_to_status(tiktok_review.latest_review_event('callback', account_id=account_id, db_path=db_path)),
+            'lastRefresh': _event_payload_to_status(tiktok_review.latest_review_event('refresh', account_id=account_id, db_path=db_path)),
             'lastWebhook': _event_payload_to_status(tiktok_review.latest_review_event('webhook', db_path=db_path)),
-            'recentEvents': [_event_payload_to_status(event) for event in tiktok_review.list_recent_review_events(db_path=db_path)],
+            'recentEvents': [_event_payload_to_status(event) for event in tiktok_review.list_recent_review_events(account_id=account_id, db_path=db_path)],
         },
     }), 200
 

@@ -223,28 +223,51 @@ def get_review_event(event_id: int, *, db_path: Path | None = None) -> TikTokRev
     return _row_to_event(row) if row else None
 
 
-def latest_review_event(event_type: str, *, db_path: Path | None = None) -> TikTokReviewEvent | None:
+def latest_review_event(
+    event_type: str,
+    *,
+    account_id: int | None = None,
+    db_path: Path | None = None,
+) -> TikTokReviewEvent | None:
+    query = """
+        SELECT * FROM tiktok_review_events
+        WHERE event_type = ?
+    """
+    params: list[object] = [event_type]
+    if account_id is not None:
+        query += " AND account_id = ?"
+        params.append(account_id)
+    query += " ORDER BY id DESC LIMIT 1"
     with _connect(db_path) as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM tiktok_review_events
-            WHERE event_type = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (event_type,),
-        ).fetchone()
+        row = conn.execute(query, params).fetchone()
     return _row_to_event(row) if row else None
 
 
-def list_recent_review_events(*, limit: int = 25, db_path: Path | None = None) -> list[TikTokReviewEvent]:
+def list_recent_review_events(
+    *,
+    limit: int = 25,
+    account_id: int | None = None,
+    db_path: Path | None = None,
+) -> list[TikTokReviewEvent]:
+    query = "SELECT * FROM tiktok_review_events"
+    params: list[object] = []
+    if account_id is not None:
+        query += " WHERE account_id = ?"
+        params.append(account_id)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
     with _connect(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM tiktok_review_events
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        rows = conn.execute(query, params).fetchall()
     return [_row_to_event(row) for row in rows]
+
+
+def latest_oauth_request(*, account_id: int | None = None, db_path: Path | None = None) -> TikTokOAuthRequest | None:
+    query = "SELECT * FROM tiktok_oauth_requests"
+    params: list[object] = []
+    if account_id is not None:
+        query += " WHERE account_id = ?"
+        params.append(account_id)
+    query += " ORDER BY requested_at DESC, state_token DESC LIMIT 1"
+    with _connect(db_path) as conn:
+        row = conn.execute(query, params).fetchone()
+    return _row_to_request(row) if row else None

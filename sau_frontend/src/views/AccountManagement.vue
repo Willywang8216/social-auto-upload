@@ -294,6 +294,17 @@
                 </div>
               </div>
             </el-form-item>
+            <el-form-item label="Connection health">
+              <div class="tiktok-health-card">
+                <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : 'missing' }}</strong></div>
+                <div class="health-row"><span>Refresh token</span><strong>{{ accountForm.refreshToken ? 'present' : 'missing' }}</strong></div>
+                <div class="health-row"><span>Last OAuth start</span><strong>{{ tiktokHealth.lastRequest?.requestedAt || '—' }}</strong></div>
+                <div class="health-row"><span>Last callback</span><strong>{{ tiktokHealth.lastCallback?.receivedAt || '—' }}</strong></div>
+                <div class="health-row"><span>Last refresh</span><strong>{{ tiktokHealth.lastRefresh?.receivedAt || '—' }}</strong></div>
+                <div class="health-row"><span>Last webhook</span><strong>{{ tiktokHealth.lastWebhook?.receivedAt || '—' }}</strong></div>
+                <div class="health-row"><span>Webhook signature</span><strong>{{ tiktokHealth.lastWebhook?.signatureStatus || '—' }}</strong></div>
+              </div>
+            </el-form-item>
             <el-form-item label="Access Token">
               <el-input v-model="accountForm.accessToken" placeholder="由 TikTok Connect 自動填入，或手動貼上" type="textarea" :rows="2" />
             </el-form-item>
@@ -501,6 +512,13 @@ const isStructuredAccountForm = computed(() => Boolean(accountForm.profileId))
 const sseConnecting = ref(false)
 const qrCodeData = ref('')
 const loginStatus = ref('')
+const tiktokHealth = reactive({
+  accountId: null,
+  lastRequest: null,
+  lastCallback: null,
+  lastRefresh: null,
+  lastWebhook: null,
+})
 let eventSource = null
 
 const filteredAccounts = computed(() => {
@@ -667,9 +685,36 @@ onMounted(() => {
   }, 100)
 })
 
+const resetTikTokHealth = () => {
+  Object.assign(tiktokHealth, {
+    accountId: null,
+    lastRequest: null,
+    lastCallback: null,
+    lastRefresh: null,
+    lastWebhook: null,
+  })
+}
+
+const loadTikTokHealth = async (accountId = null) => {
+  try {
+    const response = await tiktokApi.getStatus(accountId)
+    const data = response?.data || {}
+    Object.assign(tiktokHealth, {
+      accountId: data.accountId || accountId || null,
+      lastRequest: data.lastRequest || null,
+      lastCallback: data.lastCallback || null,
+      lastRefresh: data.lastRefresh || null,
+      lastWebhook: data.lastWebhook || null,
+    })
+  } catch (error) {
+    console.error('載入 TikTok health 失敗:', error)
+  }
+}
+
 const handleAddAccount = () => {
   dialogType.value = 'add'
   resetAccountForm()
+  resetTikTokHealth()
   sseConnecting.value = false
   qrCodeData.value = ''
   loginStatus.value = ''
@@ -696,6 +741,11 @@ const handleEdit = (row) => {
   qrCodeData.value = ''
   loginStatus.value = ''
   dialogVisible.value = true
+  if ((row.platformSlug || row.platform) === 'tiktok') {
+    loadTikTokHealth(row.id)
+  } else {
+    resetTikTokHealth()
+  }
 }
 
 const handleDelete = (row) => {
@@ -855,6 +905,7 @@ async function refreshTikTokToken() {
     accountForm.tiktokScope = config.scope || accountForm.tiktokScope
     accountForm.tiktokDisplayName = config.displayName || accountForm.tiktokDisplayName
     accountForm.tiktokAvatarUrl = config.avatarUrl || accountForm.tiktokAvatarUrl
+    await loadTikTokHealth(accountForm.id)
     ElMessage.success('TikTok token 已刷新')
   } catch (error) {
     console.error('刷新 TikTok token 失敗:', error)
@@ -863,6 +914,10 @@ async function refreshTikTokToken() {
 }
 
 function openTikTokReviewStatus() {
+  if (accountForm.id) {
+    router.push({ path: '/tiktok-review', query: { accountId: String(accountForm.id) } })
+    return
+  }
   router.push('/tiktok-review')
 }
 
@@ -880,6 +935,7 @@ function handleTikTokOauthMessage(event) {
   accountForm.tiktokScope = data.scope || ''
   accountForm.tiktokDisplayName = data.displayName || ''
   accountForm.tiktokAvatarUrl = data.avatarUrl || ''
+  loadTikTokHealth(accountForm.id || null)
   ElMessage.success('TikTok 已連線，可直接儲存帳號設定')
 }
 
@@ -1168,6 +1224,35 @@ onBeforeUnmount(() => {
 
     .tiktok-connected-text {
       min-width: 0;
+    }
+  }
+
+  .tiktok-health-card {
+    width: 100%;
+    background: #f5f7fa;
+    border-radius: 6px;
+    padding: 12px;
+
+    .health-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 13px;
+      color: #606266;
+      margin-bottom: 8px;
+
+      &:last-child {
+        margin-bottom: 0;
+      }
+
+      span {
+        color: #909399;
+      }
+
+      strong {
+        text-align: right;
+        word-break: break-word;
+      }
     }
   }
 

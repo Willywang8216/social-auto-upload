@@ -12,6 +12,7 @@
           <div class="kv"><span>Domain</span><code>{{ status.domain || '—' }}</code></div>
           <div class="kv"><span>Redirect URI</span><code>{{ status.redirectUri || '—' }}</code></div>
           <div class="kv"><span>Webhook URI</span><code>{{ status.webhookUri || '—' }}</code></div>
+          <div class="kv"><span>Account filter</span><code>{{ status.accountId || 'global' }}</code></div>
         </el-card>
       </el-col>
       <el-col :span="12">
@@ -30,8 +31,10 @@
     <el-row :gutter="20" class="status-row">
       <el-col :span="12">
         <el-card>
-          <template #header>Last callback</template>
-          <div v-if="status.lastCallback" class="event-card">
+          <template #header>Last request / callback</template>
+          <div v-if="status.lastCallback || status.lastRequest" class="event-card">
+            <div class="kv"><span>Last request</span><strong>{{ status.lastRequest?.requestedAt || '—' }}</strong></div>
+            <div class="kv"><span>Request status</span><strong>{{ status.lastRequest?.status || '—' }}</strong></div>
             <div class="kv"><span>Received</span><strong>{{ status.lastCallback.receivedAt }}</strong></div>
             <div class="kv"><span>Status</span><strong>{{ status.lastCallback.status }}</strong></div>
             <div class="kv"><span>Account</span><strong>{{ status.lastCallback.accountName || '—' }}</strong></div>
@@ -44,8 +47,10 @@
       </el-col>
       <el-col :span="12">
         <el-card>
-          <template #header>Last webhook</template>
-          <div v-if="status.lastWebhook" class="event-card">
+          <template #header>Last refresh / webhook</template>
+          <div v-if="status.lastWebhook || status.lastRefresh" class="event-card">
+            <div class="kv"><span>Last refresh</span><strong>{{ status.lastRefresh?.receivedAt || '—' }}</strong></div>
+            <div class="kv"><span>Refresh status</span><strong>{{ status.lastRefresh?.status || '—' }}</strong></div>
             <div class="kv"><span>Received</span><strong>{{ status.lastWebhook.receivedAt }}</strong></div>
             <div class="kv"><span>Signature</span><strong>{{ status.lastWebhook.signatureStatus || '—' }}</strong></div>
             <div class="kv"><span>Verified</span><strong>{{ status.lastWebhook.signatureVerified ? 'yes' : 'no' }}</strong></div>
@@ -53,7 +58,7 @@
               <pre>{{ pretty(status.lastWebhook.payload) }}</pre>
             </div>
           </div>
-          <el-empty v-else description="No webhook received yet" />
+          <el-empty v-else description="No webhook or refresh yet" />
         </el-card>
       </el-col>
     </el-row>
@@ -75,10 +80,12 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useRoute } from 'vue-router'
 import { tiktokApi } from '@/api/tiktok'
 
+const route = useRoute()
 const loading = ref(false)
 const status = reactive({
   domain: '',
@@ -86,7 +93,10 @@ const status = reactive({
   webhookUri: '',
   selectedProducts: [],
   selectedScopes: [],
+  accountId: null,
+  lastRequest: null,
   lastCallback: null,
+  lastRefresh: null,
   lastWebhook: null,
   recentEvents: []
 })
@@ -104,14 +114,22 @@ function pretty(value) {
 function eventSummary(event) {
   if (event.type === 'start') return `${event.accountName || 'TikTok'} requested ${event.scopes?.join(', ') || ''}`
   if (event.type === 'callback') return `${event.accountName || 'TikTok'} ${event.status}`
+  if (event.type === 'refresh') return `${event.accountName || 'TikTok'} token refresh ${event.status}`
   if (event.type === 'webhook') return `${event.signatureStatus || 'received'} webhook event`
   return '—'
 }
 
+const scopedAccountId = computed(() => {
+  const raw = route.query.accountId
+  if (!raw) return null
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return value ? Number(value) : null
+})
+
 async function refreshStatus() {
   loading.value = true
   try {
-    const response = await tiktokApi.getStatus()
+    const response = await tiktokApi.getStatus(scopedAccountId.value)
     Object.assign(status, response?.data || {})
   } catch (error) {
     console.error('載入 TikTok callback status 失敗:', error)
@@ -124,6 +142,10 @@ async function refreshStatus() {
 onMounted(() => {
   refreshStatus()
   timer = window.setInterval(refreshStatus, 5000)
+})
+
+watch(scopedAccountId, () => {
+  refreshStatus()
 })
 
 onBeforeUnmount(() => {

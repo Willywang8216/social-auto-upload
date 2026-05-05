@@ -5,7 +5,7 @@ export const tiktokApi = {
     return http.post('/oauth/tiktok/start', payload)
   },
 
-  getStatus() {
-    return http.get('/admin/tiktok/status')
+  getStatus(accountId = null) {
+    return http.get('/admin/tiktok/status', accountId ? { accountId } : undefined)
   }
 }
