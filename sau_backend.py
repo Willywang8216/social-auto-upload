@@ -32,6 +32,8 @@ from myUtils import reddit_auth
 from myUtils import reddit_review
 from myUtils import youtube_auth
 from myUtils import youtube_review
+from myUtils import threads_auth
+from myUtils import threads_review
 from myUtils import tiktok_auth
 from myUtils import tiktok_review
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
@@ -139,6 +141,13 @@ def _reddit_callback_base_url() -> str:
     if configured:
         return configured.rstrip("/")
     return "https://up.iamwillywang.com/oauth/reddit/callback"
+
+
+def _threads_callback_base_url() -> str:
+    configured = str(os.environ.get("SAU_THREADS_CALLBACK_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return "https://up.iamwillywang.com/oauth/threads/callback"
 
 
 def _tiktok_callback_base_url() -> str:
@@ -2715,6 +2724,169 @@ def reddit_oauth_callback():
                 db_path=db_path,
             )
         return Response(f"<html><body><p>Reddit callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
+
+
+@app.route('/oauth/threads/start', methods=['POST'])
+def threads_oauth_start():
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        raw_account_id = data.get('accountId')
+        if raw_account_id in (None, ''):
+            raise ValueError('Please save the Threads account before connecting OAuth')
+        account_id = int(raw_account_id)
+        account = profile_registry.get_account(account_id, db_path=db_path)
+        if account.platform != profile_registry.PLATFORM_THREADS:
+            raise ValueError('OAuth connect is only available for Threads accounts on this route')
+        state_token = threads_auth.build_state_token()
+        redirect_uri = str(data.get('redirectUri') or _threads_callback_base_url() or threads_auth.default_redirect_uri()).strip()
+        scopes = data.get('scopes') if isinstance(data.get('scopes'), list) and data.get('scopes') else list(threads_auth.DEFAULT_SCOPES)
+        authorize_url = threads_auth.build_authorize_url_from_env(
+            state=state_token,
+            redirect_uri=redirect_uri,
+            scopes=tuple(str(scope) for scope in scopes),
+        )
+        threads_review.create_oauth_request(
+            state_token=state_token,
+            profile_id=account.profile_id,
+            account_id=account.id,
+            account_name=account.account_name,
+            redirect_uri=redirect_uri,
+            scopes=[str(scope) for scope in scopes],
+            db_path=db_path,
+        )
+        account_events.record_event(
+            account_id=account.id,
+            profile_id=account.profile_id,
+            platform=account.platform,
+            account_name=account.account_name,
+            action='oauth_start',
+            status='ok',
+            summary='Threads OAuth flow started',
+            metadata={'state': state_token, 'redirectUri': redirect_uri, 'scopes': scopes},
+            db_path=db_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({'code': 400, 'msg': str(exc), 'data': None}), 400
+    return jsonify({'code': 200, 'msg': 'ok', 'data': {'authorizeUrl': authorize_url, 'state': state_token}}), 200
+
+
+@app.route('/oauth/threads/callback', methods=['GET'])
+def threads_oauth_callback():
+    db_path = _current_db_path()
+    state_token = str(request.args.get('state', '') or '')
+    code = str(request.args.get('code', '') or '')
+    error = str(request.args.get('error', '') or '')
+    request_state = threads_review.get_oauth_request(state_token, db_path=db_path)
+    if not request_state:
+        return Response('Unknown Threads OAuth state', status=400, mimetype='text/plain')
+
+    if error:
+        threads_review.complete_oauth_request(state_token, status='error', error_text=error, result={'state': state_token, 'error': error}, db_path=db_path)
+        if request_state.account_id:
+            account_events.record_event(
+                account_id=request_state.account_id,
+                profile_id=request_state.profile_id,
+                platform=profile_registry.PLATFORM_THREADS,
+                account_name=request_state.account_name or '',
+                action='oauth_callback',
+                status='error',
+                summary='Threads OAuth callback failed',
+                error_text=error,
+                metadata={'state': state_token},
+                db_path=db_path,
+            )
+        return Response("""<html><body><script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'sau:threads-oauth', ok: false, error: %r }, '*');
+            }
+            window.close();
+            </script><p>Threads authorization failed. You may close this window.</p></body></html>""" % error, mimetype='text/html')
+
+    try:
+        if not request_state.account_id:
+            raise ValueError('Threads OAuth request is missing accountId')
+        account = profile_registry.get_account(int(request_state.account_id), db_path=db_path)
+        token_payload = threads_auth.exchange_code_for_token(code=code, redirect_uri=request_state.redirect_uri)
+        short_lived_access_token = str(token_payload.get('access_token') or '')
+        long_lived_payload = threads_auth.exchange_for_long_lived_token(access_token=short_lived_access_token) if short_lived_access_token else {}
+        access_token = str(long_lived_payload.get('access_token') or short_lived_access_token)
+        me_payload = threads_auth.fetch_me(access_token=access_token) if access_token else {}
+        merged_config = dict(account.config or {})
+        if access_token:
+            merged_config['accessToken'] = access_token
+        user_id = token_payload.get('user_id') or me_payload.get('id')
+        if user_id:
+            merged_config['threadUserId'] = str(user_id)
+            merged_config['userId'] = str(user_id)
+        if me_payload.get('username'):
+            merged_config['threadsUserName'] = str(me_payload.get('username') or '')
+        merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
+        expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
+        if expires_in not in (None, ''):
+            merged_config['accessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+        merged_config['scope'] = str(merged_config.get('scope') or ' '.join(request_state.scopes))
+        merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
+        updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', db_path=db_path)
+        callback_payload = {
+            'state': state_token,
+            'status': 'ok',
+            'accountId': updated.id,
+            'accountName': updated.account_name,
+            'accessToken': merged_config.get('accessToken', ''),
+            'threadUserId': merged_config.get('threadUserId', ''),
+            'threadsUserName': merged_config.get('threadsUserName', ''),
+            'accessTokenExpiresAt': merged_config.get('accessTokenExpiresAt', ''),
+            'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
+            'connectedAt': merged_config.get('connectedAt', ''),
+        }
+        threads_review.complete_oauth_request(
+            state_token,
+            status='completed',
+            result={
+                'state': state_token,
+                'status': 'ok',
+                'accountId': updated.id,
+                'accountName': updated.account_name,
+                'threadUserId': merged_config.get('threadUserId', ''),
+                'threadsUserName': merged_config.get('threadsUserName', ''),
+            },
+            db_path=db_path,
+        )
+        account_events.record_event(
+            account_id=updated.id,
+            profile_id=updated.profile_id,
+            platform=updated.platform,
+            account_name=updated.account_name,
+            action='oauth_callback',
+            status='ok',
+            summary=f"Threads connected: {merged_config.get('threadsUserName') or updated.account_name}",
+            metadata={'state': state_token},
+            db_path=db_path,
+        )
+        html = f"""<html><body><script>
+        if (window.opener) {{
+          window.opener.postMessage({{ type: 'sau:threads-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
+        }}
+        window.close();
+        </script><p>Threads authorization completed. You may close this window.</p></body></html>"""
+        return Response(html, mimetype='text/html')
+    except Exception as exc:  # noqa: BLE001
+        threads_review.complete_oauth_request(state_token, status='error', error_text=str(exc), result={'state': state_token, 'error': str(exc)}, db_path=db_path)
+        if request_state.account_id:
+            account_events.record_event(
+                account_id=request_state.account_id,
+                profile_id=request_state.profile_id,
+                platform=profile_registry.PLATFORM_THREADS,
+                account_name=request_state.account_name or '',
+                action='oauth_callback',
+                status='error',
+                summary='Threads OAuth callback failed',
+                error_text=str(exc),
+                metadata={'state': state_token},
+                db_path=db_path,
+            )
+        return Response(f"<html><body><p>Threads callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
 
 
 @app.route('/oauth/tiktok/start', methods=['POST'])

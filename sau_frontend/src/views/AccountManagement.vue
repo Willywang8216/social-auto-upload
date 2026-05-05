@@ -374,6 +374,7 @@
                 <div class="health-row"><span>Last check</span><strong>{{ accountForm.lastConnectionCheckAt || '—' }}</strong></div>
               </div>
               <div class="oauth-actions-row">
+                <el-button type="primary" plain @click="connectWithThreads" :disabled="!accountForm.id">Connect with Threads</el-button>
                 <el-button plain @click="checkStructuredConnection('threads')" :disabled="!accountForm.id">Check Threads connection</el-button>
               </div>
             </el-form-item>
@@ -547,6 +548,7 @@ import { accountApi } from '@/api/account'
 import { metaApi } from '@/api/meta'
 import { profilesApi } from '@/api/profiles'
 import { redditApi } from '@/api/reddit'
+import { threadsApi } from '@/api/threads'
 import { tiktokApi } from '@/api/tiktok'
 import { youtubeApi } from '@/api/youtube'
 import AccountTabPane from '@/components/AccountTabPane.vue'
@@ -938,6 +940,7 @@ onMounted(() => {
   window.addEventListener('message', handleTikTokOauthMessage)
   window.addEventListener('message', handleRedditOauthMessage)
   window.addEventListener('message', handleYouTubeOauthMessage)
+  window.addEventListener('message', handleThreadsOauthMessage)
   window.addEventListener('message', handleMetaOauthMessage)
   setTimeout(() => {
     fetchAccounts(true)
@@ -1288,6 +1291,32 @@ async function connectWithReddit() {
   }
 }
 
+async function connectWithThreads() {
+  if (!accountForm.id) {
+    ElMessage.warning('請先儲存 Threads 帳號，再使用 Connect with Threads')
+    return
+  }
+  const popup = window.open('', 'threads-connect', 'width=720,height=820')
+  if (!popup) {
+    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
+    return
+  }
+  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to Threads...</p>')
+  try {
+    const response = await threadsApi.startOAuth({
+      profileId: accountForm.profileId,
+      accountId: accountForm.id,
+      accountName: accountForm.name,
+      scopes: ['threads_basic', 'threads_content_publish']
+    })
+    popup.location = response.data.authorizeUrl
+  } catch (error) {
+    popup.close()
+    console.error('Threads connect 啟動失敗:', error)
+    ElMessage.error(error?.message || 'Threads connect 啟動失敗')
+  }
+}
+
 async function connectWithYouTube() {
   if (!accountForm.id) {
     ElMessage.warning('請先儲存 YouTube 帳號，再使用 Connect with YouTube')
@@ -1438,6 +1467,23 @@ function handleYouTubeOauthMessage(event) {
   accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
   ElMessage.success('YouTube 已連線，可直接儲存帳號設定')
+}
+
+function handleThreadsOauthMessage(event) {
+  const payload = event?.data
+  if (!payload || payload.type !== 'sau:threads-oauth') return
+  if (!payload.ok) {
+    ElMessage.error(payload.error || 'Threads 授權失敗')
+    return
+  }
+  const data = payload.data || {}
+  accountForm.accessToken = data.accessToken || accountForm.accessToken
+  accountForm.threadUserId = data.threadUserId || accountForm.threadUserId
+  accountForm.threadsUserName = data.threadsUserName || accountForm.threadsUserName
+  accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
+  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
+  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
+  ElMessage.success('Threads 已連線，可直接儲存帳號設定')
 }
 
 function handleMetaOauthMessage(event) {

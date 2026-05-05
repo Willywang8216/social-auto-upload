@@ -63,6 +63,7 @@ class AlembicBaselineTests(unittest.TestCase):
             "reddit_oauth_requests",
             "youtube_oauth_requests",
             "meta_oauth_requests",
+            "threads_oauth_requests",
             "tiktok_review_events",
             "account_events",
         ):

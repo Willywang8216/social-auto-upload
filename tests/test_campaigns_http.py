@@ -1006,6 +1006,80 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(account['config']['instagramUserName'], 'brand_ig')
         self.assertEqual(account['config']['accessToken'], 'page-token')
 
+    def test_validate_account_config_allows_threads_oauth_without_user_id(self) -> None:
+        response = self.client.post(
+            '/accounts/validate-config',
+            json={
+                'platform': 'threads',
+                'authType': 'oauth',
+                'config': {},
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertTrue(body['valid'])
+        self.assertTrue(body['warnings'])
+
+    def test_threads_oauth_start_persists_request_and_returns_authorize_url(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Threads Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'threads',
+                'accountName': 'brand-threads',
+                'authType': 'oauth',
+                'config': {},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.threads_auth, 'build_authorize_url_from_env', return_value='https://threads.net/oauth/authorize?demo=1'):
+            response = self.client.post('/oauth/threads/start', json={
+                'profileId': profile_id,
+                'accountId': account_id,
+                'accountName': 'brand-threads',
+                'scopes': ['threads_basic', 'threads_content_publish'],
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['data']['authorizeUrl'], 'https://threads.net/oauth/authorize?demo=1')
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute('SELECT COUNT(*) FROM threads_oauth_requests WHERE account_id = ?', (account_id,)).fetchone()
+        self.assertEqual(row[0], 1)
+
+    def test_threads_oauth_callback_updates_structured_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Threads Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'threads',
+                'accountName': 'brand-threads',
+                'authType': 'oauth',
+                'config': {},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                'INSERT INTO threads_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                ('threads-state-1', profile_id, account_id, 'brand-threads', 'https://up.iamwillywang.com/oauth/threads/callback', '["threads_basic", "threads_content_publish"]', 'started'),
+            )
+            conn.commit()
+        with patch.object(self.sau_backend.threads_auth, 'exchange_code_for_token', return_value={
+            'access_token': 'threads-short',
+            'user_id': 'th-1',
+            'expires_in': 3600,
+        }), patch.object(self.sau_backend.threads_auth, 'exchange_for_long_lived_token', return_value={
+            'access_token': 'threads-long',
+            'expires_in': 5184000,
+        }), patch.object(self.sau_backend.threads_auth, 'fetch_me', return_value={'id': 'th-1', 'username': 'threads-user'}):
+            response = self.client.get('/oauth/threads/callback?state=threads-state-1&code=demo-code')
+        self.assertEqual(response.status_code, 200)
+        account = self.client.get(f'/profiles/{profile_id}/accounts').get_json()['data'][0]
+        self.assertEqual(account['config']['threadUserId'], 'th-1')
+        self.assertEqual(account['config']['threadsUserName'], 'threads-user')
+        self.assertEqual(account['config']['accessToken'], 'threads-long')
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -92,12 +92,18 @@ def validate_structured_account_config(
     if platform == profiles.PLATFORM_REDDIT:
         if not _present(config.get("subreddits")):
             errors.append("Reddit 帳號需要至少一個 subreddit")
-        if not _present(_config_value(config, "clientId")):
+        has_client_id = _present(_config_value(config, "clientId"))
+        has_client_secret = _present(_config_value(config, "clientSecret"))
+        has_refresh_token = _present(_config_value(config, "refreshToken"))
+        if not has_client_id:
             errors.append("Reddit 帳號缺少 clientId 或 clientIdEnv")
-        if not _present(_config_value(config, "clientSecret")):
+        if not has_client_secret:
             errors.append("Reddit 帳號缺少 clientSecret 或 clientSecretEnv")
-        if not _present(_config_value(config, "refreshToken")):
-            errors.append("Reddit 帳號缺少 refreshToken 或 refreshTokenEnv")
+        if not has_refresh_token:
+            if auth_type == 'oauth' and has_client_id and has_client_secret:
+                warnings.append("Reddit refreshToken 可在 OAuth Connect 完成後自動回填")
+            else:
+                errors.append("Reddit 帳號缺少 refreshToken 或 refreshTokenEnv")
 
     if platform == profiles.PLATFORM_TELEGRAM:
         if not _present(config.get("chatId")):
@@ -121,22 +127,46 @@ def validate_structured_account_config(
             errors.append("YouTube 帳號缺少 channelId")
 
     if platform == profiles.PLATFORM_FACEBOOK:
-        if not _present(config.get("pageId")):
-            errors.append("Facebook 帳號缺少 pageId")
-        if not _present(_config_value(config, "accessToken")):
-            errors.append("Facebook 帳號缺少 accessToken 或 accessTokenEnv")
+        has_page_id = _present(config.get("pageId"))
+        has_access_token = _present(_config_value(config, "accessToken"))
+        if not has_page_id:
+            if auth_type == 'oauth':
+                warnings.append("Facebook pageId 可在 OAuth Connect 完成後自動回填")
+            else:
+                errors.append("Facebook 帳號缺少 pageId")
+        if not has_access_token:
+            if auth_type == 'oauth':
+                warnings.append("Facebook accessToken 可在 OAuth Connect 完成後自動回填")
+            else:
+                errors.append("Facebook 帳號缺少 accessToken 或 accessTokenEnv")
 
     if platform == profiles.PLATFORM_INSTAGRAM:
-        if not _present(config.get("igUserId")):
-            errors.append("Instagram 帳號缺少 igUserId")
-        if not _present(_config_value(config, "accessToken")):
-            errors.append("Instagram 帳號缺少 accessToken 或 accessTokenEnv")
+        has_ig_user_id = _present(config.get("igUserId"))
+        has_access_token = _present(_config_value(config, "accessToken"))
+        if not has_ig_user_id:
+            if auth_type == 'oauth':
+                warnings.append("Instagram igUserId 可在 OAuth Connect 完成後自動回填")
+            else:
+                errors.append("Instagram 帳號缺少 igUserId")
+        if not has_access_token:
+            if auth_type == 'oauth':
+                warnings.append("Instagram accessToken 可在 OAuth Connect 完成後自動回填")
+            else:
+                errors.append("Instagram 帳號缺少 accessToken 或 accessTokenEnv")
 
     if platform == profiles.PLATFORM_THREADS:
-        if not _present(config.get("threadUserId") or config.get("userId")):
-            errors.append("Threads 帳號缺少 threadUserId")
-        if not _present(_config_value(config, "accessToken")):
-            errors.append("Threads 帳號缺少 accessToken 或 accessTokenEnv")
+        has_thread_user_id = _present(config.get("threadUserId") or config.get("userId"))
+        has_access_token = _present(_config_value(config, "accessToken"))
+        if not has_thread_user_id:
+            if auth_type == 'oauth':
+                warnings.append("Threads threadUserId 可在 OAuth Connect 完成後自動回填")
+            else:
+                errors.append("Threads 帳號缺少 threadUserId")
+        if not has_access_token:
+            if auth_type == 'oauth':
+                warnings.append("Threads accessToken 可在 OAuth Connect 完成後自動回填")
+            else:
+                errors.append("Threads 帳號缺少 accessToken 或 accessTokenEnv")
 
     if platform == profiles.PLATFORM_DISCORD:
         if not _present(_config_value(config, "webhookUrl")):
@@ -156,18 +186,30 @@ def validate_structured_account_config(
             if platform == profiles.PLATFORM_TELEGRAM:
                 metadata["telegram"] = prepared_publishers.validate_telegram_config_live(config, session=session)
             elif platform == profiles.PLATFORM_REDDIT:
-                metadata["reddit"] = prepared_publishers.validate_reddit_config_live(config, session=session)
+                if _present(_config_value(config, 'refreshToken')):
+                    metadata["reddit"] = prepared_publishers.validate_reddit_config_live(config, session=session)
+                else:
+                    warnings.append('Reddit live 驗證已略過，等待 OAuth Connect 自動填入 refreshToken')
             elif platform == profiles.PLATFORM_YOUTUBE:
                 if _present(config.get('channelId')):
                     metadata["youtube"] = prepared_publishers.validate_youtube_config_live(config, session=session)
                 else:
                     warnings.append('YouTube live 驗證已略過，等待 OAuth Connect 自動填入 channelId')
             elif platform == profiles.PLATFORM_FACEBOOK:
-                metadata["facebook"] = prepared_publishers.validate_facebook_config_live(config, session=session)
+                if _present(config.get('pageId')) and _present(_config_value(config, 'accessToken')):
+                    metadata["facebook"] = prepared_publishers.validate_facebook_config_live(config, session=session)
+                else:
+                    warnings.append('Facebook live 驗證已略過，等待 OAuth Connect 自動填入 pageId / accessToken')
             elif platform == profiles.PLATFORM_INSTAGRAM:
-                metadata["instagram"] = prepared_publishers.validate_instagram_config_live(config, session=session)
+                if _present(config.get('igUserId')) and _present(_config_value(config, 'accessToken')):
+                    metadata["instagram"] = prepared_publishers.validate_instagram_config_live(config, session=session)
+                else:
+                    warnings.append('Instagram live 驗證已略過，等待 OAuth Connect 自動填入 igUserId / accessToken')
             elif platform == profiles.PLATFORM_THREADS:
-                metadata["threads"] = prepared_publishers.validate_threads_config_live(config, session=session)
+                if _present(config.get('threadUserId') or config.get('userId')) and _present(_config_value(config, 'accessToken')):
+                    metadata["threads"] = prepared_publishers.validate_threads_config_live(config, session=session)
+                else:
+                    warnings.append('Threads live 驗證已略過，等待 OAuth Connect 自動填入 threadUserId / accessToken')
             elif platform == profiles.PLATFORM_DISCORD:
                 metadata["discord"] = prepared_publishers.validate_discord_config_live(config, session=session)
             elif platform == profiles.PLATFORM_TIKTOK:
