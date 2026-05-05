@@ -13,8 +13,16 @@
             :value="String(profile.id)"
           />
         </el-select>
+        <el-button plain :loading="maintenanceLoading" :disabled="bulkRefreshTargets.length < 1 && selectedProfileFilter === 'legacy'" @click="runMaintenanceSweep">維護刷新</el-button>
         <el-button type="primary" plain @click="openProfileDialog">新增 Profile</el-button>
       </div>
+    </div>
+
+    <div class="maintenance-banner">
+      <span>Scheduler：{{ maintenanceStatus.enabled ? 'enabled' : 'disabled' }}</span>
+      <span>Running：{{ maintenanceStatus.running ? 'yes' : 'no' }}</span>
+      <span>Last run：{{ maintenanceStatus.lastFinishedAt || '—' }}</span>
+      <span v-if="maintenanceStatus.lastResult">Refreshed：{{ maintenanceStatus.lastResult.refreshed || 0 }}</span>
     </div>
 
     <div class="account-tabs">
@@ -653,6 +661,8 @@ const tiktokHealth = reactive({
 })
 const recentAccountEvents = ref([])
 const eventsLoading = ref(false)
+const maintenanceLoading = ref(false)
+const maintenanceStatus = ref({ enabled: false, running: false, lastFinishedAt: '', lastResult: null })
 let eventSource = null
 
 const filteredAccounts = computed(() => {
@@ -845,6 +855,52 @@ const fetchAccounts = async (validateLegacy = true) => {
 
 const refreshAccounts = () => fetchAccounts(true)
 
+const fetchMaintenanceStatus = async () => {
+  try {
+    const response = await accountApi.getMaintenanceStatus()
+    maintenanceStatus.value = response?.data || maintenanceStatus.value
+  } catch (error) {
+    console.error('取得維護狀態失敗:', error)
+  }
+}
+
+const runMaintenanceSweep = async () => {
+  if (maintenanceLoading.value) return
+  const accountIds = bulkRefreshTargets.value.map((row) => row.id)
+  if (accountIds.length < 1) {
+    ElMessage.info('目前篩選範圍內沒有可維護的 refreshable 帳號')
+    return
+  }
+  maintenanceLoading.value = true
+  try {
+    const payload = {
+      accountIds,
+      platforms: [...new Set(bulkRefreshTargets.value.map((row) => row.platformSlug))],
+      maxAccounts: accountIds.length,
+      expiringWithinSeconds: 3600,
+    }
+    if (selectedProfileFilter.value !== 'all' && selectedProfileFilter.value !== 'legacy') {
+      payload.profileId = Number(selectedProfileFilter.value)
+    }
+    const response = await accountApi.runMaintenance(payload)
+    const data = response?.data || {}
+    for (const account of data.accounts || []) {
+      accountStore.updateAccount(account.id, account)
+    }
+    await Promise.all([fetchRecentAccountEvents(), fetchMaintenanceStatus()])
+    if ((data.refreshed || 0) > 0) {
+      ElMessage.success(`維護刷新完成：${data.refreshed} 個已刷新，${data.skipped || 0} 個略過`)
+    } else {
+      ElMessage.info(`維護檢查完成：0 個需刷新，${data.skipped || 0} 個略過`)
+    }
+  } catch (error) {
+    console.error('執行維護刷新失敗:', error)
+    ElMessage.error(error?.message || '執行維護刷新失敗')
+  } finally {
+    maintenanceLoading.value = false
+  }
+}
+
 const fetchRecentAccountEvents = async () => {
   eventsLoading.value = true
   try {
@@ -871,6 +927,7 @@ watch([activeTab, selectedProfileFilter], () => {
 onMounted(() => {
   fetchAccounts(false)
   fetchRecentAccountEvents()
+  fetchMaintenanceStatus()
   window.addEventListener('message', handleTikTokOauthMessage)
   setTimeout(() => {
     fetchAccounts(true)
@@ -1520,6 +1577,18 @@ onBeforeUnmount(() => {
       align-items: center;
       gap: 12px;
     }
+  }
+
+  .maintenance-banner {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin: 12px 0 20px;
+    padding: 10px 12px;
+    background: #f5f7fa;
+    border-radius: 6px;
+    color: $text-secondary;
+    font-size: 13px;
   }
 
   .recent-account-events {

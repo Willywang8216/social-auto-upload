@@ -54,6 +54,16 @@ LEGACY_PLATFORM_CODES = {
 TWITTER_PLATFORM_ALIASES = {"twitter", "x"}
 
 active_queues = {}
+_ACCOUNT_MAINTENANCE_STATE = {
+    'enabled': False,
+    'intervalSeconds': 0,
+    'running': False,
+    'lastStartedAt': None,
+    'lastFinishedAt': None,
+    'lastResult': None,
+    'lastError': None,
+}
+_ACCOUNT_MAINTENANCE_THREAD = None
 app = Flask(__name__)
 
 # Security policy is loaded once from the environment at import time. Tests
@@ -1407,7 +1417,7 @@ def _run_account_connection_check(*, account_id: int, db_path: Path):
         raise
 
 
-def _run_account_token_refresh(*, account_id: int, db_path: Path):
+def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "manual"):
     account = profile_registry.get_account(account_id, db_path=db_path)
     config = dict(account.config or {})
     now = datetime.now().isoformat(timespec='seconds')
@@ -1426,7 +1436,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path):
                 'scope': token_payload.get('scope') or config.get('scope') or '',
                 'displayName': user_info.get('data', {}).get('user', {}).get('display_name') or config.get('displayName') or '',
                 'avatarUrl': user_info.get('data', {}).get('user', {}).get('avatar_url') or config.get('avatarUrl') or '',
-                'lastManualRefreshAt': now,
+                ('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt'): now,
             })
             updated = profile_registry.update_account(
                 account_id,
@@ -1438,6 +1448,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path):
                 'refresh',
                 {
                     'status': 'ok',
+                    'mode': mode,
                     'accountId': account_id,
                     'accountName': updated.account_name,
                     'openId': config.get('openId', ''),
@@ -1448,6 +1459,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path):
                 account_id=account_id,
                 account_name=updated.account_name,
                 status='ok',
+                metadata={'mode': mode},
                 db_path=db_path,
             )
             summary = f"TikTok refreshed: {config.get('displayName') or updated.account_name}"
@@ -1457,7 +1469,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path):
                 'accessToken': refreshed['access_token'],
                 'scope': refreshed.get('scope', config.get('scope', '')),
                 'accessTokenUpdatedAt': now,
-                'lastManualRefreshAt': now,
+                ('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt'): now,
                 'redditUserName': refreshed.get('me', {}).get('name', config.get('redditUserName', '')),
             })
             expires_in = refreshed.get('expires_in')
@@ -1477,7 +1489,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path):
             config.update({
                 'accessToken': refreshed['access_token'],
                 'accessTokenUpdatedAt': now,
-                'lastManualRefreshAt': now,
+                ('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt'): now,
             })
             expires_in = refreshed.get('expires_in')
             if expires_in:
@@ -1506,7 +1518,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path):
             action='refresh_token',
             status='ok',
             summary=summary,
-            metadata={'timestamp': now},
+            metadata={'timestamp': now, 'mode': mode},
             db_path=db_path,
         )
         return updated
@@ -1514,10 +1526,11 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path):
         if account.platform == profile_registry.PLATFORM_TIKTOK:
             _append_tiktok_review_event(
                 'refresh',
-                {'status': 'error', 'accountId': account_id, 'accountName': account.account_name, 'error': str(exc)},
+                {'status': 'error', 'mode': mode, 'accountId': account_id, 'accountName': account.account_name, 'error': str(exc)},
                 account_id=account_id,
                 account_name=account.account_name,
                 status='error',
+                metadata={'mode': mode},
                 db_path=db_path,
             )
         account_events.record_event(
@@ -1529,7 +1542,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path):
             status='error',
             summary='Token refresh failed',
             error_text=str(exc),
-            metadata={'timestamp': now},
+            metadata={'timestamp': now, 'mode': mode},
             db_path=db_path,
         )
         raise
@@ -1573,6 +1586,147 @@ def _batch_account_operation(*, account_ids: list[int], db_path: Path, operation
         'results': results,
         'accounts': updated_accounts,
     }
+
+
+_REFRESHABLE_PLATFORMS = (
+    profile_registry.PLATFORM_TIKTOK,
+    profile_registry.PLATFORM_REDDIT,
+    profile_registry.PLATFORM_YOUTUBE,
+)
+
+
+def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_seconds: int = 300) -> bool:
+    config = dict(account.config or {})
+    if account.platform == profile_registry.PLATFORM_TIKTOK:
+        return prepared_publishers._is_tiktok_access_token_stale(config, skew_seconds=skew_seconds)
+    access_token = str(config.get('accessToken') or '').strip()
+    if not access_token:
+        return True
+    expires_at = prepared_publishers._parse_iso_datetime(str(config.get('accessTokenExpiresAt') or ''))
+    if expires_at is None:
+        return False
+    return expires_at <= (prepared_publishers._utc_now() + timedelta(seconds=skew_seconds))
+
+
+def _run_refreshable_account_maintenance(
+    *,
+    db_path: Path,
+    dry_run: bool = False,
+    expiring_within_seconds: int = 300,
+    max_accounts: int = 50,
+    profile_id: int | None = None,
+    account_ids: list[int] | None = None,
+    platforms: list[str] | None = None,
+    enabled_only: bool = True,
+    mode: str = 'auto',
+) -> dict:
+    accounts = profile_registry.list_accounts(
+        profile_id=profile_id,
+        enabled=True if enabled_only else None,
+        db_path=db_path,
+    )
+    allowed_platforms = {platform.lower() for platform in (platforms or _REFRESHABLE_PLATFORMS)}
+    allowed_platforms &= set(_REFRESHABLE_PLATFORMS)
+    if account_ids is not None:
+        allowed_ids = set(account_ids)
+        accounts = [account for account in accounts if account.id in allowed_ids]
+    accounts = [account for account in accounts if account.platform in allowed_platforms]
+
+    results = []
+    updated_accounts = []
+    refreshed = 0
+    stale = 0
+    skipped = 0
+    examined = 0
+
+    for account in accounts[:max_accounts]:
+        examined += 1
+        config = dict(account.config or {})
+        is_stale = _is_refreshable_account_stale(account, skew_seconds=expiring_within_seconds)
+        if not is_stale:
+            skipped += 1
+            results.append({'accountId': account.id, 'platform': account.platform, 'accountName': account.account_name, 'status': 'up_to_date'})
+            continue
+        stale += 1
+        if account.platform == profile_registry.PLATFORM_TIKTOK and not str(config.get('refreshToken') or '').strip():
+            skipped += 1
+            results.append({'accountId': account.id, 'platform': account.platform, 'accountName': account.account_name, 'status': 'missing_refresh_token'})
+            continue
+        if dry_run:
+            results.append({'accountId': account.id, 'platform': account.platform, 'accountName': account.account_name, 'status': 'would_refresh'})
+            continue
+        try:
+            updated = _run_account_token_refresh(account_id=account.id, db_path=db_path, mode=mode)
+            refreshed += 1
+            updated_accounts.append(_account_payload(updated))
+            results.append({'accountId': updated.id, 'platform': updated.platform, 'accountName': updated.account_name, 'status': 'refreshed'})
+        except Exception as exc:  # noqa: BLE001
+            skipped += 1
+            results.append({'accountId': account.id, 'platform': account.platform, 'accountName': account.account_name, 'status': 'error', 'error': str(exc)})
+
+    return {
+        'dryRun': dry_run,
+        'mode': mode,
+        'examined': examined,
+        'stale': stale,
+        'refreshed': refreshed,
+        'skipped': skipped,
+        'results': results,
+        'accounts': updated_accounts,
+    }
+
+
+def _account_maintenance_loop(interval_seconds: int, *, expiring_within_seconds: int, max_accounts: int) -> None:
+    while True:
+        time.sleep(interval_seconds)
+        db_path = _current_db_path()
+        _ACCOUNT_MAINTENANCE_STATE['running'] = True
+        _ACCOUNT_MAINTENANCE_STATE['lastStartedAt'] = datetime.now().isoformat(timespec='seconds')
+        _ACCOUNT_MAINTENANCE_STATE['lastError'] = None
+        try:
+            result = _run_refreshable_account_maintenance(
+                db_path=db_path,
+                dry_run=False,
+                expiring_within_seconds=expiring_within_seconds,
+                max_accounts=max_accounts,
+                mode='auto',
+            )
+            _ACCOUNT_MAINTENANCE_STATE['lastResult'] = result
+        except Exception as exc:  # noqa: BLE001
+            _ACCOUNT_MAINTENANCE_STATE['lastError'] = str(exc)
+        finally:
+            _ACCOUNT_MAINTENANCE_STATE['running'] = False
+            _ACCOUNT_MAINTENANCE_STATE['lastFinishedAt'] = datetime.now().isoformat(timespec='seconds')
+
+
+def _maybe_start_account_maintenance_scheduler() -> None:
+    global _ACCOUNT_MAINTENANCE_THREAD
+    if _ACCOUNT_MAINTENANCE_THREAD is not None:
+        return
+    try:
+        interval_seconds = int(os.environ.get('SAU_ACCOUNT_MAINTENANCE_INTERVAL_SECONDS', '0') or '0')
+    except ValueError:
+        interval_seconds = 0
+    if interval_seconds <= 0:
+        return
+    try:
+        expiring_within_seconds = int(os.environ.get('SAU_ACCOUNT_MAINTENANCE_EXPIRING_WITHIN_SECONDS', '300') or '300')
+    except ValueError:
+        expiring_within_seconds = 300
+    try:
+        max_accounts = int(os.environ.get('SAU_ACCOUNT_MAINTENANCE_MAX_ACCOUNTS', '50') or '50')
+    except ValueError:
+        max_accounts = 50
+    _ACCOUNT_MAINTENANCE_STATE['enabled'] = True
+    _ACCOUNT_MAINTENANCE_STATE['intervalSeconds'] = interval_seconds
+    _ACCOUNT_MAINTENANCE_THREAD = threading.Thread(
+        target=_account_maintenance_loop,
+        args=(interval_seconds,),
+        kwargs={'expiring_within_seconds': expiring_within_seconds, 'max_accounts': max_accounts},
+        daemon=True,
+        name='account-maintenance-scheduler',
+    )
+    _ACCOUNT_MAINTENANCE_THREAD.start()
 
 
 def _validate_account_payload(data: dict, *, db_path: Path, profile_id: int | None = None, perform_live_checks: bool = False):
@@ -2445,6 +2599,43 @@ def accounts_health_summary():
     }), 200
 
 
+@app.route("/accounts/maintenance/run", methods=["POST"])
+def accounts_maintenance_run():
+    db_path = _current_db_path()
+    data = request.get_json(silent=True) or {}
+    raw_account_ids = data.get('accountIds')
+    raw_profile_id = data.get('profileId')
+    dry_run = bool(data.get('dryRun', False))
+    expiring_within_seconds = int(data.get('expiringWithinSeconds', 300) or 300)
+    max_accounts = max(1, min(int(data.get('maxAccounts', 50) or 50), 500))
+    platforms = data.get('platforms') if isinstance(data.get('platforms'), list) else None
+    account_ids = None
+    if isinstance(raw_account_ids, list):
+        try:
+            account_ids = [int(value) for value in raw_account_ids if value not in (None, '')]
+        except (TypeError, ValueError):
+            return jsonify({'code': 400, 'msg': 'accountIds must contain integers', 'data': None}), 400
+    profile_id = int(raw_profile_id) if raw_profile_id not in (None, '') else None
+    result = _run_refreshable_account_maintenance(
+        db_path=db_path,
+        dry_run=dry_run,
+        expiring_within_seconds=expiring_within_seconds,
+        max_accounts=max_accounts,
+        profile_id=profile_id,
+        account_ids=account_ids,
+        platforms=platforms,
+        mode='auto',
+    )
+    _ACCOUNT_MAINTENANCE_STATE['lastResult'] = result
+    _ACCOUNT_MAINTENANCE_STATE['lastFinishedAt'] = datetime.now().isoformat(timespec='seconds')
+    return jsonify({'code': 200, 'msg': 'ok', 'data': result}), 200
+
+
+@app.route("/accounts/maintenance/status", methods=["GET"])
+def accounts_maintenance_status():
+    return jsonify({'code': 200, 'msg': 'ok', 'data': dict(_ACCOUNT_MAINTENANCE_STATE)}), 200
+
+
 @app.route("/accounts/tiktok/refresh-stale", methods=["POST"])
 def accounts_refresh_stale_tiktok_tokens():
     db_path = _current_db_path()
@@ -2454,129 +2645,19 @@ def accounts_refresh_stale_tiktok_tokens():
     dry_run = bool(data.get('dryRun', False))
     expiring_within_seconds = int(data.get('expiringWithinSeconds', 300) or 300)
     max_accounts = max(1, min(int(data.get('maxAccounts', 50) or 50), 200))
-
-    account_id = int(raw_account_id) if raw_account_id not in (None, '') else None
+    account_ids = [int(raw_account_id)] if raw_account_id not in (None, '') else None
     profile_id = int(raw_profile_id) if raw_profile_id not in (None, '') else None
-
-    accounts = profile_registry.list_accounts(
-        profile_id=profile_id,
-        platform=profile_registry.PLATFORM_TIKTOK,
-        enabled=True,
+    result = _run_refreshable_account_maintenance(
         db_path=db_path,
+        dry_run=dry_run,
+        expiring_within_seconds=expiring_within_seconds,
+        max_accounts=max_accounts,
+        profile_id=profile_id,
+        account_ids=account_ids,
+        platforms=[profile_registry.PLATFORM_TIKTOK],
+        mode='auto',
     )
-    if account_id is not None:
-        accounts = [account for account in accounts if account.id == account_id]
-
-    results = []
-    refreshed = 0
-    stale = 0
-    skipped = 0
-    examined = 0
-
-    for account in accounts[:max_accounts]:
-        examined += 1
-        config = dict(account.config or {})
-        is_stale = prepared_publishers._is_tiktok_access_token_stale(
-            config,
-            skew_seconds=expiring_within_seconds,
-        )
-        if not is_stale:
-            skipped += 1
-            results.append({
-                'accountId': account.id,
-                'accountName': account.account_name,
-                'status': 'up_to_date',
-            })
-            continue
-        stale += 1
-        refresh_token = str(config.get('refreshToken') or '').strip()
-        if not refresh_token:
-            skipped += 1
-            results.append({
-                'accountId': account.id,
-                'accountName': account.account_name,
-                'status': 'missing_refresh_token',
-            })
-            continue
-        if dry_run:
-            results.append({
-                'accountId': account.id,
-                'accountName': account.account_name,
-                'status': 'would_refresh',
-            })
-            continue
-        try:
-            token_payload = tiktok_auth.refresh_access_token(refresh_token=refresh_token)
-            access_token = str(token_payload.get('access_token') or '')
-            user_info = tiktok_auth.fetch_user_info(access_token=access_token) if access_token else {}
-            updated_config = prepared_publishers._apply_tiktok_token_payload(config, token_payload, user_info)
-            updated_config['lastAutoRefreshAt'] = datetime.now().isoformat(timespec='seconds')
-            updated = profile_registry.update_account(
-                account.id,
-                config=updated_config,
-                auth_type='oauth',
-                db_path=db_path,
-            )
-            refreshed += 1
-            _append_tiktok_review_event(
-                'refresh',
-                {
-                    'status': 'ok',
-                    'mode': 'auto',
-                    'accountId': updated.id,
-                    'accountName': updated.account_name,
-                    'openId': updated_config.get('openId', ''),
-                    'scope': updated_config.get('scope', ''),
-                    'displayName': updated_config.get('displayName', ''),
-                    'avatarUrl': updated_config.get('avatarUrl', ''),
-                },
-                account_id=updated.id,
-                account_name=updated.account_name,
-                status='ok',
-                metadata={'mode': 'auto'},
-                db_path=db_path,
-            )
-            results.append({
-                'accountId': updated.id,
-                'accountName': updated.account_name,
-                'status': 'refreshed',
-            })
-        except Exception as exc:  # noqa: BLE001
-            skipped += 1
-            _append_tiktok_review_event(
-                'refresh',
-                {
-                    'status': 'error',
-                    'mode': 'auto',
-                    'accountId': account.id,
-                    'accountName': account.account_name,
-                    'error': str(exc),
-                },
-                account_id=account.id,
-                account_name=account.account_name,
-                status='error',
-                metadata={'mode': 'auto'},
-                db_path=db_path,
-            )
-            results.append({
-                'accountId': account.id,
-                'accountName': account.account_name,
-                'status': 'error',
-                'error': str(exc),
-            })
-
-    return jsonify({
-        'code': 200,
-        'msg': 'ok',
-        'data': {
-            'dryRun': dry_run,
-            'examined': examined,
-            'stale': stale,
-            'refreshed': refreshed,
-            'skipped': skipped,
-            'results': results,
-        },
-    }), 200
+    return jsonify({'code': 200, 'msg': 'ok', 'data': result}), 200
 
 
 @app.route("/accounts/<int:account_id>", methods=["PATCH"])
@@ -3127,6 +3208,8 @@ def sse_stream(status_queue, login_id=None, idle_timeout=SSE_IDLE_TIMEOUT_SECOND
     finally:
         if login_id is not None:
             active_queues.pop(login_id, None)
+
+_maybe_start_account_maintenance_scheduler()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0' ,port=5409)

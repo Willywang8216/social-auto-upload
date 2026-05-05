@@ -714,6 +714,69 @@ class CampaignApiTests(unittest.TestCase):
         self.assertGreaterEqual(body['recentEventTotals']['total'], 1)
         self.assertIn('reddit', body['byPlatform'])
 
+    def test_accounts_maintenance_run_refreshes_multiple_platforms(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Ops Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        tiktok_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'tiktok',
+                'accountName': 'brand-tiktok',
+                'authType': 'oauth',
+                'config': {
+                    'accessToken': 'old-token',
+                    'refreshToken': 'refresh-token',
+                    'accessTokenExpiresAt': '2000-01-01T00:00:00+00:00',
+                    'publishMode': 'direct',
+                },
+            },
+        )
+        reddit_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'reddit',
+                'accountName': 'brand-reddit',
+                'authType': 'oauth',
+                'config': {
+                    'clientIdEnv': 'REDDIT_CLIENT_ID',
+                    'clientSecretEnv': 'REDDIT_CLIENT_SECRET',
+                    'refreshTokenEnv': 'REDDIT_REFRESH_TOKEN',
+                    'subreddits': ['suba'],
+                    'accessTokenExpiresAt': '2000-01-01T00:00:00+00:00',
+                },
+            },
+        )
+        tiktok_id = tiktok_response.get_json()['data']['id']
+        reddit_id = reddit_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.tiktok_auth, 'refresh_access_token', return_value={
+            'access_token': 'fresh-token',
+            'refresh_token': 'fresh-refresh',
+            'expires_in': 3600,
+            'scope': 'user.info.basic,video.publish',
+            'open_id': 'open-xyz',
+        }), patch.object(self.sau_backend.tiktok_auth, 'fetch_user_info', return_value={
+            'data': {'user': {'display_name': 'TikTok Demo', 'avatar_url': 'https://example.com/avatar.jpg'}}
+        }), patch.object(self.sau_backend.prepared_publishers, 'refresh_reddit_access_token', return_value={
+            'access_token': 'reddit-token', 'expires_in': 3600, 'scope': 'submit identity read', 'me': {'name': 'reddit-user'}
+        }):
+            response = self.client.post('/accounts/maintenance/run', json={
+                'accountIds': [tiktok_id, reddit_id],
+                'platforms': ['tiktok', 'reddit'],
+                'expiringWithinSeconds': 300,
+            })
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['refreshed'], 2)
+        self.assertEqual(body['stale'], 2)
+        self.assertEqual(body['mode'], 'auto')
+
+    def test_accounts_maintenance_status_reports_last_result(self) -> None:
+        response = self.client.get('/accounts/maintenance/status')
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertIn('enabled', body)
+        self.assertIn('lastResult', body)
+
 
 if __name__ == "__main__":
     unittest.main()

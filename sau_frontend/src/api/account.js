@@ -25,5 +25,21 @@ export const accountApi = {
   // 删除账号
   deleteAccount(id) {
     return http.get(`/deleteAccount?id=${id}`)
+  },
+
+  getHealthSummary() {
+    return http.get('/accounts/health-summary')
+  },
+
+  getRecentEvents(params = {}) {
+    return http.get('/accounts/events', params)
+  },
+
+  runMaintenance(payload = {}) {
+    return http.post('/accounts/maintenance/run', payload)
+  },
+
+  getMaintenanceStatus() {
+    return http.get('/accounts/maintenance/status')
   }
 }
