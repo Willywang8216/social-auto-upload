@@ -246,15 +246,7 @@
                 placeholder="用逗號或換行分隔，例如：suba, subb"
               />
             </el-form-item>
-            <el-form-item label="Client ID Env">
-              <el-input v-model="accountForm.clientIdEnv" placeholder="例如：REDDIT_CLIENT_ID" />
-            </el-form-item>
-            <el-form-item label="Client Secret Env">
-              <el-input v-model="accountForm.clientSecretEnv" placeholder="例如：REDDIT_CLIENT_SECRET" />
-            </el-form-item>
-            <el-form-item label="Refresh Token Env">
-              <el-input v-model="accountForm.refreshTokenEnv" placeholder="例如：REDDIT_REFRESH_TOKEN" />
-            </el-form-item>
+            <AccountTextFieldList :fields="redditFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
             <el-form-item label="User Agent">
               <el-input v-model="accountForm.userAgent" placeholder="可選，自訂 Reddit User-Agent" />
             </el-form-item>
@@ -290,9 +282,7 @@
             <el-form-item label="OAuth health">
               <AccountConnectionPanel :rows="youtubeHealthRows" :actions="youtubeHealthActions" />
             </el-form-item>
-            <el-form-item label="Channel ID">
-              <el-input v-model="accountForm.channelId" placeholder="例如：UCxxxx" />
-            </el-form-item>
+            <AccountTextFieldList :fields="youtubeIdentityFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
             <el-form-item label="隱私狀態">
               <el-select v-model="accountForm.privacyStatus" style="width: 100%">
                 <el-option label="private" value="private" />
@@ -300,21 +290,7 @@
                 <el-option label="public" value="public" />
               </el-select>
             </el-form-item>
-            <el-form-item label="Playlist ID">
-              <el-input v-model="accountForm.playlistId" placeholder="可選，自動加入播放清單" />
-            </el-form-item>
-            <el-form-item label="Category ID">
-              <el-input v-model="accountForm.categoryId" placeholder="預設 22" />
-            </el-form-item>
-            <el-form-item label="Client ID Env">
-              <el-input v-model="accountForm.clientIdEnv" placeholder="例如：YT_CLIENT_ID" />
-            </el-form-item>
-            <el-form-item label="Client Secret Env">
-              <el-input v-model="accountForm.clientSecretEnv" placeholder="例如：YT_CLIENT_SECRET" />
-            </el-form-item>
-            <el-form-item label="Refresh Token Env">
-              <el-input v-model="accountForm.refreshTokenEnv" placeholder="例如：YT_REFRESH_TOKEN" />
-            </el-form-item>
+            <AccountTextFieldList :fields="youtubeFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
           </template>
 
           <template v-else-if="accountForm.platform === 'facebook'">
@@ -322,12 +298,7 @@
             <el-form-item label="Connection health">
               <AccountConnectionPanel :rows="facebookHealthRows" :actions="facebookHealthActions" />
             </el-form-item>
-            <el-form-item label="Page ID">
-              <el-input v-model="accountForm.pageId" />
-            </el-form-item>
-            <el-form-item label="Access Token Env">
-              <el-input v-model="accountForm.accessTokenEnv" placeholder="例如：FB_PAGE_TOKEN" />
-            </el-form-item>
+            <AccountTextFieldList :fields="facebookFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
           </template>
 
           <template v-else-if="accountForm.platform === 'instagram'">
@@ -335,12 +306,7 @@
             <el-form-item label="Connection health">
               <AccountConnectionPanel :rows="instagramHealthRows" :actions="instagramHealthActions" />
             </el-form-item>
-            <el-form-item label="IG User ID">
-              <el-input v-model="accountForm.igUserId" />
-            </el-form-item>
-            <el-form-item label="Access Token Env">
-              <el-input v-model="accountForm.accessTokenEnv" placeholder="例如：IG_ACCESS_TOKEN" />
-            </el-form-item>
+            <AccountTextFieldList :fields="instagramFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
           </template>
 
           <template v-else-if="accountForm.platform === 'threads'">
@@ -348,12 +314,7 @@
             <el-form-item label="Connection health">
               <AccountConnectionPanel :rows="threadsHealthRows" :actions="threadsHealthActions" />
             </el-form-item>
-            <el-form-item label="User ID">
-              <el-input v-model="accountForm.threadUserId" />
-            </el-form-item>
-            <el-form-item label="Access Token Env">
-              <el-input v-model="accountForm.accessTokenEnv" placeholder="例如：THREADS_ACCESS_TOKEN" />
-            </el-form-item>
+            <AccountTextFieldList :fields="threadsFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
           </template>
 
           <template v-else-if="accountForm.platform === 'tiktok'">
@@ -424,9 +385,7 @@
             <el-form-item label="Connection health">
               <AccountConnectionPanel :rows="discordHealthRows" :actions="discordHealthActions" />
             </el-form-item>
-            <el-form-item label="Webhook URL Env">
-              <el-input v-model="accountForm.webhookUrlEnv" placeholder="例如：DISCORD_WEBHOOK_URL" />
-            </el-form-item>
+            <AccountTextFieldList :fields="discordFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
           </template>
 
           <template v-else-if="accountForm.platform === 'patreon'">
@@ -501,6 +460,7 @@ import { tiktokApi } from '@/api/tiktok'
 import { youtubeApi } from '@/api/youtube'
 import AccountTabPane from '@/components/AccountTabPane.vue'
 import AccountConnectionPanel from '@/components/AccountConnectionPanel.vue'
+import AccountTextFieldList from '@/components/AccountTextFieldList.vue'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { useProfilesStore } from '@/stores/profiles'
@@ -525,6 +485,37 @@ const syncingRouteFilters = ref(false)
 
 const accountPlatformTabs = PROFILE_PLATFORM_OPTIONS
 const profileOptions = computed(() => profilesStore.profiles)
+
+const redditFieldDefs = [
+  { key: 'clientIdEnv', label: 'Client ID Env', placeholder: '例如：REDDIT_CLIENT_ID' },
+  { key: 'clientSecretEnv', label: 'Client Secret Env', placeholder: '例如：REDDIT_CLIENT_SECRET' },
+  { key: 'refreshTokenEnv', label: 'Refresh Token Env', placeholder: '例如：REDDIT_REFRESH_TOKEN' }
+]
+const youtubeIdentityFieldDefs = [
+  { key: 'channelId', label: 'Channel ID', placeholder: '例如：UCxxxx' }
+]
+const youtubeFieldDefs = [
+  { key: 'playlistId', label: 'Playlist ID', placeholder: '可選，自動加入播放清單' },
+  { key: 'categoryId', label: 'Category ID', placeholder: '預設 22' },
+  { key: 'clientIdEnv', label: 'Client ID Env', placeholder: '例如：YT_CLIENT_ID' },
+  { key: 'clientSecretEnv', label: 'Client Secret Env', placeholder: '例如：YT_CLIENT_SECRET' },
+  { key: 'refreshTokenEnv', label: 'Refresh Token Env', placeholder: '例如：YT_REFRESH_TOKEN' }
+]
+const facebookFieldDefs = [
+  { key: 'pageId', label: 'Page ID' },
+  { key: 'accessTokenEnv', label: 'Access Token Env', placeholder: '例如：FB_PAGE_TOKEN' }
+]
+const instagramFieldDefs = [
+  { key: 'igUserId', label: 'IG User ID' },
+  { key: 'accessTokenEnv', label: 'Access Token Env', placeholder: '例如：IG_ACCESS_TOKEN' }
+]
+const threadsFieldDefs = [
+  { key: 'threadUserId', label: 'User ID' },
+  { key: 'accessTokenEnv', label: 'Access Token Env', placeholder: '例如：THREADS_ACCESS_TOKEN' }
+]
+const discordFieldDefs = [
+  { key: 'webhookUrlEnv', label: 'Webhook URL Env', placeholder: '例如：DISCORD_WEBHOOK_URL' }
+]
 
 const dialogVisible = ref(false)
 const dialogType = ref('add')
@@ -899,6 +890,10 @@ const syncRouteFilters = async () => {
 
 const onSearchChange = (value) => {
   searchKeyword.value = value
+}
+
+const updateAccountFormField = ({ key, value }) => {
+  accountForm[key] = value
 }
 
 const onTableSortChange = ({ mode, order }) => {
