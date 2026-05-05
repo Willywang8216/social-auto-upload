@@ -1080,6 +1080,88 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(account['config']['threadsUserName'], 'threads-user')
         self.assertEqual(account['config']['accessToken'], 'threads-long')
 
+    def test_refresh_threads_token_updates_structured_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Threads Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'threads',
+                'accountName': 'brand-threads',
+                'authType': 'oauth',
+                'config': {
+                    'accessToken': 'threads-long',
+                    'threadUserId': 'th-1',
+                    'threadsUserName': 'threads-user',
+                    'accessTokenExpiresAt': '2000-01-01T00:00:00+00:00',
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.threads_auth, 'refresh_long_lived_token', return_value={
+            'access_token': 'threads-long-2', 'expires_in': 5184000,
+        }), patch.object(self.sau_backend.threads_auth, 'fetch_me', return_value={'id': 'th-1', 'username': 'threads-user-2'}):
+            response = self.client.post(f'/accounts/{account_id}/refresh-token')
+        self.assertEqual(response.status_code, 200)
+        config = response.get_json()['data']['config']
+        self.assertEqual(config['accessToken'], 'threads-long-2')
+        self.assertEqual(config['threadsUserName'], 'threads-user-2')
+        self.assertTrue(config['lastManualRefreshAt'])
+
+    def test_batch_refresh_tokens_includes_threads(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Ops Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        threads_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'threads',
+                'accountName': 'brand-threads',
+                'authType': 'oauth',
+                'config': {
+                    'accessToken': 'threads-long',
+                    'threadUserId': 'th-1',
+                    'threadsUserName': 'threads-user',
+                    'accessTokenExpiresAt': '2000-01-01T00:00:00+00:00',
+                },
+            },
+        )
+        threads_id = threads_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.threads_auth, 'refresh_long_lived_token', return_value={
+            'access_token': 'threads-long-2', 'expires_in': 5184000,
+        }), patch.object(self.sau_backend.threads_auth, 'fetch_me', return_value={'id': 'th-1', 'username': 'threads-user-2'}):
+            response = self.client.post('/accounts/batch/refresh-tokens', json={'accountIds': [threads_id]})
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['succeeded'], 1)
+        self.assertEqual(body['accounts'][0]['config']['threadsUserName'], 'threads-user-2')
+
+    def test_accounts_maintenance_run_refreshes_threads(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Threads Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'threads',
+                'accountName': 'brand-threads',
+                'authType': 'oauth',
+                'config': {
+                    'accessToken': 'threads-long',
+                    'threadUserId': 'th-1',
+                    'threadsUserName': 'threads-user',
+                    'accessTokenExpiresAt': '2000-01-01T00:00:00+00:00',
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.threads_auth, 'refresh_long_lived_token', return_value={
+            'access_token': 'threads-long-2', 'expires_in': 5184000,
+        }), patch.object(self.sau_backend.threads_auth, 'fetch_me', return_value={'id': 'th-1', 'username': 'threads-user-2'}):
+            response = self.client.post('/accounts/maintenance/run', json={'accountIds': [account_id], 'platforms': ['threads']})
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()['data']
+        self.assertEqual(body['refreshed'], 1)
+        self.assertEqual(body['accounts'][0]['config']['threadsUserName'], 'threads-user-2')
+
 
 if __name__ == "__main__":
     unittest.main()

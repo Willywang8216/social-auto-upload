@@ -1543,8 +1543,35 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 db_path=db_path,
             )
             summary = f"YouTube refreshed: {config.get('channelTitle') or updated.account_name}"
+        elif account.platform == profile_registry.PLATFORM_THREADS:
+            access_token = str(config.get('accessToken') or '').strip()
+            if not access_token:
+                raise ValueError('Threads account is missing accessToken')
+            refreshed = threads_auth.refresh_long_lived_token(access_token=access_token)
+            next_access_token = str(refreshed.get('access_token') or access_token)
+            me_payload = threads_auth.fetch_me(access_token=next_access_token) if next_access_token else {}
+            config.update({
+                'accessToken': next_access_token,
+                'accessTokenUpdatedAt': now,
+                ('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt'): now,
+                'threadUserId': str(me_payload.get('id') or config.get('threadUserId') or config.get('userId') or ''),
+                'userId': str(me_payload.get('id') or config.get('userId') or config.get('threadUserId') or ''),
+                'threadsUserName': str(me_payload.get('username') or config.get('threadsUserName') or ''),
+            })
+            expires_in = refreshed.get('expires_in')
+            if expires_in:
+                config['accessTokenExpiresAt'] = (
+                    datetime.now() + timedelta(seconds=int(expires_in))
+                ).isoformat(timespec='seconds')
+            updated = profile_registry.update_account(
+                account_id,
+                config=config,
+                auth_type='oauth',
+                db_path=db_path,
+            )
+            summary = f"Threads refreshed: {config.get('threadsUserName') or updated.account_name}"
         else:
-            raise ValueError('Refresh is implemented only for TikTok, Reddit, and YouTube')
+            raise ValueError('Refresh is implemented only for TikTok, Reddit, YouTube, and Threads')
 
         account_events.record_event(
             account_id=updated.id,
@@ -1628,6 +1655,7 @@ _REFRESHABLE_PLATFORMS = (
     profile_registry.PLATFORM_TIKTOK,
     profile_registry.PLATFORM_REDDIT,
     profile_registry.PLATFORM_YOUTUBE,
+    profile_registry.PLATFORM_THREADS,
 )
 
 
@@ -3332,7 +3360,7 @@ def accounts_events_list():
 def accounts_health_summary():
     db_path = _current_db_path()
     accounts = profile_registry.list_accounts(db_path=db_path)
-    refresh_platforms = {profile_registry.PLATFORM_TIKTOK, profile_registry.PLATFORM_REDDIT, profile_registry.PLATFORM_YOUTUBE}
+    refresh_platforms = {profile_registry.PLATFORM_TIKTOK, profile_registry.PLATFORM_REDDIT, profile_registry.PLATFORM_YOUTUBE, profile_registry.PLATFORM_THREADS}
     check_platforms = {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM, profile_registry.PLATFORM_THREADS, profile_registry.PLATFORM_TELEGRAM, profile_registry.PLATFORM_DISCORD}
 
     def _derive_state(account):

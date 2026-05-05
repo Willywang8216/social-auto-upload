@@ -54,6 +54,12 @@ class ThreadsAuthTests(unittest.TestCase):
         self.assertEqual(payload['access_token'], 'token')
         self.assertEqual(session.calls[0][1], threads_auth.THREADS_TOKEN_URL)
 
+    def test_refresh_long_lived_token_uses_expected_endpoint(self):
+        session = _FakeSession([_FakeResponse({'access_token': 'long-token', 'expires_in': 5184000})])
+        payload = threads_auth.refresh_long_lived_token(access_token='token', session=session)
+        self.assertEqual(payload['access_token'], 'long-token')
+        self.assertEqual(session.calls[0][1], threads_auth.THREADS_REFRESH_TOKEN_URL)
+
     def test_fetch_me_uses_expected_endpoint(self):
         session = _FakeSession([_FakeResponse({'id': 'th-1', 'username': 'threads-demo'})])
         payload = threads_auth.fetch_me(access_token='token', session=session)

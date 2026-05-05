@@ -2,8 +2,8 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { getLegacyPlatformType, getPlatformLabel, getPublishPlatformSlug } from '@/utils/platforms'
 
-const HEALTH_REFRESH_PLATFORMS = new Set(['tiktok', 'reddit', 'youtube'])
-const HEALTH_CHECK_PLATFORMS = new Set(['facebook', 'instagram', 'threads', 'telegram', 'discord'])
+const HEALTH_REFRESH_PLATFORMS = new Set(['tiktok', 'reddit', 'youtube', 'threads'])
+const HEALTH_CHECK_PLATFORMS = new Set(['facebook', 'instagram', 'telegram', 'discord'])
 
 export const useAccountStore = defineStore('account', () => {
   const accounts = ref([])

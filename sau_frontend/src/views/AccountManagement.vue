@@ -375,6 +375,7 @@
               </div>
               <div class="oauth-actions-row">
                 <el-button type="primary" plain @click="connectWithThreads" :disabled="!accountForm.id">Connect with Threads</el-button>
+                <el-button plain @click="refreshStructuredToken('threads')" :disabled="!accountForm.id">Refresh Threads token</el-button>
                 <el-button plain @click="checkStructuredConnection('threads')" :disabled="!accountForm.id">Check Threads connection</el-button>
               </div>
             </el-form-item>
@@ -1390,6 +1391,8 @@ async function refreshStructuredToken(expectedPlatform) {
     accountForm.lastManualRefreshAt = config.lastManualRefreshAt || accountForm.lastManualRefreshAt
     accountForm.redditUserName = config.redditUserName || accountForm.redditUserName
     accountForm.channelTitle = config.channelTitle || accountForm.channelTitle
+    accountForm.threadUserId = config.threadUserId || accountForm.threadUserId
+    accountForm.threadsUserName = config.threadsUserName || accountForm.threadsUserName
     ElMessage.success(`${account.platform} token 已刷新`)
   } catch (error) {
     console.error('刷新平台 token 失敗:', error)
