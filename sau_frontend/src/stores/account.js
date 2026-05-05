@@ -44,7 +44,9 @@ export const useAccountStore = defineStore('account', () => {
         isExpiringWithin24h: false,
         isExpiringWithin7d: false,
         reconnectRequired: false,
-        expiryRecommendedAction: ''
+        expiryRecommendedAction: '',
+        urgencyRank: 99,
+        urgencyLabel: ''
       }
     }
 
@@ -53,6 +55,21 @@ export const useAccountStore = defineStore('account', () => {
     const isExpiringWithin24h = secondsRemaining > 0 && secondsRemaining <= 24 * 3600
     const isExpiringWithin7d = secondsRemaining > 0 && secondsRemaining <= 7 * 24 * 3600
     const reconnectRequired = Boolean(isMeta && isOverdue)
+    let urgencyRank = 99
+    let urgencyLabel = ''
+    if (reconnectRequired) {
+      urgencyRank = 0
+      urgencyLabel = 'reconnect_required'
+    } else if (isOverdue) {
+      urgencyRank = 1
+      urgencyLabel = 'overdue'
+    } else if (isExpiringWithin24h) {
+      urgencyRank = 2
+      urgencyLabel = 'expiring_24h'
+    } else if (isExpiringWithin7d) {
+      urgencyRank = 3
+      urgencyLabel = 'expiring_7d'
+    }
     return {
       expiresAt: expiryDate.toISOString(),
       secondsRemaining,
@@ -60,7 +77,9 @@ export const useAccountStore = defineStore('account', () => {
       isExpiringWithin24h,
       isExpiringWithin7d,
       reconnectRequired,
-      expiryRecommendedAction: reconnectRequired ? 'reconnect' : 'refresh'
+      expiryRecommendedAction: reconnectRequired ? 'reconnect' : 'refresh',
+      urgencyRank,
+      urgencyLabel
     }
   }
 

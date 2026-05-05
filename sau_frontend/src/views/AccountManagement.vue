@@ -31,6 +31,7 @@
       <span>Last run：{{ maintenanceStatus.lastFinishedAt || '—' }}</span>
       <span>Next run：{{ nextMaintenanceRunLabel }}</span>
       <span v-if="maintenanceStatus.lastResult">Refreshed：{{ maintenanceStatus.lastResult.refreshed || 0 }}</span>
+      <span v-if="maintenanceStatus.lastError" class="maintenance-error">Last error：{{ maintenanceStatus.lastError }}</span>
     </div>
 
     <div class="account-tabs">
@@ -694,22 +695,38 @@ let eventSource = null
 
 const filteredAccounts = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
-  return accountStore.accounts.filter((account) => {
-    if (selectedProfileFilter.value === 'legacy' && account.profileId != null) return false
-    if (selectedProfileFilter.value !== 'all' && selectedProfileFilter.value !== 'legacy') {
-      if (String(account.profileId) !== selectedProfileFilter.value) return false
-    }
+  return accountStore.accounts
+    .filter((account) => {
+      if (selectedProfileFilter.value === 'legacy' && account.profileId != null) return false
+      if (selectedProfileFilter.value !== 'all' && selectedProfileFilter.value !== 'legacy') {
+        if (String(account.profileId) !== selectedProfileFilter.value) return false
+      }
 
-    if (selectedRiskFilter.value === 'expiring_24h' && !account.isExpiringWithin24h) return false
-    if (selectedRiskFilter.value === 'expiring_7d' && !account.isExpiringWithin7d) return false
-    if (selectedRiskFilter.value === 'overdue' && !account.isOverdue) return false
-    if (selectedRiskFilter.value === 'reconnect_required' && !account.reconnectRequired) return false
+      if (selectedRiskFilter.value === 'expiring_24h' && !account.isExpiringWithin24h) return false
+      if (selectedRiskFilter.value === 'expiring_7d' && !account.isExpiringWithin7d) return false
+      if (selectedRiskFilter.value === 'overdue' && !account.isOverdue) return false
+      if (selectedRiskFilter.value === 'reconnect_required' && !account.reconnectRequired) return false
 
-    if (!keyword) return true
-    return [account.name, account.platform, account.profileName]
-      .filter(Boolean)
-      .some((value) => String(value).toLowerCase().includes(keyword))
-  })
+      if (!keyword) return true
+      return [account.name, account.platform, account.profileName]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(keyword))
+    })
+    .sort((left, right) => {
+      const leftRank = Number(left.urgencyRank ?? 99)
+      const rightRank = Number(right.urgencyRank ?? 99)
+      if (leftRank !== rightRank) return leftRank - rightRank
+
+      const leftSeconds = left.secondsRemaining ?? Number.POSITIVE_INFINITY
+      const rightSeconds = right.secondsRemaining ?? Number.POSITIVE_INFINITY
+      if (leftSeconds !== rightSeconds) return leftSeconds - rightSeconds
+
+      const leftProfile = String(left.profileName || '')
+      const rightProfile = String(right.profileName || '')
+      if (leftProfile !== rightProfile) return leftProfile.localeCompare(rightProfile)
+
+      return String(left.name || '').localeCompare(String(right.name || ''))
+    })
 })
 
 const getFilteredAccountsByPlatform = (platformLabel) =>
@@ -1878,6 +1895,11 @@ onBeforeUnmount(() => {
     border-radius: 6px;
     color: $text-secondary;
     font-size: 13px;
+
+    .maintenance-error {
+      color: $danger-color;
+      word-break: break-word;
+    }
   }
 
   .recent-account-events {
