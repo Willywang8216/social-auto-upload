@@ -422,6 +422,67 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(body['refreshed'], 1)
         self.assertEqual(body['results'][0]['status'], 'refreshed')
 
+    def test_refresh_reddit_token_updates_structured_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'Reddit Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'reddit',
+                'accountName': 'brand-reddit',
+                'authType': 'oauth',
+                'config': {
+                    'clientIdEnv': 'REDDIT_CLIENT_ID',
+                    'clientSecretEnv': 'REDDIT_CLIENT_SECRET',
+                    'refreshTokenEnv': 'REDDIT_REFRESH_TOKEN',
+                    'subreddits': ['suba'],
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.prepared_publishers, 'refresh_reddit_access_token', return_value={
+            'access_token': 'reddit-token',
+            'expires_in': 3600,
+            'scope': 'submit identity read',
+            'me': {'name': 'reddit-user'},
+        }):
+            response = self.client.post(f'/accounts/{account_id}/refresh-token')
+        self.assertEqual(response.status_code, 200)
+        config = response.get_json()['data']['config']
+        self.assertEqual(config['accessToken'], 'reddit-token')
+        self.assertEqual(config['redditUserName'], 'reddit-user')
+        self.assertTrue(config['lastManualRefreshAt'])
+
+    def test_refresh_youtube_token_updates_structured_account(self) -> None:
+        profile_response = self.client.post('/profiles', json={'name': 'YouTube Brand'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'youtube',
+                'accountName': 'brand-youtube',
+                'authType': 'oauth',
+                'config': {
+                    'channelId': 'UC123',
+                    'clientIdEnv': 'YT_CLIENT_ID',
+                    'clientSecretEnv': 'YT_CLIENT_SECRET',
+                    'refreshTokenEnv': 'YT_REFRESH_TOKEN',
+                },
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.prepared_publishers, 'refresh_youtube_access_token', return_value={
+            'access_token': 'yt-token',
+            'expires_in': 3600,
+            'channel': {'items': [{'snippet': {'title': 'Demo Channel'}}]},
+        }):
+            response = self.client.post(f'/accounts/{account_id}/refresh-token')
+        self.assertEqual(response.status_code, 200)
+        config = response.get_json()['data']['config']
+        self.assertEqual(config['accessToken'], 'yt-token')
+        self.assertEqual(config['channelTitle'], 'Demo Channel')
+        self.assertTrue(config['lastManualRefreshAt'])
+
 
 if __name__ == "__main__":
     unittest.main()

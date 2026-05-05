@@ -171,6 +171,18 @@
 
           <template v-if="accountForm.platform === 'reddit'">
             <el-divider content-position="left">Reddit 設定</el-divider>
+            <el-form-item label="OAuth health">
+              <div class="oauth-health-card">
+                <div class="health-row"><span>Username</span><strong>{{ accountForm.redditUserName || '—' }}</strong></div>
+                <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : 'missing' }}</strong></div>
+                <div class="health-row"><span>Token updated</span><strong>{{ accountForm.accessTokenUpdatedAt || '—' }}</strong></div>
+                <div class="health-row"><span>Token expires</span><strong>{{ accountForm.accessTokenExpiresAt || '—' }}</strong></div>
+                <div class="health-row"><span>Last manual refresh</span><strong>{{ accountForm.lastManualRefreshAt || '—' }}</strong></div>
+              </div>
+              <div class="oauth-actions-row">
+                <el-button plain @click="refreshStructuredToken('reddit')" :disabled="!accountForm.id">Refresh Reddit token</el-button>
+              </div>
+            </el-form-item>
             <el-form-item label="Subreddits">
               <el-input
                 v-model="accountForm.subredditsText"
@@ -217,6 +229,18 @@
 
           <template v-else-if="accountForm.platform === 'youtube'">
             <el-divider content-position="left">YouTube 設定</el-divider>
+            <el-form-item label="OAuth health">
+              <div class="oauth-health-card">
+                <div class="health-row"><span>Channel title</span><strong>{{ accountForm.channelTitle || '—' }}</strong></div>
+                <div class="health-row"><span>Access token</span><strong>{{ accountForm.accessToken ? 'present' : 'missing' }}</strong></div>
+                <div class="health-row"><span>Token updated</span><strong>{{ accountForm.accessTokenUpdatedAt || '—' }}</strong></div>
+                <div class="health-row"><span>Token expires</span><strong>{{ accountForm.accessTokenExpiresAt || '—' }}</strong></div>
+                <div class="health-row"><span>Last manual refresh</span><strong>{{ accountForm.lastManualRefreshAt || '—' }}</strong></div>
+              </div>
+              <div class="oauth-actions-row">
+                <el-button plain @click="refreshStructuredToken('youtube')" :disabled="!accountForm.id">Refresh YouTube token</el-button>
+              </div>
+            </el-form-item>
             <el-form-item label="Channel ID">
               <el-input v-model="accountForm.channelId" placeholder="例如：UCxxxx" />
             </el-form-item>
@@ -489,6 +513,8 @@ const makeEmptyAccountForm = () => ({
   connectedAt: '',
   lastManualRefreshAt: '',
   lastAutoRefreshAt: '',
+  redditUserName: '',
+  channelTitle: '',
   accessTokenEnv: '',
   publishMode: 'direct',
   privacyLevel: 'PUBLIC_TO_EVERYONE',
@@ -607,6 +633,8 @@ const loadStructuredFieldsFromConfig = (config) => {
   accountForm.connectedAt = config.connectedAt || ''
   accountForm.lastManualRefreshAt = config.lastManualRefreshAt || ''
   accountForm.lastAutoRefreshAt = config.lastAutoRefreshAt || ''
+  accountForm.redditUserName = config.redditUserName || ''
+  accountForm.channelTitle = config.channelTitle || ''
   accountForm.accessTokenEnv = config.accessTokenEnv || ''
   accountForm.publishMode = config.publishMode || 'direct'
   accountForm.privacyLevel = config.privacyLevel || 'PUBLIC_TO_EVERYONE'
@@ -905,6 +933,32 @@ async function connectWithTikTok() {
     popup.close()
     console.error('TikTok connect 啟動失敗:', error)
     ElMessage.error(error?.message || 'TikTok connect 啟動失敗')
+  }
+}
+
+async function refreshStructuredToken(expectedPlatform) {
+  if (!accountForm.id) {
+    ElMessage.warning('請先儲存帳號，再刷新 token')
+    return
+  }
+  if (accountForm.platform !== expectedPlatform) {
+    ElMessage.warning('目前帳號平台與刷新操作不符')
+    return
+  }
+  try {
+    const response = await profilesApi.refreshAccountToken(accountForm.id)
+    const account = response?.data || {}
+    const config = account.config || {}
+    accountForm.accessToken = config.accessToken || accountForm.accessToken
+    accountForm.accessTokenExpiresAt = config.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
+    accountForm.accessTokenUpdatedAt = config.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
+    accountForm.lastManualRefreshAt = config.lastManualRefreshAt || accountForm.lastManualRefreshAt
+    accountForm.redditUserName = config.redditUserName || accountForm.redditUserName
+    accountForm.channelTitle = config.channelTitle || accountForm.channelTitle
+    ElMessage.success(`${account.platform} token 已刷新`)
+  } catch (error) {
+    console.error('刷新平台 token 失敗:', error)
+    ElMessage.error(error?.message || '刷新平台 token 失敗')
   }
 }
 
@@ -1237,6 +1291,41 @@ onBeforeUnmount(() => {
     padding: 10px 12px;
     background: #f5f7fa;
     border-radius: 4px;
+  }
+
+  .oauth-health-card,
+  .tiktok-health-card {
+    width: 100%;
+    background: #f5f7fa;
+    border-radius: 6px;
+    padding: 12px;
+
+    .health-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+
+      &:last-child {
+        margin-bottom: 0;
+      }
+
+      span {
+        color: #909399;
+      }
+
+      strong {
+        text-align: right;
+        word-break: break-word;
+      }
+    }
+  }
+
+  .oauth-actions-row {
+    margin-top: 12px;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
   }
 
   .tiktok-connect-row {

@@ -250,6 +250,36 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(result['request']['media_type'], 'PHOTO')
         self.assertEqual(result['request']['source_info']['photo_cover_index'], 0)
 
+    def test_refresh_reddit_access_token_returns_identity(self):
+        session = _RecordingSession([
+            _FakeResponse({'access_token': 'reddit-token', 'expires_in': 3600, 'scope': 'submit identity read'}),
+            _FakeResponse({'name': 'brand-main'}),
+        ])
+        account = {
+            'clientId': 'cid',
+            'clientSecret': 'secret',
+            'refreshToken': 'refresh',
+            'userAgent': 'ua',
+        }
+        result = prepared_publishers.refresh_reddit_access_token(account, session=session)
+        self.assertEqual(result['access_token'], 'reddit-token')
+        self.assertEqual(result['me']['name'], 'brand-main')
+
+    def test_refresh_youtube_access_token_returns_channel_metadata(self):
+        session = _RecordingSession([
+            _FakeResponse({'access_token': 'yt-token', 'expires_in': 3600}),
+            _FakeResponse({'items': [{'snippet': {'title': 'Demo Channel'}}]}),
+        ])
+        account = {
+            'channelId': 'UC123',
+            'clientId': 'cid',
+            'clientSecret': 'secret',
+            'refreshToken': 'refresh',
+        }
+        result = prepared_publishers.refresh_youtube_access_token(account, session=session)
+        self.assertEqual(result['access_token'], 'yt-token')
+        self.assertEqual(result['channel']['items'][0]['snippet']['title'], 'Demo Channel')
+
     def test_youtube_refresh_and_resumable_upload(self):
         session = _RecordingSession([
             _FakeResponse({"access_token": "google-token"}),

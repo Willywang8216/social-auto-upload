@@ -844,6 +844,45 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     raise PreparedPublishError("TikTok publish requires at least one video or image")
 
 
+def refresh_reddit_access_token(config: dict[str, Any], *, session=None) -> dict:
+    client_id = str(_config_value(config, "clientId", default_env="REDDIT_CLIENT_ID") or "").strip()
+    client_secret = str(_config_value(config, "clientSecret", default_env="REDDIT_CLIENT_SECRET") or "").strip()
+    refresh_token = str(_config_value(config, "refreshToken", default_env="REDDIT_REFRESH_TOKEN") or "").strip()
+    user_agent = str(
+        _config_value(config, "userAgent")
+        or f"social-auto-upload/0.1 ({config.get('accountName', 'sau')})"
+    ).strip()
+    if not client_id or not client_secret or not refresh_token:
+        raise PreparedPublishError(
+            "Reddit refresh requires clientId/clientSecret/refreshToken or their env references"
+        )
+    http = _get_session(session)
+    token_response = http.post(
+        REDDIT_TOKEN_URL,
+        auth=(client_id, client_secret),
+        data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+        headers={"User-Agent": user_agent},
+        timeout=120,
+    )
+    _raise_for_status(token_response)
+    token_payload = token_response.json()
+    access_token = token_payload.get("access_token")
+    if not access_token:
+        raise PreparedPublishError("Reddit token response did not include access_token")
+    me_response = http.get(
+        REDDIT_ME_URL,
+        headers={"Authorization": f"Bearer {access_token}", "User-Agent": user_agent},
+        timeout=120,
+    )
+    _raise_for_status(me_response)
+    return {
+        "access_token": str(access_token),
+        "expires_in": token_payload.get("expires_in"),
+        "scope": token_payload.get("scope", ""),
+        "me": _response_payload(me_response),
+    }
+
+
 def _reddit_access_token(config: dict[str, Any], *, session=None) -> str:
     client_id = str(_config_value(config, "clientId", default_env="REDDIT_CLIENT_ID") or "").strip()
     client_secret = str(_config_value(config, "clientSecret", default_env="REDDIT_CLIENT_SECRET") or "").strip()
@@ -919,6 +958,50 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
             raise PreparedPublishError(f"Reddit submit failed for r/{subreddit}: {errors}")
         results.append(body)
     return results
+
+
+def refresh_youtube_access_token(config: dict[str, Any], *, session=None) -> dict:
+    channel_id = str(config.get("channelId") or "").strip()
+    if not channel_id:
+        raise PreparedPublishError("YouTube refresh requires channelId")
+    http = _get_session(session)
+    access_token = str(_config_value(config, "accessToken") or "").strip()
+    token_payload = {"access_token": access_token, "expires_in": None}
+    if not access_token:
+        client_id = str(_config_value(config, "clientId") or "").strip()
+        client_secret = str(_config_value(config, "clientSecret") or "").strip()
+        refresh_token = str(_config_value(config, "refreshToken") or "").strip()
+        if not client_id or not client_secret or not refresh_token:
+            raise PreparedPublishError(
+                "YouTube refresh requires accessToken or clientId/clientSecret/refreshToken"
+            )
+        token_response = http.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+            timeout=120,
+        )
+        _raise_for_status(token_response)
+        token_payload = token_response.json()
+        access_token = str(token_payload.get("access_token") or "")
+        if not access_token:
+            raise PreparedPublishError("Google token response did not include access_token")
+    channel_response = http.get(
+        YOUTUBE_CHANNELS_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+        params={"part": "id,snippet", "id": channel_id},
+        timeout=120,
+    )
+    _raise_for_status(channel_response)
+    return {
+        "access_token": access_token,
+        "expires_in": token_payload.get("expires_in"),
+        "channel": _response_payload(channel_response),
+    }
 
 
 def _google_access_token(config: dict[str, Any], *, session=None) -> str:
