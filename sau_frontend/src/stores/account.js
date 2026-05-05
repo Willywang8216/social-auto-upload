@@ -8,6 +8,62 @@ const HEALTH_CHECK_PLATFORMS = new Set(['facebook', 'instagram', 'telegram', 'di
 export const useAccountStore = defineStore('account', () => {
   const accounts = ref([])
 
+  const parseIsoDate = (value) => {
+    if (!value) return null
+    try {
+      const normalized = String(value).endsWith('Z') ? String(value).replace(/Z$/, '+00:00') : String(value)
+      const parsed = new Date(normalized)
+      return Number.isNaN(parsed.getTime()) ? null : parsed
+    } catch {
+      return null
+    }
+  }
+
+  const deriveExpiryMeta = (platformSlug, config = {}, isLegacy = false) => {
+    if (isLegacy) {
+      return {
+        expiresAt: '',
+        secondsRemaining: null,
+        isOverdue: false,
+        isExpiringWithin24h: false,
+        isExpiringWithin7d: false,
+        reconnectRequired: false,
+        expiryRecommendedAction: ''
+      }
+    }
+
+    const isMeta = ['facebook', 'instagram'].includes(platformSlug)
+    const refreshable = HEALTH_REFRESH_PLATFORMS.has(platformSlug) || (isMeta && Boolean(config.metaUserAccessToken))
+    const expiryRaw = isMeta ? (config.metaUserAccessTokenExpiresAt || config.accessTokenExpiresAt || '') : (config.accessTokenExpiresAt || '')
+    const expiryDate = parseIsoDate(expiryRaw)
+    if (!refreshable || !expiryDate) {
+      return {
+        expiresAt: expiryRaw || '',
+        secondsRemaining: null,
+        isOverdue: false,
+        isExpiringWithin24h: false,
+        isExpiringWithin7d: false,
+        reconnectRequired: false,
+        expiryRecommendedAction: ''
+      }
+    }
+
+    const secondsRemaining = Math.floor((expiryDate.getTime() - Date.now()) / 1000)
+    const isOverdue = secondsRemaining <= 0
+    const isExpiringWithin24h = secondsRemaining > 0 && secondsRemaining <= 24 * 3600
+    const isExpiringWithin7d = secondsRemaining > 0 && secondsRemaining <= 7 * 24 * 3600
+    const reconnectRequired = Boolean(isMeta && isOverdue)
+    return {
+      expiresAt: expiryDate.toISOString(),
+      secondsRemaining,
+      isOverdue,
+      isExpiringWithin24h,
+      isExpiringWithin7d,
+      reconnectRequired,
+      expiryRecommendedAction: reconnectRequired ? 'reconnect' : 'refresh'
+    }
+  }
+
   const mapStatusLabel = (value) => {
     if (value === -1) return '驗證中'
     if (value === 1 || value === 'ok' || value === 'ready') return '正常'
@@ -115,7 +171,8 @@ export const useAccountStore = defineStore('account', () => {
       isLegacy,
       supportsCookieActions: Boolean(filePath),
       supportsRelogin: Boolean(isLegacy && getLegacyPlatformType(platformSlug) != null),
-      ...deriveConnectionMeta(platformSlug, config, isLegacy)
+      ...deriveConnectionMeta(platformSlug, config, isLegacy),
+      ...deriveExpiryMeta(platformSlug, config, isLegacy)
     }
   }
 

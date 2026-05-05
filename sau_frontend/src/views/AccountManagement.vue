@@ -13,6 +13,13 @@
             :value="String(profile.id)"
           />
         </el-select>
+        <el-select v-model="selectedRiskFilter" style="width: 220px" placeholder="篩選風險">
+          <el-option label="全部風險" value="all" />
+          <el-option label="24h 內到期" value="expiring_24h" />
+          <el-option label="7 天內到期" value="expiring_7d" />
+          <el-option label="已逾期" value="overdue" />
+          <el-option label="需要重連" value="reconnect_required" />
+        </el-select>
         <el-button plain :loading="maintenanceLoading" :disabled="bulkRefreshTargets.length < 1 && selectedProfileFilter === 'legacy'" @click="runMaintenanceSweep">維護刷新</el-button>
         <el-button type="primary" plain @click="openProfileDialog">新增 Profile</el-button>
       </div>
@@ -576,6 +583,7 @@ const profilesStore = useProfilesStore()
 const activeTab = ref('all')
 const searchKeyword = ref('')
 const selectedProfileFilter = ref('all')
+const selectedRiskFilter = ref('all')
 
 const accountPlatformTabs = PROFILE_PLATFORM_OPTIONS
 const profileOptions = computed(() => profilesStore.profiles)
@@ -689,6 +697,11 @@ const filteredAccounts = computed(() => {
     if (selectedProfileFilter.value !== 'all' && selectedProfileFilter.value !== 'legacy') {
       if (String(account.profileId) !== selectedProfileFilter.value) return false
     }
+
+    if (selectedRiskFilter.value === 'expiring_24h' && !account.isExpiringWithin24h) return false
+    if (selectedRiskFilter.value === 'expiring_7d' && !account.isExpiringWithin7d) return false
+    if (selectedRiskFilter.value === 'overdue' && !account.isOverdue) return false
+    if (selectedRiskFilter.value === 'reconnect_required' && !account.reconnectRequired) return false
 
     if (!keyword) return true
     return [account.name, account.platform, account.profileName]
