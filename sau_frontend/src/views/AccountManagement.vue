@@ -257,12 +257,7 @@
             <el-form-item label="Connection health">
               <AccountConnectionPanel :rows="telegramHealthRows" :actions="telegramHealthActions" />
             </el-form-item>
-            <el-form-item label="Chat ID">
-              <el-input v-model="accountForm.chatId" placeholder="例如：@channel_name 或 -100123456" />
-            </el-form-item>
-            <el-form-item label="Bot Token Env">
-              <el-input v-model="accountForm.botTokenEnv" placeholder="例如：TELEGRAM_BOT_TOKEN" />
-            </el-form-item>
+            <AccountTextFieldList :fields="telegramFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
             <el-form-item label="Parse Mode">
               <el-select v-model="accountForm.parseMode" clearable style="width: 100%">
                 <el-option label="HTML" value="HTML" />
@@ -340,15 +335,7 @@
             <el-form-item label="Connection health">
               <AccountConnectionPanel :rows="tiktokHealthRows" />
             </el-form-item>
-            <el-form-item label="Access Token">
-              <el-input v-model="accountForm.accessToken" placeholder="由 TikTok Connect 自動填入，或手動貼上" type="textarea" :rows="2" />
-            </el-form-item>
-            <el-form-item label="Refresh Token">
-              <el-input v-model="accountForm.refreshToken" placeholder="由 TikTok Connect 自動填入" type="textarea" :rows="2" />
-            </el-form-item>
-            <el-form-item label="Access Token Env">
-              <el-input v-model="accountForm.accessTokenEnv" placeholder="例如：TIKTOK_ACCESS_TOKEN；若已直連可留空" />
-            </el-form-item>
+            <AccountTextFieldList :fields="tiktokTokenFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
             <el-form-item label="Publish Mode">
               <el-select v-model="accountForm.publishMode" style="width: 100%">
                 <el-option label="direct" value="direct" />
@@ -373,9 +360,6 @@
             </el-form-item>
             <el-form-item label="自動配樂（圖片）">
               <el-switch v-model="accountForm.autoAddMusic" />
-            </el-form-item>
-            <el-form-item label="封面時間 ms">
-              <el-input v-model="accountForm.videoCoverTimestampMs" placeholder="例如：1000" />
             </el-form-item>
             <div class="field-hint">注意：TikTok 官方 Content Posting API 不允許品牌/促銷浮水印內容。</div>
           </template>
@@ -512,6 +496,16 @@ const instagramFieldDefs = [
 const threadsFieldDefs = [
   { key: 'threadUserId', label: 'User ID' },
   { key: 'accessTokenEnv', label: 'Access Token Env', placeholder: '例如：THREADS_ACCESS_TOKEN' }
+]
+const telegramFieldDefs = [
+  { key: 'chatId', label: 'Chat ID', placeholder: '例如：@channel_name 或 -100123456' },
+  { key: 'botTokenEnv', label: 'Bot Token Env', placeholder: '例如：TELEGRAM_BOT_TOKEN' }
+]
+const tiktokTokenFieldDefs = [
+  { key: 'accessToken', label: 'Access Token', placeholder: '由 TikTok Connect 自動填入，或手動貼上', type: 'textarea', rows: 2 },
+  { key: 'refreshToken', label: 'Refresh Token', placeholder: '由 TikTok Connect 自動填入', type: 'textarea', rows: 2 },
+  { key: 'accessTokenEnv', label: 'Access Token Env', placeholder: '例如：TIKTOK_ACCESS_TOKEN；若已直連可留空' },
+  { key: 'videoCoverTimestampMs', label: '封面時間 ms', placeholder: '例如：1000' }
 ]
 const discordFieldDefs = [
   { key: 'webhookUrlEnv', label: 'Webhook URL Env', placeholder: '例如：DISCORD_WEBHOOK_URL' }
