@@ -283,11 +283,13 @@ import { accountApi } from '@/api/account'
 import { materialApi } from '@/api/material'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
+import { useProfilesStore } from '@/stores/profiles'
 import { ACCOUNT_PLATFORM_OPTIONS, LEGACY_ACCOUNT_PLATFORM_ORDER } from '@/utils/platforms'
 
 const router = useRouter()
 const accountStore = useAccountStore()
 const appStore = useAppStore()
+const profilesStore = useProfilesStore()
 const loading = ref(false)
 const healthSummary = ref({ total: 0, ready: 0, configured: 0, missing: 0, refreshable: 0, checkable: 0, expirySummary: { overdue: 0, expiringWithin24h: 0, expiringWithin7d: 0, reconnectRequired: 0 }, recentEventTotals: { total: 0, ok: 0, error: 0 }, expiringAccounts: [], recentEvents: [] })
 const maintenanceStatus = ref({ enabled: false, running: false, intervalSeconds: 0, lastFinishedAt: '', lastStartedAt: '', lastResult: null, lastError: null })
@@ -406,16 +408,28 @@ const fetchDashboardData = async () => {
   loading.value = true
   try {
     // 并行获取账号和素材数据
-    const [accountRes, materialRes, healthRes, maintenanceRes] = await Promise.allSettled([
+    const [accountRes, materialRes, healthRes, maintenanceRes, profilesRes] = await Promise.allSettled([
       accountApi.getAccounts(),
       materialApi.getAllMaterials(),
       accountApi.getHealthSummary(),
-      accountApi.getMaintenanceStatus()
+      accountApi.getMaintenanceStatus(),
+      profilesStore.refreshProfiles()
     ])
 
-    if (accountRes.status === 'fulfilled' && accountRes.value.code === 200) {
-      accountStore.setAccounts(accountRes.value.data)
+    const legacyAccounts = accountRes.status === 'fulfilled' && accountRes.value.code === 200
+      ? (accountRes.value.data || [])
+      : []
+    let structuredAccounts = []
+    if (profilesRes.status === 'fulfilled') {
+      const structuredGroups = await Promise.all(
+        (profilesRes.value || []).map(async (profile) => {
+          const items = await profilesStore.fetchAccountsForProfile(profile.id)
+          return items.map((item) => ({ ...item, profileName: profile.name }))
+        })
+      )
+      structuredAccounts = structuredGroups.flat()
     }
+    accountStore.setAccounts([...legacyAccounts, ...structuredAccounts])
     if (materialRes.status === 'fulfilled' && materialRes.value.code === 200) {
       appStore.setMaterials(materialRes.value.data)
     }
