@@ -452,6 +452,18 @@ import { buildApiUrl } from '@/utils/api-url'
 import { appendAuthQuery, getToken } from '@/utils/auth'
 import { http } from '@/utils/request'
 import { PROFILE_PLATFORM_OPTIONS, getLegacyPlatformType } from '@/utils/platforms'
+import {
+  redditFieldDefs,
+  youtubeIdentityFieldDefs,
+  youtubeFieldDefs,
+  facebookFieldDefs,
+  instagramFieldDefs,
+  threadsFieldDefs,
+  telegramFieldDefs,
+  tiktokTokenFieldDefs,
+  discordFieldDefs,
+} from '@/utils/account-form-defs'
+import { buildAccountComparator, matchesAccountFilters } from '@/utils/account-list-sorting'
 
 const router = useRouter()
 const route = useRoute()
@@ -469,47 +481,6 @@ const syncingRouteFilters = ref(false)
 
 const accountPlatformTabs = PROFILE_PLATFORM_OPTIONS
 const profileOptions = computed(() => profilesStore.profiles)
-
-const redditFieldDefs = [
-  { key: 'clientIdEnv', label: 'Client ID Env', placeholder: '例如：REDDIT_CLIENT_ID' },
-  { key: 'clientSecretEnv', label: 'Client Secret Env', placeholder: '例如：REDDIT_CLIENT_SECRET' },
-  { key: 'refreshTokenEnv', label: 'Refresh Token Env', placeholder: '例如：REDDIT_REFRESH_TOKEN' }
-]
-const youtubeIdentityFieldDefs = [
-  { key: 'channelId', label: 'Channel ID', placeholder: '例如：UCxxxx' }
-]
-const youtubeFieldDefs = [
-  { key: 'playlistId', label: 'Playlist ID', placeholder: '可選，自動加入播放清單' },
-  { key: 'categoryId', label: 'Category ID', placeholder: '預設 22' },
-  { key: 'clientIdEnv', label: 'Client ID Env', placeholder: '例如：YT_CLIENT_ID' },
-  { key: 'clientSecretEnv', label: 'Client Secret Env', placeholder: '例如：YT_CLIENT_SECRET' },
-  { key: 'refreshTokenEnv', label: 'Refresh Token Env', placeholder: '例如：YT_REFRESH_TOKEN' }
-]
-const facebookFieldDefs = [
-  { key: 'pageId', label: 'Page ID' },
-  { key: 'accessTokenEnv', label: 'Access Token Env', placeholder: '例如：FB_PAGE_TOKEN' }
-]
-const instagramFieldDefs = [
-  { key: 'igUserId', label: 'IG User ID' },
-  { key: 'accessTokenEnv', label: 'Access Token Env', placeholder: '例如：IG_ACCESS_TOKEN' }
-]
-const threadsFieldDefs = [
-  { key: 'threadUserId', label: 'User ID' },
-  { key: 'accessTokenEnv', label: 'Access Token Env', placeholder: '例如：THREADS_ACCESS_TOKEN' }
-]
-const telegramFieldDefs = [
-  { key: 'chatId', label: 'Chat ID', placeholder: '例如：@channel_name 或 -100123456' },
-  { key: 'botTokenEnv', label: 'Bot Token Env', placeholder: '例如：TELEGRAM_BOT_TOKEN' }
-]
-const tiktokTokenFieldDefs = [
-  { key: 'accessToken', label: 'Access Token', placeholder: '由 TikTok Connect 自動填入，或手動貼上', type: 'textarea', rows: 2 },
-  { key: 'refreshToken', label: 'Refresh Token', placeholder: '由 TikTok Connect 自動填入', type: 'textarea', rows: 2 },
-  { key: 'accessTokenEnv', label: 'Access Token Env', placeholder: '例如：TIKTOK_ACCESS_TOKEN；若已直連可留空' },
-  { key: 'videoCoverTimestampMs', label: '封面時間 ms', placeholder: '例如：1000' }
-]
-const discordFieldDefs = [
-  { key: 'webhookUrlEnv', label: 'Webhook URL Env', placeholder: '例如：DISCORD_WEBHOOK_URL' }
-]
 
 const dialogVisible = ref(false)
 const dialogType = ref('add')
@@ -715,80 +686,16 @@ let eventSource = null
 
 const filteredAccounts = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
-  const compareUrgency = (left, right) => {
-    const leftRank = Number(left.urgencyRank ?? 99)
-    const rightRank = Number(right.urgencyRank ?? 99)
-    if (leftRank !== rightRank) return leftRank - rightRank
-
-    const leftSeconds = left.secondsRemaining ?? Number.POSITIVE_INFINITY
-    const rightSeconds = right.secondsRemaining ?? Number.POSITIVE_INFINITY
-    if (leftSeconds !== rightSeconds) return leftSeconds - rightSeconds
-
-    const leftProfile = String(left.profileName || '')
-    const rightProfile = String(right.profileName || '')
-    if (leftProfile !== rightProfile) return leftProfile.localeCompare(rightProfile)
-
-    return String(left.name || '').localeCompare(String(right.name || ''))
-  }
-
-  const compareExpiry = (left, right) => {
-    const leftSeconds = left.secondsRemaining ?? Number.POSITIVE_INFINITY
-    const rightSeconds = right.secondsRemaining ?? Number.POSITIVE_INFINITY
-    if (leftSeconds !== rightSeconds) return leftSeconds - rightSeconds
-    return compareUrgency(left, right)
-  }
-
-  const comparePlatform = (left, right) => {
-    const leftPlatform = String(left.platform || '')
-    const rightPlatform = String(right.platform || '')
-    if (leftPlatform !== rightPlatform) return leftPlatform.localeCompare(rightPlatform)
-    return compareUrgency(left, right)
-  }
-
-  const compareProfile = (left, right) => {
-    const leftProfile = String(left.profileName || '')
-    const rightProfile = String(right.profileName || '')
-    if (leftProfile !== rightProfile) return leftProfile.localeCompare(rightProfile)
-    return compareUrgency(left, right)
-  }
-
-  const compareName = (left, right) => {
-    const leftName = String(left.name || '')
-    const rightName = String(right.name || '')
-    if (leftName !== rightName) return leftName.localeCompare(rightName)
-    return compareUrgency(left, right)
-  }
-
-  const comparatorByMode = {
-    urgency: compareUrgency,
-    expiry: compareExpiry,
-    platform: comparePlatform,
-    profile: compareProfile,
-    name: compareName
-  }
-
-  const baseComparator = comparatorByMode[selectedSortMode.value] || compareUrgency
-  const comparator = selectedSortOrder.value === 'descending'
-    ? (left, right) => baseComparator(right, left)
-    : baseComparator
+  const comparator = buildAccountComparator(selectedSortMode.value, selectedSortOrder.value)
 
   return accountStore.accounts
-    .filter((account) => {
-      if (selectedProfileFilter.value === 'legacy' && account.profileId != null) return false
-      if (selectedProfileFilter.value !== 'all' && selectedProfileFilter.value !== 'legacy') {
-        if (String(account.profileId) !== selectedProfileFilter.value) return false
-      }
-
-      if (selectedRiskFilter.value === 'expiring_24h' && !account.isExpiringWithin24h) return false
-      if (selectedRiskFilter.value === 'expiring_7d' && !account.isExpiringWithin7d) return false
-      if (selectedRiskFilter.value === 'overdue' && !account.isOverdue) return false
-      if (selectedRiskFilter.value === 'reconnect_required' && !account.reconnectRequired) return false
-
-      if (!keyword) return true
-      return [account.name, account.platform, account.profileName]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(keyword))
-    })
+    .filter((account) =>
+      matchesAccountFilters(account, {
+        profileFilter: selectedProfileFilter.value,
+        riskFilter: selectedRiskFilter.value,
+        keyword,
+      })
+    )
     .sort(comparator)
 })
 
