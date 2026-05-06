@@ -285,6 +285,7 @@ import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { useProfilesStore } from '@/stores/profiles'
 import { ACCOUNT_PLATFORM_OPTIONS, LEGACY_ACCOUNT_PLATFORM_ORDER } from '@/utils/platforms'
+import { buildAccountQueueNavigationQuery } from '@/utils/accountQueueRouting'
 
 const router = useRouter()
 const accountStore = useAccountStore()
@@ -393,13 +394,15 @@ const navigateTo = (path) => {
 
 const platformValueByLabel = computed(() => Object.fromEntries(dashboardPlatforms.map((platform) => [platform.label, platform.key])))
 
-const goToAccountQueue = ({ risk = 'all', platform = 'all', profile = 'all', sort = 'urgency' } = {}) => {
-  const query = {}
-  if (risk && risk !== 'all') query.risk = risk
-  const normalizedPlatform = platform && platform !== 'all' ? (platformValueByLabel.value[platform] || platform) : 'all'
-  if (normalizedPlatform !== 'all') query.platform = normalizedPlatform
-  if (profile && profile !== 'all') query.profile = profile
-  if (sort && sort !== 'urgency') query.sort = sort
+const goToAccountQueue = ({ risk = 'all', platform = 'all', profile = 'all', sort = 'urgency', sortOrder = 'ascending' } = {}) => {
+  const query = buildAccountQueueNavigationQuery({
+    risk,
+    platform,
+    profile,
+    sort,
+    sortOrder,
+    platformValueByLabel: platformValueByLabel.value,
+  })
   router.push({ path: '/account-management', query })
 }
 

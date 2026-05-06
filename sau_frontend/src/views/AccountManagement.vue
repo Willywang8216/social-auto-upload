@@ -452,6 +452,7 @@ import { buildApiUrl } from '@/utils/api-url'
 import { appendAuthQuery, getToken } from '@/utils/auth'
 import { http } from '@/utils/request'
 import { PROFILE_PLATFORM_OPTIONS, getLegacyPlatformType } from '@/utils/platforms'
+import { buildAccountManagementRouteQuery, normalizeAccountManagementRouteQuery } from '@/utils/accountQueueRouting'
 import {
   redditFieldDefs,
   youtubeIdentityFieldDefs,
@@ -732,53 +733,25 @@ const nextMaintenanceRunLabel = computed(() => {
 })
 
 const applyRouteFilters = () => {
-  const risk = Array.isArray(route.query.risk) ? route.query.risk[0] : route.query.risk
-  const profile = Array.isArray(route.query.profile) ? route.query.profile[0] : route.query.profile
-  const platform = Array.isArray(route.query.platform) ? route.query.platform[0] : route.query.platform
-  const sort = Array.isArray(route.query.sort) ? route.query.sort[0] : route.query.sort
-  const sortOrder = Array.isArray(route.query.sortOrder) ? route.query.sortOrder[0] : route.query.sortOrder
-
-  const allowedRisk = new Set(['all', 'expiring_24h', 'expiring_7d', 'overdue', 'reconnect_required'])
-  selectedRiskFilter.value = allowedRisk.has(String(risk || 'all')) ? String(risk || 'all') : 'all'
-
-  if (profile === 'legacy' || profile === 'all') {
-    selectedProfileFilter.value = String(profile)
-  } else if (profile != null && profile !== '') {
-    selectedProfileFilter.value = String(profile)
-  } else {
-    selectedProfileFilter.value = 'all'
-  }
-
-  const allowedPlatforms = new Set(['all', ...accountPlatformTabs.map((item) => item.value)])
-  activeTab.value = allowedPlatforms.has(String(platform || 'all')) ? String(platform || 'all') : 'all'
-
-  const allowedSort = new Set(['urgency', 'expiry', 'platform', 'profile', 'name'])
-  selectedSortMode.value = allowedSort.has(String(sort || 'urgency')) ? String(sort || 'urgency') : 'urgency'
-  const allowedSortOrder = new Set(['ascending', 'descending'])
-  selectedSortOrder.value = allowedSortOrder.has(String(sortOrder || 'ascending')) ? String(sortOrder || 'ascending') : 'ascending'
+  const normalized = normalizeAccountManagementRouteQuery(route.query, accountPlatformTabs)
+  selectedRiskFilter.value = normalized.selectedRiskFilter
+  selectedProfileFilter.value = normalized.selectedProfileFilter
+  activeTab.value = normalized.activeTab
+  selectedSortMode.value = normalized.selectedSortMode
+  selectedSortOrder.value = normalized.selectedSortOrder
 }
 
 const syncRouteFilters = async () => {
   if (syncingRouteFilters.value) return
 
-  const nextQuery = { ...route.query }
-  if (selectedRiskFilter.value !== 'all') nextQuery.risk = selectedRiskFilter.value
-  else delete nextQuery.risk
-
-  if (selectedProfileFilter.value !== 'all') nextQuery.profile = selectedProfileFilter.value
-  else delete nextQuery.profile
-
-  if (activeTab.value !== 'all') nextQuery.platform = activeTab.value
-  else delete nextQuery.platform
-
-  if (selectedSortMode.value !== 'urgency') nextQuery.sort = selectedSortMode.value
-  else delete nextQuery.sort
-
-  if (selectedSortOrder.value !== 'ascending') nextQuery.sortOrder = selectedSortOrder.value
-  else delete nextQuery.sortOrder
-
-  const currentQuery = { ...route.query }
-  const unchanged = ['risk', 'profile', 'platform', 'sort', 'sortOrder'].every((key) => String(currentQuery[key] || '') === String(nextQuery[key] || ''))
+  const { nextQuery, unchanged } = buildAccountManagementRouteQuery({
+    selectedRiskFilter: selectedRiskFilter.value,
+    selectedProfileFilter: selectedProfileFilter.value,
+    activeTab: activeTab.value,
+    selectedSortMode: selectedSortMode.value,
+    selectedSortOrder: selectedSortOrder.value,
+    currentQuery: route.query,
+  })
   if (unchanged) return
 
   syncingRouteFilters.value = true

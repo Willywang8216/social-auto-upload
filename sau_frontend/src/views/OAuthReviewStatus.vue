@@ -96,6 +96,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { oauthApi } from '@/api/oauth'
+import { buildAccountQueueNavigationQuery } from '@/utils/accountQueueRouting'
 
 const route = useRoute()
 const router = useRouter()
@@ -169,16 +170,14 @@ const credentialRows = computed(() => {
 const title = computed(() => `${platform.value || 'OAuth'} status`)
 
 function goToAccountQueue() {
-  const query = {}
-  if (status.reconnectRequired) {
-    query.risk = 'reconnect_required'
-    query.sort = 'urgency'
-  } else if (status.recommendedAction === 'refresh' && status.expiresAt) {
-    query.risk = 'expiring_7d'
-    query.sort = 'expiry'
-  }
-  if (platform.value) query.platform = platform.value
-  if (status.account?.profile_id != null) query.profile = String(status.account.profile_id)
+  const query = buildAccountQueueNavigationQuery({
+    risk: status.reconnectRequired
+      ? 'reconnect_required'
+      : (status.recommendedAction === 'refresh' && status.expiresAt ? 'expiring_7d' : 'all'),
+    platform: platform.value || 'all',
+    profile: status.account?.profile_id != null ? String(status.account.profile_id) : 'all',
+    sort: status.reconnectRequired ? 'urgency' : 'expiry',
+  })
   router.push({ path: '/account-management', query })
 }
 
