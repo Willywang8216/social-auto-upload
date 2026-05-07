@@ -275,27 +275,63 @@ def whoami():
 # 限制上传文件大小为160MB
 app.config['MAX_CONTENT_LENGTH'] = 160 * 1024 * 1024
 
-# 获取当前目录（假设 index.html 和 assets 在这里）
+# Frontend static asset resolution.
+#
+# The maintained SPA source now lives in sau_frontend/ and production builds
+# emit into sau_frontend/dist/. Older deployments expected index.html/assets at
+# the repository root, so we keep a conservative fallback chain.
 current_dir = os.path.dirname(os.path.abspath(__file__))
+_frontend_source_dir = Path(current_dir) / 'sau_frontend'
+_frontend_dist_dir = _frontend_source_dir / 'dist'
+_frontend_public_dir = _frontend_source_dir / 'public'
 
-# 处理所有静态资源请求（未来打包用）
-@app.route('/assets/<filename>')
+
+def _frontend_index_dir() -> Path:
+    if (_frontend_dist_dir / 'index.html').exists():
+        return _frontend_dist_dir
+    if (_frontend_source_dir / 'index.html').exists():
+        return _frontend_source_dir
+    return Path(current_dir)
+
+
+def _frontend_assets_dir() -> Path:
+    if (_frontend_dist_dir / 'assets').exists():
+        return _frontend_dist_dir / 'assets'
+    if (_frontend_public_dir / 'assets').exists():
+        return _frontend_public_dir / 'assets'
+    return Path(current_dir) / 'assets'
+
+
+def _frontend_public_asset(filename: str) -> tuple[Path, str]:
+    dist_candidate = _frontend_dist_dir / filename
+    if dist_candidate.exists():
+        return _frontend_dist_dir, filename
+    public_candidate = _frontend_public_dir / filename
+    if public_candidate.exists():
+        return _frontend_public_dir, filename
+    return _frontend_index_dir(), filename
+
+
+@app.route('/assets/<path:filename>')
 def custom_static(filename):
-    return send_from_directory(os.path.join(current_dir, 'assets'), filename)
+    return send_from_directory(str(_frontend_assets_dir()), filename)
 
-# 处理 favicon.ico 静态资源（未来打包用）
+
 @app.route('/favicon.ico')
 def favicon():
-    return send_from_directory(os.path.join(current_dir, 'assets'), 'vite.svg')
+    directory, filename = _frontend_public_asset('vite.svg')
+    return send_from_directory(str(directory), filename)
+
 
 @app.route('/vite.svg')
 def vite_svg():
-    return send_from_directory(os.path.join(current_dir, 'assets'), 'vite.svg')
+    directory, filename = _frontend_public_asset('vite.svg')
+    return send_from_directory(str(directory), filename)
 
-# （未来打包用）
+
 @app.route('/')
 def index():  # put application's code here
-    return send_from_directory(current_dir, 'index.html')
+    return send_from_directory(str(_frontend_index_dir()), 'index.html')
 
 @app.route('/oauth/tiktok/callback', methods=['GET'])
 @app.route('/oauth/tiktok/callback/', methods=['GET'])
