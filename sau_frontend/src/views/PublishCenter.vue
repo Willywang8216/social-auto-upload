@@ -592,6 +592,7 @@ import { materialApi } from '@/api/material'
 import { getToken } from '@/utils/auth'
 import { buildApiUrl } from '@/utils/api-url'
 import { getPlatformLabel, PROFILE_PLATFORM_OPTIONS, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
+import { availableAccountsForTab, buildCampaignPlatformOptions, mergeKnownAccounts, profileAccountsFor, selectedProfilePlatformLabels as selectedProfileLabelsFor } from '@/utils/publish-center-logic'
 import PublishJobProgress from '@/components/PublishJobProgress.vue'
 
 const uploadAction = buildApiUrl('/upload')
@@ -628,7 +629,7 @@ const materials = computed(() => appStore.materials)
 const batchPublishing = ref(false)
 
 const legacyPlatforms = PUBLISH_PLATFORM_OPTIONS
-const campaignPlatformOptions = PROFILE_PLATFORM_OPTIONS.filter((platform) => !PUBLISH_PLATFORM_OPTIONS.some((legacy) => legacy.value === platform.value))
+const campaignPlatformOptions = buildCampaignPlatformOptions(PROFILE_PLATFORM_OPTIONS, PUBLISH_PLATFORM_OPTIONS)
 
 const defaultTabInit = {
   name: 'tab1',
@@ -683,42 +684,21 @@ const accountStore = useAccountStore()
 // 任务运行时状态（轮询 /jobs/<id> 获取进度）
 const jobsStore = useJobsStore()
 const profileOptions = computed(() => profilesStore.profiles)
-const allKnownAccounts = computed(() => {
-  const merged = [...accountStore.accounts]
-  Object.values(profilesStore.accountsByProfile || {}).forEach((items) => {
-    for (const item of items || []) {
-      if (!merged.some((existing) => existing.id === item.id)) {
-        merged.push(item)
-      }
-    }
-  })
-  return merged
-})
+const allKnownAccounts = computed(() => mergeKnownAccounts(accountStore.accounts, profilesStore.accountsByProfile))
 
-const profileAccountsFor = (profileId) => {
-  if (!profileId) return []
-  return (profilesStore.accountsByProfile[profileId] || []).filter((acc) => acc.enabled !== false)
-}
+const profileAccountsForTab = (profileId) => profileAccountsFor(profilesStore.accountsByProfile, profileId)
 
-const selectedProfilePlatformLabels = (tab) => {
-  const labels = profileAccountsFor(tab?.selectedProfileId)
-    .map((account) => account.platform || getPlatformLabel(account.platformSlug || account.platform))
-    .filter(Boolean)
-  return [...new Set(labels)]
-}
+const selectedProfilePlatformLabels = (tab) => selectedProfileLabelsFor(profilesStore.accountsByProfile, tab?.selectedProfileId)
 
 // 根据选择的平台获取可用帳號列表
-const availableAccounts = computed(() => {
-  if (currentTab.value?.selectedProfileId) {
-    return profileAccountsFor(currentTab.value.selectedProfileId)
-  }
-  const currentPlatform = currentTab.value
-    ? getPlatformLabel(currentTab.value.selectedPlatform)
-    : null
-  return currentPlatform
-    ? accountStore.accounts.filter((acc) => acc.profileId == null && acc.platform === currentPlatform)
-    : []
-})
+const availableAccounts = computed(() =>
+  availableAccountsForTab({
+    currentTab: currentTab.value,
+    legacyAccounts: accountStore.accounts,
+    accountsByProfile: profilesStore.accountsByProfile,
+    getPlatformLabel,
+  })
+)
 
 // 話題相关状态
 const topicDialogVisible = ref(false)
@@ -855,7 +835,7 @@ const confirmTopicSelection = () => {
 // 打开帳號选择弹窗
 const openAccountDialog = async (tab) => {
   currentTab.value = tab
-  if (tab.selectedProfileId && profileAccountsFor(tab.selectedProfileId).length === 0) {
+  if (tab.selectedProfileId && profileAccountsForTab(tab.selectedProfileId).length === 0) {
     try {
       await profilesStore.fetchAccountsForProfile(tab.selectedProfileId, { enabled: true })
     } catch (error) {
