@@ -82,8 +82,19 @@ class AuthGateTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
     def test_public_paths_skip_the_gate(self) -> None:
-        # The static SPA shell paths and TikTok callback/webhook endpoints must remain reachable.
-        for path in ("/favicon.ico", "/vite.svg", "/oauth/tiktok/callback", "/oauth/reddit/callback", "/oauth/youtube/callback", "/oauth/meta/callback", "/oauth/threads/callback", "/webhooks/tiktok"):
+        # The static SPA shell paths, public policy pages, and OAuth/webhook endpoints must remain reachable.
+        for path in (
+            "/favicon.ico",
+            "/vite.svg",
+            "/privacy",
+            "/terms",
+            "/oauth/tiktok/callback",
+            "/oauth/reddit/callback",
+            "/oauth/youtube/callback",
+            "/oauth/meta/callback",
+            "/oauth/threads/callback",
+            "/webhooks/tiktok",
+        ):
             response = self.client.get(path)
             self.assertNotEqual(
                 response.status_code,

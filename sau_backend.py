@@ -333,6 +333,20 @@ def vite_svg():
 def index():  # put application's code here
     return send_from_directory(str(_frontend_index_dir()), 'index.html')
 
+
+@app.route('/privacy')
+@app.route('/privacy/')
+def privacy_page():
+    directory, filename = _frontend_public_asset('privacy-policy.html')
+    return send_from_directory(str(directory), filename)
+
+
+@app.route('/terms')
+@app.route('/terms/')
+def terms_page():
+    directory, filename = _frontend_public_asset('terms-of-service.html')
+    return send_from_directory(str(directory), filename)
+
 @app.route('/oauth/tiktok/callback', methods=['GET'])
 @app.route('/oauth/tiktok/callback/', methods=['GET'])
 def oauth_tiktok_callback():
