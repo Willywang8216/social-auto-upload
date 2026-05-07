@@ -249,7 +249,23 @@
               />
             </el-select>
             <div class="profile-hint">
-              選擇 Profile 後，會改走 campaign 準備與多平台排程流程；未選擇時仍使用原本單平台 job 模式。
+              選擇 Profile 後，會改走 campaign 準備與多平台排程流程；Facebook、Instagram、Reddit、Telegram、YouTube、TikTok、Threads、Discord、Patreon 建議都從這個模式發佈。
+            </div>
+            <div class="campaign-platform-summary">
+              <div class="campaign-summary-label">Campaign 支援平台</div>
+              <div class="campaign-platform-tags">
+                <el-tag
+                  v-for="platform in campaignPlatformOptions"
+                  :key="platform.value"
+                  effect="plain"
+                  class="campaign-platform-tag"
+                >
+                  {{ platform.label }}
+                </el-tag>
+              </div>
+              <div v-if="tab.selectedProfileId && selectedProfilePlatformLabels(tab).length > 0" class="campaign-summary-label selected-profile-platforms">
+                目前 Profile 已載入：{{ selectedProfilePlatformLabels(tab).join('、') }}
+              </div>
             </div>
           </div>
 
@@ -311,12 +327,22 @@
             </template>
           </el-dialog>
 
+          <el-alert
+            v-if="!tab.selectedProfileId"
+            class="legacy-mode-hint"
+            type="warning"
+            :closable="false"
+            show-icon
+            title="目前是 Legacy 單平台模式"
+            description="這個模式只適用抖音、快手、視頻號、小紅書、X / Twitter 等舊版 uploader。若要發佈 Facebook、Instagram、Reddit、Telegram、YouTube、TikTok、Threads、Discord、Patreon，請先選擇 Profile。"
+          />
+
           <!-- 平台选择 -->
           <div v-if="!tab.selectedProfileId" class="platform-section">
-            <h3>平台</h3>
+            <h3>Legacy 平台</h3>
             <el-radio-group v-model="tab.selectedPlatform" class="platform-radios">
               <el-radio 
-                v-for="platform in platforms" 
+                v-for="platform in legacyPlatforms" 
                 :key="platform.value"
                 :value="platform.value"
                 class="platform-radio"
@@ -561,10 +587,11 @@ import { useAppStore } from '@/stores/app'
 import { useCampaignsStore } from '@/stores/campaigns'
 import { useJobsStore } from '@/stores/jobs'
 import { useProfilesStore } from '@/stores/profiles'
+import { accountApi } from '@/api/account'
 import { materialApi } from '@/api/material'
 import { getToken } from '@/utils/auth'
 import { buildApiUrl } from '@/utils/api-url'
-import { getPlatformLabel, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
+import { getPlatformLabel, PROFILE_PLATFORM_OPTIONS, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
 import PublishJobProgress from '@/components/PublishJobProgress.vue'
 
 const uploadAction = buildApiUrl('/upload')
@@ -600,7 +627,8 @@ const materials = computed(() => appStore.materials)
 // 批次發佈相关状态
 const batchPublishing = ref(false)
 
-const platforms = PUBLISH_PLATFORM_OPTIONS
+const legacyPlatforms = PUBLISH_PLATFORM_OPTIONS
+const campaignPlatformOptions = PROFILE_PLATFORM_OPTIONS.filter((platform) => !PUBLISH_PLATFORM_OPTIONS.some((legacy) => legacy.value === platform.value))
 
 const defaultTabInit = {
   name: 'tab1',
@@ -609,7 +637,7 @@ const defaultTabInit = {
   displayFileList: [], // 用于显示的文件列表
   selectedAccounts: [], // 选中的帳號ID列表
   selectedProfileId: null,
-  selectedPlatform: 'xiaohongshu', // 选中的平台（单选）
+  selectedPlatform: 'xiaohongshu', // legacy 單平台模式使用
   title: '',
   notes: '',
   contactDetails: '',
@@ -655,18 +683,41 @@ const accountStore = useAccountStore()
 // 任务运行时状态（轮询 /jobs/<id> 获取进度）
 const jobsStore = useJobsStore()
 const profileOptions = computed(() => profilesStore.profiles)
+const allKnownAccounts = computed(() => {
+  const merged = [...accountStore.accounts]
+  Object.values(profilesStore.accountsByProfile || {}).forEach((items) => {
+    for (const item of items || []) {
+      if (!merged.some((existing) => existing.id === item.id)) {
+        merged.push(item)
+      }
+    }
+  })
+  return merged
+})
+
+const profileAccountsFor = (profileId) => {
+  if (!profileId) return []
+  return (profilesStore.accountsByProfile[profileId] || []).filter((acc) => acc.enabled !== false)
+}
+
+const selectedProfilePlatformLabels = (tab) => {
+  const labels = profileAccountsFor(tab?.selectedProfileId)
+    .map((account) => account.platform || getPlatformLabel(account.platformSlug || account.platform))
+    .filter(Boolean)
+  return [...new Set(labels)]
+}
 
 // 根据选择的平台获取可用帳號列表
 const availableAccounts = computed(() => {
   if (currentTab.value?.selectedProfileId) {
-    return accountStore.accounts.filter(
-      (acc) => acc.profileId === currentTab.value.selectedProfileId && acc.enabled !== false
-    )
+    return profileAccountsFor(currentTab.value.selectedProfileId)
   }
   const currentPlatform = currentTab.value
     ? getPlatformLabel(currentTab.value.selectedPlatform)
     : null
-  return currentPlatform ? accountStore.accounts.filter(acc => acc.platform === currentPlatform) : []
+  return currentPlatform
+    ? accountStore.accounts.filter((acc) => acc.profileId == null && acc.platform === currentPlatform)
+    : []
 })
 
 // 話題相关状态
@@ -802,8 +853,17 @@ const confirmTopicSelection = () => {
 
 // 帳號选择相关方法
 // 打开帳號选择弹窗
-const openAccountDialog = (tab) => {
+const openAccountDialog = async (tab) => {
   currentTab.value = tab
+  if (tab.selectedProfileId && profileAccountsFor(tab.selectedProfileId).length === 0) {
+    try {
+      await profilesStore.fetchAccountsForProfile(tab.selectedProfileId, { enabled: true })
+    } catch (error) {
+      console.error('載入 Profile 帳號失敗:', error)
+      ElMessage.error('載入 Profile 帳號失敗')
+      return
+    }
+  }
   tempSelectedAccounts.value = [...tab.selectedAccounts]
   accountDialogVisible.value = true
 }
@@ -825,7 +885,7 @@ const removeAccount = (tab, index) => {
 
 // 获取帳號显示名称
 const getAccountDisplayName = (accountId) => {
-  const account = accountStore.accounts.find(acc => acc.id === accountId)
+  const account = allKnownAccounts.value.find(acc => acc.id === accountId)
   return account ? `${account.name} · ${account.platform}` : accountId
 }
 
@@ -910,8 +970,7 @@ const handleProfileChange = async (tab, profileId) => {
   }
 
   try {
-    const accounts = await profilesStore.fetchAccountsForProfile(profileId, { enabled: true })
-    accountStore.setAccounts(accounts)
+    await profilesStore.fetchAccountsForProfile(profileId, { enabled: true })
   } catch (error) {
     console.error('載入 Profile 帳號失敗:', error)
     ElMessage.error('載入 Profile 帳號失敗')
@@ -1143,10 +1202,21 @@ const batchPublish = async () => {
 
 // Stop every active job poller when the user navigates away. Without this
 // the polling timers keep ticking against the backend in the background.
-onMounted(() => {
-  profilesStore.refreshProfiles().catch((error) => {
+onMounted(async () => {
+  try {
+    await profilesStore.refreshProfiles()
+  } catch (error) {
     console.error('載入 Profiles 失敗:', error)
-  })
+  }
+
+  try {
+    const response = await accountApi.getAccounts()
+    const legacyAccounts = response?.data || []
+    const structuredAccounts = accountStore.accounts.filter((acc) => acc.profileId != null)
+    accountStore.setAccounts([...legacyAccounts, ...structuredAccounts])
+  } catch (error) {
+    console.error('載入 Legacy 帳號失敗:', error)
+  }
 })
 
 onBeforeUnmount(() => {
@@ -1344,6 +1414,30 @@ onBeforeUnmount(() => {
             font-size: 13px;
             line-height: 1.6;
           }
+
+          .campaign-platform-summary {
+            margin-top: 12px;
+            padding: 12px;
+            background-color: #f5f7fa;
+            border-radius: 6px;
+
+            .campaign-summary-label {
+              color: #606266;
+              font-size: 13px;
+              margin-bottom: 8px;
+
+              &.selected-profile-platforms {
+                margin-top: 8px;
+                margin-bottom: 0;
+              }
+            }
+
+            .campaign-platform-tags {
+              display: flex;
+              flex-wrap: wrap;
+              gap: 8px;
+            }
+          }
         }
 
         .product-section {
@@ -1461,6 +1555,10 @@ onBeforeUnmount(() => {
           margin-top: 30px;
           padding-top: 20px;
           border-top: 1px solid #ebeef5;
+        }
+
+        .legacy-mode-hint {
+          margin: 0 0 20px;
         }
 
         .draft-section {
