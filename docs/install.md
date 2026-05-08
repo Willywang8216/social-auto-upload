@@ -83,7 +83,7 @@ cp .env.example .env
 
 详细获取步骤见：
 
-- [Credential setup guide](./credential-setup.md)
+- [Platform integration runbook](./platform-integration-runbook.md)
 
 ### 5. 配置 conf.py
 
