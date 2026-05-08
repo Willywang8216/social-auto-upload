@@ -10,7 +10,7 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 
-from conf import BASE_DIR
+from utils.conf_defaults import BASE_DIR
 from uploader.douyin_uploader.main import (
     DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
     DOUYIN_PUBLISH_STRATEGY_SCHEDULED,

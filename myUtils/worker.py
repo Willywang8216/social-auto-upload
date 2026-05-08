@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
-from conf import BASE_DIR
+from utils.conf_defaults import BASE_DIR
 from myUtils import jobs
 from myUtils import profiles as profile_registry
 from myUtils import prepared_publishers
@@ -384,7 +384,7 @@ async def _publish_prepared_twitter(
     payload: dict,
     target: jobs.Target,
     *,
-    account,
+    account=None,
     account_file: Path | None,
 ) -> None:
     file_paths = _prepared_artifact_local_paths(payload)
@@ -542,6 +542,7 @@ PREPARED_PUBLISHER_REGISTRY: dict[str, Callable[..., Awaitable[None]]] = {
     "tiktok": _publish_prepared_tiktok,
     "threads": _publish_prepared_threads,
     "discord": _publish_prepared_discord,
+    "patreon": _publish_prepared_not_implemented,
 }
 
 

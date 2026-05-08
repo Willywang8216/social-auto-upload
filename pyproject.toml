@@ -23,6 +23,7 @@ dependencies = [
   # async API. Every uploader and the Flask login/auth helpers go through
   # it; we no longer ship the upstream `playwright` package alongside.
   "patchright==1.58.2",
+  "pillow==11.2.1",
   "qrcode==8.2",
   "requests==2.32.3",
   "segno==1.6.6",

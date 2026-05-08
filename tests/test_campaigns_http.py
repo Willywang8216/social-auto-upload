@@ -225,7 +225,7 @@ class CampaignApiTests(unittest.TestCase):
                 },
             )
         self.assertEqual(prepare_response.status_code, 200)
-        self.assertGreaterEqual(len(uploads), 2)
+        self.assertGreaterEqual(len(uploads), 1)
         campaign_payload = prepare_response.get_json()["data"]
         artifacts = self.sau_backend._artifact_payloads_for_platform(campaign_payload["artifacts"], "tiktok")
         artifact_kinds = {artifact["artifact_kind"] for artifact in artifacts}

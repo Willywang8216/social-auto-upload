@@ -12,7 +12,7 @@ from typing import Awaitable, Callable, Iterator, Sequence
 from patchright.async_api import Page
 from patchright.async_api import async_playwright
 
-from conf import DEBUG_MODE, LOCAL_CHROME_HEADLESS
+from utils.conf_defaults import DEBUG_MODE, LOCAL_CHROME_HEADLESS
 from uploader.base_video import BaseVideoUploader
 from utils.base_social_media import set_init_script
 from utils.browser_hook import get_browser_options

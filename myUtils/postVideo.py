@@ -1,7 +1,9 @@
 import asyncio
 from pathlib import Path
 
-from conf import BASE_DIR
+from utils.conf_defaults import BASE_DIR
+
+BASE_DIR = Path(BASE_DIR)
 from uploader.douyin_uploader.main import DouYinVideo
 from uploader.ks_uploader.main import KSVideo
 from uploader.tencent_uploader.main import TencentVideo

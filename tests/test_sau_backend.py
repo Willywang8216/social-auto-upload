@@ -82,6 +82,7 @@ class LegacyDbBootstrapEndpointTests(unittest.TestCase):
 
         self._tmp = tempfile.TemporaryDirectory()
         self.base_dir = Path(self._tmp.name)
+        (self.base_dir / "db").mkdir(parents=True, exist_ok=True)
         self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
         self._base_dir_patch.start()
 
@@ -130,6 +131,8 @@ class LegacyDbBootstrapEndpointTests(unittest.TestCase):
         self.assertTrue({"user_info", "file_records"}.issubset(self._table_names()))
 
     def test_delete_account_supports_structured_profile_accounts(self) -> None:
+        self.client.get("/getAccounts")
+
         cookie_dir = self.base_dir / "cookies" / "twitter" / "brand"
         cookie_dir.mkdir(parents=True, exist_ok=True)
         cookie_path = cookie_dir / "main.json"

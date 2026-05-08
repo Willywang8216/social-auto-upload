@@ -1,5 +1,6 @@
 from pathlib import Path
 
-from conf import BASE_DIR
+from utils.conf_defaults import BASE_DIR
 
-Path(BASE_DIR / "cookies").mkdir(exist_ok=True)
+BASE_DIR = Path(BASE_DIR)
+BASE_DIR.joinpath('cookies').mkdir(exist_ok=True)

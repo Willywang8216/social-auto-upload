@@ -20,7 +20,7 @@ from pathlib import Path
 
 from patchright.async_api import Page, Playwright, async_playwright
 
-from conf import DEBUG_MODE, LOCAL_CHROME_HEADLESS
+from utils.conf_defaults import DEBUG_MODE, LOCAL_CHROME_HEADLESS
 from uploader.base_post import BasePostUploader
 from utils.base_social_media import set_init_script
 from utils.log import medium_logger

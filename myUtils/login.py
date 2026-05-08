@@ -7,7 +7,7 @@ from myUtils.auth import check_cookie
 from utils.base_social_media import set_init_script
 import uuid
 from pathlib import Path
-from conf import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
+from utils.conf_defaults import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 
 # 统一获取浏览器启动配置（防风控+引入本地浏览器）
 def get_browser_options():

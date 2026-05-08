@@ -30,7 +30,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from conf import BASE_DIR
+from utils.conf_defaults import BASE_DIR
 from utils.log import loguru_logger, worker_logger
 
 JOB_LOG_DIR = Path(BASE_DIR) / "logs" / "jobs"

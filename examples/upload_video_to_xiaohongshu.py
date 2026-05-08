@@ -12,7 +12,7 @@ import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from conf import BASE_DIR
+from utils.conf_defaults import BASE_DIR
 from uploader.xiaohongshu_uploader.main import XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE
 from uploader.xiaohongshu_uploader.main import XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED
 from uploader.xiaohongshu_uploader.main import XiaoHongShuNote

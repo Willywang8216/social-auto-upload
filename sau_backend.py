@@ -1,5 +1,7 @@
 import asyncio
 import hashlib
+import json
+import json
 import hmac
 import logging
 import os
@@ -14,7 +16,7 @@ from flask_cors import CORS
 from myUtils.auth import check_cookie
 from myUtils import account_validation
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory
-from conf import BASE_DIR
+from utils.conf_defaults import BASE_DIR
 from myUtils import campaigns as campaign_store
 from myUtils import content_rules
 from myUtils import google_sheets
@@ -347,9 +349,9 @@ def terms_page():
     directory, filename = _frontend_public_asset('terms-of-service.html')
     return send_from_directory(str(directory), filename)
 
-@app.route('/oauth/tiktok/callback', methods=['GET'])
-@app.route('/oauth/tiktok/callback/', methods=['GET'])
-def oauth_tiktok_callback():
+@app.route('/oauth/tiktok/callback-demo', methods=['GET'])
+@app.route('/oauth/tiktok/callback-demo/', methods=['GET'])
+def oauth_tiktok_callback_demo():
     error = request.args.get('error')
     error_description = request.args.get('error_description')
     code = request.args.get('code')
@@ -409,9 +411,9 @@ def oauth_tiktok_callback():
     )
 
 
-@app.route('/webhooks/tiktok', methods=['GET', 'POST'])
-@app.route('/webhooks/tiktok/', methods=['GET', 'POST'])
-def webhook_tiktok():
+@app.route('/webhooks/tiktok-demo', methods=['GET', 'POST'])
+@app.route('/webhooks/tiktok-demo/', methods=['GET', 'POST'])
+def webhook_tiktok_demo():
     if request.method == 'GET':
         return jsonify({
             "code": 200,
@@ -2015,12 +2017,15 @@ def _prepare_campaign_media_artifacts(
     media_files: list[dict],
     request_data: dict,
     *,
+    selected_platforms: set[str] | None = None,
     db_path: Path,
 ) -> dict:
     upload_to_remote = bool(
         request_data.get("uploadToRemote", os.environ.get("SAU_DEFAULT_RCLONE_REMOTE"))
     )
     watermark_spec = _derive_watermark_spec(profile, request_data)
+    selected_platforms = set(selected_platforms or set())
+    tiktok_only = selected_platforms == {profile_registry.PLATFORM_TIKTOK}
     artifacts_context = {
         "imageUrls": [],
         "videoUrl": "",
@@ -2038,7 +2043,7 @@ def _prepare_campaign_media_artifacts(
         publish_path = source_path
         artifact_kind = None
 
-        if watermark_spec and _is_image_file(source_path):
+        if watermark_spec and not tiktok_only and _is_image_file(source_path):
             artifact_kind = "watermarked_image"
             publish_path = media_pipeline.prepare_campaign_artifact_path(
                 campaign_id,
@@ -2052,7 +2057,7 @@ def _prepare_campaign_media_artifacts(
                 watermark_image_path=watermark_spec.get("imagePath"),
                 seed=campaign_id * 1000 + int(media_file["file_record_id"]),
             )
-        elif watermark_spec and _is_video_file(source_path):
+        elif watermark_spec and not tiktok_only and _is_video_file(source_path):
             artifact_kind = "watermarked_video"
             publish_path = media_pipeline.prepare_campaign_artifact_path(
                 campaign_id,
@@ -2081,23 +2086,25 @@ def _prepare_campaign_media_artifacts(
         public_url = None
         raw_public_url = None
         if upload_to_remote:
+            remote_source = source_path if tiktok_only else publish_path
+            remote_kind = "raw_remote_upload" if tiktok_only else "remote_upload"
             remote_artifact = rclone_storage.upload_artifact(
-                publish_path,
+                remote_source,
                 campaign_id=campaign_id,
-                artifact_subdir="videos" if _is_video_file(publish_path) else "images",
+                artifact_subdir="videos" if _is_video_file(remote_source) else "images",
             )
             public_url = remote_artifact.public_url
             campaign_store.add_campaign_artifact(
                 campaign_id,
                 source_file_record_id=media_file["file_record_id"],
-                artifact_kind="remote_upload",
-                local_path=str(publish_path),
+                artifact_kind=remote_kind,
+                local_path=str(remote_source),
                 public_url=remote_artifact.public_url,
                 remote_path=remote_artifact.remote_path,
                 metadata={"role": media_file["role"]},
                 db_path=db_path,
             )
-            if publish_path != source_path:
+            if not tiktok_only and publish_path != source_path:
                 raw_remote_artifact = rclone_storage.upload_artifact(
                     source_path,
                     campaign_id=campaign_id,
@@ -3311,7 +3318,7 @@ def tiktok_webhook():
         if challenge:
             _append_tiktok_review_event('webhook', {'status': 'challenge', 'challenge': challenge}, status='challenge', db_path=_current_db_path())
             return Response(challenge, mimetype='text/plain')
-        return jsonify({'code': 200, 'msg': 'ok', 'data': {'path': '/webhooks/tiktok'}}), 200
+        return jsonify({'code': 200, 'msg': 'ok', 'data': {'service': 'tiktok-webhook', 'status': 'ready', 'path': '/webhooks/tiktok'}}), 200
 
     raw_body = request.get_data()
     payload = request.get_json(silent=True)
@@ -3914,17 +3921,18 @@ def campaigns_prepare():
         )
 
         media_files = _load_media_group_files(media_group_id, db_path=db_path)
+        grouped_accounts: dict[str, list[profile_registry.Account]] = {}
+        for account in account_rows:
+            grouped_accounts.setdefault(account.platform, []).append(account)
+
         media_context = _prepare_campaign_media_artifacts(
             campaign.id,
             profile,
             media_files,
             data,
+            selected_platforms=set(grouped_accounts.keys()),
             db_path=db_path,
         )
-
-        grouped_accounts: dict[str, list[profile_registry.Account]] = {}
-        for account in account_rows:
-            grouped_accounts.setdefault(account.platform, []).append(account)
 
         created_posts: list[campaign_store.CampaignPost] = []
         for platform, platform_accounts in grouped_accounts.items():

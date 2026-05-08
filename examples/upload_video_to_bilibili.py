@@ -2,7 +2,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from conf import BASE_DIR
+from utils.conf_defaults import BASE_DIR
 from utils.constant import VideoZoneTypes
 from utils.files_times import generate_schedule_time_next_day, get_title_and_hashtags
 

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from conf import BASE_DIR
+from utils.conf_defaults import BASE_DIR
 
 DB_PATH = Path(BASE_DIR) / "db" / "database.db"
 

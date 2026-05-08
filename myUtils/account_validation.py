@@ -120,7 +120,10 @@ def validate_structured_account_config(
         )
         has_refresh_token = _present(_config_value(config, "refreshToken"))
         if not has_access_token and not (has_oauth_triplet and has_refresh_token):
-            errors.append("YouTube 帳號需要 accessToken 或 clientId/clientSecret/refreshToken")
+            if auth_type == 'oauth' and has_oauth_triplet:
+                warnings.append("YouTube refreshToken 可在 OAuth Connect 完成後自動回填")
+            else:
+                errors.append("YouTube 帳號需要 accessToken 或 clientId/clientSecret/refreshToken")
         if not has_channel_id and has_oauth_triplet:
             warnings.append("YouTube channelId 可在 OAuth Connect 完成後自動回填")
         elif not has_channel_id:

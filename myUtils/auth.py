@@ -3,7 +3,7 @@ from pathlib import Path
 
 from patchright.async_api import async_playwright
 
-from conf import BASE_DIR, LOCAL_CHROME_HEADLESS
+from utils.conf_defaults import BASE_DIR, LOCAL_CHROME_HEADLESS
 from utils.base_social_media import set_init_script
 from utils.log import douyin_logger, kuaishou_logger, tencent_logger
 

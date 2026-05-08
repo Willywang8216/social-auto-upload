@@ -1,7 +1,9 @@
 from pathlib import Path
 from typing import List
 
-from conf import BASE_DIR
+from utils.conf_defaults import BASE_DIR
+
+BASE_DIR = Path(BASE_DIR)
 
 SOCIAL_MEDIA_DOUYIN = "douyin"
 SOCIAL_MEDIA_TENCENT = "tencent"

@@ -7,7 +7,7 @@ Current mainline usage prefers:
 import asyncio
 from pathlib import Path
 
-from conf import BASE_DIR
+from utils.conf_defaults import BASE_DIR
 from uploader.ks_uploader.main import ks_setup
 
 
