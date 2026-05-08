@@ -101,6 +101,7 @@ class AuthGateTests(unittest.TestCase):
                 401,
                 f"{path} should not require auth",
             )
+            response.close()
 
     def test_login_sse_rejects_missing_query_token(self) -> None:
         # /login without a token must 401 before the SSE worker spins up.

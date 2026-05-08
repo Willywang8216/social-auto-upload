@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Queue
 from flask_cors import CORS
@@ -348,116 +348,6 @@ def privacy_page():
 def terms_page():
     directory, filename = _frontend_public_asset('terms-of-service.html')
     return send_from_directory(str(directory), filename)
-
-@app.route('/oauth/tiktok/callback-demo', methods=['GET'])
-@app.route('/oauth/tiktok/callback-demo/', methods=['GET'])
-def oauth_tiktok_callback_demo():
-    error = request.args.get('error')
-    error_description = request.args.get('error_description')
-    code = request.args.get('code')
-    state = request.args.get('state', '')
-    if error:
-        return Response(
-            f"""
-            <html><body style='font-family: sans-serif; padding: 24px;'>
-            <h1>TikTok OAuth failed</h1>
-            <p><strong>Error:</strong> {error}</p>
-            <p>{error_description or ''}</p>
-            </body></html>
-            """,
-            mimetype='text/html',
-        )
-    if not code:
-        return jsonify({"code": 400, "msg": "missing code", "data": None}), 400
-
-    payload = {
-        "client_key": _tiktok_client_key(),
-        "client_secret": _tiktok_client_secret(),
-        "code": code,
-        "grant_type": "authorization_code",
-        "redirect_uri": _tiktok_callback_base_url(),
-    }
-    token_result = None
-    token_error = None
-    if payload["client_key"] and payload["client_secret"]:
-        try:
-            import requests
-            response = requests.post(
-                "https://open.tiktokapis.com/v2/oauth/token/",
-                data=payload,
-                timeout=120,
-            )
-            response.raise_for_status()
-            token_result = response.json()
-        except Exception as exc:  # noqa: BLE001
-            token_error = str(exc)
-
-    body = {
-        "received": True,
-        "state": state,
-        "code": code,
-        "token": token_result,
-        "tokenError": token_error,
-    }
-    return Response(
-        f"""
-        <html><body style='font-family: sans-serif; padding: 24px;'>
-        <h1>TikTok OAuth callback received</h1>
-        <p>The authorization code was received successfully for <strong>up.iamwillywang.com</strong>.</p>
-        <pre style='white-space: pre-wrap; background: #f5f5f5; padding: 12px; border-radius: 8px;'>{json.dumps(body, ensure_ascii=False, indent=2)}</pre>
-        </body></html>
-        """,
-        mimetype='text/html',
-    )
-
-
-@app.route('/webhooks/tiktok-demo', methods=['GET', 'POST'])
-@app.route('/webhooks/tiktok-demo/', methods=['GET', 'POST'])
-def webhook_tiktok_demo():
-    if request.method == 'GET':
-        return jsonify({
-            "code": 200,
-            "msg": "ok",
-            "data": {
-                "service": "tiktok-webhook",
-                "status": "ready",
-            }
-        }), 200
-
-    raw_body = request.get_data(cache=False)
-    signature_header = request.headers.get('Tiktok-Signature') or request.headers.get('TikTok-Signature')
-    signature_valid, signature_reason = _verify_tiktok_signature(raw_body, signature_header)
-    try:
-        parsed_body = request.get_json(silent=True)
-    except Exception:  # noqa: BLE001
-        parsed_body = None
-
-    event = {
-        "received_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "path": request.path,
-        "signature_valid": signature_valid,
-        "signature_reason": signature_reason,
-        "headers": {
-            "Tiktok-Signature": signature_header or "",
-            "User-Agent": request.headers.get('User-Agent', ''),
-            "Content-Type": request.headers.get('Content-Type', ''),
-        },
-        "body": parsed_body if parsed_body is not None else raw_body.decode('utf-8', errors='replace'),
-    }
-    _append_tiktok_webhook_event(event)
-
-    if signature_header and not signature_valid and _tiktok_client_secret():
-        return jsonify({"code": 401, "msg": f"invalid webhook signature: {signature_reason}", "data": None}), 401
-
-    return jsonify({
-        "code": 200,
-        "msg": "accepted",
-        "data": {
-            "signatureValid": signature_valid,
-            "signatureReason": signature_reason,
-        }
-    }), 200
-
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
