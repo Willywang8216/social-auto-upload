@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from myUtils import media_pipeline
 from myUtils import tiktok_auth
 
 try:
@@ -35,6 +36,11 @@ TIKTOK_API_ROOT = "https://open.tiktokapis.com"
 TIKTOK_CREATOR_INFO_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/creator_info/query/"
 TIKTOK_VIDEO_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/video/init/"
 TIKTOK_CONTENT_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/content/init/"
+TIKTOK_MAX_PULL_FROM_URL_BYTES = 1 * 1024 * 1024 * 1024
+TIKTOK_MIN_VIDEO_SECONDS = 3.0
+TIKTOK_MAX_VIDEO_SECONDS = 600.0
+TIKTOK_MAX_CAPTION_CHARS = 2200
+TIKTOK_ALLOWED_VIDEO_SUFFIXES = {".mp4", ".webm"}
 
 
 class PreparedPublishError(RuntimeError):
@@ -754,6 +760,50 @@ def query_tiktok_creator_info(config: dict[str, Any], *, access_token: str | Non
     return payload
 
 
+def _validate_tiktok_video_artifact(item: dict[str, Any], *, message: str, config: dict[str, Any]) -> None:
+    if len(message) > TIKTOK_MAX_CAPTION_CHARS:
+        raise PreparedPublishError(f"TikTok caption exceeds {TIKTOK_MAX_CAPTION_CHARS} characters for direct publishing")
+
+    public_url = str(item.get("public_url") or "").strip()
+    if not public_url:
+        raise PreparedPublishError("TikTok video publish requires a public_url")
+
+    local_path = str(item.get("local_path") or "").strip()
+    if not local_path:
+        return
+
+    source = Path(local_path).expanduser().resolve()
+    if not source.exists():
+        raise PreparedPublishError(f"TikTok video artifact not found: {source}")
+
+    suffix = source.suffix.lower()
+    if suffix not in TIKTOK_ALLOWED_VIDEO_SUFFIXES:
+        raise PreparedPublishError("TikTok video publish currently supports only MP4 or WebM artifacts")
+
+    file_size = source.stat().st_size
+    if file_size > TIKTOK_MAX_PULL_FROM_URL_BYTES:
+        raise PreparedPublishError("TikTok PULL_FROM_URL video uploads currently support up to 1 GB in this implementation")
+
+    duration_seconds = media_pipeline.probe_video_duration(source)
+    if duration_seconds < TIKTOK_MIN_VIDEO_SECONDS or duration_seconds > TIKTOK_MAX_VIDEO_SECONDS:
+        raise PreparedPublishError("TikTok videos must be between 3 seconds and 10 minutes for the current direct publishing flow")
+
+    cover_timestamp_raw = config.get("videoCoverTimestampMs")
+    if cover_timestamp_raw not in (None, ""):
+        cover_timestamp_ms = int(cover_timestamp_raw)
+        if cover_timestamp_ms < 0:
+            raise PreparedPublishError("TikTok video_cover_timestamp_ms must be >= 0")
+        if cover_timestamp_ms > int(duration_seconds * 1000):
+            raise PreparedPublishError("TikTok video_cover_timestamp_ms must not exceed the video duration")
+
+
+def _validate_tiktok_photo_payload(public_urls: list[str], *, message: str) -> None:
+    if len(message) > TIKTOK_MAX_CAPTION_CHARS:
+        raise PreparedPublishError(f"TikTok caption exceeds {TIKTOK_MAX_CAPTION_CHARS} characters for direct publishing")
+    if len(public_urls) > 35:
+        raise PreparedPublishError("TikTok photo publish supports up to 35 images")
+
+
 def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     config = dict(account.config or {})
     http = _get_session(session)
@@ -768,12 +818,12 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     privacy_level = str(config.get("privacyLevel") or "PUBLIC_TO_EVERYONE")
 
     if media["videos"]:
-        public_url = media["videos"][0].get("public_url") or ""
-        if not public_url:
-            raise PreparedPublishError("TikTok video publish requires a public_url")
+        video_item = media["videos"][0]
+        _validate_tiktok_video_artifact(video_item, message=message, config=config)
+        public_url = video_item.get("public_url") or ""
         request_body = {
             "post_info": {
-                "title": message[:2200],
+                "title": message[:TIKTOK_MAX_CAPTION_CHARS],
                 "privacy_level": privacy_level,
                 "disable_duet": bool(config.get("disableDuet", False)),
                 "disable_comment": bool(config.get("disableComment", False)),
@@ -808,10 +858,11 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         public_urls = [item.get("public_url") or "" for item in media["images"][:35]]
         if not all(public_urls):
             raise PreparedPublishError("TikTok photo publish requires public image URLs")
+        _validate_tiktok_photo_payload(public_urls, message=message)
         request_body = {
             "post_info": {
                 "title": _message_title(payload),
-                "description": message[:4000],
+                "description": message[:TIKTOK_MAX_CAPTION_CHARS],
                 "privacy_level": privacy_level,
                 "disable_comment": bool(config.get("disableComment", False)),
                 "auto_add_music": bool(config.get("autoAddMusic", True)),

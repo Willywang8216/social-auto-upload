@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+if "conf" not in sys.modules:
+    conf_module = types.ModuleType("conf")
+    conf_module.BASE_DIR = str(Path(__file__).resolve().parent.parent)
+    sys.modules["conf"] = conf_module
 
 from myUtils import prepared_publishers
 
@@ -318,6 +325,63 @@ class PreparedPublisherTests(unittest.TestCase):
         with patch.dict(os.environ, {"TOKEN_ENV": "abc"}, clear=False):
             value = prepared_publishers._config_value({"botTokenEnv": "TOKEN_ENV"}, "botToken")
         self.assertEqual(value, "abc")
+
+    def test_tiktok_video_rejects_pull_from_url_file_over_one_gb(self):
+        session = _RecordingSession([
+            _FakeResponse({'data': {'creator_avatar_url': 'x'}}),
+        ])
+        account = SimpleNamespace(config={'accessToken': 'tt-token'})
+        with tempfile.TemporaryDirectory() as tmp,              patch.object(prepared_publishers.media_pipeline, 'probe_video_duration', return_value=120.0),              patch.object(prepared_publishers, 'TIKTOK_MAX_PULL_FROM_URL_BYTES', 1):
+            video = Path(tmp) / 'clip.mp4'
+            video.write_bytes(b'video')
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.publish_tiktok_sync(
+                    account,
+                    {
+                        'message': 'TikTok launch',
+                        'artifacts': [{'public_url': 'https://cdn.example/video.mp4', 'local_path': str(video), 'artifact_kind': 'remote_upload'}],
+                    },
+                    session=session,
+                )
+        self.assertIn('1 GB', str(ctx.exception))
+
+    def test_tiktok_video_rejects_duration_over_ten_minutes(self):
+        session = _RecordingSession([
+            _FakeResponse({'data': {'creator_avatar_url': 'x'}}),
+        ])
+        account = SimpleNamespace(config={'accessToken': 'tt-token'})
+        with tempfile.TemporaryDirectory() as tmp, patch.object(prepared_publishers.media_pipeline, 'probe_video_duration', return_value=601.0):
+            video = Path(tmp) / 'clip.mp4'
+            video.write_bytes(b'video')
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.publish_tiktok_sync(
+                    account,
+                    {
+                        'message': 'TikTok launch',
+                        'artifacts': [{'public_url': 'https://cdn.example/video.mp4', 'local_path': str(video), 'artifact_kind': 'remote_upload'}],
+                    },
+                    session=session,
+                )
+        self.assertIn('10 minutes', str(ctx.exception))
+
+    def test_tiktok_video_rejects_caption_over_2200_chars(self):
+        session = _RecordingSession([
+            _FakeResponse({'data': {'creator_avatar_url': 'x'}}),
+        ])
+        account = SimpleNamespace(config={'accessToken': 'tt-token'})
+        with tempfile.TemporaryDirectory() as tmp, patch.object(prepared_publishers.media_pipeline, 'probe_video_duration', return_value=120.0):
+            video = Path(tmp) / 'clip.mp4'
+            video.write_bytes(b'video')
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.publish_tiktok_sync(
+                    account,
+                    {
+                        'message': 'x' * 2201,
+                        'artifacts': [{'public_url': 'https://cdn.example/video.mp4', 'local_path': str(video), 'artifact_kind': 'remote_upload'}],
+                    },
+                    session=session,
+                )
+        self.assertIn('2200', str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -9,6 +9,13 @@ from datetime import datetime
 DEFAULT_EMOJI = "✨"
 DEFAULT_HASHTAG_FILLERS = ["#socialmedia", "#content", "#campaign"]
 
+SHEET_MESSAGE_MAX_CHARS = {
+    "facebook": 63206,
+    "instagram": 2200,
+    "twitter": 280,
+    "tiktok": 150,
+}
+
 SHEET_COLUMN_ORDER = [
     "Message",
     "Link",
@@ -55,7 +62,7 @@ PLATFORM_RULES: dict[str, PlatformRule] = {
     "facebook": PlatformRule("facebook", max_chars=63206, long_form=True),
     "telegram": PlatformRule("telegram"),
     "youtube": PlatformRule("youtube"),
-    "tiktok": PlatformRule("tiktok", max_chars=150),
+    "tiktok": PlatformRule("tiktok", max_chars=2200),
     "reddit": PlatformRule("reddit"),
     "discord": PlatformRule("discord"),
 }
@@ -191,6 +198,7 @@ def _schedule_parts(schedule: dict | datetime | None) -> tuple[str, str, str, st
 def build_sheet_row(
     *,
     message: str,
+    platform: str | None = None,
     link: str = "",
     image_urls: list[str] | None = None,
     video_url: str = "",
@@ -211,6 +219,8 @@ def build_sheet_row(
     image_url_value = ",".join(image_urls or [])
     if image_url_value and video_url:
         raise ValueError("ImageURL and VideoURL cannot both be populated")
+    if platform:
+        message = trim_to_max_length(message, SHEET_MESSAGE_MAX_CHARS.get(platform))
     return {
         "Message": message,
         "Link": link,

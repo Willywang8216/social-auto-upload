@@ -78,6 +78,23 @@ def build_remote_path(
     return str(remote_dir / source.name)
 
 
+
+
+def _link_command(remote_spec: str, *, remote_name: str) -> list[str]:
+    lower_remote = remote_name.lower()
+    if 'onedrive' in lower_remote:
+        return [
+            RCLONE_COMMAND,
+            'link',
+            remote_spec,
+            '--onedrive-link-scope',
+            'anonymous',
+            '--onedrive-link-type',
+            'view',
+        ]
+    return [RCLONE_COMMAND, 'link', remote_spec]
+
+
 def ensure_public_link(
     remote_path: str,
     *,
@@ -102,15 +119,7 @@ def ensure_public_link(
     remote_spec = f"{resolved_remote_name}:{remote_path}"
     try:
         completed = runner(
-            [
-                RCLONE_COMMAND,
-                "link",
-                remote_spec,
-                "--onedrive-link-scope",
-                "anonymous",
-                "--onedrive-link-type",
-                "view",
-            ],
+            _link_command(remote_spec, remote_name=resolved_remote_name),
             capture_output=True,
             text=True,
         )

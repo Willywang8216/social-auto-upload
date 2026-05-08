@@ -102,6 +102,17 @@ class RcloneStorageTests(unittest.TestCase):
             )
         self.assertIn("anonymous link creation failed", str(ctx.exception))
 
+    def test_google_drive_link_omits_onedrive_flags(self) -> None:
+        calls = []
+
+        def fake_runner(command, **kwargs):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout='https://drive.example/link', stderr='')
+
+        url = rclone_storage.ensure_public_link('socialupload/file.mp4', remote_name='GDrive-willywang8216', runner=fake_runner)
+        self.assertEqual(url, 'https://drive.example/link')
+        self.assertEqual(calls[0], ['rclone', 'link', 'GDrive-willywang8216:socialupload/file.mp4'])
+
 
 if __name__ == "__main__":
     unittest.main()

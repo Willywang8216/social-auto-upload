@@ -3947,6 +3947,7 @@ def campaigns_prepare():
                     sheet_image_urls = None
                 sheet_row = content_rules.build_sheet_row(
                     message=draft["message"],
+                    platform=platform,
                     link=str(data.get("link", "") or ""),
                     image_urls=sheet_image_urls,
                     video_url=sheet_video_url,

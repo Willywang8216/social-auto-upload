@@ -50,6 +50,13 @@ class ContentRulesTests(unittest.TestCase):
                 video_url="https://example.com/a.mp4",
             )
 
+    def test_tiktok_draft_and_sheet_row_use_different_limits(self) -> None:
+        message = 'x' * 500
+        draft = content_rules.prepare_platform_draft('tiktok', {'message': message})
+        self.assertEqual(len(draft['message']), 500)
+        row = content_rules.build_sheet_row(message=draft['message'], platform='tiktok')
+        self.assertEqual(len(row['Message']), 150)
+
 
 if __name__ == "__main__":
     unittest.main()
