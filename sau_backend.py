@@ -3251,7 +3251,7 @@ def tiktok_admin_status():
             'redirectUri': tiktok_auth.default_redirect_uri(),
             'webhookUri': 'https://up.iamwillywang.com/webhooks/tiktok',
             'selectedProducts': ['Login Kit for Web', 'Content Posting API', 'Webhooks'],
-            'selectedScopes': ['user.info.basic', 'video.publish'],
+            'selectedScopes': ['user.info.basic', 'video.upload', 'video.publish'],
             'accountId': account_id,
             'lastRequest': _oauth_request_to_status(tiktok_review.latest_oauth_request(account_id=account_id, db_path=db_path)),
             'lastCallback': _event_payload_to_status(tiktok_review.latest_review_event('callback', account_id=account_id, db_path=db_path)),

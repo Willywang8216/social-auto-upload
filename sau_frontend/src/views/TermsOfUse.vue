@@ -82,6 +82,21 @@
           moderation decisions, rejected uploads, removed posts, changed permissions, platform policy
           changes, or other acts or omissions of third-party services.
         </p>
+        <p>
+          TikTok integration features are available only when you connect a TikTok account that you are
+          authorized to use. TikTok Login Kit is used to authorize the connection and confirm the
+          connected account identity. TikTok Content Posting API actions must be initiated by a user in
+          the service. Draft uploads use TikTok’s media upload flow so the creator can complete posting
+          in TikTok. Direct posts are submitted only when the user selects direct publishing and
+          confirms the publishing action in the application.
+        </p>
+        <p>
+          You are responsible for ensuring all TikTok content, captions, hashtags, privacy settings,
+          posting frequency, and account use comply with TikTok’s terms, community guidelines,
+          developer policies, music and commercial-content rules, and applicable law. The service must
+          not be used to publish unauthorized, infringing, deceptive, spam, abusive, or policy-violating
+          TikTok content.
+        </p>
       </section>
 
       <section>

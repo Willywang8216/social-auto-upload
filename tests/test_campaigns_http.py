@@ -265,7 +265,7 @@ class CampaignApiTests(unittest.TestCase):
         with patch.object(self.sau_backend.tiktok_auth, 'refresh_access_token', return_value={
             'access_token': 'new-token',
             'refresh_token': 'new-refresh',
-            'scope': 'user.info.basic,video.publish',
+            'scope': 'user.info.basic,video.upload,video.publish',
             'open_id': 'open-123',
         }), patch.object(self.sau_backend.tiktok_auth, 'fetch_user_info', return_value={
             'data': {
@@ -303,7 +303,7 @@ class CampaignApiTests(unittest.TestCase):
                 'profileId': profile_id,
                 'accountId': account_id,
                 'accountName': 'brand-tiktok',
-                'scopes': ['user.info.basic', 'video.publish'],
+                'scopes': ['user.info.basic', 'video.upload', 'video.publish'],
             })
 
         self.assertEqual(response.status_code, 200)
@@ -328,7 +328,7 @@ class CampaignApiTests(unittest.TestCase):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 'INSERT INTO tiktok_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                ('state-123', profile_id, account_id, 'brand-tiktok', 'https://up.iamwillywang.com/oauth/tiktok/callback', '["user.info.basic", "video.publish"]', 'started'),
+                ('state-123', profile_id, account_id, 'brand-tiktok', 'https://up.iamwillywang.com/oauth/tiktok/callback', '["user.info.basic", "video.upload", "video.publish"]', 'started'),
             )
             conn.commit()
 
@@ -336,7 +336,7 @@ class CampaignApiTests(unittest.TestCase):
             'access_token': 'token-1',
             'refresh_token': 'refresh-1',
             'open_id': 'open-1',
-            'scope': 'user.info.basic,video.publish',
+            'scope': 'user.info.basic,video.upload,video.publish',
         }), patch.object(self.sau_backend.tiktok_auth, 'fetch_user_info', return_value={
             'data': {'user': {'display_name': 'TikTok Demo', 'avatar_url': 'https://example.com/avatar.jpg'}}
         }):
@@ -410,7 +410,7 @@ class CampaignApiTests(unittest.TestCase):
             'access_token': 'fresh-token',
             'refresh_token': 'fresh-refresh',
             'expires_in': 3600,
-            'scope': 'user.info.basic,video.publish',
+            'scope': 'user.info.basic,video.upload,video.publish',
             'open_id': 'open-xyz',
         }), patch.object(self.sau_backend.tiktok_auth, 'fetch_user_info', return_value={
             'data': {'user': {'display_name': 'TikTok Demo', 'avatar_url': 'https://example.com/avatar.jpg'}}
@@ -752,7 +752,7 @@ class CampaignApiTests(unittest.TestCase):
             'access_token': 'fresh-token',
             'refresh_token': 'fresh-refresh',
             'expires_in': 3600,
-            'scope': 'user.info.basic,video.publish',
+            'scope': 'user.info.basic,video.upload,video.publish',
             'open_id': 'open-xyz',
         }), patch.object(self.sau_backend.tiktok_auth, 'fetch_user_info', return_value={
             'data': {'user': {'display_name': 'TikTok Demo', 'avatar_url': 'https://example.com/avatar.jpg'}}

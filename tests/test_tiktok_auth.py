@@ -40,12 +40,12 @@ class TikTokAuthTests(unittest.TestCase):
             client_key='client-key',
             redirect_uri='https://up.iamwillywang.com/oauth/tiktok/callback',
             state='state123',
-            scopes=('user.info.basic', 'video.publish'),
+            scopes=('user.info.basic', 'video.upload', 'video.publish'),
         )
         self.assertIn('client_key=client-key', url)
         self.assertIn('response_type=code', url)
         self.assertIn('state=state123', url)
-        self.assertIn('user.info.basic%2Cvideo.publish', url)
+        self.assertIn('user.info.basic%2Cvideo.upload%2Cvideo.publish', url)
 
     def test_exchange_code_for_token_uses_expected_endpoint(self):
         session = _FakeSession([_FakeResponse({'access_token': 'token', 'refresh_token': 'refresh'})])

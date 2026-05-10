@@ -106,6 +106,24 @@
           Platform changes may affect available permissions, data returned to the service, publishing
           behavior, retention on those platforms, and whether an integration continues to work.
         </p>
+        <p>
+          When you connect TikTok, the service may process TikTok data returned through Login Kit and
+          the Content Posting API, including your TikTok open ID, display name, avatar URL, authorized
+          scopes, access tokens, refresh tokens, token expiry, upload or publish status, webhook events,
+          selected privacy settings, captions, hashtags, video URLs, and related publishing metadata.
+          This information is used only to show the connected TikTok account, refresh the connection,
+          upload creator-selected content as a draft when requested, directly publish content when
+          explicitly confirmed by the user, diagnose failures, and maintain an auditable publishing
+          history.
+        </p>
+        <p>
+          TikTok access can be disconnected from the service account-management controls where
+          available. You should also revoke the app directly from your TikTok account settings if you
+          want TikTok to stop honoring previously granted permissions. You may request deletion of
+          TikTok-related profile data, tokens, upload records, and logs through the contact method on
+          <strong>up.iamwillywang.com</strong>, subject to legal, security, backup, and operational
+          retention needs.
+        </p>
       </section>
 
       <section>

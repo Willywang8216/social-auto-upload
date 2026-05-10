@@ -551,6 +551,7 @@ Do this after LLM + OneDrive + basic structured accounts are already working.
   - Webhooks
 - [ ] Add scopes:
   - `user.info.basic`
+  - `video.upload`
   - `video.publish`
 - [ ] Add redirect URI:
   - `https://up.iamwillywang.com/oauth/tiktok/callback`

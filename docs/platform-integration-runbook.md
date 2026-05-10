@@ -288,6 +288,7 @@ Products/features actively used by this repo:
 Scopes actively used:
 
 - `user.info.basic`
+- `video.upload`
 - `video.publish`
 
 Exact URLs:
@@ -332,6 +333,10 @@ Suggested answer:
 #### Why do you need `video.publish`?
 
 > We use `video.publish` to submit creator-authorized content through TikTok’s official Content Posting API after the operator has uploaded media and explicitly initiated the publish action in the app.
+
+#### Why do you need `video.upload`?
+
+> We use `video.upload` when the operator selects draft upload mode. In that flow, the app uploads creator-authorized video content to TikTok as a draft so the creator can finish editing or posting inside TikTok.
 
 #### Review / screencast summary
 Use the dedicated file:
@@ -979,4 +984,3 @@ Before you start live posting, verify all of these:
 - In Account Management, fields ending in `Env` should usually contain the env var **name**
 - Register the callback URLs from Section 3 exactly in each provider console
 - Use the shared production domain `https://up.iamwillywang.com` unless you are intentionally overriding it everywhere
-

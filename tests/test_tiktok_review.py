@@ -35,7 +35,7 @@ class TikTokReviewPersistenceTests(unittest.TestCase):
             account_id=None,
             account_name="brand-main",
             redirect_uri="https://up.iamwillywang.com/oauth/tiktok/callback",
-            scopes=["user.info.basic", "video.publish"],
+            scopes=["user.info.basic", "video.upload", "video.publish"],
             db_path=self.db_path,
         )
         self.assertEqual(request.status, "started")

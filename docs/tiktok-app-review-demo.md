@@ -6,6 +6,58 @@ Important review guidance:
 - Only keep the TikTok products/scopes you actually use in the Developer Portal.
 - For the implementation currently in this codebase, the review configuration should match the real app surface shown in the UI.
 
+## Developer Portal field values
+
+### Description
+Use:
+
+> Manage, schedule, and publish your social video content to TikTok and other platforms from one dashboard.
+
+### Terms of Service URL
+Use the static public URL:
+
+- `https://up.iamwillywang.com/terms-of-service.html`
+
+The Vue route is also available at `https://up.iamwillywang.com/#/terms`, but the static URL is easier for reviewers because it does not depend on client-side routing.
+
+### Privacy Policy URL
+Use the static public URL:
+
+- `https://up.iamwillywang.com/privacy-policy.html`
+
+The Vue route is also available at `https://up.iamwillywang.com/#/privacy`, but the static URL is easier for reviewers because it does not depend on client-side routing.
+
+### Platforms
+Select only:
+
+- Web
+
+Do not select Desktop, Android, or iOS unless those native app surfaces are submitted and demonstrated.
+
+### Products
+Select only:
+
+- Login Kit
+- Content Posting API
+
+Do not select Share Kit unless the app implements and demonstrates a real TikTok Share Kit flow.
+
+### Scopes
+Select:
+
+- `user.info.basic`
+- `video.upload`
+- `video.publish`
+
+### App review explanation
+Paste this into the review explanation field:
+
+> Our web app helps authenticated creators and operators manage TikTok publishing from up.iamwillywang.com. Users connect TikTok using Login Kit for Web. After authorization, user.info.basic is used only to show the connected profile display name, avatar, and open ID so users can confirm the correct account.
+>
+> In Publish Center, the user uploads or selects a video, enters caption, hashtags, and TikTok settings, selects the connected TikTok account, then manually starts the job. Content Posting API uses video.upload when the user selects draft upload mode, sending the video to TikTok so the creator can finish in TikTok. Content Posting API uses video.publish only when the user selects direct mode and explicitly confirms publishing to their profile.
+>
+> The app does not post without user action. Users can refresh or disconnect TikTok from Account Management. Share Kit is not used and should not be selected.
+
 ## Domain shown in the recording
 The website shown in the video must be:
 - `https://up.iamwillywang.com`
@@ -24,6 +76,7 @@ For the current implementation, keep only:
 
 Scopes actively used in the current flow:
 - `user.info.basic`
+- `video.upload`
 - `video.publish`
 
 If Share Kit, Display API, Research API, or other products are enabled in the TikTok portal but are not shown in the review video, remove them before submission.
@@ -38,7 +91,7 @@ If Share Kit, Display API, Research API, or other products are enabled in the Ti
 5. The app shows a callback/webhook receipt status page in the web UI.
 6. The user configures a TikTok account under a Profile.
 7. The user prepares content in the actual app UI.
-8. The app submits a TikTok Content Posting API request using `video.publish`.
+8. The app submits a TikTok Content Posting API request using `video.upload` for draft uploads or `video.publish` for direct posts.
 
 ---
 
@@ -112,7 +165,7 @@ Narration:
 - If available, show the job progressing in **Jobs**.
 
 Narration:
-> The application prepares the content and sends a TikTok Content Posting API request through the connected TikTok account using the approved video.publish scope.
+> The application prepares the content and sends a TikTok Content Posting API request through the connected TikTok account. Draft upload mode uses the approved video.upload scope, and direct post mode uses the approved video.publish scope.
 
 ### Shot 9 — Show webhook receipt
 - Return to the TikTok callback status page.
@@ -147,7 +200,7 @@ Narration:
 >
 > In Publish Center, the user selects the Profile and the TikTok account, enters the content details, and submits the campaign.
 >
-> The application sends the post through TikTok’s Content Posting API using the approved video.publish scope.
+> The application sends the post through TikTok’s Content Posting API using video.upload for draft uploads or video.publish for direct posting, depending on the user-selected TikTok publish mode.
 >
 > The application is also configured to receive TikTok webhook events on the same production domain.
 >
@@ -157,7 +210,7 @@ Narration:
 
 ## Notes for you before submission
 - Keep only the products actually used in this flow: **Login Kit for Web**, **Content Posting API**, and **Webhooks**.
-- Keep only the scopes actually used in this flow: **user.info.basic** and **video.publish**.
+- Keep only the scopes actually used in this flow: **user.info.basic**, **video.upload**, and **video.publish**.
 - Remove Share Kit, Display API, and any unused scopes or products before submission.
 - Make sure the domain visible in the browser bar is exactly `up.iamwillywang.com`.
 - Use a non-watermarked TikTok profile configuration in the demo, because TikTok prohibits unwanted promotional watermarks in Content Posting API uploads.
