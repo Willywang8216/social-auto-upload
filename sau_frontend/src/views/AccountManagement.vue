@@ -1293,7 +1293,7 @@ async function connectWithTikTok() {
       profileId: accountForm.profileId,
       accountId: accountForm.id,
       accountName: accountForm.name,
-      scopes: ['user.info.basic', 'video.publish']
+      scopes: ['user.info.basic', 'video.upload', 'video.publish']
     })
     popup.location = response.data.authorizeUrl
   } catch (error) {

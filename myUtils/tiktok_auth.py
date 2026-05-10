@@ -15,7 +15,7 @@ except ModuleNotFoundError:  # pragma: no cover - environment-specific
 TIKTOK_AUTHORIZE_URL = "https://www.tiktok.com/v2/auth/authorize/"
 TIKTOK_OAUTH_TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
 TIKTOK_USER_INFO_URL = "https://open.tiktokapis.com/v2/user/info/"
-DEFAULT_SCOPES = ("user.info.basic", "video.publish")
+DEFAULT_SCOPES = ("user.info.basic", "video.upload", "video.publish")
 CLIENT_KEY_ENV = "TIKTOK_CLIENT_KEY"
 CLIENT_SECRET_ENV = "TIKTOK_CLIENT_SECRET"
 REDIRECT_URI_ENV = "TIKTOK_REDIRECT_URI"
