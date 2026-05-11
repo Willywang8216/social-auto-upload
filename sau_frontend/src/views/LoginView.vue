@@ -3,7 +3,7 @@
     <el-card class="login-card">
       <template #header>
         <div class="card-header">
-          <h2>自媒體自動化營運系統</h2>
+          <h2>Socialupload</h2>
           <p class="subtitle">請輸入存取權杖以登入</p>
         </div>
       </template>
@@ -45,7 +45,7 @@
         <div class="legal-links">
           <router-link to="/privacy">Privacy Policy</router-link>
           <span>·</span>
-          <router-link to="/terms">Terms of Use</router-link>
+          <router-link to="/terms">Terms of Service</router-link>
         </div>
       </el-form>
     </el-card>
@@ -79,7 +79,7 @@ onMounted(async () => {
   const ok = await probeToken(getToken() || '', { silent: true })
   if (ok) {
     if (openModeNotice.value || getToken()) {
-      router.replace(route.query.redirect || '/')
+      router.replace(route.query.redirect || '/dashboard')
     }
   }
 })
@@ -111,7 +111,7 @@ async function onSubmit() {
     const ok = await probeToken(form.value.token || '')
     if (ok) {
       ElMessage.success(openModeNotice.value ? '已進入（開放模式）' : '登入成功')
-      router.replace(route.query.redirect || '/')
+      router.replace(route.query.redirect || '/dashboard')
     }
   } finally {
     loading.value = false

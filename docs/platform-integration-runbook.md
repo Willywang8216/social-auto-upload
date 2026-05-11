@@ -225,11 +225,11 @@ These are the answers I recommend reusing across provider forms, with small edit
 
 ### Short app description
 
-> Social Auto Upload is a web-based content operations tool for authorized brand and creator teams. It helps operators upload their own media, generate platform-specific copy, review drafts, and publish or queue posts to connected social accounts they directly manage.
+> Socialupload is a web-based content operations tool for authorized brand and creator teams. It helps operators upload their own media, generate platform-specific copy, review drafts, and publish or queue posts to connected social accounts they directly manage.
 
 ### Long app description
 
-> Social Auto Upload is an internal publishing and workflow tool for content creators, agencies, and brand operators. The system allows an authenticated operator to upload media, organize assets into campaign groups, connect owned social accounts, generate channel-specific captions and descriptions, export planning sheets, and publish or queue content to supported social platforms. The application is not used for scraping third-party data, bulk engagement automation, follower manipulation, or reposting unauthorized content. It is used only to manage and publish content for accounts that the operator owns or is authorized to manage.
+> Socialupload is an internal publishing and workflow tool for content creators, agencies, and brand operators. The system allows an authenticated operator to upload media, organize assets into campaign groups, connect owned social accounts, generate channel-specific captions and descriptions, export planning sheets, and publish or queue content to supported social platforms. The application is not used for scraping third-party data, bulk engagement automation, follower manipulation, or reposting unauthorized content. It is used only to manage and publish content for accounts that the operator owns or is authorized to manage.
 
 ### What the app is used for
 
@@ -738,7 +738,7 @@ DISCORD_WEBHOOK_URL_BRAND_A=https://discord.com/api/webhooks/...
 
 ### Suggested webhook name
 
-> Social Auto Upload
+> Socialupload
 
 No separate app-review answers are normally needed for this webhook-only path.
 
@@ -911,7 +911,7 @@ Use these as starting points and edit only where needed.
 
 ### “What is your app about?”
 
-> Social Auto Upload is a content operations and publishing tool for authorized brand and creator teams. It helps users connect accounts they manage, upload first-party media, prepare captions and metadata, review drafts, and publish or schedule content to their own social channels.
+> Socialupload is a content operations and publishing tool for authorized brand and creator teams. It helps users connect accounts they manage, upload first-party media, prepare captions and metadata, review drafts, and publish or schedule content to their own social channels.
 
 ### “How do you intend to use the data?”
 

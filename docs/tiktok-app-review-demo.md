@@ -1,12 +1,24 @@
 # TikTok app review demo script and transcript
 
-This script is tailored to the current web deployment at **https://up.iamwillywang.com**.
+This script is tailored to the current Socialupload web deployment at **https://up.iamwillywang.com**.
 
 Important review guidance:
 - Only keep the TikTok products/scopes you actually use in the Developer Portal.
 - For the implementation currently in this codebase, the review configuration should match the real app surface shown in the UI.
 
 ## Developer Portal field values
+
+### App name
+Use exactly:
+
+> Socialupload
+
+### Website URL
+Use the public homepage, not the login route:
+
+- `https://up.iamwillywang.com/`
+
+The root page now displays a public Socialupload homepage. Do not submit `/#/login` or any URL that immediately opens the login form. If TikTok continues to enforce domain-name matching, point a Socialupload-branded domain or subdomain at this deployment and use that same host for Website URL, Terms, Privacy, Redirect URI, and the demo video.
 
 ### Description
 Use:
@@ -52,7 +64,7 @@ Select:
 ### App review explanation
 Paste this into the review explanation field:
 
-> Our web app helps authenticated creators and operators manage TikTok publishing from up.iamwillywang.com. Users connect TikTok using Login Kit for Web. After authorization, user.info.basic is used only to show the connected profile display name, avatar, and open ID so users can confirm the correct account.
+> Socialupload helps authenticated creators and operators manage TikTok publishing from its web dashboard. Users connect TikTok using Login Kit for Web. After authorization, user.info.basic is used only to show the connected profile display name, avatar, and open ID so users can confirm the correct account.
 >
 > In Publish Center, the user uploads or selects a video, enters caption, hashtags, and TikTok settings, selects the connected TikTok account, then manually starts the job. Content Posting API uses video.upload when the user selects draft upload mode, sending the video to TikTok so the creator can finish in TikTok. Content Posting API uses video.publish only when the user selects direct mode and explicitly confirms publishing to their profile.
 >
@@ -103,7 +115,7 @@ If Share Kit, Display API, Research API, or other products are enabled in the Ti
 - Keep the full domain visible in the address bar.
 
 Narration:
-> This is the production web app deployed at up.iamwillywang.com. This is the exact website where the TikTok integration is used.
+> This is Socialupload, the production web app deployed at up.iamwillywang.com. This is the exact website where the TikTok integration is used.
 
 ### Shot 2 — Show login / access gate
 - Show the login screen or authenticated landing flow.
@@ -184,7 +196,7 @@ Narration:
 
 ## Short review-safe transcript
 
-> This is the production web app deployed at up.iamwillywang.com.
+> This is Socialupload, the production web app deployed at up.iamwillywang.com.
 >
 > First, the user enters the real web application and signs in.
 >

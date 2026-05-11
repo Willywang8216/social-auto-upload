@@ -2,7 +2,7 @@
   <div class="about">
     <el-card class="about-card">
       <div class="about-header">
-        <h1>自媒體自動化營運系統</h1>
+        <h1>Socialupload</h1>
         <p class="version">social-auto-upload</p>
       </div>
 

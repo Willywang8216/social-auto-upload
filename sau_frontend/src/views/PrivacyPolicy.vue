@@ -2,26 +2,26 @@
   <div class="legal-page">
     <div class="legal-card">
       <div class="legal-header">
-        <h1>Privacy Policy</h1>
+        <h1>Socialupload Privacy Policy</h1>
         <p class="meta">Last updated: 2026-05-10</p>
         <p class="summary">
-          This Privacy Policy explains what information Social Auto Upload collects, why it is
+          This Privacy Policy explains what information Socialupload collects, why it is
           collected, how it is used and shared, and the choices you have to manage, export, or
-          delete information associated with your use of <strong>up.iamwillywang.com</strong>.
+          delete information associated with your use of Socialupload.
         </p>
       </div>
 
       <section>
         <h2>1. Introduction</h2>
         <p>
-          When you use Social Auto Upload, you trust the service with media files, connected account
+          When you use Socialupload, you trust the service with media files, connected account
           information, publishing instructions, and operational records. This is a significant
           responsibility. This policy is intended to help you understand what information is collected,
           why it is collected, and how you can review, manage, export, or delete information connected
           to your use of the service.
         </p>
         <p>
-          Social Auto Upload helps users upload, prepare, schedule, and publish content to connected
+          Socialupload helps users upload, prepare, schedule, and publish content to connected
           social media and publishing platforms. The information processed depends on the features you
           use, the accounts you connect, the content you upload, and the settings selected in your
           deployment or workspace.
@@ -31,9 +31,9 @@
       <section>
         <h2>2. When this policy applies</h2>
         <p>
-          This Privacy Policy applies to the Social Auto Upload web application, backend services,
+          This Privacy Policy applies to the Socialupload web application, backend services,
           scheduling and worker flows, account-management flows, support interactions, and related
-          services made available through <strong>up.iamwillywang.com</strong>.
+          services made available through <strong>the Socialupload website</strong>.
         </p>
         <p>
           This policy does not apply to third-party social platforms, cloud providers, payment
@@ -69,7 +69,7 @@
           <li><strong>Personalize and configure workflows.</strong> We use information to remember preferences, selected accounts, campaign profiles, platform settings, and other choices that make repeated publishing workflows easier.</li>
           <li><strong>Communicate with you.</strong> We may use contact information to respond to support requests, send security or service notices, and provide updates about important changes to the service or these policies.</li>
           <li><strong>Protect the service, users, platforms, and the public.</strong> We use information to detect, prevent, and respond to fraud, spam, abuse, unauthorized access, malware, illegal content, platform-policy violations, security risks, and technical issues.</li>
-          <li><strong>Comply with law and enforce terms.</strong> We may use and retain information as needed to comply with applicable law, respond to lawful requests, enforce the Terms of Use, resolve disputes, and protect rights, safety, and property.</li>
+          <li><strong>Comply with law and enforce terms.</strong> We may use and retain information as needed to comply with applicable law, respond to lawful requests, enforce the Terms of Service, resolve disputes, and protect rights, safety, and property.</li>
         </ul>
       </section>
 
@@ -121,7 +121,7 @@
           available. You should also revoke the app directly from your TikTok account settings if you
           want TikTok to stop honoring previously granted permissions. You may request deletion of
           TikTok-related profile data, tokens, upload records, and logs through the contact method on
-          <strong>up.iamwillywang.com</strong>, subject to legal, security, backup, and operational
+          the Socialupload website, subject to legal, security, backup, and operational
           retention needs.
         </p>
       </section>
@@ -132,7 +132,7 @@
           <li>You can review and update account labels, connected-account configuration, campaign profiles, uploaded assets, drafts, and publishing schedules using available service controls.</li>
           <li>You can disconnect or revoke connected platform credentials in the service where controls are available. You should also revoke access directly in the third-party platform’s account or security settings when appropriate.</li>
           <li>You can delete uploaded media, generated drafts, campaign records, and scheduled jobs where the service provides deletion controls.</li>
-          <li>You can request access, export, correction, or deletion of information associated with your use of the service through the official contact method on <strong>up.iamwillywang.com</strong>.</li>
+          <li>You can request access, export, correction, or deletion of information associated with your use of the service through the official contact method on the Socialupload website.</li>
           <li>You can manage cookies, local storage, and browser permissions through your browser settings. Blocking cookies or storage may prevent login, session, and application features from working correctly.</li>
           <li>You can manage third-party provider permissions, platform privacy settings, and device or browser permissions directly with those providers and devices.</li>
         </ul>
@@ -148,7 +148,7 @@
         </p>
         <p>
           Published content often must be edited or deleted directly on the target platform. Deleting
-          information from Social Auto Upload may not remove copies already published, processed, cached,
+          information from Socialupload may not remove copies already published, processed, cached,
           backed up, or retained by third-party platforms or other users.
         </p>
       </section>
@@ -226,16 +226,17 @@
         <h2>15. Contact</h2>
         <p>
           For privacy-related questions, access requests, deletion requests, or legal notices, please use
-          the support or contact method provided on <strong>up.iamwillywang.com</strong>.
+          the support or contact method provided on the Socialupload website.
         </p>
       </section>
 
       <div class="legal-links">
-        <router-link to="/terms">View Terms of Use</router-link>
+        <router-link to="/terms">View Terms of Service</router-link>
       </div>
     </div>
   </div>
 </template>
+
 
 <style lang="scss" scoped>
 .legal-page {

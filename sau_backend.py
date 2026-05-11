@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Queue
@@ -3029,7 +3030,7 @@ def tiktok_oauth_start():
     try:
         data = _read_json_body()
         state_token = tiktok_auth.build_state_token()
-        redirect_uri = str(data.get('redirectUri') or tiktok_auth.default_redirect_uri()).strip()
+        redirect_uri = str(data.get('redirectUri') or _tiktok_callback_base_url() or tiktok_auth.default_redirect_uri()).strip()
         scopes = data.get('scopes') if isinstance(data.get('scopes'), list) and data.get('scopes') else list(tiktok_auth.DEFAULT_SCOPES)
         authorize_url = tiktok_auth.build_authorize_url_from_env(
             state=state_token,
@@ -3243,13 +3244,16 @@ def tiktok_admin_status():
     db_path = _current_db_path()
     raw_account_id = request.args.get('accountId')
     account_id = int(raw_account_id) if raw_account_id and str(raw_account_id).isdigit() else None
+    redirect_uri = _tiktok_callback_base_url() or tiktok_auth.default_redirect_uri()
+    parsed_redirect_uri = urlparse(redirect_uri)
+    origin = f"{parsed_redirect_uri.scheme}://{parsed_redirect_uri.netloc}" if parsed_redirect_uri.scheme and parsed_redirect_uri.netloc else 'https://up.iamwillywang.com'
     return jsonify({
         'code': 200,
         'msg': 'ok',
         'data': {
-            'domain': 'up.iamwillywang.com',
-            'redirectUri': tiktok_auth.default_redirect_uri(),
-            'webhookUri': 'https://up.iamwillywang.com/webhooks/tiktok',
+            'domain': parsed_redirect_uri.netloc or 'up.iamwillywang.com',
+            'redirectUri': redirect_uri,
+            'webhookUri': f'{origin}/webhooks/tiktok',
             'selectedProducts': ['Login Kit for Web', 'Content Posting API', 'Webhooks'],
             'selectedScopes': ['user.info.basic', 'video.upload', 'video.publish'],
             'accountId': account_id,

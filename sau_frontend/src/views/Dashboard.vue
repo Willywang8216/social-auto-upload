@@ -1,7 +1,7 @@
 <template>
   <div class="dashboard">
     <div class="page-header">
-      <h1>自媒體自動化營運系統</h1>
+      <h1>Socialupload</h1>
     </div>
 
     <div class="dashboard-content">

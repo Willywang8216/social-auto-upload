@@ -1,4 +1,5 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
+import LandingPage from '../views/LandingPage.vue'
 import Dashboard from '../views/Dashboard.vue'
 import AccountManagement from '../views/AccountManagement.vue'
 import MaterialManagement from '../views/MaterialManagement.vue'
@@ -18,59 +19,73 @@ const routes = [
     path: '/login',
     name: 'Login',
     component: LoginView,
-    meta: { public: true, publicLayout: true }
+    meta: { public: true, publicLayout: true, title: 'Socialupload Sign In' }
   },
   {
     path: '/',
+    name: 'LandingPage',
+    component: LandingPage,
+    meta: { public: true, publicLayout: true, title: 'Socialupload' }
+  },
+  {
+    path: '/dashboard',
     name: 'Dashboard',
-    component: Dashboard
+    component: Dashboard,
+    meta: { title: 'Socialupload' }
   },
   {
     path: '/account-management',
     name: 'AccountManagement',
-    component: AccountManagement
+    component: AccountManagement,
+    meta: { title: 'Socialupload' }
   },
   {
     path: '/material-management',
     name: 'MaterialManagement',
-    component: MaterialManagement
+    component: MaterialManagement,
+    meta: { title: 'Socialupload' }
   },
   {
     path: '/publish-center',
     name: 'PublishCenter',
-    component: PublishCenter
+    component: PublishCenter,
+    meta: { title: 'Socialupload' }
   },
   {
     path: '/jobs',
     name: 'Jobs',
-    component: JobsView
+    component: JobsView,
+    meta: { title: 'Socialupload' }
   },
   {
     path: '/about',
     name: 'About',
-    component: About
+    component: About,
+    meta: { title: 'Socialupload' }
   },
   {
     path: '/tiktok-review',
     name: 'TikTokReviewStatus',
-    component: TikTokReviewStatus
+    component: TikTokReviewStatus,
+    meta: { title: 'Socialupload' }
   },
   {
     path: '/oauth-review/:platform?',
     name: 'OAuthReviewStatus',
-    component: OAuthReviewStatus
+    component: OAuthReviewStatus,
+    meta: { title: 'Socialupload' }
   },
   {
     path: '/privacy',
     name: 'PrivacyPolicy',
     component: PrivacyPolicy,
-    meta: { public: true, publicLayout: true }
+    meta: { public: true, publicLayout: true, title: 'Socialupload Privacy Policy' }
   },
   {
     path: '/terms',
     name: 'TermsOfUse',
     component: TermsOfUse,
-    meta: { public: true, publicLayout: true }
+    meta: { public: true, publicLayout: true, title: 'Socialupload Terms of Service' }
   }
 ]
 
@@ -91,6 +106,10 @@ router.beforeEach((to) => {
     return { name: 'Login', query: { redirect: to.fullPath } }
   }
   return true
+})
+
+router.afterEach((to) => {
+  document.title = to.meta?.title || 'Socialupload'
 })
 
 export default router

@@ -320,7 +320,7 @@
                 <el-button plain @click="refreshTikTokToken" :disabled="!accountForm.id">Refresh TikTok token</el-button>
                 <el-button plain @click="openTikTokReviewStatus">Open callback status</el-button>
               </div>
-              <div class="field-hint">這會走 TikTok Login Kit for Web，並使用 https://up.iamwillywang.com/oauth/tiktok/callback。</div>
+              <div class="field-hint">這會走 TikTok Login Kit for Web，並使用後端設定的 TikTok Redirect URI。</div>
             </el-form-item>
             <el-form-item label="Connected account">
               <div class="tiktok-connected-preview">

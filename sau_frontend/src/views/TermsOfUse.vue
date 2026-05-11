@@ -2,19 +2,19 @@
   <div class="legal-page">
     <div class="legal-card">
       <div class="legal-header">
-        <h1>Terms of Use</h1>
+        <h1>Socialupload Terms of Service</h1>
         <p class="meta">Last updated: 2026-05-10</p>
         <p class="summary">
-          These Terms of Use govern access to and use of Social Auto Upload, including account access,
+          These Terms of Service govern access to and use of Socialupload, including account access,
           connected platforms, uploaded content, scheduling, automation, publishing workflows, and any
-          paid or managed features made available through <strong>up.iamwillywang.com</strong>.
+          paid or managed features made available through Socialupload.
         </p>
       </div>
 
       <section>
         <h2>1. Acceptance of terms</h2>
         <p>
-          By accessing or using Social Auto Upload, you agree to these Terms of Use and to the Privacy
+          By accessing or using Socialupload, you agree to these Terms of Service and to the Privacy
           Policy. These Terms form an electronic agreement between you and the operator of the service.
           If you do not agree, you must not access or use the service.
         </p>
@@ -23,7 +23,7 @@
       <section>
         <h2>2. Description of the service</h2>
         <p>
-          Social Auto Upload is a media workflow and social publishing tool that may allow users to
+          Socialupload is a media workflow and social publishing tool that may allow users to
           upload media, prepare captions and metadata, connect social accounts, schedule posts, run
           publishing jobs, monitor results, and manage related automation across supported platforms.
           Unless separate terms apply, new features, integrations, and enhancements are also governed by
@@ -178,7 +178,7 @@
           You must not upload, store, generate, or publish material that infringes another person’s
           rights. The operator may remove content, disable jobs, restrict accounts, or suspend repeat
           infringers when appropriate. Copyright or infringement notices should be sent through the
-          official support or contact method provided on <strong>up.iamwillywang.com</strong> and should
+          official support or contact method provided on <strong>the Socialupload website</strong> and should
           include:
         </p>
         <ul>
@@ -288,7 +288,7 @@
         <h2>22. Contact</h2>
         <p>
           For questions about these terms, please use the support or contact method provided on
-          <strong>up.iamwillywang.com</strong>.
+          <strong>the Socialupload website</strong>.
         </p>
       </section>
 
@@ -298,6 +298,7 @@
     </div>
   </div>
 </template>
+
 
 <style lang="scss" scoped>
 .legal-page {

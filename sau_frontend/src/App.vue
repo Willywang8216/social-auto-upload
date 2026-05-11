@@ -8,8 +8,8 @@
         <el-aside :width="isCollapse ? '64px' : '200px'">
           <div class="sidebar">
             <div class="logo">
-              <img v-show="isCollapse" src="/vite.svg" alt="Logo" class="logo-img">
-              <h2 v-show="!isCollapse">自媒體自動化營運系統</h2>
+              <img v-show="isCollapse" src="/socialupload-app-icon.png" alt="Socialupload" class="logo-img">
+              <h2 v-show="!isCollapse">Socialupload</h2>
             </div>
             <el-menu
               :router="true"
@@ -20,7 +20,7 @@
               text-color="#fff"
               active-text-color="#409EFF"
             >
-              <el-menu-item index="/">
+              <el-menu-item index="/dashboard">
                 <el-icon><HomeFilled /></el-icon>
                 <span>儀表板</span>
               </el-menu-item>
@@ -59,7 +59,7 @@
               </div>
               <div class="header-right">
                 <div class="header-links">
-                  <a class="domain-link" href="https://up.iamwillywang.com" target="_blank" rel="noreferrer">up.iamwillywang.com</a>
+                  <router-link class="domain-link" to="/">Socialupload</router-link>
                   <span>·</span>
                   <router-link to="/privacy">Privacy</router-link>
                   <span>·</span>
@@ -73,11 +73,11 @@
           </el-main>
           <el-footer>
             <div class="app-footer">
-              <span>Operated via up.iamwillywang.com</span>
+              <span>Socialupload</span>
               <div class="footer-links">
                 <router-link to="/privacy">Privacy Policy</router-link>
                 <span>·</span>
-                <router-link to="/terms">Terms of Use</router-link>
+                <router-link to="/terms">Terms of Service</router-link>
               </div>
             </div>
           </el-footer>
