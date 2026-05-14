@@ -332,6 +332,12 @@ def vite_svg():
     return send_from_directory(str(directory), filename)
 
 
+@app.route('/socialupload-app-icon.png')
+def app_icon():
+    directory, filename = _frontend_public_asset('socialupload-app-icon.png')
+    return send_from_directory(str(directory), filename)
+
+
 @app.route('/')
 def index():  # put application's code here
     return send_from_directory(str(_frontend_index_dir()), 'index.html')
