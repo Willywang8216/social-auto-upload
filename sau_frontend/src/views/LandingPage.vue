@@ -8,8 +8,8 @@
           <span class="nav-brand">Socialupload</span>
         </router-link>
         <div class="nav-links">
-          <a href="#features">Features</a>
-          <a href="#platforms">Platforms</a>
+          <a href="#" @click.prevent="scrollTo('features')">Features</a>
+          <a href="#" @click.prevent="scrollTo('platforms')">Platforms</a>
           <router-link to="/privacy">Privacy</router-link>
           <router-link to="/terms">Terms</router-link>
           <router-link class="nav-cta" to="/login">Sign In</router-link>
@@ -32,7 +32,7 @@
         </p>
         <div class="hero-actions">
           <router-link class="btn btn-primary" to="/login">Get Started</router-link>
-          <a class="btn btn-secondary" href="#features">Learn More</a>
+          <a class="btn btn-secondary" href="#" @click.prevent="scrollTo('features')">Learn More</a>
         </div>
         <div class="platform-strip">
           <span class="platform-label">Works with</span>
@@ -208,6 +208,13 @@
 </template>
 
 <script setup>
+function scrollTo(id) {
+  const el = document.getElementById(id)
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
+
 const platforms = [
   { name: 'TikTok', desc: 'Content Posting API with draft and direct modes' },
   { name: 'YouTube', desc: 'Video uploads via YouTube Data API' },
