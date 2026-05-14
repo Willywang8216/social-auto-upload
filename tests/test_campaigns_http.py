@@ -236,7 +236,7 @@ class CampaignApiTests(unittest.TestCase):
         response = self.client.get('/admin/tiktok/status')
         self.assertEqual(response.status_code, 200)
         body = response.get_json()['data']
-        self.assertEqual(body['redirectUri'], 'https://up.iamwillywang.com/oauth/tiktok/callback')
+        self.assertEqual(body['redirectUri'], 'https://socialupload.iamwillywang.com/oauth/tiktok/callback')
         self.assertIn('Login Kit for Web', body['selectedProducts'])
         self.assertIn('video.publish', body['selectedScopes'])
 
@@ -328,7 +328,7 @@ class CampaignApiTests(unittest.TestCase):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 'INSERT INTO tiktok_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                ('state-123', profile_id, account_id, 'brand-tiktok', 'https://up.iamwillywang.com/oauth/tiktok/callback', '["user.info.basic", "video.upload", "video.publish"]', 'started'),
+                ('state-123', profile_id, account_id, 'brand-tiktok', 'https://socialupload.iamwillywang.com/oauth/tiktok/callback', '["user.info.basic", "video.upload", "video.publish"]', 'started'),
             )
             conn.commit()
 

@@ -38,7 +38,7 @@ class TikTokAuthTests(unittest.TestCase):
     def test_build_authorize_url_contains_expected_parameters(self):
         url = tiktok_auth.build_authorize_url(
             client_key='client-key',
-            redirect_uri='https://up.iamwillywang.com/oauth/tiktok/callback',
+            redirect_uri='https://socialupload.iamwillywang.com/oauth/tiktok/callback',
             state='state123',
             scopes=('user.info.basic', 'video.upload', 'video.publish'),
         )
@@ -55,7 +55,7 @@ class TikTokAuthTests(unittest.TestCase):
         }, clear=False):
             payload = tiktok_auth.exchange_code_for_token(
                 code='auth-code',
-                redirect_uri='https://up.iamwillywang.com/oauth/tiktok/callback',
+                redirect_uri='https://socialupload.iamwillywang.com/oauth/tiktok/callback',
                 session=session,
             )
         self.assertEqual(payload['access_token'], 'token')

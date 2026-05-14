@@ -43,7 +43,7 @@ def _required_env(name: str) -> str:
 def default_redirect_uri() -> str:
     return str(
         os.environ.get(REDIRECT_URI_ENV)
-        or "https://up.iamwillywang.com/oauth/tiktok/callback"
+        or "https://socialupload.iamwillywang.com/oauth/tiktok/callback"
     ).strip()
 
 

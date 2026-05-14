@@ -34,7 +34,7 @@ class TikTokReviewPersistenceTests(unittest.TestCase):
             profile_id=None,
             account_id=None,
             account_name="brand-main",
-            redirect_uri="https://up.iamwillywang.com/oauth/tiktok/callback",
+            redirect_uri="https://socialupload.iamwillywang.com/oauth/tiktok/callback",
             scopes=["user.info.basic", "video.upload", "video.publish"],
             db_path=self.db_path,
         )

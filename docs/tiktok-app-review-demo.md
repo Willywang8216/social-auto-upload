@@ -1,10 +1,19 @@
 # TikTok app review demo script and transcript
 
-This script is tailored to the current Socialupload web deployment at **https://up.iamwillywang.com**.
+This script is tailored to the current Socialupload web deployment at **https://socialupload.iamwillywang.com**.
 
 Important review guidance:
 - Only keep the TikTok products/scopes you actually use in the Developer Portal.
 - For the implementation currently in this codebase, the review configuration should match the real app surface shown in the UI.
+
+## Before resubmitting
+
+- [ ] App name in TikTok Developer Portal is exactly **Socialupload** (one word, capital S -- not "Social Auto Upload" or any other variation)
+- [ ] `https://socialupload.iamwillywang.com/` serves the Socialupload landing page
+- [ ] `https://socialupload.iamwillywang.com/privacy-policy.html` loads with title "Socialupload Privacy Policy"
+- [ ] `https://socialupload.iamwillywang.com/terms-of-service.html` loads with title "Socialupload Terms of Service"
+- [ ] All four portal URLs (Website, Terms, Privacy, Redirect URI) use `socialupload.iamwillywang.com`
+- [ ] Demo video shows `socialupload.iamwillywang.com` in the browser address bar
 
 ## Developer Portal field values
 
@@ -16,9 +25,9 @@ Use exactly:
 ### Website URL
 Use the public homepage, not the login route:
 
-- `https://up.iamwillywang.com/`
+- `https://socialupload.iamwillywang.com/`
 
-The root page now displays a public Socialupload homepage. Do not submit `/#/login` or any URL that immediately opens the login form. If TikTok continues to enforce domain-name matching, point a Socialupload-branded domain or subdomain at this deployment and use that same host for Website URL, Terms, Privacy, Redirect URI, and the demo video.
+The root page now displays a public Socialupload homepage. Do not submit `/#/login` or any URL that immediately opens the login form. The domain `socialupload.iamwillywang.com` matches the app name exactly, which satisfies TikTok's domain-name matching requirement.
 
 ### Description
 Use:
@@ -28,16 +37,16 @@ Use:
 ### Terms of Service URL
 Use the static public URL:
 
-- `https://up.iamwillywang.com/terms-of-service.html`
+- `https://socialupload.iamwillywang.com/terms-of-service.html`
 
-The Vue route is also available at `https://up.iamwillywang.com/#/terms`, but the static URL is easier for reviewers because it does not depend on client-side routing.
+The Vue route is also available at `https://socialupload.iamwillywang.com/#/terms`, but the static URL is easier for reviewers because it does not depend on client-side routing.
 
 ### Privacy Policy URL
 Use the static public URL:
 
-- `https://up.iamwillywang.com/privacy-policy.html`
+- `https://socialupload.iamwillywang.com/privacy-policy.html`
 
-The Vue route is also available at `https://up.iamwillywang.com/#/privacy`, but the static URL is easier for reviewers because it does not depend on client-side routing.
+The Vue route is also available at `https://socialupload.iamwillywang.com/#/privacy`, but the static URL is easier for reviewers because it does not depend on client-side routing.
 
 ### Platforms
 Select only:
@@ -72,13 +81,13 @@ Paste this into the review explanation field:
 
 ## Domain shown in the recording
 The website shown in the video must be:
-- `https://up.iamwillywang.com`
+- `https://socialupload.iamwillywang.com`
 
 ## Redirect URI
-- `https://up.iamwillywang.com/oauth/tiktok/callback`
+- `https://socialupload.iamwillywang.com/oauth/tiktok/callback`
 
 ## Webhook callback URL
-- `https://up.iamwillywang.com/webhooks/tiktok`
+- `https://socialupload.iamwillywang.com/webhooks/tiktok`
 
 ## Products and scopes selected right now
 For the current implementation, keep only:
@@ -99,7 +108,7 @@ If Share Kit, Display API, Research API, or other products are enabled in the Ti
 1. The reviewer can see the real web app domain.
 2. The user opens the real authenticated web UI.
 3. The user clicks a real **Connect with TikTok** button inside the app.
-4. TikTok redirects back to the registered callback URL on `up.iamwillywang.com`.
+4. TikTok redirects back to the registered callback URL on `socialupload.iamwillywang.com`.
 5. The app shows a callback/webhook receipt status page in the web UI.
 6. The user configures a TikTok account under a Profile.
 7. The user prepares content in the actual app UI.
@@ -111,11 +120,11 @@ If Share Kit, Display API, Research API, or other products are enabled in the Ti
 
 ### Shot 1 — Open the real site
 - Open a browser.
-- Type `https://up.iamwillywang.com`.
+- Type `https://socialupload.iamwillywang.com`.
 - Keep the full domain visible in the address bar.
 
 Narration:
-> This is Socialupload, the production web app deployed at up.iamwillywang.com. This is the exact website where the TikTok integration is used.
+> This is Socialupload, the production web app deployed at socialupload.iamwillywang.com. This is the exact website where the TikTok integration is used.
 
 ### Shot 2 — Show login / access gate
 - Show the login screen or authenticated landing flow.
@@ -136,10 +145,10 @@ Narration:
 - In the TikTok section, click **Connect with TikTok**.
 - Show the popup or redirect leaving the app and opening the TikTok authorization screen.
 - Approve access.
-- Show the redirect landing on `https://up.iamwillywang.com/oauth/tiktok/callback`.
+- Show the redirect landing on `https://socialupload.iamwillywang.com/oauth/tiktok/callback`.
 
 Narration:
-> This step demonstrates TikTok Login Kit for Web. The user clicks Connect with TikTok inside the real application, authorizes access on TikTok, and TikTok redirects back to the registered callback URL on up.iamwillywang.com.
+> This step demonstrates TikTok Login Kit for Web. The user clicks Connect with TikTok inside the real application, authorizes access on TikTok, and TikTok redirects back to the registered callback URL on socialupload.iamwillywang.com.
 
 ### Shot 5 — Show callback status page
 - Open the tiny **TikTok callback status** admin page in the app.
@@ -196,7 +205,7 @@ Narration:
 
 ## Short review-safe transcript
 
-> This is Socialupload, the production web app deployed at up.iamwillywang.com.
+> This is Socialupload, the production web app deployed at socialupload.iamwillywang.com.
 >
 > First, the user enters the real web application and signs in.
 >
@@ -204,7 +213,7 @@ Narration:
 >
 > Then the user clicks Connect with TikTok inside the app. This uses TikTok Login Kit for Web.
 >
-> After the user authorizes access on TikTok, TikTok redirects back to the registered callback URL on up.iamwillywang.com.
+> After the user authorizes access on TikTok, TikTok redirects back to the registered callback URL on socialupload.iamwillywang.com.
 >
 > We then open the TikTok callback status page in the app, which shows the latest callback receipt, the webhook URL, and the exact selected products and scopes for this integration.
 >
@@ -224,5 +233,5 @@ Narration:
 - Keep only the products actually used in this flow: **Login Kit for Web**, **Content Posting API**, and **Webhooks**.
 - Keep only the scopes actually used in this flow: **user.info.basic**, **video.upload**, and **video.publish**.
 - Remove Share Kit, Display API, and any unused scopes or products before submission.
-- Make sure the domain visible in the browser bar is exactly `up.iamwillywang.com`.
+- Make sure the domain visible in the browser bar is exactly `socialupload.iamwillywang.com`.
 - Use a non-watermarked TikTok profile configuration in the demo, because TikTok prohibits unwanted promotional watermarks in Content Posting API uploads.

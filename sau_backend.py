@@ -157,7 +157,7 @@ def _tiktok_callback_base_url() -> str:
     configured = str(os.environ.get("SAU_TIKTOK_CALLBACK_URL") or "").strip()
     if configured:
         return configured.rstrip("/")
-    return "https://up.iamwillywang.com/oauth/tiktok/callback"
+    return "https://socialupload.iamwillywang.com/oauth/tiktok/callback"
 
 
 def _tiktok_webhook_log_path() -> Path:
@@ -339,6 +339,7 @@ def index():  # put application's code here
 
 @app.route('/privacy')
 @app.route('/privacy/')
+@app.route('/privacy-policy.html')
 def privacy_page():
     directory, filename = _frontend_public_asset('privacy-policy.html')
     return send_from_directory(str(directory), filename)
@@ -346,6 +347,7 @@ def privacy_page():
 
 @app.route('/terms')
 @app.route('/terms/')
+@app.route('/terms-of-service.html')
 def terms_page():
     directory, filename = _frontend_public_asset('terms-of-service.html')
     return send_from_directory(str(directory), filename)
@@ -3246,12 +3248,12 @@ def tiktok_admin_status():
     account_id = int(raw_account_id) if raw_account_id and str(raw_account_id).isdigit() else None
     redirect_uri = _tiktok_callback_base_url() or tiktok_auth.default_redirect_uri()
     parsed_redirect_uri = urlparse(redirect_uri)
-    origin = f"{parsed_redirect_uri.scheme}://{parsed_redirect_uri.netloc}" if parsed_redirect_uri.scheme and parsed_redirect_uri.netloc else 'https://up.iamwillywang.com'
+    origin = f"{parsed_redirect_uri.scheme}://{parsed_redirect_uri.netloc}" if parsed_redirect_uri.scheme and parsed_redirect_uri.netloc else 'https://socialupload.iamwillywang.com'
     return jsonify({
         'code': 200,
         'msg': 'ok',
         'data': {
-            'domain': parsed_redirect_uri.netloc or 'up.iamwillywang.com',
+            'domain': parsed_redirect_uri.netloc or 'socialupload.iamwillywang.com',
             'redirectUri': redirect_uri,
             'webhookUri': f'{origin}/webhooks/tiktok',
             'selectedProducts': ['Login Kit for Web', 'Content Posting API', 'Webhooks'],

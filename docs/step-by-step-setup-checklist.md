@@ -554,17 +554,17 @@ Do this after LLM + OneDrive + basic structured accounts are already working.
   - `video.upload`
   - `video.publish`
 - [ ] Add redirect URI:
-  - `https://up.iamwillywang.com/oauth/tiktok/callback`
+  - `https://socialupload.iamwillywang.com/oauth/tiktok/callback`
 - [ ] Add webhook URL:
-  - `https://up.iamwillywang.com/webhooks/tiktok`
+  - `https://socialupload.iamwillywang.com/webhooks/tiktok`
 
 ### 12.2 Put credentials into `.env`
 
 ```env
 TIKTOK_CLIENT_KEY=...
 TIKTOK_CLIENT_SECRET=...
-TIKTOK_REDIRECT_URI=https://up.iamwillywang.com/oauth/tiktok/callback
-SAU_TIKTOK_CALLBACK_URL=https://up.iamwillywang.com/oauth/tiktok/callback
+TIKTOK_REDIRECT_URI=https://socialupload.iamwillywang.com/oauth/tiktok/callback
+SAU_TIKTOK_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/tiktok/callback
 ```
 
 ### 12.3 Create TikTok account entry in UI

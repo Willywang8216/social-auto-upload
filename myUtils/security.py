@@ -43,6 +43,8 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/privacy/",
     "/terms",
     "/terms/",
+    "/privacy-policy.html",
+    "/terms-of-service.html",
     "/favicon.ico",
     "/vite.svg",
     "/oauth/tiktok/callback",

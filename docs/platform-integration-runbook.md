@@ -124,7 +124,7 @@ Use these when a platform asks for homepage / app domain / policy pages:
 
 | Platform | Callback URL | Override env in backend helper | Platform-specific redirect env also worth setting |
 |---|---|---|---|
-| TikTok | `https://up.iamwillywang.com/oauth/tiktok/callback` | `SAU_TIKTOK_CALLBACK_URL` | `TIKTOK_REDIRECT_URI` |
+| TikTok | `https://socialupload.iamwillywang.com/oauth/tiktok/callback` | `SAU_TIKTOK_CALLBACK_URL` | `TIKTOK_REDIRECT_URI` |
 | Reddit | `https://up.iamwillywang.com/oauth/reddit/callback` | `SAU_REDDIT_CALLBACK_URL` | `REDDIT_REDIRECT_URI` |
 | YouTube | `https://up.iamwillywang.com/oauth/youtube/callback` | `SAU_YOUTUBE_CALLBACK_URL` | `YOUTUBE_REDIRECT_URI` |
 | Meta (Facebook / Instagram) | `https://up.iamwillywang.com/oauth/meta/callback` | `SAU_META_CALLBACK_URL` | `META_REDIRECT_URI` |
@@ -134,7 +134,7 @@ Use these when a platform asks for homepage / app domain / policy pages:
 
 | Platform | Webhook URL | Notes |
 |---|---|---|
-| TikTok | `https://up.iamwillywang.com/webhooks/tiktok` | GET challenge supported, POST signature verification supported |
+| TikTok | `https://socialupload.iamwillywang.com/webhooks/tiktok` | GET challenge supported, POST signature verification supported |
 
 ### Very important if you deploy on a different domain
 
@@ -176,8 +176,8 @@ SAU_PUBLIC_URL_TEMPLATE=
 # TikTok
 TIKTOK_CLIENT_KEY=...
 TIKTOK_CLIENT_SECRET=...
-TIKTOK_REDIRECT_URI=https://up.iamwillywang.com/oauth/tiktok/callback
-SAU_TIKTOK_CALLBACK_URL=https://up.iamwillywang.com/oauth/tiktok/callback
+TIKTOK_REDIRECT_URI=https://socialupload.iamwillywang.com/oauth/tiktok/callback
+SAU_TIKTOK_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/tiktok/callback
 
 # Reddit
 REDDIT_CLIENT_ID=...
@@ -293,8 +293,8 @@ Scopes actively used:
 
 Exact URLs:
 
-- Redirect URI: `https://up.iamwillywang.com/oauth/tiktok/callback`
-- Webhook URL: `https://up.iamwillywang.com/webhooks/tiktok`
+- Redirect URI: `https://socialupload.iamwillywang.com/oauth/tiktok/callback`
+- Webhook URL: `https://socialupload.iamwillywang.com/webhooks/tiktok`
 
 Required envs:
 
@@ -309,17 +309,17 @@ Required envs:
 #### App website / domain
 Use:
 
-- `https://up.iamwillywang.com`
+- `https://socialupload.iamwillywang.com`
 
 #### Redirect URI
 Use exactly:
 
-- `https://up.iamwillywang.com/oauth/tiktok/callback`
+- `https://socialupload.iamwillywang.com/oauth/tiktok/callback`
 
 #### Webhook callback URL
 Use exactly:
 
-- `https://up.iamwillywang.com/webhooks/tiktok`
+- `https://socialupload.iamwillywang.com/webhooks/tiktok`
 
 #### How do you intend to use the app?
 Suggested answer:
@@ -983,4 +983,4 @@ Before you start live posting, verify all of these:
 - Put Google service account JSON in a safe local path and reference it via `SAU_GOOGLE_SERVICE_ACCOUNT_FILE`
 - In Account Management, fields ending in `Env` should usually contain the env var **name**
 - Register the callback URLs from Section 3 exactly in each provider console
-- Use the shared production domain `https://up.iamwillywang.com` unless you are intentionally overriding it everywhere
+- Use the shared production domain `https://up.iamwillywang.com` unless you are intentionally overriding it everywhere (TikTok uses `https://socialupload.iamwillywang.com` to match the app name)
