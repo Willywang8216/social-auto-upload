@@ -2287,14 +2287,33 @@ def meta_oauth_callback():
                     {'id': str(p.get('id') or ''), 'name': str(p.get('name') or ''), 'access_token': str(p.get('access_token') or '')}
                     for p in pages if isinstance(p, dict)
                 ]
+                pages_json = json.dumps(savable_pages)
                 html = f"""<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
             <style>body{{font-family:-apple-system,system-ui,sans-serif;padding:20px;max-width:560px;margin:0 auto;background:#f4f6f8}}
             h2{{text-align:center;color:#1d2129}}.card{{background:#fff;border:2px solid #e4e6eb;border-radius:12px;padding:16px;margin:10px 0;cursor:pointer;transition:all .15s}}
             .card:hover{{border-color:#1877f2;box-shadow:0 2px 8px rgba(24,119,242,.15)}}
             .card h3{{margin:0 0 4px;color:#1877f2}}.card p{{margin:0;color:#65676b;font-size:13px}}</style></head><body>
-            <h2>{{len(savable_pages)}} pages available</h2><p style="text-align:center;color:#65676b">Select the page to connect:</p>
-            {''.join(f'''<div class="card" onclick="selectPage({json.dumps(p)})"><h3>{p['name']}</h3><p>ID {p['id']}</p></div>''' for p in savable_pages)}
-            <script>function selectPage(p){{if(window.opener){{window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'facebook',accountId:{request_state.account_id},selectedPage:p,pages:{json.dumps(savable_pages)},tokenData:{{userAccessToken:{json.dumps(user_access_token)},expiresIn:{json.dumps(long_lived_payload.get('expires_in') or token_payload.get('expires_in') or '')}}}}}}},'*');}}window.close();}}</script>
+            <h2>{len(savable_pages)} pages available</h2><p style="text-align:center;color:#65676b">Select the page to connect:</p>
+            <div id="cards"></div>
+            <script>
+            var PAGES = {pages_json};
+            var TOKEN_DATA = {{userAccessToken: {json.dumps(user_access_token)}, expiresIn: {json.dumps(long_lived_payload.get('expires_in') or token_payload.get('expires_in') or '')}}};
+            var ACCOUNT_ID = {request_state.account_id};
+            var cards = document.getElementById('cards');
+            PAGES.forEach(function(p) {{
+              var card = document.createElement('div');
+              card.className = 'card';
+              card.innerHTML = '<h3>' + p.name + '</h3><p>ID ' + p.id + '</p>';
+              card.onclick = function() {{ selectPage(p); }};
+              cards.appendChild(card);
+            }});
+            function selectPage(p) {{
+              if (window.opener) {{
+                window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'facebook',accountId:ACCOUNT_ID,selectedPage:p,pages:PAGES,tokenData:TOKEN_DATA}}}}, '*');
+              }}
+              window.close();
+            }}
+            </script>
             </body></html>"""
                 meta_review.complete_oauth_request(state_token, status='pending_page_selection', result={'available_page_count': len(savable_pages)}, db_path=db_path)
                 return Response(html, mimetype='text/html')

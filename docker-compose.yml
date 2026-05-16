@@ -16,6 +16,8 @@ services:
         ipv4_address: 172.18.0.46  # 這是你原本清單中這個容器用的 IP
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
     environment:
       - SAU_API_TOKENS=sdkjauashuaiuhHOHEIUFhfaphgeiusdiu545gfdgd
       - META_APP_ID=1541229970910006
