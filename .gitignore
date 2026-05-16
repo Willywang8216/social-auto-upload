@@ -198,3 +198,6 @@ syncscript.sh
 
 # data directory (runtime data)
 data/
+
+# secrets directory
+secrets/
