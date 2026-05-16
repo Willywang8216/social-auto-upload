@@ -2280,9 +2280,25 @@ def meta_oauth_callback():
             wanted_page_id = str(config.get('pageId') or '').strip()
             if wanted_page_id:
                 selected_page = next((page for page in pages if str(page.get('id') or '') == wanted_page_id), None)
-            if selected_page is None and pages:
+            if selected_page is None and len(pages) == 1:
                 selected_page = pages[0]
-            if selected_page is None:
+            if selected_page is None and len(pages) > 1:
+                savable_pages = [
+                    {'id': str(p.get('id') or ''), 'name': str(p.get('name') or ''), 'access_token': str(p.get('access_token') or '')}
+                    for p in pages if isinstance(p, dict)
+                ]
+                html = f"""<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>body{{font-family:-apple-system,system-ui,sans-serif;padding:20px;max-width:560px;margin:0 auto;background:#f4f6f8}}
+            h2{{text-align:center;color:#1d2129}}.card{{background:#fff;border:2px solid #e4e6eb;border-radius:12px;padding:16px;margin:10px 0;cursor:pointer;transition:all .15s}}
+            .card:hover{{border-color:#1877f2;box-shadow:0 2px 8px rgba(24,119,242,.15)}}
+            .card h3{{margin:0 0 4px;color:#1877f2}}.card p{{margin:0;color:#65676b;font-size:13px}}</style></head><body>
+            <h2>{{len(savable_pages)}} pages available</h2><p style="text-align:center;color:#65676b">Select the page to connect:</p>
+            {''.join(f'''<div class="card" onclick="selectPage({json.dumps(p)})"><h3>{p['name']}</h3><p>ID {p['id']}</p></div>''' for p in savable_pages)}
+            <script>function selectPage(p){{if(window.opener){{window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'facebook',accountId:{request_state.account_id},selectedPage:p,pages:{json.dumps(savable_pages)},tokenData:{{userAccessToken:{json.dumps(user_access_token)},expiresIn:{json.dumps(long_lived_payload.get('expires_in') or token_payload.get('expires_in') or '')}}}}}}},'*');}}window.close();}}</script>
+            </body></html>"""
+                meta_review.complete_oauth_request(state_token, status='pending_page_selection', result={'available_page_count': len(savable_pages)}, db_path=db_path)
+                return Response(html, mimetype='text/html')
+            if selected_page is None and not pages:
                 raise ValueError('Meta OAuth did not return any manageable Facebook Pages')
             merged_config = dict(config)
             merged_config['pageId'] = str(selected_page.get('id') or merged_config.get('pageId') or '')
@@ -2296,7 +2312,7 @@ def meta_oauth_callback():
                 merged_config['metaUserAccessTokenExpiresAt'] = expiry
                 merged_config['accessTokenExpiresAt'] = expiry
             merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
-            updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', db_path=db_path)
+            updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
             callback_payload = {
                 'platform': updated.platform,
                 'state': state_token,
@@ -2353,7 +2369,7 @@ def meta_oauth_callback():
                 merged_config['metaUserAccessTokenExpiresAt'] = expiry
                 merged_config['accessTokenExpiresAt'] = expiry
             merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
-            updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', db_path=db_path)
+            updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
             callback_payload = {
                 'platform': updated.platform,
                 'state': state_token,
@@ -2532,7 +2548,7 @@ def youtube_oauth_callback():
             merged_config['channelTitle'] = snippet.get('title')
         merged_config['scope'] = str(token_payload.get('scope') or merged_config.get('scope') or ' '.join(request_state.scopes))
         merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
-        updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', db_path=db_path)
+        updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
         callback_payload = {
             'state': state_token,
             'status': 'ok',
@@ -2975,7 +2991,7 @@ def threads_oauth_callback():
             merged_config['accessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
         merged_config['scope'] = str(merged_config.get('scope') or ' '.join(request_state.scopes))
         merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
-        updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', db_path=db_path)
+        updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
         callback_payload = {
             'state': state_token,
             'status': 'ok',

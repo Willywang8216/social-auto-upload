@@ -18,7 +18,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       - SAU_API_TOKENS=sdkjauashuaiuhHOHEIUFhfaphgeiusdiu545gfdgd
-      - META_APP_ID=2438066176703416
+      - META_APP_ID=1541229970910006
       - META_APP_SECRET=48b42e3e140869cd7180cac751295d19
       - SAU_META_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/meta/callback
 

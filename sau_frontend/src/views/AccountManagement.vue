@@ -209,7 +209,21 @@
           />
         </el-form-item>
 
-        <template v-if="isStructuredAccountForm">
+        <!-- Quick-connect: for OAuth platforms, show only the Connect button on add -->
+        <template v-if="dialogType === 'add' && isOAuthPlatform(accountForm.platform)">
+          <el-divider content-position="left">{{ oAuthPlatformLabel(accountForm.platform) }} 設定</el-divider>
+          <el-form-item label="Connection">
+            <div class="quick-connect-row">
+              <el-button :type="'primary'" plain size="large" style="width:100%" @click="quickConnect()">
+                Connect with {{ oAuthPlatformLabel(accountForm.platform) }}
+              </el-button>
+            </div>
+            <div class="field-hint">帳號會自動儲存，然後彈出 {{ oAuthPlatformLabel(accountForm.platform) }} OAuth 授權視窗。</div>
+          </el-form-item>
+        </template>
+
+        <!-- Full edit panel: only shown when editing an existing account -->
+        <template v-if="dialogType === 'edit' && isStructuredAccountForm">
           <el-form-item label="登入方式">
             <el-select v-model="accountForm.authType" style="width: 100%">
               <el-option label="cookie" value="cookie" />
@@ -1320,6 +1334,26 @@ function validateConnectPlatform(expectedPlatform) {
   return true
 }
 
+const OAUTH_PLATFORMS = new Set(['tiktok', 'facebook', 'instagram', 'reddit', 'threads', 'youtube'])
+const OAUTH_PLATFORM_LABELS = { tiktok: 'TikTok', facebook: 'Facebook', instagram: 'Instagram', reddit: 'Reddit', threads: 'Threads', youtube: 'YouTube' }
+
+function isOAuthPlatform(platform) { return OAUTH_PLATFORMS.has(platform) }
+function oAuthPlatformLabel(platform) { return OAUTH_PLATFORM_LABELS[platform] || platform }
+
+async function quickConnect() {
+  if (!accountForm.profileId) { ElMessage.warning('請先選擇一個 Profile'); return }
+  if (!accountForm.name.trim()) { ElMessage.warning('請先輸入帳號名稱'); return }
+  if (!accountForm.platform) { ElMessage.warning('請先選擇平台'); return }
+  if (!await ensureAccountSaved()) return
+  const platform = accountForm.platform
+  if (platform === 'tiktok') await connectWithTikTok()
+  else if (platform === 'facebook' || platform === 'instagram') await connectWithMeta(platform)
+  else if (platform === 'reddit') await connectWithReddit()
+  else if (platform === 'threads') await connectWithThreads()
+  else if (platform === 'youtube') await connectWithYouTube()
+  else ElMessage.warning('此平台不支援 OAuth 連線')
+}
+
 async function connectWithTikTok() {
   if (!accountForm.profileId) {
     ElMessage.warning('請先選擇 Profile，再使用 TikTok Connect')
@@ -1613,6 +1647,32 @@ function handleThreadsOauthMessage(event) {
   ElMessage.success('Threads 已連線，可直接儲存帳號設定')
 }
 
+async function finalizeMetaPageSelection(page, tokenData, accountName) {
+  try {
+    await profilesApi.updateAccount(accountForm.id, {
+      config: {
+        pageId: page.id,
+        facebookPageName: page.name,
+        accessToken: page.access_token,
+        metaUserAccessToken: tokenData.userAccessToken,
+        accessTokenUpdatedAt: new Date().toISOString(),
+        connectedAt: new Date().toISOString(),
+      },
+      authType: 'oauth',
+      enabled: true,
+      status: 1,
+    })
+    accountForm.pageId = page.id
+    accountForm.facebookPageName = page.name
+    accountForm.accessToken = page.access_token
+    ElMessage.success(`Facebook 已連線至 ${page.name}`)
+    dialogVisible.value = false
+    await refreshAccounts()
+  } catch (error) {
+    ElMessage.error(error?.message || '頁面選擇儲存失敗')
+  }
+}
+
 function handleMetaOauthMessage(event) {
   const payload = event?.data
   if (!payload || payload.type !== 'sau:meta-oauth') return
@@ -1621,13 +1681,21 @@ function handleMetaOauthMessage(event) {
     return
   }
   const data = payload.data || {}
+
+  if (data.selectedPage && data.tokenData) {
+    finalizeMetaPageSelection(data.selectedPage, data.tokenData, accountForm.name)
+    return
+  }
+
   accountForm.accessToken = data.accessToken || accountForm.accessToken
   accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
   if (data.platform === 'facebook') {
     accountForm.pageId = data.pageId || accountForm.pageId
     accountForm.facebookPageName = data.facebookPageName || accountForm.facebookPageName
-    ElMessage.success('Facebook 已連線，可直接儲存帳號設定')
+    ElMessage.success(`Facebook 已連線至 ${accountForm.facebookPageName || 'Facebook Page'}`)
+    dialogVisible.value = false
+    refreshAccounts()
     return
   }
   if (data.platform === 'instagram') {
@@ -1635,7 +1703,9 @@ function handleMetaOauthMessage(event) {
     accountForm.facebookPageName = data.facebookPageName || accountForm.facebookPageName
     accountForm.igUserId = data.igUserId || accountForm.igUserId
     accountForm.instagramUserName = data.instagramUserName || accountForm.instagramUserName
-    ElMessage.success('Instagram 已連線，可直接儲存帳號設定')
+    ElMessage.success(`Instagram 已連線至 ${accountForm.instagramUserName || 'Instagram Account'}`)
+    dialogVisible.value = false
+    refreshAccounts()
   }
 }
 
