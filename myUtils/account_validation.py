@@ -91,19 +91,26 @@ def validate_structured_account_config(
 
     if platform == profiles.PLATFORM_REDDIT:
         if not _present(config.get("subreddits")):
-            errors.append("Reddit 帳號需要至少一個 subreddit")
+            if auth_type == 'oauth':
+                warnings.append("Reddit 尚未設定 subreddits；儲存後可在編輯頁面中新增")
+            else:
+                errors.append("Reddit 帳號需要至少一個 subreddit")
         has_client_id = _present(_config_value(config, "clientId"))
         has_client_secret = _present(_config_value(config, "clientSecret"))
         has_refresh_token = _present(_config_value(config, "refreshToken"))
-        if not has_client_id:
+        if auth_type == 'oauth' and not has_refresh_token:
+            # During OAuth add flow, the token will be filled after OAuth callback
+            warnings.append("Reddit refreshToken 可在 OAuth Connect 完成後自動回填")
+        elif not has_refresh_token:
+            errors.append("Reddit 帳號缺少 refreshToken 或 refreshTokenEnv")
+        if auth_type == 'oauth' and not has_client_id:
+            warnings.append("Reddit clientId 可在 OAuth Connect 時透過 env 變數自動讀取；若有 clientIdEnv 可忽略")
+        elif not has_client_id:
             errors.append("Reddit 帳號缺少 clientId 或 clientIdEnv")
-        if not has_client_secret:
+        if auth_type == 'oauth' and not has_client_secret:
+            warnings.append("Reddit clientSecret 可在 OAuth Connect 時透過 env 變數自動讀取；若有 clientSecretEnv 可忽略")
+        elif not has_client_secret:
             errors.append("Reddit 帳號缺少 clientSecret 或 clientSecretEnv")
-        if not has_refresh_token:
-            if auth_type == 'oauth' and has_client_id and has_client_secret:
-                warnings.append("Reddit refreshToken 可在 OAuth Connect 完成後自動回填")
-            else:
-                errors.append("Reddit 帳號缺少 refreshToken 或 refreshTokenEnv")
 
     if platform == profiles.PLATFORM_TELEGRAM:
         if not _present(config.get("chatId")):
@@ -119,15 +126,18 @@ def validate_structured_account_config(
             for key in ("clientId", "clientSecret")
         )
         has_refresh_token = _present(_config_value(config, "refreshToken"))
-        if not has_access_token and not (has_oauth_triplet and has_refresh_token):
-            if auth_type == 'oauth' and has_oauth_triplet:
+        if auth_type == 'oauth':
+            if not has_access_token and not has_refresh_token:
                 warnings.append("YouTube refreshToken 可在 OAuth Connect 完成後自動回填")
-            else:
+            if not has_oauth_triplet:
+                warnings.append("YouTube clientId/clientSecret 可在 OAuth Connect 時透過 env 變數自動讀取；若有 clientIdEnv 可忽略")
+            if not has_channel_id:
+                warnings.append("YouTube channelId 可在 OAuth Connect 完成後自動回填")
+        else:
+            if not has_access_token and not (has_oauth_triplet and has_refresh_token):
                 errors.append("YouTube 帳號需要 accessToken 或 clientId/clientSecret/refreshToken")
-        if not has_channel_id and has_oauth_triplet:
-            warnings.append("YouTube channelId 可在 OAuth Connect 完成後自動回填")
-        elif not has_channel_id:
-            errors.append("YouTube 帳號缺少 channelId")
+            if not has_channel_id:
+                errors.append("YouTube 帳號缺少 channelId")
 
     if platform == profiles.PLATFORM_FACEBOOK:
         has_page_id = _present(config.get("pageId"))

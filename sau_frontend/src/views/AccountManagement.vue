@@ -242,6 +242,22 @@
           <template v-else-if="accountForm.platform === 'discord'">
             <AccountTextFieldList :fields="discordFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
           </template>
+          <template v-else-if="accountForm.platform === 'twitter'">
+            <el-form-item label="Auth type">
+              <el-select v-model="accountForm.twitterAuthType" style="width: 100%">
+                <el-option label="Cookie-based (legacy)" value="cookie" />
+                <el-option label="API (env keys)" value="api" />
+              </el-select>
+            </el-form-item>
+            <template v-if="accountForm.twitterAuthType === 'cookie'">
+              <el-form-item label="Cookie 路徑">
+                <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
+              </el-form-item>
+            </template>
+            <template v-else>
+              <AccountTextFieldList :fields="twitterFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
+            </template>
+          </template>
         </template>
 
         <!-- Full edit panel: only shown when editing an existing account -->
