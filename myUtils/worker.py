@@ -387,23 +387,33 @@ async def _publish_prepared_twitter(
     account=None,
     account_file: Path | None,
 ) -> None:
-    file_paths = _prepared_artifact_local_paths(payload)
-    if not account_file:
-        raise ValueError("Prepared Twitter publish requires a cookie-backed account")
-    if not file_paths:
-        raise ValueError("Prepared Twitter publish requires local media artifacts")
+    config = dict(account.config or {}) if account else {}
+    twitter_auth_type = str(config.get("twitterAuthType") or "cookie")
 
-    await _run_platform_upload(
-        "twitter",
-        {
-            "title": payload.get("message") or payload.get("draft", {}).get("message", ""),
-            "tags": payload.get("draft", {}).get("hashtags", []) or [],
-            "threadFileRefs": [str(path) for path in file_paths],
-        },
-        target,
-        account_file=account_file,
-        thread_file_paths=file_paths,
-    )
+    if twitter_auth_type == "cookie":
+        file_paths = _prepared_artifact_local_paths(payload)
+        if not account_file:
+            raise ValueError("Prepared Twitter publish requires a cookie-backed account")
+        if not file_paths:
+            raise ValueError("Prepared Twitter publish requires local media artifacts")
+
+        await _run_platform_upload(
+            "twitter",
+            {
+                "title": payload.get("message") or payload.get("draft", {}).get("message", ""),
+                "tags": payload.get("draft", {}).get("hashtags", []) or [],
+                "threadFileRefs": [str(path) for path in file_paths],
+            },
+            target,
+            account_file=account_file,
+            thread_file_paths=file_paths,
+        )
+    else:
+        if account is None:
+            raise ValueError("Prepared Twitter API publish requires a structured account")
+        await asyncio.to_thread(
+            prepared_publishers.publish_twitter_sync, account, payload
+        )
 
 
 async def _publish_prepared_telegram(

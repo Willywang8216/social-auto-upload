@@ -23,6 +23,8 @@ services:
       - META_APP_ID=1541229970910006
       - META_APP_SECRET=48b42e3e140869cd7180cac751295d19
       - SAU_META_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/meta/callback
+      - SAU_YOUTUBE_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/youtube/callback
+      - SAU_REDDIT_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/reddit/callback
 
 networks:
   1panel-network:

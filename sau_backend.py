@@ -129,28 +129,28 @@ def _youtube_callback_base_url() -> str:
     configured = str(os.environ.get("SAU_YOUTUBE_CALLBACK_URL") or "").strip()
     if configured:
         return configured.rstrip("/")
-    return "https://up.iamwillywang.com/oauth/youtube/callback"
+    return "https://socialupload.iamwillywang.com/oauth/youtube/callback"
 
 
 def _meta_callback_base_url() -> str:
     configured = str(os.environ.get("SAU_META_CALLBACK_URL") or "").strip()
     if configured:
         return configured.rstrip("/")
-    return "https://up.iamwillywang.com/oauth/meta/callback"
+    return "https://socialupload.iamwillywang.com/oauth/meta/callback"
 
 
 def _reddit_callback_base_url() -> str:
     configured = str(os.environ.get("SAU_REDDIT_CALLBACK_URL") or "").strip()
     if configured:
         return configured.rstrip("/")
-    return "https://up.iamwillywang.com/oauth/reddit/callback"
+    return "https://socialupload.iamwillywang.com/oauth/reddit/callback"
 
 
 def _threads_callback_base_url() -> str:
     configured = str(os.environ.get("SAU_THREADS_CALLBACK_URL") or "").strip()
     if configured:
         return configured.rstrip("/")
-    return "https://up.iamwillywang.com/oauth/threads/callback"
+    return "https://socialupload.iamwillywang.com/oauth/threads/callback"
 
 
 def _tiktok_callback_base_url() -> str:

@@ -48,7 +48,7 @@ def _user_agent(user_agent: str | None = None) -> str:
 def default_redirect_uri() -> str:
     return str(
         os.environ.get(REDIRECT_URI_ENV)
-        or "https://up.iamwillywang.com/oauth/reddit/callback"
+        or "https://socialupload.iamwillywang.com/oauth/reddit/callback"
     ).strip()
 
 

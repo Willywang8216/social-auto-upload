@@ -46,3 +46,10 @@ export const tiktokTokenFieldDefs = [
 export const discordFieldDefs = [
   { key: 'webhookUrlEnv', label: 'Webhook URL Env', placeholder: '例如：DISCORD_WEBHOOK_URL' }
 ]
+
+export const twitterFieldDefs = [
+  { key: 'apiKeyEnv', label: 'API Key Env', placeholder: '例如：X_API_KEY' },
+  { key: 'apiKeySecretEnv', label: 'API Key Secret Env', placeholder: '例如：X_API_KEY_SECRET' },
+  { key: 'accessTokenEnv', label: 'Access Token Env', placeholder: '例如：X_ACCESS_TOKEN' },
+  { key: 'accessTokenSecretEnv', label: 'Access Token Secret Env', placeholder: '例如：X_ACCESS_TOKEN_SECRET' },
+]

@@ -222,6 +222,28 @@
           </el-form-item>
         </template>
 
+        <!-- Non-OAuth structured platforms: show config fields directly on add -->
+        <template v-if="dialogType === 'add' && isStructuredAccountForm && !isOAuthPlatform(accountForm.platform)">
+          <el-divider content-position="left">{{ platformLabel(accountForm.platform) }} 設定</el-divider>
+          <div class="field-hint" style="margin-bottom: 12px;">
+            <template v-if="accountForm.platform === 'telegram'">
+              使用 Telegram Bot API。請先在 @BotFather 建立 Bot，將 Bot 加入目標頻道/群組並設為管理員，然後填入 Bot Token 和 Chat ID。
+            </template>
+            <template v-else-if="accountForm.platform === 'discord'">
+              使用 Discord Webhook。請先在 Discord 頻道設定 → 整合 → Webhook 中建立 Webhook，複製 URL。
+            </template>
+            <template v-else-if="accountForm.platform === 'twitter'">
+              X / Twitter 支援兩種方式：Cookie（上傳 storage_state JSON）或 API（設定 env 變數）。
+            </template>
+          </div>
+          <template v-if="accountForm.platform === 'telegram'">
+            <AccountTextFieldList :fields="telegramFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
+          </template>
+          <template v-else-if="accountForm.platform === 'discord'">
+            <AccountTextFieldList :fields="discordFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
+          </template>
+        </template>
+
         <!-- Full edit panel: only shown when editing an existing account -->
         <template v-if="dialogType === 'edit' && isStructuredAccountForm">
           <el-form-item label="登入方式">
@@ -386,6 +408,27 @@
             <AccountTextFieldList :fields="discordFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
           </template>
 
+          <template v-else-if="accountForm.platform === 'twitter'">
+            <el-divider content-position="left">X / Twitter 設定</el-divider>
+            <el-form-item label="Auth type">
+              <el-select v-model="accountForm.twitterAuthType" style="width: 100%">
+                <el-option label="Cookie-based (legacy)" value="cookie" />
+                <el-option label="API (env keys)" value="api" />
+              </el-select>
+            </el-form-item>
+            <template v-if="accountForm.twitterAuthType === 'cookie'">
+              <el-form-item label="Cookie 路徑">
+                <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
+              </el-form-item>
+            </template>
+            <template v-else>
+              <el-form-item label="Connection health">
+                <AccountConnectionPanel :rows="twitterHealthRows" :actions="twitterHealthActions" />
+              </el-form-item>
+              <AccountTextFieldList :fields="twitterFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
+            </template>
+          </template>
+
           <template v-else-if="accountForm.platform === 'patreon'">
             <el-divider content-position="left">Patreon 設定</el-divider>
             <el-form-item label="Campaign ID">
@@ -404,7 +447,7 @@
         </template>
 
         <div v-else class="legacy-login-hint">
-          Legacy 帳號使用現有 QR Login / Cookie 流程。若是 Facebook、Instagram、Reddit、Telegram、YouTube、TikTok、Threads 等新平台，請先建立 Profile，再新增該平台帳號。
+          請先建立 Profile 並選擇平台，再新增該平台帳號。
         </div>
 
         <div v-if="sseConnecting" class="qrcode-container">
@@ -465,7 +508,7 @@ import { useProfilesStore } from '@/stores/profiles'
 import { buildApiUrl } from '@/utils/api-url'
 import { appendAuthQuery, getToken } from '@/utils/auth'
 import { http } from '@/utils/request'
-import { PROFILE_PLATFORM_OPTIONS, getLegacyPlatformType } from '@/utils/platforms'
+import { PROFILE_PLATFORM_OPTIONS, getLegacyPlatformType, getPlatformMeta } from '@/utils/platforms'
 import { buildAccountManagementRouteQuery, normalizeAccountManagementRouteQuery } from '@/utils/accountQueueRouting'
 import {
   redditFieldDefs,
@@ -477,6 +520,7 @@ import {
   telegramFieldDefs,
   tiktokTokenFieldDefs,
   discordFieldDefs,
+  twitterFieldDefs,
 } from '@/utils/account-form-defs'
 import { buildAccountComparator, matchesAccountFilters } from '@/utils/account-list-sorting'
 
@@ -562,6 +606,10 @@ const makeEmptyAccountForm = () => ({
   webhookUrlEnv: '',
   patreonCampaignId: '',
   advancedConfigText: '',
+  twitterAuthType: 'cookie',
+  apiKeyEnv: '',
+  apiKeySecretEnv: '',
+  accessTokenSecretEnv: '',
   status: '正常'
 })
 
@@ -675,6 +723,16 @@ const discordHealthRows = computed(() => [
 ])
 const discordHealthActions = computed(() => [
   { label: 'Check Discord connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('discord') }
+])
+
+const twitterHealthRows = computed(() => [
+  { label: 'Auth type', value: accountForm.twitterAuthType === 'api' ? 'API (env keys)' : 'Cookie' },
+  { label: 'API Key', value: presentLabel(accountForm.apiKeyEnv, 'env-backed') },
+  { label: 'Access Token', value: presentLabel(accountForm.accessTokenEnv, 'env-backed') },
+  { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
+])
+const twitterHealthActions = computed(() => [
+  { label: 'Check Twitter connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('twitter') }
 ])
 
 const tiktokHealthRows = computed(() => [
@@ -861,6 +919,10 @@ const loadStructuredFieldsFromConfig = (config) => {
   accountForm.videoCoverTimestampMs = config.videoCoverTimestampMs != null ? String(config.videoCoverTimestampMs) : ''
   accountForm.webhookUrlEnv = config.webhookUrlEnv || ''
   accountForm.patreonCampaignId = config.campaignId || ''
+  accountForm.twitterAuthType = config.twitterAuthType || 'cookie'
+  accountForm.apiKeyEnv = config.apiKeyEnv || ''
+  accountForm.apiKeySecretEnv = config.apiKeySecretEnv || ''
+  accountForm.accessTokenSecretEnv = config.accessTokenSecretEnv || ''
 }
 
 const openProfileDialog = () => {
@@ -1338,6 +1400,7 @@ const OAUTH_PLATFORM_LABELS = { tiktok: 'TikTok', facebook: 'Facebook', instagra
 
 function isOAuthPlatform(platform) { return OAUTH_PLATFORMS.has(platform) }
 function oAuthPlatformLabel(platform) { return OAUTH_PLATFORM_LABELS[platform] || platform }
+function platformLabel(platform) { const meta = getPlatformMeta(platform); return meta?.label || platform }
 
 async function quickConnect() {
   if (!accountForm.profileId) { ElMessage.warning('請先選擇一個 Profile'); return }
@@ -1864,6 +1927,13 @@ const buildStructuredConfig = () => {
       break
     case 'discord':
       assignIfValue(config, 'webhookUrlEnv', accountForm.webhookUrlEnv.trim())
+      break
+    case 'twitter':
+      assignIfValue(config, 'twitterAuthType', accountForm.twitterAuthType)
+      assignIfValue(config, 'apiKeyEnv', accountForm.apiKeyEnv.trim())
+      assignIfValue(config, 'apiKeySecretEnv', accountForm.apiKeySecretEnv.trim())
+      assignIfValue(config, 'accessTokenEnv', accountForm.accessTokenEnv.trim())
+      assignIfValue(config, 'accessTokenSecretEnv', accountForm.accessTokenSecretEnv.trim())
       break
     case 'patreon':
       assignIfValue(config, 'campaignId', accountForm.patreonCampaignId.trim())

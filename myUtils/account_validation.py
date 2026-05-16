@@ -175,6 +175,21 @@ def validate_structured_account_config(
         if not _present(_config_value(config, "webhookUrl")):
             errors.append("Discord 帳號缺少 webhookUrl 或 webhookUrlEnv")
 
+    if platform == profiles.PLATFORM_TWITTER:
+        twitter_auth_type = str(config.get("twitterAuthType") or "cookie").strip().lower()
+        if twitter_auth_type == "api":
+            if not _present(_config_value(config, "apiKey")):
+                errors.append("Twitter API 模式需要 apiKey 或 apiKeyEnv")
+            if not _present(_config_value(config, "apiKeySecret")):
+                errors.append("Twitter API 模式需要 apiKeySecret 或 apiKeySecretEnv")
+            if not _present(_config_value(config, "accessToken")):
+                errors.append("Twitter API 模式需要 accessToken 或 accessTokenEnv")
+            if not _present(_config_value(config, "accessTokenSecret")):
+                errors.append("Twitter API 模式需要 accessTokenSecret 或 accessTokenSecretEnv")
+        elif twitter_auth_type == "cookie":
+            if not cookie_path:
+                warnings.append("未指定 cookiePath；後端會自動產生預設路徑")
+
     if platform == profiles.PLATFORM_TIKTOK:
         if not _present(_config_value(config, "accessToken")):
             errors.append("TikTok 帳號缺少 accessToken 或 accessTokenEnv")

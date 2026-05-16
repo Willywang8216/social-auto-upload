@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
-from datetime import datetime, timedelta, timezone
 import mimetypes
 import os
+import secrets
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus, urlparse
 
 from myUtils import media_pipeline
 from myUtils import tiktok_auth
@@ -960,6 +966,193 @@ def _reddit_access_token(config: dict[str, Any], *, session=None) -> str:
     if not token:
         raise PreparedPublishError("Reddit token response did not include access_token")
     return str(token)
+
+
+# ---------------------------------------------------------------------------
+# X / Twitter (API v2 with OAuth 1.0a)
+# ---------------------------------------------------------------------------
+
+X_API_ROOT = "https://api.twitter.com"
+X_UPLOAD_URL = "https://upload.twitter.com/1.1/media/upload.json"
+X_TWEET_URL = f"{X_API_ROOT}/2/tweets"
+
+
+def _x_oauth1_signature(
+    *,
+    method: str,
+    url: str,
+    params: dict[str, str],
+    consumer_secret: str,
+    token_secret: str,
+) -> str:
+    """Build an OAuth 1.0a HMAC-SHA1 signature for a Twitter API request."""
+    sorted_params = sorted(params.items())
+    param_string = "&".join(
+        f"{quote_plus(k, safe='')}={quote_plus(v, safe='')}"
+        for k, v in sorted_params
+    )
+    base_string = "&".join(
+        [
+            method.upper(),
+            quote_plus(url, safe=""),
+            quote_plus(param_string, safe=""),
+        ]
+    )
+    signing_key = f"{quote_plus(consumer_secret, safe='')}&{quote_plus(token_secret, safe='')}"
+    sig = hmac.new(
+        signing_key.encode("utf-8"),
+        base_string.encode("utf-8"),
+        hashlib.sha1,
+    )
+    return base64.b64encode(sig.digest()).decode("utf-8")
+
+
+def _x_auth_header(
+    *,
+    method: str,
+    url: str,
+    consumer_key: str,
+    token: str,
+    consumer_secret: str,
+    token_secret: str,
+    oauth_params_extra: dict[str, str] | None = None,
+) -> str:
+    nonce = secrets.token_hex(16)
+    timestamp = str(int(time.time()))
+    oauth_params: dict[str, str] = {
+        "oauth_consumer_key": consumer_key,
+        "oauth_nonce": nonce,
+        "oauth_signature_method": "HMAC-SHA1",
+        "oauth_timestamp": timestamp,
+        "oauth_token": token,
+        "oauth_version": "1.0",
+    }
+    if oauth_params_extra:
+        oauth_params.update(oauth_params_extra)
+    signature = _x_oauth1_signature(
+        method=method,
+        url=url,
+        params={**oauth_params, **(oauth_params_extra or {})},
+        consumer_secret=consumer_secret,
+        token_secret=token_secret,
+    )
+    oauth_params["oauth_signature"] = signature
+    header_parts = [
+        f'{quote_plus(k, safe="")}="{quote_plus(v, safe="")}"'
+        for k, v in sorted(oauth_params.items())
+        if not k.startswith("oauth_signature_method")
+    ]
+    header_parts.append('oauth_signature_method="HMAC-SHA1"')
+    return "OAuth " + ", ".join(header_parts)
+
+
+def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access_token: str, access_token_secret: str, session=None) -> str:
+    """Upload a media file to Twitter and return the media_id."""
+    http = _get_session(session)
+    file_size = Path(file_path).stat().st_size
+    mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+
+    # INIT
+    auth_header = _x_auth_header(
+        method="POST", url=X_UPLOAD_URL,
+        consumer_key=api_key, token=access_token,
+        consumer_secret=api_key_secret, token_secret=access_token_secret,
+    )
+    init_resp = http.post(
+        X_UPLOAD_URL,
+        headers={"Authorization": auth_header},
+        data={
+            "command": "INIT",
+            "total_bytes": str(file_size),
+            "media_type": mime_type,
+        },
+        timeout=120,
+    )
+    _raise_for_status(init_resp)
+    media_id = str(init_resp.json().get("media_id_string") or "")
+
+    # APPEND
+    with Path(file_path).open("rb") as fh:
+        auth_header = _x_auth_header(
+            method="POST", url=X_UPLOAD_URL,
+            consumer_key=api_key, token=access_token,
+            consumer_secret=api_key_secret, token_secret=access_token_secret,
+        )
+        append_resp = http.post(
+            X_UPLOAD_URL,
+            headers={"Authorization": auth_header},
+            data={"command": "APPEND", "media_id": media_id, "segment_index": "0"},
+            files={"media": (Path(file_path).name, fh, mime_type)},
+            timeout=600,
+        )
+        _raise_for_status(append_resp)
+
+    # FINALIZE
+    auth_header = _x_auth_header(
+        method="POST", url=X_UPLOAD_URL,
+        consumer_key=api_key, token=access_token,
+        consumer_secret=api_key_secret, token_secret=access_token_secret,
+    )
+    finalize_resp = http.post(
+        X_UPLOAD_URL,
+        headers={"Authorization": auth_header},
+        data={"command": "FINALIZE", "media_id": media_id},
+        timeout=120,
+    )
+    _raise_for_status(finalize_resp)
+    return media_id
+
+
+def publish_twitter_sync(account, payload: dict, *, session=None) -> list[Any]:
+    """Publish a tweet with optional media via the X API v2 (OAuth 1.0a)."""
+    config = dict(account.config or {})
+    api_key = str(_config_value(config, "apiKey") or "").strip()
+    api_key_secret = str(_config_value(config, "apiKeySecret") or "").strip()
+    access_token = str(_config_value(config, "accessToken") or "").strip()
+    access_token_secret = str(_config_value(config, "accessTokenSecret") or "").strip()
+
+    if not all([api_key, api_key_secret, access_token, access_token_secret]):
+        raise PreparedPublishError(
+            "Twitter API publish requires apiKey, apiKeySecret, accessToken, accessTokenSecret (or their Env equivalents)"
+        )
+
+    http = _get_session(session)
+    message = _payload_message(payload)
+    media = _extract_media(payload)
+
+    # Upload media first (v1.1 endpoint)
+    media_ids = []
+    for item in media["images"][:4] + media["videos"][:1]:
+        local_path = item.get("local_path")
+        if local_path:
+            mid = _x_media_upload(
+                file_path=local_path,
+                api_key=api_key, api_key_secret=api_key_secret,
+                access_token=access_token, access_token_secret=access_token_secret,
+                session=http,
+            )
+            media_ids.append(mid)
+
+    # Create tweet (v2 endpoint)
+    tweet_data: dict[str, Any] = {"text": message}
+    if media_ids:
+        tweet_data["media"] = {"media_ids": media_ids}
+
+    resp = http.post(
+        X_TWEET_URL,
+        headers={
+            "Authorization": _x_auth_header(
+                method="POST", url=X_TWEET_URL,
+                consumer_key=api_key, token=access_token,
+                consumer_secret=api_key_secret, token_secret=access_token_secret,
+            ),
+            "Content-Type": "application/json",
+        },
+        data=json.dumps(tweet_data),
+        timeout=120,
+    )
+    _raise_for_status(resp)
+    return [_response_payload(resp)]
 
 
 def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:

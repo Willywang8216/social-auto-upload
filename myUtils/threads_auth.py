@@ -49,7 +49,7 @@ def _required_env(name: str) -> str:
 
 
 def default_redirect_uri() -> str:
-    return str(os.environ.get(REDIRECT_URI_ENV) or 'https://up.iamwillywang.com/oauth/threads/callback').strip()
+    return str(os.environ.get(REDIRECT_URI_ENV) or 'https://socialupload.iamwillywang.com/oauth/threads/callback').strip()
 
 
 def build_state_token() -> str:
