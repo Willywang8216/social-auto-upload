@@ -189,3 +189,12 @@ uploadFile
 videoFile
 
 /uploader/bilibili_uploader/qrcode.png
+
+# rclone config with secrets
+docker/rclone/
+
+# sync scripts (may contain secrets)
+syncscript.sh
+
+# data directory (runtime data)
+data/

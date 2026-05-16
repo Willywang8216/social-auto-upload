@@ -589,9 +589,9 @@ const redditHealthRows = computed(() => [
   { label: 'Last manual refresh', value: accountForm.lastManualRefreshAt || '—' }
 ])
 const redditHealthActions = computed(() => [
-  { label: 'Connect with Reddit', type: 'primary', disabled: !accountForm.id, onClick: connectWithReddit },
-  { label: 'Refresh Reddit token', disabled: !accountForm.id, onClick: () => refreshStructuredToken('reddit') },
-  { label: 'Open OAuth status', disabled: !accountForm.id, onClick: () => openOauthReviewStatus('reddit') }
+  { label: 'Connect with Reddit', type: 'primary', onClick: connectWithReddit },
+  { label: 'Refresh Reddit token', onClick: () => refreshStructuredToken('reddit') },
+  { label: 'Open OAuth status', onClick: () => openOauthReviewStatus('reddit') }
 ])
 
 const telegramHealthRows = computed(() => [
@@ -612,9 +612,9 @@ const youtubeHealthRows = computed(() => [
   { label: 'Last manual refresh', value: accountForm.lastManualRefreshAt || '—' }
 ])
 const youtubeHealthActions = computed(() => [
-  { label: 'Connect with YouTube', type: 'primary', disabled: !accountForm.id, onClick: connectWithYouTube },
-  { label: 'Refresh YouTube token', disabled: !accountForm.id, onClick: () => refreshStructuredToken('youtube') },
-  { label: 'Open OAuth status', disabled: !accountForm.id, onClick: () => openOauthReviewStatus('youtube') }
+  { label: 'Connect with YouTube', type: 'primary', onClick: connectWithYouTube },
+  { label: 'Refresh YouTube token', onClick: () => refreshStructuredToken('youtube') },
+  { label: 'Open OAuth status', onClick: () => openOauthReviewStatus('youtube') }
 ])
 
 const facebookHealthRows = computed(() => [
@@ -623,10 +623,10 @@ const facebookHealthRows = computed(() => [
   { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
 ])
 const facebookHealthActions = computed(() => [
-  { label: 'Connect with Facebook', type: 'primary', disabled: !accountForm.id, onClick: () => connectWithMeta('facebook') },
-  { label: 'Refresh Facebook token', disabled: !accountForm.id, onClick: () => refreshStructuredToken('facebook') },
-  { label: 'Check Facebook connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('facebook') },
-  { label: 'Open OAuth status', disabled: !accountForm.id, onClick: () => openOauthReviewStatus('facebook') }
+  { label: 'Connect with Facebook', type: 'primary', onClick: () => connectWithMeta('facebook') },
+  { label: 'Refresh Facebook token', onClick: () => refreshStructuredToken('facebook') },
+  { label: 'Check Facebook connection', onClick: () => checkStructuredConnection('facebook') },
+  { label: 'Open OAuth status', onClick: () => openOauthReviewStatus('facebook') }
 ])
 
 const instagramHealthRows = computed(() => [
@@ -635,10 +635,10 @@ const instagramHealthRows = computed(() => [
   { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
 ])
 const instagramHealthActions = computed(() => [
-  { label: 'Connect with Instagram', type: 'primary', disabled: !accountForm.id, onClick: () => connectWithMeta('instagram') },
-  { label: 'Refresh Instagram token', disabled: !accountForm.id, onClick: () => refreshStructuredToken('instagram') },
-  { label: 'Check Instagram connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('instagram') },
-  { label: 'Open OAuth status', disabled: !accountForm.id, onClick: () => openOauthReviewStatus('instagram') }
+  { label: 'Connect with Instagram', type: 'primary', onClick: () => connectWithMeta('instagram') },
+  { label: 'Refresh Instagram token', onClick: () => refreshStructuredToken('instagram') },
+  { label: 'Check Instagram connection', onClick: () => checkStructuredConnection('instagram') },
+  { label: 'Open OAuth status', onClick: () => openOauthReviewStatus('instagram') }
 ])
 
 const threadsHealthRows = computed(() => [
@@ -647,10 +647,10 @@ const threadsHealthRows = computed(() => [
   { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
 ])
 const threadsHealthActions = computed(() => [
-  { label: 'Connect with Threads', type: 'primary', disabled: !accountForm.id, onClick: connectWithThreads },
-  { label: 'Refresh Threads token', disabled: !accountForm.id, onClick: () => refreshStructuredToken('threads') },
-  { label: 'Check Threads connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('threads') },
-  { label: 'Open OAuth status', disabled: !accountForm.id, onClick: () => openOauthReviewStatus('threads') }
+  { label: 'Connect with Threads', type: 'primary', onClick: connectWithThreads },
+  { label: 'Refresh Threads token', onClick: () => refreshStructuredToken('threads') },
+  { label: 'Check Threads connection', onClick: () => checkStructuredConnection('threads') },
+  { label: 'Open OAuth status', onClick: () => openOauthReviewStatus('threads') }
 ])
 
 const discordHealthRows = computed(() => [
@@ -1271,6 +1271,55 @@ const handleReLogin = (row) => {
   }, 300)
 }
 
+/** Auto-save the account if it hasn't been saved yet. Returns true on success. */
+async function ensureAccountSaved() {
+  if (accountForm.id) return true
+  if (!accountForm.profileId) {
+    ElMessage.warning('請先選擇一個 Profile')
+    return false
+  }
+  if (!accountForm.name.trim()) {
+    ElMessage.warning('請先輸入帳號名稱')
+    return false
+  }
+  if (!accountForm.platform) {
+    ElMessage.warning('請先選擇平台')
+    return false
+  }
+  try {
+    const payload = {
+      profileId: accountForm.profileId,
+      platform: accountForm.platform,
+      accountName: accountForm.name,
+      authType: 'oauth',
+      enabled: true,
+      config: buildStructuredConfig()
+    }
+    const result = await profilesApi.createAccount(accountForm.profileId, payload)
+    const data = result?.data || {}
+    accountForm.id = data.id
+    dialogType.value = 'edit'
+    ElMessage.success('帳號已自動儲存，繼續連線...')
+    await refreshAccounts()
+    return true
+  } catch (error) {
+    ElMessage.error(error?.message || '自動儲存失敗，請先手動儲存帳號')
+    return false
+  }
+}
+
+function validateConnectPlatform(expectedPlatform) {
+  if (!['facebook', 'instagram', 'reddit', 'threads', 'youtube', 'tiktok'].includes(expectedPlatform)) {
+    ElMessage.warning('平台不符')
+    return false
+  }
+  if (accountForm.platform !== expectedPlatform) {
+    ElMessage.warning(`目前選擇的平台不是 ${expectedPlatform}`)
+    return false
+  }
+  return true
+}
+
 async function connectWithTikTok() {
   if (!accountForm.profileId) {
     ElMessage.warning('請先選擇 Profile，再使用 TikTok Connect')
@@ -1280,6 +1329,7 @@ async function connectWithTikTok() {
     ElMessage.warning('請先輸入帳號名稱')
     return
   }
+  if (!await ensureAccountSaved()) return
 
   const popup = window.open('', 'tiktok-connect', 'width=560,height=760')
   if (!popup) {
@@ -1304,14 +1354,9 @@ async function connectWithTikTok() {
 }
 
 async function connectWithMeta(expectedPlatform) {
-  if (!accountForm.id) {
-    ElMessage.warning(`請先儲存 ${expectedPlatform === 'facebook' ? 'Facebook' : 'Instagram'} 帳號，再使用 Connect`)
-    return
-  }
-  if (!['facebook', 'instagram'].includes(expectedPlatform) || accountForm.platform !== expectedPlatform) {
-    ElMessage.warning('目前帳號平台與 Connect 操作不符')
-    return
-  }
+  if (!validateConnectPlatform(expectedPlatform)) return
+  if (!await ensureAccountSaved()) return
+
   const popup = window.open('', `meta-connect-${expectedPlatform}`, 'width=720,height=820')
   if (!popup) {
     ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
@@ -1337,10 +1382,9 @@ async function connectWithMeta(expectedPlatform) {
 }
 
 async function connectWithReddit() {
-  if (!accountForm.id) {
-    ElMessage.warning('請先儲存 Reddit 帳號，再使用 Connect with Reddit')
-    return
-  }
+  if (!validateConnectPlatform('reddit')) return
+  if (!await ensureAccountSaved()) return
+
   const popup = window.open('', 'reddit-connect', 'width=720,height=820')
   if (!popup) {
     ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
@@ -1363,10 +1407,9 @@ async function connectWithReddit() {
 }
 
 async function connectWithThreads() {
-  if (!accountForm.id) {
-    ElMessage.warning('請先儲存 Threads 帳號，再使用 Connect with Threads')
-    return
-  }
+  if (!validateConnectPlatform('threads')) return
+  if (!await ensureAccountSaved()) return
+
   const popup = window.open('', 'threads-connect', 'width=720,height=820')
   if (!popup) {
     ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
@@ -1389,10 +1432,9 @@ async function connectWithThreads() {
 }
 
 async function connectWithYouTube() {
-  if (!accountForm.id) {
-    ElMessage.warning('請先儲存 YouTube 帳號，再使用 Connect with YouTube')
-    return
-  }
+  if (!validateConnectPlatform('youtube')) return
+  if (!await ensureAccountSaved()) return
+
   const popup = window.open('', 'youtube-connect', 'width=720,height=820')
   if (!popup) {
     ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')

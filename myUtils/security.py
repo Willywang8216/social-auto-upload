@@ -39,6 +39,7 @@ from typing import Iterable
 # auth token via query string instead.
 PUBLIC_PATHS: frozenset[str] = frozenset({
     "/",
+    "/login",
     "/privacy",
     "/privacy/",
     "/terms",
@@ -60,6 +61,12 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/oauth/threads/callback/",
     "/webhooks/tiktok",
     "/webhooks/tiktok/",
+    "/oauth/messenger/callback",
+    "/oauth/messenger/callback/",
+    "/oauth/meta/deauthorize",
+    "/oauth/meta/deauthorize/",
+    "/oauth/meta/data-deletion",
+    "/oauth/meta/data-deletion/",
 })
 
 # Path prefixes that are public (e.g. static asset folders). Kept as a tuple

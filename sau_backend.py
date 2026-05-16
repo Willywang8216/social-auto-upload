@@ -16,7 +16,7 @@ from queue import Queue
 from flask_cors import CORS
 from myUtils.auth import check_cookie
 from myUtils import account_validation
-from flask import Flask, request, jsonify, Response, render_template, send_from_directory
+from flask import Flask, request, jsonify, Response, render_template, send_from_directory, current_app, url_for
 from utils.conf_defaults import BASE_DIR
 from myUtils import campaigns as campaign_store
 from myUtils import content_rules
@@ -757,6 +757,11 @@ def delete_account():
 # SSE 登录接口
 @app.route('/login')
 def login():
+    # When the browser simply visits /login without SSE parameters, serve the
+    # SPA so that hash-based client-side routing takes over.
+    if not request.args.get('type') and not request.args.get('id'):
+        return send_from_directory(str(_frontend_index_dir()), 'index.html')
+
     # 1 小红书 2 视频号 3 抖音 4 快手
     type = request.args.get('type')
     # 账号名
@@ -3245,6 +3250,79 @@ def tiktok_webhook():
     )
     _append_tiktok_webhook_event(event_payload)
     return jsonify({'code': 200, 'msg': 'received', 'data': {'signatureVerified': signature_verified, 'signatureStatus': signature_reason}}), 200
+
+
+_MESSENGER_VERIFY_TOKEN = "LJFi34r834fwhfwqfhiOGourwihuq3u2839590fj"
+
+
+@app.route('/oauth/messenger/callback', methods=['GET', 'POST'])
+def messenger_webhook():
+    if request.method == 'GET':
+        mode = request.args.get('hub.mode')
+        challenge = request.args.get('hub.challenge')
+        token = request.args.get('hub.verify_token', '')
+        if mode == 'subscribe' and token == _MESSENGER_VERIFY_TOKEN:
+            return Response(str(challenge) if challenge else 'ok', mimetype='text/plain', status=200)
+        return Response('Forbidden', status=403)
+    # POST – incoming webhook events from Messenger
+    payload = request.get_json(silent=True) or {}
+    return jsonify({'code': 200, 'msg': 'received'}), 200
+
+
+@app.route('/oauth/meta/deauthorize', methods=['POST'])
+def meta_deauthorize():
+    """Handle Facebook/Meta deauthorization callback.
+
+    Meta sends a signed_request when a user deauthorizes the app. We log the
+    event so the operator knows the page connection was severed, and return 200
+    so Meta doesn't keep retrying.
+    """
+    signed_request = request.form.get('signed_request', '')
+    app_id = current_app.config.get('META_APP_ID', '')
+    secret = current_app.config.get('META_APP_SECRET', '')
+    try:
+        data = meta_auth.parse_signed_request(signed_request, app_secret=secret) if signed_request and secret else {}
+    except Exception:
+        data = {}
+    logging.getLogger(__name__).warning('[meta] deauthorize callback received. userId=%s', data.get('user_id', 'unknown'))
+    return jsonify({'code': 200, 'msg': 'received'}), 200
+
+
+@app.route('/oauth/meta/data-deletion', methods=['POST'])
+def meta_data_deletion():
+    """Handle Meta data deletion request callback.
+
+    When a user requests data deletion through Meta, this endpoint receives the
+    signed_request. We return a confirmation URL and status code. In a
+    production deployment you would hook this into your data retention pipeline.
+    """
+    signed_request = request.form.get('signed_request', '')
+    app_id = current_app.config.get('META_APP_ID', '')
+    secret = current_app.config.get('META_APP_SECRET', '')
+    try:
+        data = meta_auth.parse_signed_request(signed_request, app_secret=secret) if signed_request and secret else {}
+    except Exception:
+        data = {}
+    user_id = data.get('user_id', 'unknown')
+    logging.getLogger(__name__).warning('[meta] data deletion request received. userId=%s', user_id)
+    confirmation_url = url_for('meta_data_deletion_status', user_id=user_id, _external=True)
+    return jsonify({
+        'url': confirmation_url,
+        'confirmation_code': user_id,
+    }), 200
+
+
+@app.route('/oauth/meta/data-deletion/status', methods=['GET'])
+def meta_data_deletion_status():
+    user_id = request.args.get('user_id', 'unknown')
+    return jsonify({
+        'code': 200,
+        'msg': 'ok',
+        'data': {
+            'userId': user_id,
+            'status': 'pending',
+        }
+    }), 200
 
 
 @app.route('/admin/tiktok/status', methods=['GET'])

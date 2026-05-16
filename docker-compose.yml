@@ -10,11 +10,17 @@ services:
       - ./cookiesFile:/app/cookiesFile
       - ${SAU_CONF_FILE:-./conf.example.py}:/app/conf.py
       - ./data:/app/data
+      - ./db:/app/db
     networks:
       1panel-network:
         ipv4_address: 172.18.0.46  # 這是你原本清單中這個容器用的 IP
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    environment:
+      - SAU_API_TOKENS=sdkjauashuaiuhHOHEIUFhfaphgeiusdiu545gfdgd
+      - META_APP_ID=2438066176703416
+      - META_APP_SECRET=48b42e3e140869cd7180cac751295d19
+      - SAU_META_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/meta/callback
 
 networks:
   1panel-network:

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import os
 import secrets
 import urllib.parse
@@ -148,3 +152,31 @@ def fetch_managed_pages(*, access_token: str, session=None) -> dict[str, Any]:
         message = payload.get('error', {}).get('message') if isinstance(payload.get('error'), dict) else payload.get('error')
         raise MetaOAuthError(str(message or 'Meta pages query failed'))
     return payload
+
+
+def parse_signed_request(signed_request: str, *, app_secret: str) -> dict[str, Any]:
+    """Decode and verify a Meta signed_request payload.
+
+    Meta sends signed_request parameters for deauthorize and data-deletion
+    callbacks. The format is ``base64url(encoded_signature).base64url(payload)``
+    where the signature is HMAC-SHA256 of the payload using the app secret.
+    """
+    if not signed_request or '.' not in signed_request:
+        raise ValueError('signed_request must contain a dot-separated signature and payload')
+
+    encoded_sig, encoded_payload = signed_request.split('.', 1)
+    # Pad base64url to standard base64
+    def _b64url_decode(s: str) -> bytes:
+        padding = 4 - len(s) % 4
+        if padding != 4:
+            s += '=' * padding
+        return base64.urlsafe_b64decode(s)
+
+    payload_bytes = _b64url_decode(encoded_payload)
+    expected_sig = hmac.new(app_secret.encode(), payload_bytes, hashlib.sha256).digest()
+    actual_sig = _b64url_decode(encoded_sig)
+
+    if not hmac.compare_digest(expected_sig, actual_sig):
+        raise ValueError('signed_request signature mismatch')
+
+    return json.loads(payload_bytes.decode('utf-8'))
