@@ -1209,31 +1209,28 @@ def refresh_youtube_access_token(config: dict[str, Any], *, session=None) -> dic
     if not channel_id:
         raise PreparedPublishError("YouTube refresh requires channelId")
     http = _get_session(session)
-    access_token = str(_config_value(config, "accessToken") or "").strip()
-    token_payload = {"access_token": access_token, "expires_in": None}
-    if not access_token:
-        client_id = str(_config_value(config, "clientId") or "").strip()
-        client_secret = str(_config_value(config, "clientSecret") or "").strip()
-        refresh_token = str(_config_value(config, "refreshToken") or "").strip()
-        if not client_id or not client_secret or not refresh_token:
-            raise PreparedPublishError(
-                "YouTube refresh requires accessToken or clientId/clientSecret/refreshToken"
-            )
-        token_response = http.post(
-            GOOGLE_TOKEN_URL,
-            data={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "refresh_token": refresh_token,
-                "grant_type": "refresh_token",
-            },
-            timeout=120,
+    client_id = str(_config_value(config, "clientId") or "").strip()
+    client_secret = str(_config_value(config, "clientSecret") or "").strip()
+    refresh_token = str(_config_value(config, "refreshToken") or "").strip()
+    if not client_id or not client_secret or not refresh_token:
+        raise PreparedPublishError(
+            "YouTube refresh requires clientId/clientSecret/refreshToken"
         )
-        _raise_for_status(token_response)
-        token_payload = token_response.json()
-        access_token = str(token_payload.get("access_token") or "")
-        if not access_token:
-            raise PreparedPublishError("Google token response did not include access_token")
+    token_response = http.post(
+        GOOGLE_TOKEN_URL,
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        },
+        timeout=120,
+    )
+    _raise_for_status(token_response)
+    token_payload = token_response.json()
+    access_token = str(token_payload.get("access_token") or "")
+    if not access_token:
+        raise PreparedPublishError("Google token response did not include access_token")
     channel_response = http.get(
         YOUTUBE_CHANNELS_URL,
         headers={"Authorization": f"Bearer {access_token}"},
@@ -1249,16 +1246,12 @@ def refresh_youtube_access_token(config: dict[str, Any], *, session=None) -> dic
 
 
 def _google_access_token(config: dict[str, Any], *, session=None) -> str:
-    access_token = str(_config_value(config, "accessToken") or "").strip()
-    if access_token:
-        return access_token
-
     client_id = str(_config_value(config, "clientId") or "").strip()
     client_secret = str(_config_value(config, "clientSecret") or "").strip()
     refresh_token = str(_config_value(config, "refreshToken") or "").strip()
     if not client_id or not client_secret or not refresh_token:
         raise PreparedPublishError(
-            "YouTube publish requires accessToken or clientId/clientSecret/refreshToken"
+            "YouTube publish requires clientId/clientSecret/refreshToken"
         )
 
     http = _get_session(session)

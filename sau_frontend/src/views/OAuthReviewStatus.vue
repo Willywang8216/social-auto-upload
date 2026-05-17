@@ -1,10 +1,18 @@
 <template>
   <div class="oauth-review-status">
     <div class="page-header">
-      <h1>{{ title }}</h1>
-      <el-button type="primary" @click="refreshStatus" :loading="loading">Refresh</el-button>
+      <div class="page-header-left">
+        <h1>{{ title }}</h1>
+        <el-select v-if="!platform" v-model="selectedPlatform" placeholder="選擇平台" style="width: 200px; margin-left: 16px;" @change="onPlatformChange">
+          <el-option v-for="p in OAUTH_PLATFORMS" :key="p.value" :label="p.label" :value="p.value" />
+        </el-select>
+      </div>
+      <el-button type="primary" @click="refreshStatus" :loading="loading" :disabled="!platform">Refresh</el-button>
     </div>
 
+    <el-empty v-if="!platform" description="請選擇一個 OAuth 平台查看連線狀態" :image-size="120" />
+
+    <template v-if="platform">
     <el-row :gutter="20">
       <el-col :span="12">
         <el-card>
@@ -88,6 +96,7 @@
         <el-table-column prop="summary" label="Summary" min-width="260" />
       </el-table>
     </el-card>
+    </template>
   </div>
 </template>
 
@@ -98,9 +107,18 @@ import { ElMessage } from 'element-plus'
 import { oauthApi } from '@/api/oauth'
 import { buildAccountQueueNavigationQuery } from '@/utils/accountQueueRouting'
 
+const OAUTH_PLATFORMS = [
+  { value: 'youtube', label: 'YouTube' },
+  { value: 'reddit', label: 'Reddit' },
+  { value: 'facebook', label: 'Facebook' },
+  { value: 'instagram', label: 'Instagram' },
+  { value: 'threads', label: 'Threads' },
+]
+
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
+const selectedPlatform = ref('')
 const status = reactive({
   platform: '',
   accountId: null,
@@ -119,7 +137,7 @@ const status = reactive({
 })
 
 const platform = computed(() => {
-  const raw = route.query.platform || route.params.platform
+  const raw = route.query.platform || route.params.platform || selectedPlatform.value
   return Array.isArray(raw) ? raw[0] : (raw || '')
 })
 const accountId = computed(() => {
@@ -181,6 +199,11 @@ function goToAccountQueue() {
   router.push({ path: '/account-management', query })
 }
 
+function onPlatformChange(value) {
+  selectedPlatform.value = value
+  router.replace({ path: `/oauth-review/${value}` })
+}
+
 async function refreshStatus() {
   if (!platform.value) return
   loading.value = true
@@ -206,6 +229,11 @@ watch([platform, accountId], refreshStatus)
     align-items: center;
     justify-content: space-between;
     margin-bottom: 20px;
+
+    .page-header-left {
+      display: flex;
+      align-items: center;
+    }
 
     h1 {
       margin: 0;

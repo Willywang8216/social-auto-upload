@@ -218,12 +218,12 @@
             </el-card>
           </el-col>
           <el-col :span="6">
-            <el-card class="action-card" @click="navigateTo('/tiktok-review')">
+            <el-card class="action-card" @click="navigateTo('/oauth-review')">
               <div class="action-icon">
                 <el-icon><Connection /></el-icon>
               </div>
-              <div class="action-title">TikTok callback</div>
-              <div class="action-desc">查看 callback / webhook 收件狀態</div>
+              <div class="action-title">OAuth 狀態</div>
+              <div class="action-desc">查看各平台 OAuth 連線與 token 狀態</div>
             </el-card>
           </el-col>
           <el-col :span="6">

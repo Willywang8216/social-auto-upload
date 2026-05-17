@@ -40,9 +40,9 @@
                 <el-icon><List /></el-icon>
                 <span>任務中心</span>
               </el-menu-item>
-              <el-menu-item index="/tiktok-review">
+              <el-menu-item index="/oauth-review">
                 <el-icon><Connection /></el-icon>
-                <span>TikTok callback</span>
+                <span>OAuth 狀態</span>
               </el-menu-item>
               <el-menu-item index="/about">
                 <el-icon><DataAnalysis /></el-icon>
