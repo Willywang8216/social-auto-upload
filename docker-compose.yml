@@ -26,6 +26,7 @@ services:
       - SAU_META_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/meta/callback
       - SAU_YOUTUBE_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/youtube/callback
       - SAU_REDDIT_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/reddit/callback
+      - SAU_TWITTER_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/twitter/callback
       - SAU_ACCOUNT_MAINTENANCE_INTERVAL_SECONDS=600
       - SAU_ACCOUNT_MAINTENANCE_EXPIRING_WITHIN_SECONDS=3600
 

@@ -310,7 +310,7 @@
                   Connect with X / Twitter
                 </el-button>
               </div>
-              <div class="field-hint">使用 .env 中的 X_API_KEY / X_API_KEY_SECRET / X_ACCESS_TOKEN / X_ACCESS_TOKEN_SECRET 自動驗證連線</div>
+              <div class="field-hint">通過 OAuth 2.0 授權連接 X / Twitter 帳號，支持自動 token 刷新</div>
               <AccountTextFieldList :fields="twitterFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
             </template>
           </template>
@@ -594,6 +594,7 @@ import { metaApi } from '@/api/meta'
 import { profilesApi } from '@/api/profiles'
 import { redditApi } from '@/api/reddit'
 import { threadsApi } from '@/api/threads'
+import { twitterApi } from '@/api/x'
 import { tiktokApi } from '@/api/tiktok'
 import { youtubeApi } from '@/api/youtube'
 import AccountTabPane from '@/components/AccountTabPane.vue'
@@ -833,15 +834,20 @@ const discordHealthActions = computed(() => [
 ])
 
 const twitterHealthRows = computed(() => [
-  { label: 'Auth type', value: accountForm.twitterAuthType === 'api' ? 'API (env keys)' : 'Cookie' },
-  { label: 'API Key', value: presentLabel(accountForm.apiKeyEnv, 'env-backed') },
-  { label: 'Access Token', value: presentLabel(accountForm.accessTokenEnv, 'env-backed') },
-  { label: 'Username', value: accountForm.twitterUserName || '—' },
+  { label: 'Auth type', value: accountForm.twitterAuthType === 'api' ? 'API' : 'Cookie' },
+  { label: 'Username', value: accountForm.twitterUserName ? `@${accountForm.twitterUserName}` : '—' },
   { label: 'Display name', value: accountForm.twitterDisplayName || '—' },
+  { label: 'Access token', value: presentLabel(accountForm.accessToken) },
+  { label: 'Refresh token', value: presentLabel(accountForm.refreshToken) },
+  { label: 'Token expires', value: accountForm.accessTokenExpiresAt || '—' },
+  { label: 'Last token update', value: accountForm.accessTokenUpdatedAt || '—' },
+  { label: 'Connected at', value: accountForm.connectedAt || '—' },
   { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
 ])
 const twitterHealthActions = computed(() => [
-  { label: 'Check Twitter connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('twitter') }
+  { label: 'Check connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('twitter') },
+  { label: 'Refresh token', disabled: !accountForm.id || !accountForm.refreshToken, onClick: () => refreshStructuredToken('twitter') },
+  { label: 'Reconnect OAuth', disabled: !accountForm.id, onClick: () => connectWithTwitterApi() }
 ])
 
 const tiktokHealthRows = computed(() => [
@@ -1234,6 +1240,7 @@ onMounted(() => {
   window.addEventListener('message', handleYouTubeOauthMessage)
   window.addEventListener('message', handleThreadsOauthMessage)
   window.addEventListener('message', handleMetaOauthMessage)
+  window.addEventListener('message', handleTwitterOauthMessage)
   setTimeout(() => {
     fetchAccounts(true)
   }, 100)
@@ -1530,7 +1537,7 @@ async function ensureAccountSaved() {
 }
 
 function validateConnectPlatform(expectedPlatform) {
-  if (!['facebook', 'instagram', 'reddit', 'threads', 'youtube', 'tiktok'].includes(expectedPlatform)) {
+  if (!['facebook', 'instagram', 'reddit', 'threads', 'youtube', 'tiktok', 'twitter'].includes(expectedPlatform)) {
     ElMessage.warning('平台不符')
     return false
   }
@@ -1541,8 +1548,8 @@ function validateConnectPlatform(expectedPlatform) {
   return true
 }
 
-const OAUTH_PLATFORMS = new Set(['tiktok', 'facebook', 'instagram', 'reddit', 'threads', 'youtube'])
-const OAUTH_PLATFORM_LABELS = { tiktok: 'TikTok', facebook: 'Facebook', instagram: 'Instagram', reddit: 'Reddit', threads: 'Threads', youtube: 'YouTube' }
+const OAUTH_PLATFORMS = new Set(['tiktok', 'facebook', 'instagram', 'reddit', 'threads', 'youtube', 'twitter'])
+const OAUTH_PLATFORM_LABELS = { tiktok: 'TikTok', facebook: 'Facebook', instagram: 'Instagram', reddit: 'Reddit', threads: 'Threads', youtube: 'YouTube', twitter: 'Twitter/X' }
 
 function isOAuthPlatform(platform) { return OAUTH_PLATFORMS.has(platform) }
 function oAuthPlatformLabel(platform) { return OAUTH_PLATFORM_LABELS[platform] || platform }
@@ -1559,6 +1566,7 @@ async function quickConnect() {
   else if (platform === 'reddit') await connectWithReddit()
   else if (platform === 'threads') await connectWithThreads()
   else if (platform === 'youtube') await connectWithYouTube()
+  else if (platform === 'twitter') await connectWithTwitterApi()
   else ElMessage.warning('此平台不支援 OAuth 連線')
 }
 
@@ -1702,15 +1710,26 @@ async function connectWithTwitterApi() {
   if (!accountForm.profileId) { ElMessage.warning('請先選擇一個 Profile'); return }
   if (!accountForm.name.trim()) { ElMessage.warning('請先輸入帳號名稱'); return }
   if (accountForm.platform !== 'twitter') { ElMessage.warning('目前選擇的平台不是 Twitter'); return }
-  if (accountForm.twitterAuthType !== 'api') { ElMessage.warning('請先選擇 API 認證模式'); return }
   if (!await ensureAccountSaved()) return
 
+  const popup = window.open('', 'twitter-connect', 'width=720,height=820')
+  if (!popup) {
+    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
+    return
+  }
+  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to X / Twitter...</p>')
   try {
-    await checkStructuredConnection('twitter')
-    ElMessage.success('Twitter API 連線驗證成功')
-    dialogVisible.value = false
-  } catch {
-    // checkStructuredConnection already shows error toast
+    const response = await twitterApi.startOAuth({
+      profileId: accountForm.profileId,
+      accountId: accountForm.id,
+      accountName: accountForm.name,
+      scopes: ['tweet.read', 'tweet.write', 'users.read', 'offline.access']
+    })
+    popup.location = response.data.authorizeUrl
+  } catch (error) {
+    popup.close()
+    console.error('Twitter connect 啟動失敗:', error)
+    ElMessage.error(error?.message || 'Twitter connect 啟動失敗')
   }
 }
 
@@ -1875,6 +1894,28 @@ function handleThreadsOauthMessage(event) {
   accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
   ElMessage.success('Threads 已連線')
+  dialogVisible.value = false
+  refreshAccounts()
+}
+
+function handleTwitterOauthMessage(event) {
+  const payload = event?.data
+  if (!payload || payload.type !== 'sau:twitter-oauth') return
+  if (!payload.ok) {
+    ElMessage.error(payload.error || 'Twitter 授權失敗')
+    return
+  }
+  const data = payload.data || {}
+  accountForm.accessToken = data.accessToken || accountForm.accessToken
+  accountForm.refreshToken = data.refreshToken || accountForm.refreshToken
+  accountForm.twitterUserName = data.twitterUserName || accountForm.twitterUserName
+  accountForm.twitterDisplayName = data.twitterDisplayName || accountForm.twitterDisplayName
+  accountForm.twitterUserId = data.twitterUserId || accountForm.twitterUserId
+  accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
+  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
+  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
+  accountForm.twitterAuthType = 'api'
+  ElMessage.success('Twitter/X 已連線')
   dialogVisible.value = false
   refreshAccounts()
 }
@@ -2235,6 +2276,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('message', handleTikTokOauthMessage)
   window.removeEventListener('message', handleRedditOauthMessage)
   window.removeEventListener('message', handleYouTubeOauthMessage)
+  window.removeEventListener('message', handleThreadsOauthMessage)
+  window.removeEventListener('message', handleMetaOauthMessage)
+  window.removeEventListener('message', handleTwitterOauthMessage)
 })
 </script>
 

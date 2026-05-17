@@ -37,6 +37,8 @@ from myUtils import youtube_auth
 from myUtils import youtube_review
 from myUtils import threads_auth
 from myUtils import threads_review
+from myUtils import x_auth
+from myUtils import x_review
 from myUtils import tiktok_auth
 from myUtils import tiktok_review
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
@@ -149,6 +151,13 @@ def _reddit_callback_base_url() -> str:
     if configured:
         return configured.rstrip("/")
     return "https://socialupload.iamwillywang.com/oauth/reddit/callback"
+
+
+def _twitter_callback_base_url() -> str:
+    configured = str(os.environ.get("SAU_TWITTER_CALLBACK_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return "https://socialupload.iamwillywang.com/oauth/twitter/callback"
 
 
 def _threads_callback_base_url() -> str:
@@ -1507,6 +1516,8 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
             )
             summary = f"TikTok refreshed: {config.get('displayName') or updated.account_name}"
         elif account.platform == profile_registry.PLATFORM_REDDIT:
+            if str(config.get('redditAuthType') or '') == 'cookie':
+                raise ValueError('Cannot refresh token for a cookie-based Reddit account. Switch to OAuth auth type first.')
             refreshed = prepared_publishers.refresh_reddit_access_token(config)
             config.update({
                 'accessToken': refreshed['access_token'],
@@ -1633,8 +1644,35 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                     config['accessTokenExpiresAt'] = str(config.get('metaUserAccessTokenExpiresAt'))
                 updated = profile_registry.update_account(account_id, config=config, auth_type='oauth', db_path=db_path)
                 summary = f"Instagram credentials re-synced: {config.get('instagramUserName') or updated.account_name}"
+        elif account.platform == profile_registry.PLATFORM_TWITTER:
+            refreshed = prepared_publishers.refresh_twitter_access_token(config)
+            config.update({
+                'accessToken': refreshed['access_token'],
+                'refreshToken': refreshed.get('refresh_token', config.get('refreshToken', '')),
+                'scope': refreshed.get('scope', config.get('scope', '')),
+                'tokenType': refreshed.get('token_type', config.get('tokenType', 'bearer')),
+                'accessTokenUpdatedAt': now,
+                ('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt'): now,
+            })
+            user_data = refreshed.get('me', {}).get('data', {}) if isinstance(refreshed.get('me'), dict) else {}
+            if isinstance(user_data, dict):
+                config['twitterUserId'] = user_data.get('id', config.get('twitterUserId', ''))
+                config['twitterUserName'] = user_data.get('username', config.get('twitterUserName', ''))
+                config['twitterDisplayName'] = user_data.get('name', config.get('twitterDisplayName', ''))
+            expires_in = refreshed.get('expires_in')
+            if expires_in:
+                config['accessTokenExpiresAt'] = (
+                    datetime.now() + timedelta(seconds=int(expires_in))
+                ).isoformat(timespec='seconds')
+            updated = profile_registry.update_account(
+                account_id,
+                config=config,
+                auth_type='oauth',
+                db_path=db_path,
+            )
+            summary = f"Twitter refreshed: @{config.get('twitterUserName') or updated.account_name}"
         else:
-            raise ValueError('Refresh is implemented only for TikTok, Reddit, YouTube, Threads, Facebook, and Instagram')
+            raise ValueError('Refresh is implemented only for TikTok, Reddit, YouTube, Threads, Facebook, Instagram, and Twitter')
 
         account_events.record_event(
             account_id=updated.id,
@@ -2874,6 +2912,200 @@ def reddit_oauth_callback():
         return Response(f"<html><body><p>Reddit callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
 
 
+@app.route('/oauth/twitter/start', methods=['POST'])
+def twitter_oauth_start():
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        raw_account_id = data.get('accountId')
+        if raw_account_id in (None, ''):
+            raise ValueError('Please save the Twitter account before connecting OAuth')
+        account_id = int(raw_account_id)
+        account = profile_registry.get_account(account_id, db_path=db_path)
+        if account.platform != profile_registry.PLATFORM_TWITTER:
+            raise ValueError('OAuth connect is only available for Twitter accounts on this route')
+        state_token = x_auth.build_state_token()
+        redirect_uri = str(data.get('redirectUri') or _twitter_callback_base_url() or x_auth.default_redirect_uri()).strip()
+        scopes = data.get('scopes') if isinstance(data.get('scopes'), list) and data.get('scopes') else list(x_auth.DEFAULT_SCOPES)
+        authorize_url, code_verifier, _ = x_auth.build_authorize_url_from_env(
+            state=state_token,
+            redirect_uri=redirect_uri,
+            scopes=tuple(str(scope) for scope in scopes),
+        )
+        x_review.create_oauth_request(
+            state_token=state_token,
+            profile_id=account.profile_id,
+            account_id=account.id,
+            account_name=account.account_name,
+            redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
+            scopes=[str(scope) for scope in scopes],
+            db_path=db_path,
+        )
+        account_events.record_event(
+            account_id=account.id,
+            profile_id=account.profile_id,
+            platform=account.platform,
+            account_name=account.account_name,
+            action='oauth_start',
+            status='ok',
+            summary='Twitter OAuth flow started',
+            metadata={'state': state_token, 'redirectUri': redirect_uri, 'scopes': scopes},
+            db_path=db_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({'code': 400, 'msg': str(exc), 'data': None}), 400
+    return jsonify({'code': 200, 'msg': 'ok', 'data': {'authorizeUrl': authorize_url, 'state': state_token}}), 200
+
+
+@app.route('/oauth/twitter/callback', methods=['GET'])
+def twitter_oauth_callback():
+    db_path = _current_db_path()
+    state_token = str(request.args.get('state', '') or '')
+    code = str(request.args.get('code', '') or '')
+    error = str(request.args.get('error', '') or '')
+    request_state = x_review.get_oauth_request(state_token, db_path=db_path)
+    if not request_state:
+        return Response('Unknown Twitter OAuth state', status=400, mimetype='text/plain')
+
+    if error:
+        x_review.complete_oauth_request(
+            state_token,
+            status='error',
+            error_text=error,
+            result={'state': state_token, 'error': error},
+            db_path=db_path,
+        )
+        if request_state.account_id:
+            account_events.record_event(
+                account_id=request_state.account_id,
+                profile_id=request_state.profile_id,
+                platform=profile_registry.PLATFORM_TWITTER,
+                account_name=request_state.account_name or '',
+                action='oauth_callback',
+                status='error',
+                summary='Twitter OAuth callback failed',
+                error_text=error,
+                metadata={'state': state_token},
+                db_path=db_path,
+            )
+        return Response(
+            """<html><body><script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'sau:twitter-oauth', ok: false, error: %r }, '*');
+            }
+            window.close();
+            </script><p>Twitter authorization failed. You may close this window.</p></body></html>""" % error,
+            mimetype='text/html',
+        )
+
+    try:
+        if not request_state.account_id:
+            raise ValueError('Twitter OAuth request is missing accountId')
+        account = profile_registry.get_account(int(request_state.account_id), db_path=db_path)
+        config = dict(account.config or {})
+        token_payload = x_auth.exchange_code_for_token(
+            code=code,
+            redirect_uri=request_state.redirect_uri,
+            code_verifier=request_state.code_verifier,
+        )
+        access_token = str(token_payload.get('access_token') or '')
+        refresh_token = str(token_payload.get('refresh_token') or '')
+        user_info = x_auth.fetch_user_info(access_token=access_token) if access_token else {}
+        merged_config = dict(config)
+        if access_token:
+            merged_config['accessToken'] = access_token
+        if refresh_token:
+            merged_config['refreshToken'] = refresh_token
+        merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
+        merged_config['tokenType'] = token_payload.get('token_type', 'bearer')
+        expires_in = token_payload.get('expires_in')
+        if expires_in not in (None, ''):
+            merged_config['accessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+        user_data = user_info.get('data', user_info) if isinstance(user_info, dict) else {}
+        if isinstance(user_data, dict):
+            merged_config['twitterUserId'] = str(user_data.get('id') or merged_config.get('twitterUserId') or '')
+            merged_config['twitterUserName'] = str(user_data.get('username') or merged_config.get('twitterUserName') or '')
+            merged_config['twitterDisplayName'] = str(user_data.get('name') or merged_config.get('twitterDisplayName') or '')
+        merged_config['scope'] = str(token_payload.get('scope') or merged_config.get('scope') or ' '.join(request_state.scopes))
+        merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
+        merged_config['twitterAuthType'] = 'api'
+        updated = profile_registry.update_account(
+            account.id,
+            config=merged_config,
+            auth_type='oauth',
+            db_path=db_path,
+        )
+        callback_payload = {
+            'state': state_token,
+            'status': 'ok',
+            'accountId': updated.id,
+            'accountName': updated.account_name,
+            'accessToken': merged_config.get('accessToken', ''),
+            'refreshToken': merged_config.get('refreshToken', ''),
+            'twitterUserName': merged_config.get('twitterUserName', ''),
+            'twitterDisplayName': merged_config.get('twitterDisplayName', ''),
+            'twitterUserId': merged_config.get('twitterUserId', ''),
+            'scope': merged_config.get('scope', ''),
+            'accessTokenExpiresAt': merged_config.get('accessTokenExpiresAt', ''),
+            'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
+            'connectedAt': merged_config.get('connectedAt', ''),
+        }
+        x_review.complete_oauth_request(
+            state_token,
+            status='completed',
+            result={
+                'state': state_token,
+                'status': 'ok',
+                'accountId': updated.id,
+                'accountName': updated.account_name,
+                'twitterUserName': merged_config.get('twitterUserName', ''),
+                'scope': merged_config.get('scope', ''),
+            },
+            db_path=db_path,
+        )
+        account_events.record_event(
+            account_id=updated.id,
+            profile_id=updated.profile_id,
+            platform=updated.platform,
+            account_name=updated.account_name,
+            action='oauth_callback',
+            status='ok',
+            summary=f"Twitter connected: @{merged_config.get('twitterUserName') or updated.account_name}",
+            metadata={'state': state_token, 'scope': merged_config.get('scope', '')},
+            db_path=db_path,
+        )
+        html = f"""<html><body><script>
+        if (window.opener) {{
+          window.opener.postMessage({{ type: 'sau:twitter-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
+        }}
+        window.close();
+        </script><p>Twitter authorization completed. You may close this window.</p></body></html>"""
+        return Response(html, mimetype='text/html')
+    except Exception as exc:  # noqa: BLE001
+        x_review.complete_oauth_request(
+            state_token,
+            status='error',
+            error_text=str(exc),
+            result={'state': state_token, 'error': str(exc)},
+            db_path=db_path,
+        )
+        if request_state.account_id:
+            account_events.record_event(
+                account_id=request_state.account_id,
+                profile_id=request_state.profile_id,
+                platform=profile_registry.PLATFORM_TWITTER,
+                account_name=request_state.account_name or '',
+                action='oauth_callback',
+                status='error',
+                summary='Twitter OAuth callback failed',
+                error_text=str(exc),
+                metadata={'state': state_token},
+                db_path=db_path,
+            )
+        return Response(f"<html><body><p>Twitter callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
+
+
 @app.route('/admin/oauth/status', methods=['GET'])
 def oauth_admin_status():
     db_path = _current_db_path()
@@ -2888,6 +3120,7 @@ def oauth_admin_status():
         profile_registry.PLATFORM_FACEBOOK,
         profile_registry.PLATFORM_INSTAGRAM,
         profile_registry.PLATFORM_THREADS,
+        profile_registry.PLATFORM_TWITTER,
     }:
         return jsonify({'code': 400, 'msg': 'Unsupported platform for OAuth status', 'data': None}), 400
 
@@ -2910,6 +3143,10 @@ def oauth_admin_status():
         redirect_uri = _threads_callback_base_url()
         request_state = threads_review.latest_oauth_request(account_id=account_id, db_path=db_path)
         products = ['Threads API OAuth']
+    elif platform == profile_registry.PLATFORM_TWITTER:
+        redirect_uri = _twitter_callback_base_url()
+        request_state = x_review.latest_oauth_request(account_id=account_id, db_path=db_path)
+        products = ['Twitter/X OAuth 2.0']
 
     events = account_events.list_events(limit=25, account_id=account_id, platform=platform, db_path=db_path)
     last_start = next((event for event in events if event.action == 'oauth_start'), None)

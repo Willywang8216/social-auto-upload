@@ -1105,50 +1105,59 @@ def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access
 
 
 def publish_twitter_sync(account, payload: dict, *, session=None) -> list[Any]:
-    """Publish a tweet with optional media via the X API v2 (OAuth 1.0a)."""
+    """Publish a tweet with optional media via the X API v2."""
     config = dict(account.config or {})
-    api_key = str(_config_value(config, "apiKey", default_env="X_API_KEY") or "").strip()
-    api_key_secret = str(_config_value(config, "apiKeySecret", default_env="X_API_KEY_SECRET") or "").strip()
-    access_token = str(_config_value(config, "accessToken", default_env="X_ACCESS_TOKEN") or "").strip()
-    access_token_secret = str(_config_value(config, "accessTokenSecret", default_env="X_ACCESS_TOKEN_SECRET") or "").strip()
 
-    if not all([api_key, api_key_secret, access_token, access_token_secret]):
+    # Check if we have OAuth 2.0 token (from PKCE flow)
+    oauth2_token = str(config.get("accessToken") or "").strip()
+    has_oauth1 = all([
+        str(_config_value(config, "apiKey", default_env="X_API_KEY") or "").strip(),
+        str(_config_value(config, "apiKeySecret", default_env="X_API_KEY_SECRET") or "").strip(),
+        str(_config_value(config, "accessToken", default_env="X_ACCESS_TOKEN") or "").strip(),
+        str(_config_value(config, "accessTokenSecret", default_env="X_ACCESS_TOKEN_SECRET") or "").strip(),
+    ])
+
+    if not oauth2_token and not has_oauth1:
         raise PreparedPublishError(
-            "Twitter API publish requires apiKey, apiKeySecret, accessToken, accessTokenSecret (or their Env equivalents)"
+            "Twitter publish requires either OAuth 2.0 tokens (via Connect button) or OAuth 1.0a credentials"
         )
 
     http = _get_session(session)
     message = _payload_message(payload)
     media = _extract_media(payload)
 
-    # Upload media first (v1.1 endpoint)
+    # Upload media first (v1.1 endpoint requires OAuth 1.0a)
     media_ids = []
-    for item in media["images"][:4] + media["videos"][:1]:
-        local_path = item.get("local_path")
-        if local_path:
-            mid = _x_media_upload(
-                file_path=local_path,
-                api_key=api_key, api_key_secret=api_key_secret,
-                access_token=access_token, access_token_secret=access_token_secret,
-                session=http,
+    if media["images"][:4] + media["videos"][:1]:
+        api_key = str(_config_value(config, "apiKey", default_env="X_API_KEY") or "").strip()
+        api_key_secret = str(_config_value(config, "apiKeySecret", default_env="X_API_KEY_SECRET") or "").strip()
+        access_token = str(_config_value(config, "accessToken", default_env="X_ACCESS_TOKEN") or "").strip()
+        access_token_secret = str(_config_value(config, "accessTokenSecret", default_env="X_ACCESS_TOKEN_SECRET") or "").strip()
+        if not all([api_key, api_key_secret, access_token, access_token_secret]):
+            raise PreparedPublishError(
+                "Twitter media upload requires OAuth 1.0a credentials (apiKey, apiKeySecret, accessToken, accessTokenSecret)"
             )
-            media_ids.append(mid)
+        for item in media["images"][:4] + media["videos"][:1]:
+            local_path = item.get("local_path")
+            if local_path:
+                mid = _x_media_upload(
+                    file_path=local_path,
+                    api_key=api_key, api_key_secret=api_key_secret,
+                    access_token=access_token, access_token_secret=access_token_secret,
+                    session=http,
+                )
+                media_ids.append(mid)
 
     # Create tweet (v2 endpoint)
     tweet_data: dict[str, Any] = {"text": message}
     if media_ids:
         tweet_data["media"] = {"media_ids": media_ids}
 
+    headers = _twitter_auth_headers(config, method="POST", url=X_TWEET_URL)
+    headers["Content-Type"] = "application/json"
     resp = http.post(
         X_TWEET_URL,
-        headers={
-            "Authorization": _x_auth_header(
-                method="POST", url=X_TWEET_URL,
-                consumer_key=api_key, token=access_token,
-                consumer_secret=api_key_secret, token_secret=access_token_secret,
-            ),
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         data=json.dumps(tweet_data),
         timeout=120,
     )
@@ -1156,32 +1165,66 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> list[Any]:
     return [_response_payload(resp)]
 
 
-def validate_twitter_config_live(config: dict[str, Any], *, session=None) -> dict:
-    """Validate Twitter/X API credentials by fetching the authenticated user's info."""
+def _twitter_auth_headers(config: dict[str, Any], *, method: str, url: str) -> dict[str, str]:
+    """Return Authorization headers for Twitter, preferring OAuth 2.0 over 1.0a."""
+    # OAuth 2.0 Bearer token (from OAuth PKCE flow stored in config)
+    oauth2_token = str(config.get("accessToken") or "").strip()
+    if oauth2_token:
+        return {"Authorization": f"Bearer {oauth2_token}"}
+
+    # OAuth 1.0a (from env vars or config overrides)
     api_key = str(_config_value(config, "apiKey", default_env="X_API_KEY") or "").strip()
     api_key_secret = str(_config_value(config, "apiKeySecret", default_env="X_API_KEY_SECRET") or "").strip()
     access_token = str(_config_value(config, "accessToken", default_env="X_ACCESS_TOKEN") or "").strip()
     access_token_secret = str(_config_value(config, "accessTokenSecret", default_env="X_ACCESS_TOKEN_SECRET") or "").strip()
 
-    if not all([api_key, api_key_secret, access_token, access_token_secret]):
-        raise PreparedPublishError(
-            "Twitter validation requires apiKey, apiKeySecret, accessToken, accessTokenSecret (or their Env equivalents / .env defaults)"
-        )
-
-    http = _get_session(session)
-    resp = http.get(
-        X_ME_URL,
-        headers={
+    if all([api_key, api_key_secret, access_token, access_token_secret]):
+        return {
             "Authorization": _x_auth_header(
-                method="GET", url=X_ME_URL,
+                method=method, url=url,
                 consumer_key=api_key, token=access_token,
                 consumer_secret=api_key_secret, token_secret=access_token_secret,
-            ),
-        },
-        timeout=120,
+            )
+        }
+
+    raise PreparedPublishError(
+        "Twitter requires either OAuth 2.0 tokens (via Connect button) or OAuth 1.0a credentials (apiKey, apiKeySecret, accessToken, accessTokenSecret)"
     )
+
+
+def validate_twitter_config_live(config: dict[str, Any], *, session=None) -> dict:
+    """Validate Twitter/X API credentials by fetching the authenticated user's info."""
+    http = _get_session(session)
+    headers = _twitter_auth_headers(config, method="GET", url=X_ME_URL)
+    resp = http.get(X_ME_URL, headers=headers, timeout=120)
     _raise_for_status(resp)
     return _response_payload(resp)
+
+
+def refresh_twitter_access_token(config: dict[str, Any], *, session=None) -> dict:
+    """Refresh a Twitter OAuth 2.0 access token using the stored refresh token."""
+    from myUtils import x_auth as _x_auth
+
+    refresh_token = str(config.get("refreshToken") or "").strip()
+    if not refresh_token:
+        raise PreparedPublishError("Twitter refresh requires a refreshToken (re-authorize via Connect button)")
+
+    http = _get_session(session)
+    token_payload = _x_auth.refresh_access_token(refresh_token=refresh_token, session=http)
+    access_token = str(token_payload.get("access_token") or "")
+    if not access_token:
+        raise PreparedPublishError("Twitter token response did not include access_token")
+
+    user_info = _x_auth.fetch_user_info(access_token=access_token, session=http) if access_token else {}
+
+    return {
+        "access_token": access_token,
+        "refresh_token": token_payload.get("refresh_token") or refresh_token,
+        "expires_in": token_payload.get("expires_in"),
+        "scope": token_payload.get("scope", ""),
+        "token_type": token_payload.get("token_type", "bearer"),
+        "me": user_info,
+    }
 
 
 def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
