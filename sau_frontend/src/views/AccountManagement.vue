@@ -276,9 +276,6 @@
             <template v-else-if="accountForm.platform === 'discord'">
               使用 Discord Webhook。請先在 Discord 頻道設定 → 整合 → Webhook 中建立 Webhook，複製 URL。
             </template>
-            <template v-else-if="accountForm.platform === 'twitter'">
-              X / Twitter 支援兩種方式：Cookie（上傳 storage_state JSON）或 OAuth 2.0 API。<br/>
-              Cookie 模式使用瀏覽器登入取得 cookie；API 模式使用 OAuth 2.0 授權，支持自動 token 刷新。</template>
           </div>
           <template v-if="accountForm.platform === 'telegram'">
             <AccountTextFieldList :fields="telegramFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
@@ -286,33 +283,40 @@
           <template v-else-if="accountForm.platform === 'discord'">
             <AccountTextFieldList :fields="discordFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
           </template>
-          <template v-else-if="accountForm.platform === 'twitter'">
-            <el-form-item label="Auth type">
-              <el-select v-model="accountForm.twitterAuthType" style="width: 100%">
-                <el-option label="Cookie-based (legacy)" value="cookie" />
-                <el-option label="OAuth 2.0 API" value="api" />
-              </el-select>
+        </template>
+
+        <!-- Twitter add flow: supports both cookie and OAuth 2.0 -->
+        <template v-if="dialogType === 'add' && isStructuredAccountForm && accountForm.platform === 'twitter'">
+          <el-divider content-position="left">X / Twitter 設定</el-divider>
+          <div class="field-hint" style="margin-bottom: 12px;">
+            X / Twitter 支援兩種方式：Cookie（瀏覽器登入）或 OAuth 2.0 API。<br/>
+            Cookie 模式使用瀏覽器登入取得 cookie；API 模式使用 OAuth 2.0 授權，支持自動 token 刷新。
+          </div>
+          <el-form-item label="Auth type">
+            <el-select v-model="accountForm.twitterAuthType" style="width: 100%">
+              <el-option label="Cookie-based (browser login)" value="cookie" />
+              <el-option label="OAuth 2.0 API" value="api" />
+            </el-select>
+          </el-form-item>
+          <template v-if="accountForm.twitterAuthType === 'cookie'">
+            <div class="quick-connect-row" style="margin-bottom: 10px;">
+              <el-button :type="'primary'" plain size="large" style="width:100%" @click="acquireCookie()">
+                Login with Browser
+              </el-button>
+            </div>
+            <div class="field-hint">點擊後彈出瀏覽器，在 X 登入後 cookie 會自動儲存到 <code>cookies/twitter/&lt;profile&gt;/&lt;name&gt;.json</code></div>
+            <el-form-item label="Cookie 路徑">
+              <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
             </el-form-item>
-            <template v-if="accountForm.twitterAuthType === 'cookie'">
-              <div class="quick-connect-row" style="margin-bottom: 10px;">
-                <el-button :type="'primary'" plain size="large" style="width:100%" @click="acquireCookie()">
-                  Login with Browser
-                </el-button>
-              </div>
-              <div class="field-hint">點擊後彈出瀏覽器，在 X 登入後 cookie 會自動儲存到 <code>cookies/twitter/&lt;profile&gt;/&lt;name&gt;.json</code></div>
-              <el-form-item label="Cookie 路徑">
-                <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
-              </el-form-item>
-            </template>
-            <template v-else>
-              <div class="quick-connect-row" style="margin-bottom: 10px;">
-                <el-button :type="'primary'" plain size="large" style="width:100%" @click="connectWithTwitterApi()">
-                  Connect with X / Twitter (OAuth 2.0)
-                </el-button>
-              </div>
-              <div class="field-hint">通過 OAuth 2.0 授權連接 X / Twitter 帳號，支持自動 token 刷新</div>
-              <AccountTextFieldList :fields="twitterFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-            </template>
+          </template>
+          <template v-else>
+            <div class="quick-connect-row" style="margin-bottom: 10px;">
+              <el-button :type="'primary'" plain size="large" style="width:100%" @click="connectWithTwitterApi()">
+                Connect with X / Twitter (OAuth 2.0)
+              </el-button>
+            </div>
+            <div class="field-hint">通過 OAuth 2.0 授權連接 X / Twitter 帳號，支持自動 token 刷新</div>
+            <AccountTextFieldList :fields="twitterFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
           </template>
         </template>
 
@@ -1566,7 +1570,10 @@ async function quickConnect() {
   else if (platform === 'reddit') await connectWithReddit()
   else if (platform === 'threads') await connectWithThreads()
   else if (platform === 'youtube') await connectWithYouTube()
-  else if (platform === 'twitter') await connectWithTwitterApi()
+  else if (platform === 'twitter') {
+    if (accountForm.twitterAuthType === 'cookie') await acquireCookie()
+    else await connectWithTwitterApi()
+  }
   else ElMessage.warning('此平台不支援 OAuth 連線')
 }
 
