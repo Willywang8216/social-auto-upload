@@ -1740,7 +1740,9 @@ function handleRedditOauthMessage(event) {
   accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
   accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
-  ElMessage.success('Reddit 已連線，可直接儲存帳號設定')
+  ElMessage.success('Reddit 已連線')
+  dialogVisible.value = false
+  refreshAccounts()
 }
 
 function handleYouTubeOauthMessage(event) {
@@ -1758,7 +1760,9 @@ function handleYouTubeOauthMessage(event) {
   accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
   accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
-  ElMessage.success('YouTube 已連線，可直接儲存帳號設定')
+  ElMessage.success('YouTube 已連線')
+  dialogVisible.value = false
+  refreshAccounts()
 }
 
 function handleThreadsOauthMessage(event) {
@@ -1775,7 +1779,9 @@ function handleThreadsOauthMessage(event) {
   accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
   accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
-  ElMessage.success('Threads 已連線，可直接儲存帳號設定')
+  ElMessage.success('Threads 已連線')
+  dialogVisible.value = false
+  refreshAccounts()
 }
 
 async function finalizeMetaPageSelection(page, tokenData, accountName) {
@@ -1859,7 +1865,9 @@ function handleTikTokOauthMessage(event) {
   accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || ''
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
   loadTikTokHealth(accountForm.id || null)
-  ElMessage.success('TikTok 已連線，可直接儲存帳號設定')
+  ElMessage.success('TikTok 已連線')
+  dialogVisible.value = false
+  refreshAccounts()
 }
 
 const closeSSEConnection = () => {
