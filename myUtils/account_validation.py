@@ -95,7 +95,7 @@ def validate_structured_account_config(
         reddit_auth_type = str(config.get("redditAuthType") or "api").strip().lower()
         if reddit_auth_type == "cookie":
             if not _present(config.get("subreddits")):
-                errors.append("Reddit 帳號需要至少一個 subreddit")
+                warnings.append("Reddit 尚未設定 subreddits；儲存後可在編輯頁面中新增")
             if not cookie_path:
                 warnings.append("未指定 cookiePath；後端會自動產生預設路徑")
         else:
