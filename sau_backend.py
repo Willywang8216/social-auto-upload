@@ -40,6 +40,7 @@ from myUtils import threads_review
 from myUtils import tiktok_auth
 from myUtils import tiktok_review
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
+from myUtils.login import reddit_cookie_gen, twitter_cookie_gen
 from myUtils.postVideo import (
     post_video_DouYin,
     post_video_ks,
@@ -63,6 +64,10 @@ LEGACY_PLATFORM_CODES = {
     7: "twitter",
 }
 TWITTER_PLATFORM_ALIASES = {"twitter", "x"}
+COOKIE_ACQUISITION_GENERATORS = {
+    "reddit": reddit_cookie_gen,
+    "twitter": twitter_cookie_gen,
+}
 
 active_queues = {}
 _ACCOUNT_MAINTENANCE_STATE = {
@@ -759,8 +764,45 @@ def delete_account():
 def login():
     # When the browser simply visits /login without SSE parameters, serve the
     # SPA so that hash-based client-side routing takes over.
-    if not request.args.get('type') and not request.args.get('id'):
+    if not request.args.get('type') and not request.args.get('id') and not request.args.get('accountId'):
         return send_from_directory(str(_frontend_index_dir()), 'index.html')
+
+    account_id_raw = request.args.get('accountId')
+
+    # New cookie-acquire flow for structured accounts (Reddit, Twitter, etc.)
+    if account_id_raw:
+        db_path = _current_db_path()
+        try:
+            account = profile_registry.get_account(int(account_id_raw), db_path=db_path)
+        except (ValueError, LookupError):
+            return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
+
+        generator = COOKIE_ACQUISITION_GENERATORS.get(account.platform)
+        if generator is None:
+            return jsonify({"code": 400, "msg": f"No browser cookie flow for {account.platform}", "data": None}), 400
+
+        cookie_path = account.cookie_path
+        if not cookie_path:
+            profile = profile_registry.get_profile(account.profile_id, db_path=db_path)
+            cookie_path = str(profiles.resolve_cookie_path(account.platform, profile.slug, account.account_name))
+            profile_registry.update_account(account.id, cookie_path=cookie_path, db_path=db_path)
+
+        queue_id = f"cookie:{account.platform}:{account.id}"
+        status_queue = Queue()
+        active_queues[queue_id] = status_queue
+
+        thread = threading.Thread(
+            target=lambda gen, path, q: asyncio.new_event_loop().run_until_complete(gen(path, q)),
+            args=(generator, str(cookie_path), status_queue),
+            daemon=True,
+        )
+        thread.start()
+        response = Response(sse_stream(status_queue, login_id=queue_id), mimetype='text/event-stream')
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['X-Accel-Buffering'] = 'no'
+        response.headers['Content-Type'] = 'text/event-stream'
+        response.headers['Connection'] = 'keep-alive'
+        return response
 
     # 1 小红书 2 视频号 3 抖音 4 快手
     type = request.args.get('type')

@@ -1209,8 +1209,8 @@ def refresh_youtube_access_token(config: dict[str, Any], *, session=None) -> dic
     if not channel_id:
         raise PreparedPublishError("YouTube refresh requires channelId")
     http = _get_session(session)
-    client_id = str(_config_value(config, "clientId") or "").strip()
-    client_secret = str(_config_value(config, "clientSecret") or "").strip()
+    client_id = str(_config_value(config, "clientId", default_env="YT_CLIENT_ID") or "").strip()
+    client_secret = str(_config_value(config, "clientSecret", default_env="YT_CLIENT_SECRET") or "").strip()
     refresh_token = str(_config_value(config, "refreshToken") or "").strip()
     if not client_id or not client_secret or not refresh_token:
         raise PreparedPublishError(
@@ -1246,8 +1246,8 @@ def refresh_youtube_access_token(config: dict[str, Any], *, session=None) -> dic
 
 
 def _google_access_token(config: dict[str, Any], *, session=None) -> str:
-    client_id = str(_config_value(config, "clientId") or "").strip()
-    client_secret = str(_config_value(config, "clientSecret") or "").strip()
+    client_id = str(_config_value(config, "clientId", default_env="YT_CLIENT_ID") or "").strip()
+    client_secret = str(_config_value(config, "clientSecret", default_env="YT_CLIENT_SECRET") or "").strip()
     refresh_token = str(_config_value(config, "refreshToken") or "").strip()
     if not client_id or not client_secret or not refresh_token:
         raise PreparedPublishError(

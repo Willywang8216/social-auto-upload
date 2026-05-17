@@ -2,16 +2,57 @@
   <div class="oauth-review-status">
     <div class="page-header">
       <div class="page-header-left">
+        <el-button v-if="platform" text @click="backToAll">
+          <el-icon><ArrowLeft /></el-icon> 返回總覽
+        </el-button>
         <h1>{{ title }}</h1>
-        <el-select v-if="!platform" v-model="selectedPlatform" placeholder="選擇平台" style="width: 200px; margin-left: 16px;" @change="onPlatformChange">
+        <el-select
+          v-if="!platform"
+          v-model="selectedPlatform"
+          placeholder="選擇平台篩選"
+          style="width: 200px; margin-left: 16px;"
+          clearable
+          @change="onPlatformChange"
+        >
           <el-option v-for="p in OAUTH_PLATFORMS" :key="p.value" :label="p.label" :value="p.value" />
         </el-select>
       </div>
-      <el-button type="primary" @click="refreshStatus" :loading="loading" :disabled="!platform">Refresh</el-button>
+      <el-button type="primary" @click="refreshStatus" :loading="loading">Refresh</el-button>
     </div>
 
-    <el-empty v-if="!platform" description="請選擇一個 OAuth 平台查看連線狀態" :image-size="120" />
+    <!-- All-platforms summary view -->
+    <template v-if="!platform">
+      <el-row :gutter="20">
+        <el-col v-for="p in OAUTH_PLATFORMS" :key="p.value" :span="8" style="margin-bottom: 16px;">
+          <el-card
+            shadow="hover"
+            :class="['platform-summary-card', { clickable: allStatuses[p.value] }]"
+            @click="allStatuses[p.value] && router.push({ path: `/oauth-review/${p.value}` })"
+          >
+            <template #header>
+              <div class="platform-card-header">
+                <span>{{ p.label }}</span>
+                <el-tag
+                  v-if="allStatuses[p.value]"
+                  :type="allStatuses[p.value].lastCallback?.status === 'ok' ? 'success' : (allStatuses[p.value].lastCallback ? 'danger' : 'info')"
+                  size="small"
+                >
+                  {{ allStatuses[p.value].lastCallback ? (allStatuses[p.value].lastCallback.status === 'ok' ? '連線正常' : '連線失敗') : '無資料' }}
+                </el-tag>
+              </div>
+            </template>
+            <template v-if="allStatuses[p.value]">
+              <div class="kv compact"><span>Account</span><strong>{{ allStatuses[p.value].account?.account_name || '—' }}</strong></div>
+              <div class="kv compact"><span>Last check</span><strong>{{ allStatuses[p.value].lastCallback?.created_at || '—' }}</strong></div>
+              <div class="kv compact"><span>Expires</span><strong>{{ allStatuses[p.value].expiresAt || '—' }}</strong></div>
+            </template>
+            <el-empty v-else description="尚未設定" :image-size="60" />
+          </el-card>
+        </el-col>
+      </el-row>
+    </template>
 
+    <!-- Single-platform detail view -->
     <template v-if="platform">
     <el-row :gutter="20">
       <el-col :span="12">
@@ -101,6 +142,7 @@
 </template>
 
 <script setup>
+import { ArrowLeft } from '@element-plus/icons-vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -119,6 +161,7 @@ const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
 const selectedPlatform = ref('')
+const allStatuses = reactive({})
 const status = reactive({
   platform: '',
   accountId: null,
@@ -137,7 +180,7 @@ const status = reactive({
 })
 
 const platform = computed(() => {
-  const raw = route.query.platform || route.params.platform || selectedPlatform.value
+  const raw = route.query.platform || route.params.platform || ''
   return Array.isArray(raw) ? raw[0] : (raw || '')
 })
 const accountId = computed(() => {
@@ -185,7 +228,11 @@ const credentialRows = computed(() => {
   return rows.filter((row) => row.value)
 })
 
-const title = computed(() => `${platform.value || 'OAuth'} status`)
+const title = computed(() => platform.value ? `${platform.value} status` : 'OAuth 狀態總覽')
+
+function backToAll() {
+  router.replace({ path: '/oauth-review' })
+}
 
 function goToAccountQueue() {
   const query = buildAccountQueueNavigationQuery({
@@ -200,16 +247,35 @@ function goToAccountQueue() {
 }
 
 function onPlatformChange(value) {
-  selectedPlatform.value = value
-  router.replace({ path: `/oauth-review/${value}` })
+  if (value) {
+    router.push({ path: `/oauth-review/${value}` })
+  }
+}
+
+async function fetchAllStatuses() {
+  const results = await Promise.allSettled(
+    OAUTH_PLATFORMS.map(async (p) => {
+      try {
+        const response = await oauthApi.getStatus(p.value, null)
+        if (response?.data) {
+          allStatuses[p.value] = response.data
+        }
+      } catch {
+        allStatuses[p.value] = null
+      }
+    })
+  )
 }
 
 async function refreshStatus() {
-  if (!platform.value) return
   loading.value = true
   try {
-    const response = await oauthApi.getStatus(platform.value, accountId.value)
-    Object.assign(status, response?.data || {})
+    if (platform.value) {
+      const response = await oauthApi.getStatus(platform.value, accountId.value)
+      Object.assign(status, response?.data || {})
+    } else {
+      await fetchAllStatuses()
+    }
   } catch (error) {
     console.error('載入 OAuth status 失敗:', error)
     ElMessage.error(error?.message || '載入 OAuth status 失敗')
@@ -219,7 +285,11 @@ async function refreshStatus() {
 }
 
 onMounted(refreshStatus)
-watch([platform, accountId], refreshStatus)
+watch([platform, accountId], () => {
+  if (platform.value) {
+    refreshStatus()
+  }
+})
 </script>
 
 <style lang="scss" scoped>
@@ -238,6 +308,29 @@ watch([platform, accountId], refreshStatus)
     h1 {
       margin: 0;
       font-size: 24px;
+    }
+  }
+
+  .platform-summary-card {
+    cursor: default;
+
+    &.clickable {
+      cursor: pointer;
+    }
+
+    .platform-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .kv.compact {
+      margin-bottom: 6px;
+      font-size: 13px;
+
+      span {
+        width: 80px;
+      }
     }
   }
 

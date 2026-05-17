@@ -29,6 +29,7 @@
         </el-select>
         <el-button plain :loading="maintenanceLoading" :disabled="bulkRefreshTargets.length < 1 && selectedProfileFilter === 'legacy'" @click="runMaintenanceSweep">維護刷新</el-button>
         <el-button type="primary" plain @click="openProfileDialog">新增 Profile</el-button>
+        <el-button v-if="selectedProfileId" plain @click="openEditProfileDialog">編輯 Profile</el-button>
       </div>
     </div>
 
@@ -125,7 +126,7 @@
 
     <el-dialog
       v-model="profileDialogVisible"
-      title="新增 Profile"
+      :title="profileDialogMode === 'add' ? '新增 Profile' : '編輯 Profile'"
       width="560px"
       :close-on-click-modal="false"
     >
@@ -152,7 +153,7 @@
       <template #footer>
         <span class="dialog-footer">
           <el-button @click="profileDialogVisible = false">取消</el-button>
-          <el-button type="primary" @click="submitProfileForm">建立 Profile</el-button>
+          <el-button type="primary" @click="submitProfileForm">{{ profileDialogMode === 'add' ? '建立 Profile' : '更新 Profile' }}</el-button>
         </span>
       </template>
     </el-dialog>
@@ -242,8 +243,14 @@
             </el-form-item>
           </template>
           <template v-else>
+            <div class="quick-connect-row" style="margin-bottom: 10px;">
+              <el-button :type="'primary'" plain size="large" style="width:100%" @click="acquireCookie()">
+                Login with Browser
+              </el-button>
+            </div>
+            <div class="field-hint">點擊後彈出瀏覽器，在 Reddit 登入後 cookie 會自動儲存到 <code>cookies/reddit/&lt;profile&gt;/&lt;name&gt;.json</code></div>
             <el-form-item label="Cookie 路徑">
-              <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
+              <el-input v-model="accountForm.cookiePath" placeholder="自動產生" />
             </el-form-item>
           </template>
           <el-form-item label="Subreddits">
@@ -287,6 +294,12 @@
               </el-select>
             </el-form-item>
             <template v-if="accountForm.twitterAuthType === 'cookie'">
+              <div class="quick-connect-row" style="margin-bottom: 10px;">
+                <el-button :type="'primary'" plain size="large" style="width:100%" @click="acquireCookie()">
+                  Login with Browser
+                </el-button>
+              </div>
+              <div class="field-hint">點擊後彈出瀏覽器，在 X 登入後 cookie 會自動儲存到 <code>cookies/twitter/&lt;profile&gt;/&lt;name&gt;.json</code></div>
               <el-form-item label="Cookie 路徑">
                 <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
               </el-form-item>
@@ -337,6 +350,12 @@
               <AccountTextFieldList :fields="redditFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
             </template>
             <template v-else>
+              <div class="quick-connect-row" style="margin-bottom: 10px;">
+                <el-button :type="'primary'" plain size="large" style="width:100%" @click="acquireCookie()">
+                  Login with Browser
+                </el-button>
+              </div>
+              <div class="field-hint">點擊後彈出瀏覽器，在 Reddit 登入後 cookie 會自動儲存到 <code>cookies/reddit/&lt;profile&gt;/&lt;name&gt;.json</code></div>
               <el-form-item label="Cookie 路徑">
                 <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
               </el-form-item>
@@ -483,6 +502,12 @@
               </el-select>
             </el-form-item>
             <template v-if="accountForm.twitterAuthType === 'cookie'">
+              <div class="quick-connect-row" style="margin-bottom: 10px;">
+                <el-button :type="'primary'" plain size="large" style="width:100%" @click="acquireCookie()">
+                  Login with Browser
+                </el-button>
+              </div>
+              <div class="field-hint">點擊後彈出瀏覽器，在 X 登入後 cookie 會自動儲存到 <code>cookies/twitter/&lt;profile&gt;/&lt;name&gt;.json</code></div>
               <el-form-item label="Cookie 路徑">
                 <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
               </el-form-item>
@@ -606,11 +631,18 @@ const syncingRouteFilters = ref(false)
 
 const accountPlatformTabs = PROFILE_PLATFORM_OPTIONS
 const profileOptions = computed(() => profilesStore.profiles)
+const selectedProfileId = computed(() => {
+  const val = selectedProfileFilter.value
+  if (val === 'all' || val === 'legacy' || !val) return null
+  return Number(val)
+})
 
 const dialogVisible = ref(false)
 const dialogType = ref('add')
 const accountFormRef = ref(null)
 const profileDialogVisible = ref(false)
+const profileDialogMode = ref('add')  // 'add' or 'edit'
+const editingProfileId = ref(null)
 const profileFormRef = ref(null)
 
 const makeEmptyAccountForm = () => ({
@@ -994,6 +1026,8 @@ const loadStructuredFieldsFromConfig = (config) => {
 }
 
 const openProfileDialog = () => {
+  profileDialogMode.value = 'add'
+  editingProfileId.value = null
   Object.assign(profileForm, {
     name: '',
     description: '',
@@ -1005,6 +1039,31 @@ const openProfileDialog = () => {
   profileDialogVisible.value = true
 }
 
+const openEditProfileDialog = () => {
+  const profileId = selectedProfileId.value
+  if (!profileId) {
+    ElMessage.error('請先選擇要編輯的 Profile')
+    return
+  }
+  const profile = profilesStore.profiles.find(p => p.id === profileId)
+  if (!profile) {
+    ElMessage.error('找不到該 Profile')
+    return
+  }
+  profileDialogMode.value = 'edit'
+  editingProfileId.value = profileId
+  const settings = profile.settings || {}
+  Object.assign(profileForm, {
+    name: profile.name || '',
+    description: profile.description || '',
+    systemPrompt: settings.systemPrompt || '',
+    watermark: settings.watermark || '',
+    contactDetails: settings.contactDetails || '',
+    ctaText: settings.ctaText || ''
+  })
+  profileDialogVisible.value = true
+}
+
 const submitProfileForm = async () => {
   if (!profileForm.name.trim()) {
     ElMessage.error('請輸入 Profile 名稱')
@@ -1012,7 +1071,7 @@ const submitProfileForm = async () => {
   }
 
   try {
-    const created = await profilesApi.create({
+    const payload = {
       name: profileForm.name,
       description: profileForm.description,
       settings: {
@@ -1021,14 +1080,20 @@ const submitProfileForm = async () => {
         contactDetails: profileForm.contactDetails,
         ctaText: profileForm.ctaText
       }
-    })
+    }
+    if (profileDialogMode.value === 'edit' && editingProfileId.value) {
+      await profilesApi.update(editingProfileId.value, payload)
+      ElMessage.success('Profile 更新成功')
+    } else {
+      const created = await profilesApi.create(payload)
+      selectedProfileFilter.value = String(created.data.id)
+      ElMessage.success('Profile 建立成功')
+    }
     await profilesStore.refreshProfiles()
     profileDialogVisible.value = false
-    selectedProfileFilter.value = String(created.data.id)
-    ElMessage.success('Profile 建立成功')
   } catch (error) {
-    console.error('建立 Profile 失敗:', error)
-    ElMessage.error(error?.message || '建立 Profile 失敗')
+    console.error('Profile 操作失敗:', error)
+    ElMessage.error(error?.message || 'Profile 操作失敗')
   }
 }
 
@@ -1431,7 +1496,7 @@ async function ensureAccountSaved() {
     return false
   }
   try {
-    const authType = (accountForm.platform === 'reddit' && accountForm.redditAuthType === 'cookie') ? 'cookie' : 'oauth'
+    const authType = ((accountForm.platform === 'reddit' && accountForm.redditAuthType === 'cookie') || (accountForm.platform === 'twitter' && accountForm.twitterAuthType === 'cookie')) ? 'cookie' : 'oauth'
     const payload = {
       profileId: accountForm.profileId,
       platform: accountForm.platform,
@@ -1874,6 +1939,48 @@ const closeSSEConnection = () => {
   if (eventSource) {
     eventSource.close()
     eventSource = null
+  }
+}
+
+async function acquireCookie() {
+  if (!await ensureAccountSaved()) return
+  closeSSEConnection()
+  sseConnecting.value = true
+  qrCodeData.value = ''
+  loginStatus.value = ''
+
+  const url = appendAuthQuery(buildApiUrl(`/login?accountId=${accountForm.id}`))
+  eventSource = new EventSource(url)
+
+  eventSource.onmessage = (event) => {
+    const data = event.data
+    if (data === '200') {
+      loginStatus.value = data
+      setTimeout(() => {
+        closeSSEConnection()
+        setTimeout(() => {
+          dialogVisible.value = false
+          sseConnecting.value = false
+          ElMessage.success('Cookie 已成功儲存')
+          refreshAccounts()
+        }, 1000)
+      }, 1000)
+    } else if (data === '500') {
+      loginStatus.value = data
+      closeSSEConnection()
+      setTimeout(() => {
+        sseConnecting.value = false
+        qrCodeData.value = ''
+        loginStatus.value = ''
+      }, 2000)
+    }
+  }
+
+  eventSource.onerror = (error) => {
+    console.error('SSE 連線錯誤:', error)
+    ElMessage.error('連線伺服器失敗，請稍後再試')
+    closeSSEConnection()
+    sseConnecting.value = false
   }
 }
 

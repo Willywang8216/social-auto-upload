@@ -26,6 +26,111 @@ def get_browser_options():
 
     return options
 
+
+async def _browser_cookie_gen(
+    login_url: str,
+    cookie_path: str,
+    status_queue,
+    *,
+    success_check=None,
+    login_timeout: int = 300,
+) -> None:
+    """Generic browser cookie capture: navigate to login_url, wait for user
+    to complete login, then save storage_state to cookie_path.
+
+    success_check: optional callable(page) -> bool to detect successful login
+    """
+    url_changed_event = asyncio.Event()
+    original_url = ""
+
+    async def on_url_change():
+        if page.url != original_url and "/login" not in page.url.lower():
+            url_changed_event.set()
+
+    async with async_playwright() as playwright:
+        options = get_browser_options()
+        browser = await playwright.chromium.launch(**options)
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900},
+        )
+        context = await set_init_script(context)
+        page = await context.new_page()
+        await page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
+        original_url = page.url
+        status_queue.put(login_url)
+
+        page.on('framenavigated',
+                lambda frame: asyncio.create_task(on_url_change()) if frame == page.main_frame else None)
+
+        try:
+            if success_check is not None:
+                deadline = asyncio.get_event_loop().time() + login_timeout
+                while True:
+                    if await success_check(page):
+                        break
+                    if asyncio.get_event_loop().time() > deadline:
+                        raise asyncio.TimeoutError("Login success check timed out")
+                    await asyncio.sleep(1.5)
+            else:
+                await asyncio.wait_for(url_changed_event.wait(), timeout=login_timeout)
+        except asyncio.TimeoutError:
+            print("Browser login timed out")
+            status_queue.put("500")
+            await page.close()
+            await context.close()
+            await browser.close()
+            return None
+
+        await asyncio.sleep(2)
+        Path(cookie_path).parent.mkdir(parents=True, exist_ok=True)
+        await context.storage_state(path=cookie_path)
+        await page.close()
+        await context.close()
+        await browser.close()
+        status_queue.put("200")
+
+
+async def reddit_cookie_gen(cookie_path: str, status_queue) -> None:
+    """Open Reddit login page, wait for user to log in, save storage_state."""
+
+    async def _is_logged_in(page):
+        try:
+            logged_in = await page.locator("text=Create Post").count() > 0
+            if logged_in:
+                await asyncio.sleep(0.5)
+            return logged_in
+        except Exception:
+            return False
+
+    await _browser_cookie_gen(
+        login_url="https://www.reddit.com/login",
+        cookie_path=cookie_path,
+        status_queue=status_queue,
+        success_check=_is_logged_in,
+    )
+
+
+async def twitter_cookie_gen(cookie_path: str, status_queue) -> None:
+    """Open X/Twitter login page, wait for user to log in, save storage_state."""
+
+    async def _is_logged_in(page):
+        try:
+            if (
+                await page.locator("a[aria-label='Profile']").count() > 0
+                or await page.locator("a[data-testid='AppTabBar_Profile_Link']").count() > 0
+            ):
+                return True
+            return "x.com/home" in page.url and await page.locator("text=What is happening").count() == 0
+        except Exception:
+            return False
+
+    await _browser_cookie_gen(
+        login_url="https://x.com/login",
+        cookie_path=cookie_path,
+        status_queue=status_queue,
+        success_check=_is_logged_in,
+    )
+
 # 抖音登录
 async def douyin_cookie_gen(id,status_queue):
     url_changed_event = asyncio.Event()

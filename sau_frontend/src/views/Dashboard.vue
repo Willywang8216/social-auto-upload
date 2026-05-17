@@ -284,7 +284,7 @@ import { materialApi } from '@/api/material'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { useProfilesStore } from '@/stores/profiles'
-import { ACCOUNT_PLATFORM_OPTIONS, LEGACY_ACCOUNT_PLATFORM_ORDER } from '@/utils/platforms'
+import { SUPPORTED_PLATFORM_TAGS } from '@/utils/platforms'
 import { buildAccountQueueNavigationQuery } from '@/utils/accountQueueRouting'
 
 const router = useRouter()
@@ -294,13 +294,8 @@ const profilesStore = useProfilesStore()
 const loading = ref(false)
 const healthSummary = ref({ total: 0, ready: 0, configured: 0, missing: 0, refreshable: 0, checkable: 0, expirySummary: { overdue: 0, expiringWithin24h: 0, expiringWithin7d: 0, reconnectRequired: 0 }, recentEventTotals: { total: 0, ok: 0, error: 0 }, expiringAccounts: [], recentEvents: [] })
 const maintenanceStatus = ref({ enabled: false, running: false, intervalSeconds: 0, lastFinishedAt: '', lastStartedAt: '', lastResult: null, lastError: null })
-const dashboardPlatforms = LEGACY_ACCOUNT_PLATFORM_ORDER
-  .map((publishSlug) =>
-    ACCOUNT_PLATFORM_OPTIONS.find((platform) => platform.publishSlug === publishSlug)
-  )
-  .filter(Boolean)
-  .map(({ publishSlug, label, tagType }) => ({
-    key: publishSlug,
+const dashboardPlatforms = SUPPORTED_PLATFORM_TAGS.map(({ label, tagType }) => ({
+    key: label,
     label,
     tagType
   }))
@@ -317,16 +312,16 @@ const accountStats = computed(() => {
   }
 })
 
-// 平台统计数据 - 从真实数据计算
+// 平台统计数据 - 从真实数据计算（包含所有 Legacy + 結構化帳號）
 const platformStats = computed(() => {
   const accounts = accountStore.accounts
-  const counts = dashboardPlatforms.reduce((result, platform) => {
-    result[platform.key] = accounts.filter(a => a.platform === platform.label).length
-    return result
-  }, {})
+  const counts = {}
+  for (const platform of SUPPORTED_PLATFORM_TAGS) {
+    counts[platform.label] = accounts.filter(a => a.platform === platform.label).length
+  }
 
   return {
-    total: dashboardPlatforms.filter(platform => counts[platform.key] > 0).length,
+    total: SUPPORTED_PLATFORM_TAGS.filter(platform => counts[platform.label] > 0).length,
     counts
   }
 })

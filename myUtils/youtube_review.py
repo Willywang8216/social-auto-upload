@@ -103,3 +103,15 @@ def complete_oauth_request(state_token: str, *, status: str, error_text: str | N
     if request is None:
         raise LookupError(f"YouTube OAuth request not found: {state_token}")
     return request
+
+
+def latest_oauth_request(*, account_id: int | None = None, db_path: Path | None = None) -> YouTubeOAuthRequest | None:
+    query = 'SELECT * FROM youtube_oauth_requests'
+    params: list[object] = []
+    if account_id is not None:
+        query += ' WHERE account_id = ?'
+        params.append(account_id)
+    query += ' ORDER BY requested_at DESC, state_token DESC LIMIT 1'
+    with _connect(db_path) as conn:
+        row = conn.execute(query, params).fetchone()
+    return _row_to_request(row) if row else None
