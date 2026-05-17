@@ -975,6 +975,7 @@ def _reddit_access_token(config: dict[str, Any], *, session=None) -> str:
 X_API_ROOT = "https://api.twitter.com"
 X_UPLOAD_URL = "https://upload.twitter.com/1.1/media/upload.json"
 X_TWEET_URL = f"{X_API_ROOT}/2/tweets"
+X_ME_URL = f"{X_API_ROOT}/2/users/me"
 
 
 def _x_oauth1_signature(
@@ -1153,6 +1154,34 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> list[Any]:
     )
     _raise_for_status(resp)
     return [_response_payload(resp)]
+
+
+def validate_twitter_config_live(config: dict[str, Any], *, session=None) -> dict:
+    """Validate Twitter/X API credentials by fetching the authenticated user's info."""
+    api_key = str(_config_value(config, "apiKey", default_env="X_API_KEY") or "").strip()
+    api_key_secret = str(_config_value(config, "apiKeySecret", default_env="X_API_KEY_SECRET") or "").strip()
+    access_token = str(_config_value(config, "accessToken", default_env="X_ACCESS_TOKEN") or "").strip()
+    access_token_secret = str(_config_value(config, "accessTokenSecret", default_env="X_ACCESS_TOKEN_SECRET") or "").strip()
+
+    if not all([api_key, api_key_secret, access_token, access_token_secret]):
+        raise PreparedPublishError(
+            "Twitter validation requires apiKey, apiKeySecret, accessToken, accessTokenSecret (or their Env equivalents / .env defaults)"
+        )
+
+    http = _get_session(session)
+    resp = http.get(
+        X_ME_URL,
+        headers={
+            "Authorization": _x_auth_header(
+                method="GET", url=X_ME_URL,
+                consumer_key=api_key, token=access_token,
+                consumer_secret=api_key_secret, token_secret=access_token_secret,
+            ),
+        },
+        timeout=120,
+    )
+    _raise_for_status(resp)
+    return _response_payload(resp)
 
 
 def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:

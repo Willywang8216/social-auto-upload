@@ -305,6 +305,12 @@
               </el-form-item>
             </template>
             <template v-else>
+              <div class="quick-connect-row" style="margin-bottom: 10px;">
+                <el-button :type="'primary'" plain size="large" style="width:100%" @click="connectWithTwitterApi()">
+                  Connect with X / Twitter
+                </el-button>
+              </div>
+              <div class="field-hint">使用 .env 中的 X_API_KEY / X_API_KEY_SECRET / X_ACCESS_TOKEN / X_ACCESS_TOKEN_SECRET 自動驗證連線</div>
               <AccountTextFieldList :fields="twitterFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
             </template>
           </template>
@@ -693,6 +699,8 @@ const makeEmptyAccountForm = () => ({
   telegramChatTitle: '',
   discordWebhookName: '',
   discordWebhookChannel: '',
+  twitterUserName: '',
+  twitterDisplayName: '',
   lastConnectionCheckAt: '',
   accessTokenEnv: '',
   publishMode: 'direct',
@@ -828,6 +836,8 @@ const twitterHealthRows = computed(() => [
   { label: 'Auth type', value: accountForm.twitterAuthType === 'api' ? 'API (env keys)' : 'Cookie' },
   { label: 'API Key', value: presentLabel(accountForm.apiKeyEnv, 'env-backed') },
   { label: 'Access Token', value: presentLabel(accountForm.accessTokenEnv, 'env-backed') },
+  { label: 'Username', value: accountForm.twitterUserName || '—' },
+  { label: 'Display name', value: accountForm.twitterDisplayName || '—' },
   { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
 ])
 const twitterHealthActions = computed(() => [
@@ -1022,6 +1032,8 @@ const loadStructuredFieldsFromConfig = (config) => {
   accountForm.apiKeyEnv = config.apiKeyEnv || ''
   accountForm.apiKeySecretEnv = config.apiKeySecretEnv || ''
   accountForm.accessTokenSecretEnv = config.accessTokenSecretEnv || ''
+  accountForm.twitterUserName = config.twitterUserName || ''
+  accountForm.twitterDisplayName = config.twitterDisplayName || ''
   accountForm.redditAuthType = config.redditAuthType || 'api'
 }
 
@@ -1686,6 +1698,22 @@ async function connectWithYouTube() {
   }
 }
 
+async function connectWithTwitterApi() {
+  if (!accountForm.profileId) { ElMessage.warning('請先選擇一個 Profile'); return }
+  if (!accountForm.name.trim()) { ElMessage.warning('請先輸入帳號名稱'); return }
+  if (accountForm.platform !== 'twitter') { ElMessage.warning('目前選擇的平台不是 Twitter'); return }
+  if (accountForm.twitterAuthType !== 'api') { ElMessage.warning('請先選擇 API 認證模式'); return }
+  if (!await ensureAccountSaved()) return
+
+  try {
+    await checkStructuredConnection('twitter')
+    ElMessage.success('Twitter API 連線驗證成功')
+    dialogVisible.value = false
+  } catch {
+    // checkStructuredConnection already shows error toast
+  }
+}
+
 async function checkStructuredConnection(expectedPlatform) {
   if (!accountForm.id) {
     ElMessage.warning('請先儲存帳號，再檢查連線')
@@ -1706,6 +1734,8 @@ async function checkStructuredConnection(expectedPlatform) {
     accountForm.telegramChatTitle = config.telegramChatTitle || accountForm.telegramChatTitle
     accountForm.discordWebhookName = config.discordWebhookName || accountForm.discordWebhookName
     accountForm.discordWebhookChannel = config.discordWebhookChannel || accountForm.discordWebhookChannel
+    accountForm.twitterUserName = config.twitterUserName || accountForm.twitterUserName
+    accountForm.twitterDisplayName = config.twitterDisplayName || accountForm.twitterDisplayName
     accountForm.lastConnectionCheckAt = config.lastConnectionCheckAt || accountForm.lastConnectionCheckAt
     ElMessage.success(`${account.platform} connection checked`)
   } catch (error) {
@@ -1944,35 +1974,30 @@ const closeSSEConnection = () => {
 
 async function acquireCookie() {
   if (!await ensureAccountSaved()) return
-  closeSSEConnection()
-  sseConnecting.value = true
+
+  // Close the dialog immediately so the user can see the browser window
+  dialogVisible.value = false
+  sseConnecting.value = false
   qrCodeData.value = ''
   loginStatus.value = ''
 
+  // Open SSE in background for cookie capture status
+  closeSSEConnection()
+  sseConnecting.value = true
   const url = appendAuthQuery(buildApiUrl(`/login?accountId=${accountForm.id}`))
   eventSource = new EventSource(url)
 
   eventSource.onmessage = (event) => {
     const data = event.data
     if (data === '200') {
-      loginStatus.value = data
-      setTimeout(() => {
-        closeSSEConnection()
-        setTimeout(() => {
-          dialogVisible.value = false
-          sseConnecting.value = false
-          ElMessage.success('Cookie 已成功儲存')
-          refreshAccounts()
-        }, 1000)
-      }, 1000)
-    } else if (data === '500') {
-      loginStatus.value = data
       closeSSEConnection()
-      setTimeout(() => {
-        sseConnecting.value = false
-        qrCodeData.value = ''
-        loginStatus.value = ''
-      }, 2000)
+      sseConnecting.value = false
+      ElMessage.success('Cookie 已成功儲存')
+      refreshAccounts()
+    } else if (data === '500') {
+      closeSSEConnection()
+      sseConnecting.value = false
+      ElMessage.error('Cookie 取得失敗，請稍後再試')
     }
   }
 

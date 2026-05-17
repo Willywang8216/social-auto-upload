@@ -1415,8 +1415,15 @@ def _run_account_connection_check(*, account_id: int, db_path: Path):
             config['discordWebhookName'] = result.get('name', config.get('discordWebhookName', ''))
             config['discordWebhookChannel'] = result.get('channel_id', config.get('discordWebhookChannel', ''))
             summary = f"Discord webhook: {config.get('discordWebhookName') or account.account_name}"
+        elif account.platform == profile_registry.PLATFORM_TWITTER:
+            result = prepared_publishers.validate_twitter_config_live(config)
+            twitter_data = result.get('data', {})
+            config['twitterUserId'] = twitter_data.get('id', config.get('twitterUserId', ''))
+            config['twitterUserName'] = twitter_data.get('username', config.get('twitterUserName', ''))
+            config['twitterDisplayName'] = twitter_data.get('name', config.get('twitterDisplayName', ''))
+            summary = f"Twitter user: @{config.get('twitterUserName') or account.account_name}"
         else:
-            raise ValueError('Connection check is implemented only for Facebook, Instagram, Threads, Telegram, and Discord')
+            raise ValueError('Connection check is implemented only for Facebook, Instagram, Threads, Telegram, Discord, and Twitter')
 
         config['lastConnectionCheckAt'] = now
         updated = profile_registry.update_account(
@@ -2873,6 +2880,8 @@ def oauth_admin_status():
     platform = str(request.args.get('platform', '') or '').strip().lower()
     raw_account_id = request.args.get('accountId')
     account_id = int(raw_account_id) if raw_account_id not in (None, '') and str(raw_account_id).isdigit() else None
+    if not platform:
+        return jsonify({'code': 200, 'msg': 'ok', 'data': {}}), 200
     if platform not in {
         profile_registry.PLATFORM_REDDIT,
         profile_registry.PLATFORM_YOUTUBE,
