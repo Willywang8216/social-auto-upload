@@ -48,8 +48,8 @@ export const discordFieldDefs = [
 ]
 
 export const twitterFieldDefs = [
-  { key: 'apiKeyEnv', label: 'API Key Env', placeholder: '例如：X_API_KEY' },
-  { key: 'apiKeySecretEnv', label: 'API Key Secret Env', placeholder: '例如：X_API_KEY_SECRET' },
-  { key: 'accessTokenEnv', label: 'Access Token Env', placeholder: '例如：X_ACCESS_TOKEN' },
-  { key: 'accessTokenSecretEnv', label: 'Access Token Secret Env', placeholder: '例如：X_ACCESS_TOKEN_SECRET' },
+  { key: 'apiKeyEnv', label: 'API Key Env', placeholder: '可留空，預設讀取 X_API_KEY' },
+  { key: 'apiKeySecretEnv', label: 'API Key Secret Env', placeholder: '可留空，預設讀取 X_API_KEY_SECRET' },
+  { key: 'accessTokenEnv', label: 'Access Token Env', placeholder: '可留空，預設讀取 X_ACCESS_TOKEN' },
+  { key: 'accessTokenSecretEnv', label: 'Access Token Secret Env', placeholder: '可留空，預設讀取 X_ACCESS_TOKEN_SECRET' },
 ]

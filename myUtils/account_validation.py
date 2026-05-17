@@ -42,13 +42,15 @@ SUPPORTED_VALIDATION_PLATFORMS = {
 }
 
 
-def _config_value(config: dict[str, Any], key: str) -> Any:
+def _config_value(config: dict[str, Any], key: str, *, default_env: str | None = None) -> Any:
     direct = config.get(key)
     if direct not in (None, ""):
         return direct
     env_name = config.get(f"{key}Env")
     if env_name:
         return {"env": str(env_name)}
+    if default_env:
+        return {"env": str(default_env)}
     return ""
 
 
@@ -90,27 +92,33 @@ def validate_structured_account_config(
         warnings.append("Patreon 目前僅支援內容產生 / 匯出，不支援直接 API 發佈")
 
     if platform == profiles.PLATFORM_REDDIT:
-        if not _present(config.get("subreddits")):
-            if auth_type == 'oauth':
-                warnings.append("Reddit 尚未設定 subreddits；儲存後可在編輯頁面中新增")
-            else:
+        reddit_auth_type = str(config.get("redditAuthType") or "api").strip().lower()
+        if reddit_auth_type == "cookie":
+            if not _present(config.get("subreddits")):
                 errors.append("Reddit 帳號需要至少一個 subreddit")
-        has_client_id = _present(_config_value(config, "clientId"))
-        has_client_secret = _present(_config_value(config, "clientSecret"))
-        has_refresh_token = _present(_config_value(config, "refreshToken"))
-        if auth_type == 'oauth' and not has_refresh_token:
-            # During OAuth add flow, the token will be filled after OAuth callback
-            warnings.append("Reddit refreshToken 可在 OAuth Connect 完成後自動回填")
-        elif not has_refresh_token:
-            errors.append("Reddit 帳號缺少 refreshToken 或 refreshTokenEnv")
-        if auth_type == 'oauth' and not has_client_id:
-            warnings.append("Reddit clientId 可在 OAuth Connect 時透過 env 變數自動讀取；若有 clientIdEnv 可忽略")
-        elif not has_client_id:
-            errors.append("Reddit 帳號缺少 clientId 或 clientIdEnv")
-        if auth_type == 'oauth' and not has_client_secret:
-            warnings.append("Reddit clientSecret 可在 OAuth Connect 時透過 env 變數自動讀取；若有 clientSecretEnv 可忽略")
-        elif not has_client_secret:
-            errors.append("Reddit 帳號缺少 clientSecret 或 clientSecretEnv")
+            if not cookie_path:
+                warnings.append("未指定 cookiePath；後端會自動產生預設路徑")
+        else:
+            if not _present(config.get("subreddits")):
+                if auth_type == 'oauth':
+                    warnings.append("Reddit 尚未設定 subreddits；儲存後可在編輯頁面中新增")
+                else:
+                    errors.append("Reddit 帳號需要至少一個 subreddit")
+            has_client_id = _present(_config_value(config, "clientId"))
+            has_client_secret = _present(_config_value(config, "clientSecret"))
+            has_refresh_token = _present(_config_value(config, "refreshToken"))
+            if auth_type == 'oauth' and not has_refresh_token:
+                warnings.append("Reddit refreshToken 可在 OAuth Connect 完成後自動回填")
+            elif not has_refresh_token:
+                errors.append("Reddit 帳號缺少 refreshToken 或 refreshTokenEnv")
+            if auth_type == 'oauth' and not has_client_id:
+                warnings.append("Reddit clientId 可在 OAuth Connect 時透過 env 變數自動讀取；若有 clientIdEnv 可忽略")
+            elif not has_client_id:
+                errors.append("Reddit 帳號缺少 clientId 或 clientIdEnv")
+            if auth_type == 'oauth' and not has_client_secret:
+                warnings.append("Reddit clientSecret 可在 OAuth Connect 時透過 env 變數自動讀取；若有 clientSecretEnv 可忽略")
+            elif not has_client_secret:
+                errors.append("Reddit 帳號缺少 clientSecret 或 clientSecretEnv")
 
     if platform == profiles.PLATFORM_TELEGRAM:
         if not _present(config.get("chatId")):
@@ -188,14 +196,14 @@ def validate_structured_account_config(
     if platform == profiles.PLATFORM_TWITTER:
         twitter_auth_type = str(config.get("twitterAuthType") or "cookie").strip().lower()
         if twitter_auth_type == "api":
-            if not _present(_config_value(config, "apiKey")):
-                errors.append("Twitter API 模式需要 apiKey 或 apiKeyEnv")
-            if not _present(_config_value(config, "apiKeySecret")):
-                errors.append("Twitter API 模式需要 apiKeySecret 或 apiKeySecretEnv")
-            if not _present(_config_value(config, "accessToken")):
-                errors.append("Twitter API 模式需要 accessToken 或 accessTokenEnv")
-            if not _present(_config_value(config, "accessTokenSecret")):
-                errors.append("Twitter API 模式需要 accessTokenSecret 或 accessTokenSecretEnv")
+            if not _present(_config_value(config, "apiKey", default_env="X_API_KEY")):
+                errors.append("Twitter API 模式需要 apiKey / apiKeyEnv，或設定 X_API_KEY env")
+            if not _present(_config_value(config, "apiKeySecret", default_env="X_API_KEY_SECRET")):
+                errors.append("Twitter API 模式需要 apiKeySecret / apiKeySecretEnv，或設定 X_API_KEY_SECRET env")
+            if not _present(_config_value(config, "accessToken", default_env="X_ACCESS_TOKEN")):
+                errors.append("Twitter API 模式需要 accessToken / accessTokenEnv，或設定 X_ACCESS_TOKEN env")
+            if not _present(_config_value(config, "accessTokenSecret", default_env="X_ACCESS_TOKEN_SECRET")):
+                errors.append("Twitter API 模式需要 accessTokenSecret / accessTokenSecretEnv，或設定 X_ACCESS_TOKEN_SECRET env")
         elif twitter_auth_type == "cookie":
             if not cookie_path:
                 warnings.append("未指定 cookiePath；後端會自動產生預設路徑")
@@ -214,7 +222,10 @@ def validate_structured_account_config(
             if platform == profiles.PLATFORM_TELEGRAM:
                 metadata["telegram"] = prepared_publishers.validate_telegram_config_live(config, session=session)
             elif platform == profiles.PLATFORM_REDDIT:
-                if _present(_config_value(config, 'refreshToken')):
+                reddit_auth_type = str(config.get("redditAuthType") or "api").strip().lower()
+                if reddit_auth_type == "cookie":
+                    warnings.append("Reddit cookie 模式不支援 live API 驗證，請確認 cookie 檔案有效")
+                elif _present(_config_value(config, 'refreshToken')):
                     metadata["reddit"] = prepared_publishers.validate_reddit_config_live(config, session=session)
                 else:
                     warnings.append('Reddit live 驗證已略過，等待 OAuth Connect 自動填入 refreshToken')

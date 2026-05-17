@@ -439,7 +439,33 @@ async def _publish_prepared_reddit(
 ) -> None:
     if account is None:
         raise ValueError("Prepared Reddit publish requires a structured account")
-    await asyncio.to_thread(prepared_publishers.publish_reddit_sync, account, payload)
+    config = dict(account.config or {})
+    reddit_auth_type = str(config.get("redditAuthType") or "api")
+
+    if reddit_auth_type == "cookie":
+        if not account_file:
+            raise ValueError("Prepared Reddit cookie publish requires account_file (storage_state)")
+        from uploader.reddit_uploader.main import RedditCookieVideo
+
+        subreddits = config.get("subreddits") or []
+        if not subreddits:
+            raise ValueError("Reddit cookie publish requires at least one subreddit")
+        title = payload.get("message") or payload.get("draft", {}).get("message", "") or ""
+        file_paths = _prepared_artifact_local_paths(payload)
+        media_path = str(file_paths[0]) if file_paths else ""
+        body_text = payload.get("draft", {}).get("body", "") or ""
+
+        for subreddit in subreddits:
+            app = RedditCookieVideo(
+                title=title,
+                subreddit=subreddit,
+                account_file=str(account_file),
+                file_path=media_path,
+                body_text=body_text,
+            )
+            await app.main()
+    else:
+        await asyncio.to_thread(prepared_publishers.publish_reddit_sync, account, payload)
 
 
 async def _publish_prepared_youtube(

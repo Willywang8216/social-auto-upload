@@ -1106,10 +1106,10 @@ def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access
 def publish_twitter_sync(account, payload: dict, *, session=None) -> list[Any]:
     """Publish a tweet with optional media via the X API v2 (OAuth 1.0a)."""
     config = dict(account.config or {})
-    api_key = str(_config_value(config, "apiKey") or "").strip()
-    api_key_secret = str(_config_value(config, "apiKeySecret") or "").strip()
-    access_token = str(_config_value(config, "accessToken") or "").strip()
-    access_token_secret = str(_config_value(config, "accessTokenSecret") or "").strip()
+    api_key = str(_config_value(config, "apiKey", default_env="X_API_KEY") or "").strip()
+    api_key_secret = str(_config_value(config, "apiKeySecret", default_env="X_API_KEY_SECRET") or "").strip()
+    access_token = str(_config_value(config, "accessToken", default_env="X_ACCESS_TOKEN") or "").strip()
+    access_token_secret = str(_config_value(config, "accessTokenSecret", default_env="X_ACCESS_TOKEN_SECRET") or "").strip()
 
     if not all([api_key, api_key_secret, access_token, access_token_secret]):
         raise PreparedPublishError(

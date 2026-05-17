@@ -210,7 +210,7 @@
         </el-form-item>
 
         <!-- Quick-connect: for OAuth platforms, show only the Connect button on add -->
-        <template v-if="dialogType === 'add' && isOAuthPlatform(accountForm.platform)">
+        <template v-if="dialogType === 'add' && isOAuthPlatform(accountForm.platform) && accountForm.platform !== 'reddit'">
           <el-divider content-position="left">{{ oAuthPlatformLabel(accountForm.platform) }} 設定</el-divider>
           <el-form-item label="Connection">
             <div class="quick-connect-row">
@@ -219,6 +219,43 @@
               </el-button>
             </div>
             <div class="field-hint">帳號會自動儲存，然後彈出 {{ oAuthPlatformLabel(accountForm.platform) }} OAuth 授權視窗。</div>
+          </el-form-item>
+        </template>
+
+        <!-- Reddit add flow: support both OAuth and cookie -->
+        <template v-if="dialogType === 'add' && accountForm.platform === 'reddit'">
+          <el-divider content-position="left">Reddit 設定</el-divider>
+          <el-form-item label="Auth type">
+            <el-select v-model="accountForm.redditAuthType" style="width: 100%">
+              <el-option label="API (OAuth)" value="api" />
+              <el-option label="Cookie-based (browser)" value="cookie" />
+            </el-select>
+          </el-form-item>
+          <template v-if="accountForm.redditAuthType === 'api'">
+            <el-form-item label="Connection">
+              <div class="quick-connect-row">
+                <el-button :type="'primary'" plain size="large" style="width:100%" @click="quickConnect()">
+                  Connect with Reddit
+                </el-button>
+              </div>
+              <div class="field-hint">帳號會自動儲存，然後彈出 Reddit OAuth 授權視窗。</div>
+            </el-form-item>
+          </template>
+          <template v-else>
+            <el-form-item label="Cookie 路徑">
+              <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
+            </el-form-item>
+          </template>
+          <el-form-item label="Subreddits">
+            <el-input
+              v-model="accountForm.subredditsText"
+              type="textarea"
+              :rows="3"
+              placeholder="用逗號或換行分隔，例如：suba, subb"
+            />
+          </el-form-item>
+          <el-form-item label="User Agent">
+            <el-input v-model="accountForm.userAgent" placeholder="可選，自訂 Reddit User-Agent" />
           </el-form-item>
         </template>
 
@@ -233,8 +270,8 @@
               使用 Discord Webhook。請先在 Discord 頻道設定 → 整合 → Webhook 中建立 Webhook，複製 URL。
             </template>
             <template v-else-if="accountForm.platform === 'twitter'">
-              X / Twitter 支援兩種方式：Cookie（上傳 storage_state JSON）或 API（設定 env 變數）。
-            </template>
+              X / Twitter 支援兩種方式：Cookie（上傳 storage_state JSON）或 API。<br/>
+              API 模式會自動從 <code>.env</code> 讀取 <code>X_API_KEY</code>、<code>X_API_KEY_SECRET</code>、<code>X_ACCESS_TOKEN</code>、<code>X_ACCESS_TOKEN_SECRET</code>，下方欄位僅在需要覆蓋不同 env 名稱時才需填寫。</template>
           </div>
           <template v-if="accountForm.platform === 'telegram'">
             <AccountTextFieldList :fields="telegramFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
@@ -287,9 +324,23 @@
 
           <template v-if="accountForm.platform === 'reddit'">
             <el-divider content-position="left">Reddit 設定</el-divider>
-            <el-form-item label="OAuth health">
-              <AccountConnectionPanel :rows="redditHealthRows" :actions="redditHealthActions" />
+            <el-form-item label="Auth type">
+              <el-select v-model="accountForm.redditAuthType" style="width: 100%">
+                <el-option label="API (env keys)" value="api" />
+                <el-option label="Cookie-based (browser)" value="cookie" />
+              </el-select>
             </el-form-item>
+            <template v-if="accountForm.redditAuthType === 'api'">
+              <el-form-item label="OAuth health">
+                <AccountConnectionPanel :rows="redditHealthRows" :actions="redditHealthActions" />
+              </el-form-item>
+              <AccountTextFieldList :fields="redditFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
+            </template>
+            <template v-else>
+              <el-form-item label="Cookie 路徑">
+                <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
+              </el-form-item>
+            </template>
             <el-form-item label="Subreddits">
               <el-input
                 v-model="accountForm.subredditsText"
@@ -298,7 +349,6 @@
                 placeholder="用逗號或換行分隔，例如：suba, subb"
               />
             </el-form-item>
-            <AccountTextFieldList :fields="redditFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
             <el-form-item label="User Agent">
               <el-input v-model="accountForm.userAgent" placeholder="可選，自訂 Reddit User-Agent" />
             </el-form-item>
@@ -573,6 +623,7 @@ const makeEmptyAccountForm = () => ({
   cookiePath: '',
   sheetPostPreset: '',
   subredditsText: '',
+  redditAuthType: 'api',
   clientIdEnv: '',
   clientSecretEnv: '',
   refreshTokenEnv: '',
@@ -939,6 +990,7 @@ const loadStructuredFieldsFromConfig = (config) => {
   accountForm.apiKeyEnv = config.apiKeyEnv || ''
   accountForm.apiKeySecretEnv = config.apiKeySecretEnv || ''
   accountForm.accessTokenSecretEnv = config.accessTokenSecretEnv || ''
+  accountForm.redditAuthType = config.redditAuthType || 'api'
 }
 
 const openProfileDialog = () => {
@@ -1379,11 +1431,12 @@ async function ensureAccountSaved() {
     return false
   }
   try {
+    const authType = (accountForm.platform === 'reddit' && accountForm.redditAuthType === 'cookie') ? 'cookie' : 'oauth'
     const payload = {
       profileId: accountForm.profileId,
       platform: accountForm.platform,
       accountName: accountForm.name,
-      authType: 'oauth',
+      authType,
       enabled: true,
       config: buildStructuredConfig()
     }
@@ -1879,6 +1932,7 @@ const buildStructuredConfig = () => {
 
   switch (accountForm.platform) {
     case 'reddit':
+      assignIfValue(config, 'redditAuthType', accountForm.redditAuthType)
       assignIfValue(config, 'subreddits', splitListField(accountForm.subredditsText))
       assignIfValue(config, 'clientIdEnv', accountForm.clientIdEnv.trim())
       assignIfValue(config, 'clientSecretEnv', accountForm.clientSecretEnv.trim())
