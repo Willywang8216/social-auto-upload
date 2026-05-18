@@ -2615,6 +2615,8 @@ def meta_oauth_callback():
             if selected_ig is None and len(ig_accounts) > 1:
                 # Show picker page (same pattern as Facebook page selector)
                 ig_json = json.dumps(ig_accounts)
+                _picker_expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
+                _token_data_expires_json = json.dumps((datetime.now(tz=timezone.utc).replace(tzinfo=None) + timedelta(seconds=int(_picker_expires_in))).isoformat(timespec='seconds')) if _picker_expires_in else json.dumps('')
                 html = f"""<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
             <style>body{{font-family:-apple-system,system-ui,sans-serif;padding:20px;max-width:560px;margin:0 auto;background:#f4f6f8}}
             h2{{text-align:center;color:#1d2129}}.card{{background:#fff;border:2px solid #e4e6eb;border-radius:12px;padding:16px;margin:10px 0;cursor:pointer;transition:all .15s}}
@@ -2624,7 +2626,7 @@ def meta_oauth_callback():
             <div id="cards"></div>
             <script>
             var IG_ACCOUNTS = {ig_json};
-            var TOKEN_DATA = {{userAccessToken: {json.dumps(user_access_token)}, metaUserAccessTokenExpiresAt: {json.dumps((datetime.now(tz=timezone.utc).replace(tzinfo=None) + timedelta(seconds=int(long_lived_payload.get('expires_in') or token_payload.get('expires_in') or 0))).isoformat(timespec='seconds'))}}};
+            var TOKEN_DATA = {{userAccessToken: {json.dumps(user_access_token)}, metaUserAccessTokenExpiresAt: {_token_data_expires_json}}};
             var ACCOUNT_ID = {request_state.account_id};
             var cards = document.getElementById('cards');
             IG_ACCOUNTS.forEach(function(ig) {{
