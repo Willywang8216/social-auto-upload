@@ -1628,7 +1628,7 @@ async function connectWithTikTok() {
   }
   if (!await ensureAccountSaved()) return
 
-  const popup = window.open('', 'tiktok-connect', 'width=560,height=760')
+  const popup = window.open('', `tiktok-connect-${accountForm.id || Date.now()}`, 'width=560,height=760')
   if (!popup) {
     ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
     return
@@ -1654,7 +1654,7 @@ async function connectWithMeta(expectedPlatform) {
   if (!validateConnectPlatform(expectedPlatform)) return
   if (!await ensureAccountSaved()) return
 
-  const popup = window.open('', `meta-connect-${expectedPlatform}`, 'width=720,height=820')
+  const popup = window.open('', `meta-connect-${expectedPlatform}-${accountForm.id || Date.now()}`, 'width=720,height=820')
   if (!popup) {
     ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
     return
@@ -1682,7 +1682,7 @@ async function connectWithReddit() {
   if (!validateConnectPlatform('reddit')) return
   if (!await ensureAccountSaved()) return
 
-  const popup = window.open('', 'reddit-connect', 'width=720,height=820')
+  const popup = window.open('', `reddit-connect-${accountForm.id || Date.now()}`, 'width=720,height=820')
   if (!popup) {
     ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
     return
@@ -1707,7 +1707,7 @@ async function connectWithThreads() {
   if (!validateConnectPlatform('threads')) return
   if (!await ensureAccountSaved()) return
 
-  const popup = window.open('', 'threads-connect', 'width=720,height=820')
+  const popup = window.open('', `threads-connect-${accountForm.id || Date.now()}`, 'width=720,height=820')
   if (!popup) {
     ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
     return
@@ -1732,7 +1732,7 @@ async function connectWithYouTube() {
   if (!validateConnectPlatform('youtube')) return
   if (!await ensureAccountSaved()) return
 
-  const popup = window.open('', 'youtube-connect', 'width=720,height=820')
+  const popup = window.open('', `youtube-connect-${accountForm.id || Date.now()}`, 'width=720,height=820')
   if (!popup) {
     ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
     return
@@ -1759,7 +1759,7 @@ async function connectWithTwitterApi() {
   if (accountForm.platform !== 'twitter') { ElMessage.warning('目前選擇的平台不是 Twitter'); return }
   if (!await ensureAccountSaved()) return
 
-  const popup = window.open('', 'twitter-connect', 'width=720,height=820')
+  const popup = window.open('', `twitter-connect-${accountForm.id || Date.now()}`, 'width=720,height=820')
   if (!popup) {
     ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
     return
