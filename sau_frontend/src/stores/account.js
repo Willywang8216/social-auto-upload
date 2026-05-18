@@ -174,7 +174,8 @@ export const useAccountStore = defineStore('account', () => {
     const isLegacy = item.isLegacy ?? profileId == null
     const config = { ...(item.config || {}) }
     if (filePath && !config.cookiePath) config.cookiePath = filePath
-    return {
+    const authType = item.authType || item.auth_type || 'cookie'
+    const result = {
       id: item.id,
       type: item.type ?? getLegacyPlatformType(platformSlug),
       filePath,
@@ -186,7 +187,7 @@ export const useAccountStore = defineStore('account', () => {
       platform: getPlatformLabel(platformSlug),
       profileId,
       profileName: item.profileName || item.profile_name || (profileId == null ? 'Legacy' : ''),
-      authType: item.authType || item.auth_type || 'cookie',
+      authType,
       config,
       enabled: item.enabled ?? true,
       isLegacy,
@@ -195,6 +196,11 @@ export const useAccountStore = defineStore('account', () => {
       ...deriveConnectionMeta(platformSlug, config, isLegacy),
       ...deriveExpiryMeta(platformSlug, config, isLegacy)
     }
+    if (platformSlug === 'reddit' && authType === 'cookie') {
+      result.supportsHealthAction = false
+      result.healthActionKind = null
+    }
+    return result
   }
 
   const setAccounts = (accountsData) => {

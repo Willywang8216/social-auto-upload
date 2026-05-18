@@ -1197,6 +1197,8 @@ def import_cookies(account_id):
     from myUtils.cookie_storage import write_cookie
     write_cookie(Path(cookie_path), payload_bytes)
 
+    profile_registry.update_account(account.id, status=1, db_path=_current_db_path())
+
     return jsonify({
         "code": 200,
         "msg": f"Imported {len(cookies)} cookies",
