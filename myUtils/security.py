@@ -67,6 +67,8 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/oauth/meta/deauthorize/",
     "/oauth/meta/data-deletion",
     "/oauth/meta/data-deletion/",
+    "/oauth/twitter/callback",
+    "/oauth/twitter/callback/",
 })
 
 # Path prefixes that are public (e.g. static asset folders). Kept as a tuple
