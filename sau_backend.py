@@ -1759,6 +1759,7 @@ _REFRESHABLE_PLATFORMS = (
     profile_registry.PLATFORM_THREADS,
     profile_registry.PLATFORM_FACEBOOK,
     profile_registry.PLATFORM_INSTAGRAM,
+    profile_registry.PLATFORM_TWITTER,
 )
 
 
@@ -3034,6 +3035,7 @@ def twitter_oauth_callback():
             account.id,
             config=merged_config,
             auth_type='oauth',
+            status=1,
             db_path=db_path,
         )
         callback_payload = {

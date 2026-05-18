@@ -428,8 +428,24 @@ def validate_facebook_config_live(config: dict[str, Any], *, session=None) -> di
     return _response_payload(response)
 
 
+def _check_meta_token_not_expired(config: dict[str, Any], platform: str) -> None:
+    """Raise early if the Meta user access token is expired."""
+    from datetime import datetime
+    expires_at = str(config.get("metaUserAccessTokenExpiresAt") or config.get("accessTokenExpiresAt") or "").strip()
+    if expires_at:
+        try:
+            exp = datetime.fromisoformat(expires_at)
+            if datetime.now() >= exp:
+                raise PreparedPublishError(
+                    f"{platform} token expired at {expires_at}. Reconnect the account via OAuth."
+                )
+        except ValueError:
+            pass
+
+
 def publish_facebook_sync(account, payload: dict, *, session=None) -> list[Any]:
     config = account.config or {}
+    _check_meta_token_not_expired(config, "Facebook")
     page_id = str(config.get("pageId") or "").strip()
     access_token = str(_config_value(config, "accessToken") or "").strip()
     if not page_id:
@@ -551,6 +567,7 @@ def validate_instagram_config_live(config: dict[str, Any], *, session=None) -> d
 
 def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
     config = account.config or {}
+    _check_meta_token_not_expired(config, "Instagram")
     ig_user_id = str(config.get("igUserId") or "").strip()
     access_token = str(_config_value(config, "accessToken") or "").strip()
     if not ig_user_id:
@@ -645,8 +662,40 @@ def validate_threads_config_live(config: dict[str, Any], *, session=None) -> dic
     return _response_payload(response)
 
 
+def _maybe_refresh_threads_token(config: dict[str, Any], *, session=None) -> dict[str, Any]:
+    """Refresh Threads long-lived token if expired or about to expire."""
+    from myUtils import threads_auth as _threads_auth
+    access_token = str(config.get("accessToken") or "").strip()
+    if not access_token:
+        return config
+    expires_at = str(config.get("accessTokenExpiresAt") or "").strip()
+    if expires_at:
+        from datetime import datetime, timedelta
+        try:
+            exp = datetime.fromisoformat(expires_at)
+            if datetime.now() < exp - timedelta(seconds=300):
+                return config
+        except ValueError:
+            pass
+    try:
+        refreshed = _threads_auth.refresh_long_lived_token(access_token=access_token, session=session)
+    except Exception:
+        return config
+    if not refreshed or not refreshed.get("access_token"):
+        return config
+    updated = dict(config)
+    updated["accessToken"] = refreshed["access_token"]
+    expires_in = refreshed.get("expires_in")
+    if expires_in not in (None, ""):
+        from datetime import datetime, timedelta
+        updated["accessTokenExpiresAt"] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec="seconds")
+    updated["accessTokenUpdatedAt"] = datetime.now().isoformat(timespec="seconds")
+    return updated
+
+
 def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
-    config = account.config or {}
+    config = dict(account.config or {})
+    config = _maybe_refresh_threads_token(config, session=session)
     user_id = str(config.get("threadUserId") or config.get("userId") or "").strip()
     access_token = str(_config_value(config, "accessToken") or "").strip()
     if not user_id:
@@ -712,7 +761,7 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
         timeout=120,
     )
     _raise_for_status(publish_response)
-    return {"container_id": container_id, "publish": _response_payload(publish_response)}
+    return {"container_id": container_id, "publish": _response_payload(publish_response), "updated_config": config}
 
 
 def validate_reddit_config_live(config: dict[str, Any], *, session=None) -> dict:
@@ -1104,9 +1153,55 @@ def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access
     return media_id
 
 
-def publish_twitter_sync(account, payload: dict, *, session=None) -> list[Any]:
-    """Publish a tweet with optional media via the X API v2."""
+def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None) -> dict[str, Any]:
+    """Refresh Twitter OAuth 2.0 token if expired or about to expire. Returns possibly-updated config."""
+    refresh_token = str(config.get("refreshToken") or "").strip()
+    if not refresh_token or config.get("twitterAuthType") != "api":
+        return config
+    expires_at = str(config.get("accessTokenExpiresAt") or "").strip()
+    if expires_at:
+        from datetime import datetime, timedelta
+        try:
+            exp = datetime.fromisoformat(expires_at)
+            if datetime.now() < exp - timedelta(seconds=300):
+                return config  # still valid, plenty of margin
+        except ValueError:
+            pass  # unparseable → try refresh
+    try:
+        result = refresh_twitter_access_token(config, session=session)
+    except Exception:
+        return config  # best-effort: fall through with old token
+    updated = dict(config)
+    updated["accessToken"] = result["access_token"]
+    updated["refreshToken"] = result.get("refresh_token") or refresh_token
+    updated["scope"] = result.get("scope") or config.get("scope", "")
+    expires_in = result.get("expires_in")
+    if expires_in not in (None, ""):
+        from datetime import datetime, timedelta
+        updated["accessTokenExpiresAt"] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec="seconds")
+    updated["accessTokenUpdatedAt"] = datetime.now().isoformat(timespec="seconds")
+    me = result.get("me") or {}
+    user_data = me.get("data", me) if isinstance(me, dict) else {}
+    if isinstance(user_data, dict):
+        if user_data.get("id"):
+            updated["twitterUserId"] = str(user_data["id"])
+        if user_data.get("username"):
+            updated["twitterUserName"] = str(user_data["username"])
+        if user_data.get("name"):
+            updated["twitterDisplayName"] = str(user_data["name"])
+    return updated
+
+
+def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, Any]:
+    """Publish a tweet with optional media via the X API v2.
+
+    Returns ``{"results": [...], "updated_config": {...}}`` so the caller can
+    persist refreshed tokens back to the database.
+    """
     config = dict(account.config or {})
+
+    # Lazy-refresh expired OAuth 2.0 token before publishing.
+    config = _maybe_refresh_twitter_token(config, session=session)
 
     # Check if we have OAuth 2.0 token (from PKCE flow)
     oauth2_token = str(config.get("accessToken") or "").strip()
@@ -1162,7 +1257,7 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> list[Any]:
         timeout=120,
     )
     _raise_for_status(resp)
-    return [_response_payload(resp)]
+    return {"results": [_response_payload(resp)], "updated_config": config}
 
 
 def _twitter_auth_headers(config: dict[str, Any], *, method: str, url: str) -> dict[str, str]:

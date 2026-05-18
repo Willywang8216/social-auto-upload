@@ -411,9 +411,16 @@ async def _publish_prepared_twitter(
     else:
         if account is None:
             raise ValueError("Prepared Twitter API publish requires a structured account")
-        await asyncio.to_thread(
+        result = await asyncio.to_thread(
             prepared_publishers.publish_twitter_sync, account, payload
         )
+        updated_config = result.get('updated_config') if isinstance(result, dict) else None
+        if isinstance(updated_config, dict) and updated_config:
+            profile_registry.update_account(
+                account.id,
+                config=updated_config,
+                auth_type='oauth',
+            )
 
 
 async def _publish_prepared_telegram(
@@ -537,7 +544,14 @@ async def _publish_prepared_threads(
 ) -> None:
     if account is None:
         raise ValueError("Prepared Threads publish requires a structured account")
-    await asyncio.to_thread(prepared_publishers.publish_threads_sync, account, payload)
+    result = await asyncio.to_thread(prepared_publishers.publish_threads_sync, account, payload)
+    updated_config = result.get('updated_config') if isinstance(result, dict) else None
+    if isinstance(updated_config, dict) and updated_config:
+        profile_registry.update_account(
+            account.id,
+            config=updated_config,
+            auth_type='oauth',
+        )
 
 
 async def _publish_prepared_discord(
