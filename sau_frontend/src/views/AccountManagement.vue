@@ -2008,7 +2008,7 @@ async function finalizeMetaPageSelection(page, tokenData, accountName) {
   }
 }
 
-function handleMetaOauthMessage(event) {
+async function handleMetaOauthMessage(event) {
   const payload = event?.data
   if (!payload || payload.type !== 'sau:meta-oauth') return
   if (!payload.ok) {
@@ -2017,30 +2017,48 @@ function handleMetaOauthMessage(event) {
   }
   const data = payload.data || {}
 
+  // Selector path: user picked a page/IG from the picker
   if (data.selectedPage && data.tokenData) {
     finalizeMetaPageSelection(data.selectedPage, data.tokenData, accountForm.name)
     return
   }
 
-  accountForm.accessToken = data.accessToken || accountForm.accessToken
-  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
-  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
-  if (data.platform === 'facebook') {
+  // Non-selector path: backend auto-selected (single page/IG).
+  // The backend already saved the config in the callback, but we explicitly
+  // PATCH here to make sure the frontend state is in sync.
+  try {
+    const config = {
+      pageId: data.pageId || '',
+      facebookPageName: data.facebookPageName || '',
+      accessToken: data.accessToken || '',
+      accessTokenUpdatedAt: data.accessTokenUpdatedAt || new Date().toISOString(),
+      connectedAt: data.connectedAt || new Date().toISOString(),
+    }
+    if (data.platform === 'instagram') {
+      config.igUserId = data.igUserId || ''
+      config.instagramUserName = data.instagramUserName || ''
+    }
+    await profilesApi.updateAccount(accountForm.id, {
+      config,
+      authType: 'oauth',
+      enabled: true,
+      status: 1,
+    })
+    accountForm.accessToken = data.accessToken || accountForm.accessToken
     accountForm.pageId = data.pageId || accountForm.pageId
     accountForm.facebookPageName = data.facebookPageName || accountForm.facebookPageName
-    ElMessage.success(`Facebook 已連線至 ${accountForm.facebookPageName || 'Facebook Page'}`)
+    if (data.platform === 'instagram') {
+      accountForm.igUserId = data.igUserId || accountForm.igUserId
+      accountForm.instagramUserName = data.instagramUserName || accountForm.instagramUserName
+      ElMessage.success(`Instagram 已連線至 @${accountForm.instagramUserName || 'Instagram'}`)
+    } else {
+      ElMessage.success(`Facebook 已連線至 ${accountForm.facebookPageName || 'Facebook Page'}`)
+    }
     dialogVisible.value = false
-    refreshAccounts()
-    return
-  }
-  if (data.platform === 'instagram') {
-    accountForm.pageId = data.pageId || accountForm.pageId
-    accountForm.facebookPageName = data.facebookPageName || accountForm.facebookPageName
-    accountForm.igUserId = data.igUserId || accountForm.igUserId
-    accountForm.instagramUserName = data.instagramUserName || accountForm.instagramUserName
-    ElMessage.success(`Instagram 已連線至 ${accountForm.instagramUserName || 'Instagram Account'}`)
-    dialogVisible.value = false
-    refreshAccounts()
+    await refreshAccounts()
+  } catch (error) {
+    console.error('Meta OAuth save failed:', error)
+    ElMessage.error(error?.message || 'Meta OAuth 儲存失敗')
   }
 }
 
