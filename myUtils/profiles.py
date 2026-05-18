@@ -444,6 +444,7 @@ def update_account_status(
 def update_account(
     account_id: int,
     *,
+    profile_id: int | None = None,
     account_name: str | None = None,
     cookie_path: str | Path | None = None,
     auth_type: str | None = None,
@@ -453,6 +454,7 @@ def update_account(
     db_path: Path = DB_PATH,
 ) -> Account:
     current = get_account(account_id, db_path=db_path)
+    next_profile_id = current.profile_id if profile_id is None else profile_id
     next_account_name = current.account_name if account_name is None else account_name.strip()
     next_auth_type = current.auth_type if auth_type is None else auth_type
     next_config = current.config if config is None else config
@@ -462,7 +464,7 @@ def update_account(
     if cookie_path is not None:
         next_cookie_path = str(Path(cookie_path))
     elif not next_cookie_path and (next_auth_type == "cookie" or platform_requires_cookie(current.platform)):
-        profile = get_profile(current.profile_id, db_path=db_path)
+        profile = get_profile(next_profile_id, db_path=db_path)
         next_cookie_path = str(
             resolve_cookie_path(current.platform, profile.slug, next_account_name)
         )
@@ -471,11 +473,12 @@ def update_account(
         conn.execute(
             """
             UPDATE accounts
-            SET account_name = ?, cookie_path = ?, auth_type = ?, config_json = ?,
+            SET profile_id = ?, account_name = ?, cookie_path = ?, auth_type = ?, config_json = ?,
                 enabled = ?, status = ?
             WHERE id = ?
             """,
             (
+                next_profile_id,
                 next_account_name,
                 next_cookie_path,
                 next_auth_type,

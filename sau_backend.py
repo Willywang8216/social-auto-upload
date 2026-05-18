@@ -4229,17 +4229,19 @@ def accounts_patch(account_id):
     try:
         data = _read_json_body()
         existing = profile_registry.get_account(account_id, db_path=_current_db_path())
+        new_profile_id = data.get("profileId", existing.profile_id)
         merged = {
             "platform": existing.platform,
             "authType": data.get("authType", existing.auth_type),
             "config": data.get("config") if isinstance(data.get("config"), dict) else (existing.config or {}),
             "cookiePath": data.get("cookiePath", existing.cookie_path),
         }
-        validation = _validate_account_payload(merged, db_path=_current_db_path(), profile_id=existing.profile_id)
+        validation = _validate_account_payload(merged, db_path=_current_db_path(), profile_id=new_profile_id)
         if not validation.valid:
             raise ValueError("; ".join(validation.errors))
         account = profile_registry.update_account(
             account_id,
+            profile_id=new_profile_id,
             account_name=data.get("accountName"),
             cookie_path=data.get("cookiePath"),
             auth_type=data.get("authType"),

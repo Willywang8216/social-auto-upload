@@ -1266,6 +1266,13 @@ watch(() => route.fullPath, () => {
   applyRouteFilters()
 })
 
+const OAUTH_ONLY_PLATFORMS = new Set(['facebook', 'instagram', 'threads', 'youtube', 'tiktok'])
+watch(() => accountForm.platform, (newPlatform) => {
+  if (OAUTH_ONLY_PLATFORMS.has(newPlatform)) {
+    accountForm.authType = 'oauth'
+  }
+})
+
 onMounted(() => {
   applyRouteFilters()
   fetchAccounts(false)
