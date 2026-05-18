@@ -9,6 +9,10 @@ import secrets
 import urllib.parse
 from typing import Any
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 try:
     import requests
 except ModuleNotFoundError:  # pragma: no cover
@@ -100,6 +104,12 @@ def build_authorize_url_from_env(
     return url, verifier, state
 
 
+def _basic_auth_header(client_id: str, client_secret: str) -> dict[str, str]:
+    """Return Authorization header for HTTP Basic auth with client_id:client_secret."""
+    token = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
+
+
 def exchange_code_for_token(
     *,
     code: str,
@@ -122,12 +132,16 @@ def exchange_code_for_token(
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
-    # Twitter OAuth 2.0 token endpoint accepts client_secret as body param
-    # or via Basic auth.  Use body param for simplicity.
+    # Twitter requires HTTP Basic auth (client_id:client_secret) for the
+    # token endpoint — passing client_secret as a body param returns 401
+    # "unauthorized_client: Missing valid authorization header".
     if client_secret:
-        data["client_secret"] = client_secret
+        headers.update(_basic_auth_header(client_id, client_secret))
 
+    _log.info("Exchanging Twitter OAuth code: POST %s with Basic auth=%s", X_TOKEN_URL, bool(client_secret))
     response = http.post(X_TOKEN_URL, data=data, headers=headers, timeout=120)
+    if not response.ok:
+        _log.error("Twitter token exchange failed: %s %s", response.status_code, response.text[:500])
     response.raise_for_status()
     payload = response.json()
     if payload.get("error"):
@@ -151,13 +165,14 @@ def refresh_access_token(
         "refresh_token": refresh_token,
         "client_id": client_id,
     }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
     if client_secret:
-        data["client_secret"] = client_secret
+        headers.update(_basic_auth_header(client_id, client_secret))
 
     response = http.post(
         X_TOKEN_URL,
         data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers=headers,
         timeout=120,
     )
     response.raise_for_status()
