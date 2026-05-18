@@ -1969,6 +1969,7 @@ function handleTwitterOauthMessage(event) {
 
 async function finalizeMetaPageSelection(page, tokenData, accountName) {
   try {
+    console.log('🔍 finalizeMetaPageSelection called:', { page: { id: page.id, name: page.name, igUserId: page.igUserId, hasAccessToken: Boolean(page.access_token) }, tokenData: { hasUserAccessToken: Boolean(tokenData.userAccessToken), metaUserAccessTokenExpiresAt: tokenData.metaUserAccessTokenExpiresAt }, accountId: accountForm.id })
     const isIG = Boolean(page.igUserId)
     const config = {
       pageId: page.id,
@@ -2012,6 +2013,7 @@ async function finalizeMetaPageSelection(page, tokenData, accountName) {
 async function handleMetaOauthMessage(event) {
   const payload = event?.data
   if (!payload || payload.type !== 'sau:meta-oauth') return
+  console.log('🔍 handleMetaOauthMessage received:', { ok: payload.ok, hasSelectedPage: Boolean(payload.data?.selectedPage), hasTokenData: Boolean(payload.data?.tokenData), platform: payload.data?.platform, accountId: payload.data?.accountId, ourAccountId: accountForm.id })
   if (!payload.ok) {
     ElMessage.error(payload.error || 'Meta 授權失敗')
     return

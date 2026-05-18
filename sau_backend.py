@@ -4266,6 +4266,7 @@ def accounts_patch(account_id):
         incoming_config = data.get("config")
         if isinstance(incoming_config, dict):
             existing_config.update(incoming_config)
+        print(f"🔍 PATCH /accounts/{account_id}: incoming_keys={list(incoming_config.keys()) if isinstance(incoming_config, dict) else 'NONE'} merged_keys={list(existing_config.keys())} authType={data.get('authType')} status={data.get('status')}")
         merged = {
             "platform": existing.platform,
             "authType": data.get("authType", existing.auth_type),
