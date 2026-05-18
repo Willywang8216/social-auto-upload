@@ -1570,6 +1570,7 @@ async function ensureAccountSaved() {
     const result = await profilesApi.createAccount(accountForm.profileId, payload)
     const data = result?.data || {}
     accountForm.id = data.id
+    dialogType.value = 'edit'
     ElMessage.success('帳號已自動儲存，繼續連線...')
     await refreshAccounts()
     return true
