@@ -1967,9 +1967,10 @@ function handleTwitterOauthMessage(event) {
   refreshAccounts()
 }
 
-async function finalizeMetaPageSelection(page, tokenData, accountName) {
+async function finalizeMetaPageSelection(page, tokenData, accountName, targetAccountId) {
   try {
-    console.log('🔍 finalizeMetaPageSelection called:', { page: { id: page.id, name: page.name, igUserId: page.igUserId, hasAccessToken: Boolean(page.access_token) }, tokenData: { hasUserAccessToken: Boolean(tokenData.userAccessToken), metaUserAccessTokenExpiresAt: tokenData.metaUserAccessTokenExpiresAt }, accountId: accountForm.id })
+    const accountId = targetAccountId || accountForm.id
+    console.log('🔍 finalizeMetaPageSelection called:', { page: { id: page.id, name: page.name, igUserId: page.igUserId, hasAccessToken: Boolean(page.access_token) }, tokenData: { hasUserAccessToken: Boolean(tokenData.userAccessToken), metaUserAccessTokenExpiresAt: tokenData.metaUserAccessTokenExpiresAt }, targetAccountId: accountId, currentFormId: accountForm.id })
     const isIG = Boolean(page.igUserId)
     const config = {
       pageId: page.id,
@@ -1987,18 +1988,23 @@ async function finalizeMetaPageSelection(page, tokenData, accountName) {
       config.igUserId = page.igUserId
       config.instagramUserName = page.instagramUserName
     }
-    await profilesApi.updateAccount(accountForm.id, {
+    await profilesApi.updateAccount(accountId, {
       config,
       authType: 'oauth',
       enabled: true,
       status: 1,
     })
-    accountForm.pageId = page.id
-    accountForm.facebookPageName = page.name
-    accountForm.accessToken = page.access_token
+    // Only update the form if this callback is for the account currently being edited
+    if (String(accountId) === String(accountForm.id)) {
+      accountForm.pageId = page.id
+      accountForm.facebookPageName = page.name
+      accountForm.accessToken = page.access_token
+      if (isIG) {
+        accountForm.igUserId = page.igUserId
+        accountForm.instagramUserName = page.instagramUserName
+      }
+    }
     if (isIG) {
-      accountForm.igUserId = page.igUserId
-      accountForm.instagramUserName = page.instagramUserName
       ElMessage.success(`Instagram 已連線至 @${page.instagramUserName}`)
     } else {
       ElMessage.success(`Facebook 已連線至 ${page.name}`)
@@ -2020,9 +2026,13 @@ async function handleMetaOauthMessage(event) {
   }
   const data = payload.data || {}
 
+  // Use accountId from the postMessage (set by the picker) — NOT accountForm.id,
+  // which may point to a different account if multiple OAuth flows are open.
+  const targetAccountId = data.accountId || accountForm.id
+
   // Selector path: user picked a page/IG from the picker
   if (data.selectedPage && data.tokenData) {
-    finalizeMetaPageSelection(data.selectedPage, data.tokenData, accountForm.name)
+    finalizeMetaPageSelection(data.selectedPage, data.tokenData, accountForm.name, targetAccountId)
     return
   }
 
@@ -2041,21 +2051,26 @@ async function handleMetaOauthMessage(event) {
       config.igUserId = data.igUserId || ''
       config.instagramUserName = data.instagramUserName || ''
     }
-    await profilesApi.updateAccount(accountForm.id, {
+    await profilesApi.updateAccount(targetAccountId, {
       config,
       authType: 'oauth',
       enabled: true,
       status: 1,
     })
-    accountForm.accessToken = data.accessToken || accountForm.accessToken
-    accountForm.pageId = data.pageId || accountForm.pageId
-    accountForm.facebookPageName = data.facebookPageName || accountForm.facebookPageName
+    // Only update the form if this callback is for the account currently being edited
+    if (String(targetAccountId) === String(accountForm.id)) {
+      accountForm.accessToken = data.accessToken || accountForm.accessToken
+      accountForm.pageId = data.pageId || accountForm.pageId
+      accountForm.facebookPageName = data.facebookPageName || accountForm.facebookPageName
+      if (data.platform === 'instagram') {
+        accountForm.igUserId = data.igUserId || accountForm.igUserId
+        accountForm.instagramUserName = data.instagramUserName || accountForm.instagramUserName
+      }
+    }
     if (data.platform === 'instagram') {
-      accountForm.igUserId = data.igUserId || accountForm.igUserId
-      accountForm.instagramUserName = data.instagramUserName || accountForm.instagramUserName
-      ElMessage.success(`Instagram 已連線至 @${accountForm.instagramUserName || 'Instagram'}`)
+      ElMessage.success(`Instagram 已連線至 @${data.instagramUserName || 'Instagram'}`)
     } else {
-      ElMessage.success(`Facebook 已連線至 ${accountForm.facebookPageName || 'Facebook Page'}`)
+      ElMessage.success(`Facebook 已連線至 ${data.facebookPageName || 'Facebook Page'}`)
     }
     dialogVisible.value = false
     await refreshAccounts()
