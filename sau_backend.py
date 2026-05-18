@@ -4230,10 +4230,15 @@ def accounts_patch(account_id):
         data = _read_json_body()
         existing = profile_registry.get_account(account_id, db_path=_current_db_path())
         new_profile_id = data.get("profileId", existing.profile_id)
+        # Merge config: start with existing, overlay with incoming fields
+        existing_config = dict(existing.config or {})
+        incoming_config = data.get("config")
+        if isinstance(incoming_config, dict):
+            existing_config.update(incoming_config)
         merged = {
             "platform": existing.platform,
             "authType": data.get("authType", existing.auth_type),
-            "config": data.get("config") if isinstance(data.get("config"), dict) else (existing.config or {}),
+            "config": existing_config,
             "cookiePath": data.get("cookiePath", existing.cookie_path),
         }
         validation = _validate_account_payload(merged, db_path=_current_db_path(), profile_id=new_profile_id)
@@ -4245,7 +4250,7 @@ def accounts_patch(account_id):
             account_name=data.get("accountName"),
             cookie_path=data.get("cookiePath"),
             auth_type=data.get("authType"),
-            config=data.get("config") if isinstance(data.get("config"), dict) else None,
+            config=existing_config,
             enabled=data.get("enabled"),
             status=data.get("status"),
             db_path=_current_db_path(),
