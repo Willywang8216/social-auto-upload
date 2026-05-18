@@ -83,6 +83,7 @@ def build_authorize_url(*, client_id: str, redirect_uri: str, state: str, scopes
         'response_type': 'code',
         'scope': ','.join(scopes),
         'state': state,
+        'auth_type': 'reauthenticate',
     })
     return f"{META_AUTHORIZE_URL}?{query}"
 
