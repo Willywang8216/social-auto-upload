@@ -2442,11 +2442,26 @@ def meta_oauth_callback():
 
     # Idempotency: if already completed (e.g. duplicate callback), return success
     if request_state.status in ('completed', 'pending_page_selection', 'pending_ig_selection'):
+        # For picker statuses, re-render the picker HTML so the duplicate
+        # callback doesn't kill the popup with a postMessage containing empty data.
+        if request_state.status in ('pending_page_selection', 'pending_ig_selection'):
+            result = {}
+            try:
+                result = json.loads(request_state.result_json or '{}')
+            except Exception:
+                pass
+            picker_html = result.get('picker_html', '')
+            if picker_html:
+                return Response(picker_html, mimetype='text/html')
+            # Fallback: just tell the user to use the existing picker
+            return Response('<html><body><p style="font-family:sans-serif;padding:20px;text-align:center">Please make your selection in the previous window. You may close this tab.</p></body></html>', mimetype='text/html')
         result = {}
         try:
             result = json.loads(request_state.result_json or '{}')
         except Exception:
             pass
+        # Remove picker_html from the result before sending to frontend
+        result.pop('picker_html', None)
         html = f"""<html><body><script>
         if (window.opener) {{
           window.opener.postMessage({{ type: 'sau:meta-oauth', ok: true, data: {json.dumps(result, ensure_ascii=False)} }}, '*');
@@ -2530,7 +2545,7 @@ def meta_oauth_callback():
             }}
             </script>
             </body></html>"""
-                meta_review.complete_oauth_request(state_token, status='pending_page_selection', result={'available_page_count': len(savable_pages)}, db_path=db_path)
+                meta_review.complete_oauth_request(state_token, status='pending_page_selection', result={'available_page_count': len(savable_pages), 'picker_html': html}, db_path=db_path)
                 return Response(html, mimetype='text/html')
             if selected_page is None and not pages:
                 raise ValueError('Meta OAuth did not return any manageable Facebook Pages')
@@ -2621,7 +2636,7 @@ def meta_oauth_callback():
             }}
             </script>
             </body></html>"""
-                meta_review.complete_oauth_request(state_token, status='pending_ig_selection', result={'available_ig_count': len(ig_accounts)}, db_path=db_path)
+                meta_review.complete_oauth_request(state_token, status='pending_ig_selection', result={'available_ig_count': len(ig_accounts), 'picker_html': html}, db_path=db_path)
                 return Response(html, mimetype='text/html')
 
             if selected_ig is None:
