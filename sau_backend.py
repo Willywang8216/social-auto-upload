@@ -2499,8 +2499,13 @@ def meta_oauth_callback():
         config = dict(account.config or {})
         token_payload = meta_auth.exchange_code_for_token(code=code, redirect_uri=request_state.redirect_uri)
         short_lived_access_token = str(token_payload.get('access_token') or '')
-        long_lived_payload = meta_auth.exchange_for_long_lived_token(access_token=short_lived_access_token) if short_lived_access_token else {}
+        try:
+            long_lived_payload = meta_auth.exchange_for_long_lived_token(access_token=short_lived_access_token) if short_lived_access_token else {}
+        except Exception as ll_exchange_err:
+            print(f"⚠️ Meta long-lived token exchange failed: {ll_exchange_err}")
+            long_lived_payload = {}
         user_access_token = str(long_lived_payload.get('access_token') or short_lived_access_token)
+        print(f"🔍 Meta token exchange: short_lived={'present' if short_lived_access_token else 'MISSING'} long_lived={'present' if long_lived_payload.get('access_token') else 'FALLBACK_TO_SHORT'} expires_in={long_lived_payload.get('expires_in') or token_payload.get('expires_in') or 'NOT_SET'}")
         pages_payload = meta_auth.fetch_managed_pages(access_token=user_access_token) if user_access_token else {}
         pages = pages_payload.get('data', []) if isinstance(pages_payload, dict) else []
         if not isinstance(pages, list):
@@ -2554,13 +2559,14 @@ def meta_oauth_callback():
             merged_config['facebookPageName'] = str(selected_page.get('name') or merged_config.get('facebookPageName') or '')
             merged_config['accessToken'] = str(selected_page.get('access_token') or user_access_token or '')
             merged_config['metaUserAccessToken'] = user_access_token
-            merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
+            now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')
+            merged_config['accessTokenUpdatedAt'] = now_utc
             expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
             if expires_in not in (None, ''):
-                expiry = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+                expiry = (datetime.now(tz=timezone.utc).replace(tzinfo=None) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
                 merged_config['metaUserAccessTokenExpiresAt'] = expiry
                 merged_config['accessTokenExpiresAt'] = expiry
-            merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
+            merged_config['connectedAt'] = merged_config.get('connectedAt') or now_utc
             updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
             callback_payload = {
                 'platform': updated.platform,
@@ -2618,7 +2624,7 @@ def meta_oauth_callback():
             <div id="cards"></div>
             <script>
             var IG_ACCOUNTS = {ig_json};
-            var TOKEN_DATA = {{userAccessToken: {json.dumps(user_access_token)}, metaUserAccessTokenExpiresAt: {json.dumps((datetime.now() + timedelta(seconds=int(long_lived_payload.get('expires_in') or token_payload.get('expires_in') or 0))).isoformat(timespec='seconds'))}}};
+            var TOKEN_DATA = {{userAccessToken: {json.dumps(user_access_token)}, metaUserAccessTokenExpiresAt: {json.dumps((datetime.now(tz=timezone.utc).replace(tzinfo=None) + timedelta(seconds=int(long_lived_payload.get('expires_in') or token_payload.get('expires_in') or 0))).isoformat(timespec='seconds'))}}};
             var ACCOUNT_ID = {request_state.account_id};
             var cards = document.getElementById('cards');
             IG_ACCOUNTS.forEach(function(ig) {{
@@ -2649,13 +2655,14 @@ def meta_oauth_callback():
             merged_config['instagramUserName'] = selected_ig['instagramUserName']
             merged_config['accessToken'] = selected_ig['pageAccessToken'] or user_access_token
             merged_config['metaUserAccessToken'] = user_access_token
-            merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
+            now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')
+            merged_config['accessTokenUpdatedAt'] = now_utc
             expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
             if expires_in not in (None, ''):
-                expiry = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+                expiry = (datetime.now(tz=timezone.utc).replace(tzinfo=None) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
                 merged_config['metaUserAccessTokenExpiresAt'] = expiry
                 merged_config['accessTokenExpiresAt'] = expiry
-            merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
+            merged_config['connectedAt'] = merged_config.get('connectedAt') or now_utc
             print(f"🔍 Meta callback IG: saving config for account {account.id}: igUserId={merged_config.get('igUserId')} accessToken={'present' if merged_config.get('accessToken') else 'MISSING'} keys={list(merged_config.keys())}")
             updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
             print(f"✅ Meta callback IG: saved account {updated.id} status={updated.status} config_keys={list((updated.config or {}).keys())}")
