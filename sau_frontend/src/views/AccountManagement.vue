@@ -365,7 +365,12 @@
                   Login with Browser
                 </el-button>
               </div>
-              <div class="field-hint">點擊後彈出瀏覽器，在 Reddit 登入後 cookie 會自動儲存到 <code>cookies/reddit/&lt;profile&gt;/&lt;name&gt;.json</code></div>
+              <div class="quick-connect-row" style="margin-bottom: 10px;">
+                <el-button size="large" style="width:100%" @click="showCookieImport = true">
+                  Paste Cookies
+                </el-button>
+              </div>
+              <div class="field-hint">Login with Browser (Docker 需有 GUI) 或從瀏覽器 DevTools 貼上 Cookie</div>
               <el-form-item label="Cookie 路徑">
                 <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
               </el-form-item>
@@ -584,6 +589,30 @@
         </span>
       </template>
     </el-dialog>
+
+    <!-- Cookie Import Dialog -->
+    <el-dialog v-model="showCookieImport" title="Import Cookies from Browser" width="600px" :close-on-click-modal="false">
+      <div style="margin-bottom: 12px;">
+        <p style="margin: 0 0 8px; font-size: 13px; color: #909399;">
+          1. Open Reddit in Chrome and log in<br>
+          2. Press F12 > Application > Cookies > https://www.reddit.com<br>
+          3. Right-click the cookie table > "Copy all"<br>
+          4. Paste below
+        </p>
+      </div>
+      <el-input
+        v-model="cookieImportText"
+        type="textarea"
+        :rows="12"
+        placeholder="Paste cookies here (tab-separated from Chrome DevTools or JSON array from Cookie-Editor)"
+      />
+      <template #footer>
+        <el-button @click="showCookieImport = false">Cancel</el-button>
+        <el-button type="primary" :loading="cookieImportLoading" @click="submitCookieImport()">
+          Import
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -650,6 +679,9 @@ const selectedProfileId = computed(() => {
 
 const dialogVisible = ref(false)
 const dialogType = ref('add')
+const showCookieImport = ref(false)
+const cookieImportText = ref('')
+const cookieImportLoading = ref(false)
 const accountFormRef = ref(null)
 const profileDialogVisible = ref(false)
 const profileDialogMode = ref('add')  // 'add' or 'edit'
@@ -2054,6 +2086,32 @@ async function acquireCookie() {
     ElMessage.error('連線伺服器失敗，請稍後再試')
     closeSSEConnection()
     sseConnecting.value = false
+  }
+}
+
+const submitCookieImport = async () => {
+  if (!cookieImportText.value.trim()) {
+    ElMessage.warning('Please paste cookie data first')
+    return
+  }
+  if (!accountForm.id) {
+    if (!await ensureAccountSaved()) return
+  }
+  cookieImportLoading.value = true
+  try {
+    const response = await http.post(`/accounts/${accountForm.id}/import-cookies`, {
+      cookies: cookieImportText.value,
+    })
+    const data = response?.data || {}
+    ElMessage.success(data.msg || `Imported ${data.cookieCount || 0} cookies`)
+    showCookieImport.value = false
+    cookieImportText.value = ''
+    await refreshAccounts()
+  } catch (error) {
+    console.error('Cookie import failed:', error)
+    ElMessage.error(error?.response?.data?.msg || error?.message || 'Cookie import failed')
+  } finally {
+    cookieImportLoading.value = false
   }
 }
 

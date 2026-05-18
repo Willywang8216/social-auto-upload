@@ -1101,6 +1101,109 @@ def upload_cookie():
         }), 500
 
 
+@app.route('/accounts/<int:account_id>/import-cookies', methods=['POST'])
+def import_cookies(account_id):
+    """Import cookies from browser DevTools (tab-separated) or JSON array."""
+    try:
+        account = profile_registry.get_account(account_id, db_path=_current_db_path())
+    except (ValueError, LookupError):
+        return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
+
+    body = request.get_json(silent=True) or {}
+    raw = str(body.get('cookies') or '').strip()
+    if not raw:
+        return jsonify({"code": 400, "msg": "No cookie data provided", "data": None}), 400
+
+    cookies = []
+    raw = raw.strip()
+
+    # Try JSON array first (EditThisCookie / Cookie-Editor export)
+    if raw.startswith('['):
+        try:
+            import json as _json
+            arr = _json.loads(raw)
+            if isinstance(arr, list):
+                for item in arr:
+                    if not isinstance(item, dict) or 'name' not in item or 'value' not in item:
+                        continue
+                    cookies.append({
+                        'name': str(item['name']),
+                        'value': str(item['value']),
+                        'domain': str(item.get('domain') or '.reddit.com'),
+                        'path': str(item.get('path') or '/'),
+                        'expires': item.get('expires', -1),
+                        'httpOnly': bool(item.get('httpOnly', False)),
+                        'secure': bool(item.get('secure', False)),
+                        'sameSite': str(item.get('sameSite') or 'Lax'),
+                    })
+        except Exception:
+            pass
+
+    # Tab-separated: Chrome DevTools "Copy all" format
+    if not cookies:
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            # Skip header row
+            if len(parts) < 2 or parts[0].lower() in ('name', 'key'):
+                continue
+            if len(parts) >= 2:
+                name, value = parts[0], parts[1]
+                domain = parts[2] if len(parts) > 2 else '.reddit.com'
+                path = parts[3] if len(parts) > 3 else '/'
+                expires_raw = parts[4] if len(parts) > 4 else '-1'
+                try:
+                    expires = int(float(expires_raw))
+                except (ValueError, TypeError):
+                    expires = -1
+                http_only = parts[5].lower() == 'true' if len(parts) > 5 else False
+                secure = parts[6].lower() == 'true' if len(parts) > 6 else False
+                same_site = parts[7] if len(parts) > 7 else 'Lax'
+                cookies.append({
+                    'name': name,
+                    'value': value,
+                    'domain': domain,
+                    'path': path,
+                    'expires': expires,
+                    'httpOnly': http_only,
+                    'secure': secure,
+                    'sameSite': same_site or 'Lax',
+                })
+
+    if not cookies:
+        return jsonify({"code": 400, "msg": "No valid cookies found in input", "data": None}), 400
+
+    storage_state = {"cookies": cookies, "origins": []}
+    import json as _json
+    payload_bytes = _json.dumps(storage_state, ensure_ascii=False).encode('utf-8')
+
+    try:
+        from myUtils.security import CookieValidationError, validate_storage_state
+        validate_storage_state(payload_bytes)
+    except CookieValidationError as exc:
+        return jsonify({"code": 400, "msg": f"Invalid cookie data: {exc}", "data": None}), 400
+
+    cookie_path = account.cookie_path
+    if not cookie_path:
+        profile = profile_registry.get_profile(account.profile_id, db_path=_current_db_path())
+        cookie_path = str(profiles.resolve_cookie_path(account.platform, profile.slug, account.account_name))
+        profile_registry.update_account(account.id, cookie_path=cookie_path, db_path=_current_db_path())
+
+    if not _cookie_path_is_allowed(Path(cookie_path)):
+        return jsonify({"code": 400, "msg": "Invalid cookie path", "data": None}), 400
+
+    from myUtils.cookie_storage import write_cookie
+    write_cookie(Path(cookie_path), payload_bytes)
+
+    return jsonify({
+        "code": 200,
+        "msg": f"Imported {len(cookies)} cookies",
+        "data": {"cookieCount": len(cookies)},
+    }), 200
+
+
 # Cookie文件下载API
 @app.route('/downloadCookie', methods=['GET'])
 def download_cookie():
