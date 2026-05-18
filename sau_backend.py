@@ -2438,6 +2438,8 @@ def meta_oauth_callback():
     if not request_state:
         return Response('Unknown Meta OAuth state', status=400, mimetype='text/plain')
 
+    print(f"🔍 Meta callback: state={state_token[:12]}... status={request_state.status} account_id={request_state.account_id} platform={request_state.platform}")
+
     # Idempotency: if already completed (e.g. duplicate callback), return success
     if request_state.status in ('completed', 'pending_page_selection', 'pending_ig_selection'):
         result = {}
@@ -2639,7 +2641,9 @@ def meta_oauth_callback():
                 merged_config['metaUserAccessTokenExpiresAt'] = expiry
                 merged_config['accessTokenExpiresAt'] = expiry
             merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
+            print(f"🔍 Meta callback IG: saving config for account {account.id}: igUserId={merged_config.get('igUserId')} accessToken={'present' if merged_config.get('accessToken') else 'MISSING'} keys={list(merged_config.keys())}")
             updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
+            print(f"✅ Meta callback IG: saved account {updated.id} status={updated.status} config_keys={list((updated.config or {}).keys())}")
             callback_payload = {
                 'platform': updated.platform,
                 'state': state_token,
@@ -3947,17 +3951,20 @@ def profile_accounts_create(profile_id):
         validation = _validate_account_payload(data, db_path=_current_db_path(), profile_id=profile_id)
         if not validation.valid:
             raise ValueError("; ".join(validation.errors))
-        account = profile_registry.add_account(
-            profile_id,
-            platform,
-            account_name,
-            cookie_path=data.get("cookiePath"),
-            auth_type=str(data.get("authType", "cookie") or "cookie"),
-            config=data.get("config") if isinstance(data.get("config"), dict) else None,
-            enabled=bool(data.get("enabled", True)),
-            status=int(data.get("status", 0) or 0),
-            db_path=_current_db_path(),
-        )
+        try:
+            account = profile_registry.add_account(
+                profile_id,
+                platform,
+                account_name,
+                cookie_path=data.get("cookiePath"),
+                auth_type=str(data.get("authType", "cookie") or "cookie"),
+                config=data.get("config") if isinstance(data.get("config"), dict) else None,
+                enabled=bool(data.get("enabled", True)),
+                status=int(data.get("status", 0) or 0),
+                db_path=_current_db_path(),
+            )
+        except sqlite3.IntegrityError:
+            raise ValueError(f"Account '{account_name}' already exists for {platform} in this profile. Delete the existing one first or use a different name.")
     except LookupError:
         return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
     except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
