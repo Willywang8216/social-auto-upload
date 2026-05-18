@@ -116,7 +116,8 @@ export const useAccountStore = defineStore('account', () => {
       config.accessToken ||
       config.accessTokenEnv ||
       config.botTokenEnv ||
-      config.webhookUrlEnv
+      config.webhookUrlEnv ||
+      config.cookiePath
     )
     const hasValidatedIdentity = Boolean(detail)
 
@@ -171,7 +172,8 @@ export const useAccountStore = defineStore('account', () => {
     const profileId = item.profileId ?? item.profile_id ?? null
     const filePath = item.filePath || item.cookiePath || item.cookie_path || ''
     const isLegacy = item.isLegacy ?? profileId == null
-    const config = item.config || {}
+    const config = { ...(item.config || {}) }
+    if (filePath && !config.cookiePath) config.cookiePath = filePath
     return {
       id: item.id,
       type: item.type ?? getLegacyPlatformType(platformSlug),

@@ -4011,7 +4011,7 @@ def accounts_health_summary():
             detail = config.get('channelTitle', '')
         elif account.platform == profile_registry.PLATFORM_TIKTOK:
             detail = config.get('displayName', '') or config.get('openId', '')
-        has_credential = bool(config.get('accessToken') or config.get('accessTokenEnv') or config.get('botTokenEnv') or config.get('webhookUrlEnv'))
+        has_credential = bool(config.get('accessToken') or config.get('accessTokenEnv') or config.get('botTokenEnv') or config.get('webhookUrlEnv') or account.cookie_path)
         if detail or config.get('lastConnectionCheckAt') or config.get('lastManualRefreshAt') or config.get('lastAutoRefreshAt') or config.get('connectedAt') or config.get('accessTokenUpdatedAt'):
             return 'ready'
         if has_credential:
