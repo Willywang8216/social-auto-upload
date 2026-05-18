@@ -1961,15 +1961,25 @@ function handleTwitterOauthMessage(event) {
 
 async function finalizeMetaPageSelection(page, tokenData, accountName) {
   try {
+    const isIG = Boolean(page.igUserId)
+    const config = {
+      pageId: page.id,
+      facebookPageName: page.name,
+      accessToken: page.access_token,
+      metaUserAccessToken: tokenData.userAccessToken,
+      accessTokenUpdatedAt: new Date().toISOString(),
+      connectedAt: new Date().toISOString(),
+    }
+    if (tokenData.metaUserAccessTokenExpiresAt) {
+      config.metaUserAccessTokenExpiresAt = tokenData.metaUserAccessTokenExpiresAt
+      config.accessTokenExpiresAt = tokenData.metaUserAccessTokenExpiresAt
+    }
+    if (isIG) {
+      config.igUserId = page.igUserId
+      config.instagramUserName = page.instagramUserName
+    }
     await profilesApi.updateAccount(accountForm.id, {
-      config: {
-        pageId: page.id,
-        facebookPageName: page.name,
-        accessToken: page.access_token,
-        metaUserAccessToken: tokenData.userAccessToken,
-        accessTokenUpdatedAt: new Date().toISOString(),
-        connectedAt: new Date().toISOString(),
-      },
+      config,
       authType: 'oauth',
       enabled: true,
       status: 1,
@@ -1977,7 +1987,13 @@ async function finalizeMetaPageSelection(page, tokenData, accountName) {
     accountForm.pageId = page.id
     accountForm.facebookPageName = page.name
     accountForm.accessToken = page.access_token
-    ElMessage.success(`Facebook 已連線至 ${page.name}`)
+    if (isIG) {
+      accountForm.igUserId = page.igUserId
+      accountForm.instagramUserName = page.instagramUserName
+      ElMessage.success(`Instagram 已連線至 @${page.instagramUserName}`)
+    } else {
+      ElMessage.success(`Facebook 已連線至 ${page.name}`)
+    }
     dialogVisible.value = false
     await refreshAccounts()
   } catch (error) {

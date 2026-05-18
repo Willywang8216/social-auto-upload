@@ -2438,6 +2438,21 @@ def meta_oauth_callback():
     if not request_state:
         return Response('Unknown Meta OAuth state', status=400, mimetype='text/plain')
 
+    # Idempotency: if already completed (e.g. duplicate callback), return success
+    if request_state.status in ('completed', 'pending_page_selection', 'pending_ig_selection'):
+        result = {}
+        try:
+            result = json.loads(request_state.result_json or '{}')
+        except Exception:
+            pass
+        html = f"""<html><body><script>
+        if (window.opener) {{
+          window.opener.postMessage({{ type: 'sau:meta-oauth', ok: true, data: {json.dumps(result, ensure_ascii=False)} }}, '*');
+        }}
+        window.close();
+        </script><p>Already completed. You may close this window.</p></body></html>"""
+        return Response(html, mimetype='text/html')
+
     if error:
         meta_review.complete_oauth_request(state_token, status='error', error_text=error, result={'state': state_token, 'error': error}, db_path=db_path)
         if request_state.account_id:
@@ -2553,31 +2568,69 @@ def meta_oauth_callback():
             }
             summary = f"Facebook connected: {merged_config.get('facebookPageName') or updated.account_name}"
         else:
-            wanted_ig_user_id = str(config.get('igUserId') or '').strip()
-            selected_pair = None
+            # Collect all Instagram business accounts from pages
+            ig_accounts = []
             for page in pages:
                 ig_user = page.get('instagram_business_account') if isinstance(page, dict) else None
                 if not isinstance(ig_user, dict):
                     continue
-                if wanted_ig_user_id and str(ig_user.get('id') or '') != wanted_ig_user_id:
-                    continue
-                selected_pair = (page, ig_user)
-                break
-            if selected_pair is None:
-                for page in pages:
-                    ig_user = page.get('instagram_business_account') if isinstance(page, dict) else None
-                    if isinstance(ig_user, dict):
-                        selected_pair = (page, ig_user)
-                        break
-            if selected_pair is None:
+                ig_accounts.append({
+                    'igUserId': str(ig_user.get('id') or ''),
+                    'instagramUserName': str(ig_user.get('username') or ''),
+                    'pageId': str(page.get('id') or ''),
+                    'facebookPageName': str(page.get('name') or ''),
+                    'pageAccessToken': str(page.get('access_token') or ''),
+                })
+
+            wanted_ig_user_id = str(config.get('igUserId') or '').strip()
+            selected_ig = None
+            if wanted_ig_user_id:
+                selected_ig = next((ig for ig in ig_accounts if ig['igUserId'] == wanted_ig_user_id), None)
+            if selected_ig is None and len(ig_accounts) == 1:
+                selected_ig = ig_accounts[0]
+
+            if selected_ig is None and len(ig_accounts) > 1:
+                # Show picker page (same pattern as Facebook page selector)
+                ig_json = json.dumps(ig_accounts)
+                html = f"""<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>body{{font-family:-apple-system,system-ui,sans-serif;padding:20px;max-width:560px;margin:0 auto;background:#f4f6f8}}
+            h2{{text-align:center;color:#1d2129}}.card{{background:#fff;border:2px solid #e4e6eb;border-radius:12px;padding:16px;margin:10px 0;cursor:pointer;transition:all .15s}}
+            .card:hover{{border-color:#E1306C;box-shadow:0 2px 8px rgba(225,48,108,.15)}}
+            .card h3{{margin:0 0 4px;color:#E1306C}}.card p{{margin:0;color:#65676b;font-size:13px}}</style></head><body>
+            <h2>{len(ig_accounts)} Instagram accounts available</h2><p style="text-align:center;color:#65676b">Select the Instagram account to connect:</p>
+            <div id="cards"></div>
+            <script>
+            var IG_ACCOUNTS = {ig_json};
+            var TOKEN_DATA = {{userAccessToken: {json.dumps(user_access_token)}, metaUserAccessTokenExpiresAt: {json.dumps((datetime.now() + timedelta(seconds=int(long_lived_payload.get('expires_in') or token_payload.get('expires_in') or 0))).isoformat(timespec='seconds'))}}};
+            var ACCOUNT_ID = {request_state.account_id};
+            var cards = document.getElementById('cards');
+            IG_ACCOUNTS.forEach(function(ig) {{
+              var card = document.createElement('div');
+              card.className = 'card';
+              card.innerHTML = '<h3>@' + ig.instagramUserName + '</h3><p>' + ig.facebookPageName + ' (Page ID: ' + ig.pageId + ')</p>';
+              card.onclick = function() {{ selectIG(ig); }};
+              cards.appendChild(card);
+            }});
+            function selectIG(ig) {{
+              if (window.opener) {{
+                window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'instagram',accountId:ACCOUNT_ID,selectedPage:{{id:ig.pageId,name:ig.facebookPageName,access_token:ig.pageAccessToken,igUserId:ig.igUserId,instagramUserName:ig.instagramUserName}},tokenData:TOKEN_DATA}}}}, '*');
+              }}
+              window.close();
+            }}
+            </script>
+            </body></html>"""
+                meta_review.complete_oauth_request(state_token, status='pending_ig_selection', result={'available_ig_count': len(ig_accounts)}, db_path=db_path)
+                return Response(html, mimetype='text/html')
+
+            if selected_ig is None:
                 raise ValueError('Meta OAuth did not return a page-linked Instagram business account')
-            page, ig_user = selected_pair
+
             merged_config = dict(config)
-            merged_config['pageId'] = str(page.get('id') or merged_config.get('pageId') or '')
-            merged_config['facebookPageName'] = str(page.get('name') or merged_config.get('facebookPageName') or '')
-            merged_config['igUserId'] = str(ig_user.get('id') or merged_config.get('igUserId') or '')
-            merged_config['instagramUserName'] = str(ig_user.get('username') or merged_config.get('instagramUserName') or '')
-            merged_config['accessToken'] = str(page.get('access_token') or user_access_token or '')
+            merged_config['pageId'] = selected_ig['pageId']
+            merged_config['facebookPageName'] = selected_ig['facebookPageName']
+            merged_config['igUserId'] = selected_ig['igUserId']
+            merged_config['instagramUserName'] = selected_ig['instagramUserName']
+            merged_config['accessToken'] = selected_ig['pageAccessToken'] or user_access_token
             merged_config['metaUserAccessToken'] = user_access_token
             merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
             expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
