@@ -1494,6 +1494,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 account_id,
                 config=config,
                 auth_type='oauth',
+                status=1,
                 db_path=db_path,
             )
             _append_tiktok_review_event(
@@ -1535,6 +1536,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 account_id,
                 config=config,
                 auth_type='oauth',
+                status=1,
                 db_path=db_path,
             )
             summary = f"Reddit refreshed: {config.get('redditUserName') or updated.account_name}"
@@ -1558,6 +1560,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 account_id,
                 config=config,
                 auth_type='oauth',
+                status=1,
                 db_path=db_path,
             )
             summary = f"YouTube refreshed: {config.get('channelTitle') or updated.account_name}"
@@ -1585,6 +1588,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 account_id,
                 config=config,
                 auth_type='oauth',
+                status=1,
                 db_path=db_path,
             )
             summary = f"Threads refreshed: {config.get('threadsUserName') or updated.account_name}"
@@ -1613,7 +1617,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 config['accessToken'] = str(selected_page.get('access_token') or config.get('accessToken') or '')
                 if config.get('metaUserAccessTokenExpiresAt'):
                     config['accessTokenExpiresAt'] = str(config.get('metaUserAccessTokenExpiresAt'))
-                updated = profile_registry.update_account(account_id, config=config, auth_type='oauth', db_path=db_path)
+                updated = profile_registry.update_account(account_id, config=config, auth_type='oauth', status=1, db_path=db_path)
                 summary = f"Facebook credentials re-synced: {config.get('facebookPageName') or updated.account_name}"
             else:
                 wanted_ig_user_id = str(config.get('igUserId') or '').strip()
@@ -1642,7 +1646,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 config['accessToken'] = str(page.get('access_token') or config.get('accessToken') or '')
                 if config.get('metaUserAccessTokenExpiresAt'):
                     config['accessTokenExpiresAt'] = str(config.get('metaUserAccessTokenExpiresAt'))
-                updated = profile_registry.update_account(account_id, config=config, auth_type='oauth', db_path=db_path)
+                updated = profile_registry.update_account(account_id, config=config, auth_type='oauth', status=1, db_path=db_path)
                 summary = f"Instagram credentials re-synced: {config.get('instagramUserName') or updated.account_name}"
         elif account.platform == profile_registry.PLATFORM_TWITTER:
             refreshed = prepared_publishers.refresh_twitter_access_token(config)
@@ -1668,6 +1672,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 account_id,
                 config=config,
                 auth_type='oauth',
+                status=1,
                 db_path=db_path,
             )
             summary = f"Twitter refreshed: @{config.get('twitterUserName') or updated.account_name}"
