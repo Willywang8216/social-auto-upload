@@ -1332,7 +1332,7 @@ const handleEdit = (row) => {
     profileId: row.profileId,
     name: row.name,
     platform: row.platformSlug || row.platform,
-    authType: row.authType || 'cookie',
+    authType: row.authType || row.auth_type || 'cookie',
     enabled: row.enabled !== false,
     cookiePath: row.filePath || '',
     advancedConfigText: row.config && Object.keys(row.config).length > 0

@@ -4251,12 +4251,13 @@ def accounts_patch(account_id):
         validation = _validate_account_payload(merged, db_path=_current_db_path(), profile_id=new_profile_id)
         if not validation.valid:
             raise ValueError("; ".join(validation.errors))
+        resolved_auth_type = data.get("authType", existing.auth_type)
         account = profile_registry.update_account(
             account_id,
             profile_id=new_profile_id,
             account_name=data.get("accountName"),
             cookie_path=data.get("cookiePath"),
-            auth_type=data.get("authType"),
+            auth_type=resolved_auth_type,
             config=existing_config,
             enabled=data.get("enabled"),
             status=data.get("status"),
