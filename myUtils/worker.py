@@ -607,6 +607,20 @@ async def _run_prepared_campaign_upload(
     publisher = PREPARED_PUBLISHER_REGISTRY.get(platform)
     if publisher is None:
         raise ValueError(f"Unsupported prepared publish platform: {platform!r}")
+    # If the campaign post pinned itself to a subset of media files (used
+    # by the Publish Center's single-media split), filter the artifact
+    # list before handing off to the platform publisher so it doesn't
+    # accidentally upload media items the post intentionally excluded.
+    file_record_ids = payload.get("fileRecordIds")
+    if isinstance(file_record_ids, list) and file_record_ids:
+        allowed = {int(v) for v in file_record_ids if v is not None}
+        original = payload.get("artifacts") or []
+        kept = []
+        for artifact in original:
+            source_id = artifact.get("source_file_record_id")
+            if source_id is None or int(source_id) in allowed:
+                kept.append(artifact)
+        payload = {**payload, "artifacts": kept}
     await publisher(platform=platform, payload=payload, target=target, account=account, account_file=account_file)
 
 

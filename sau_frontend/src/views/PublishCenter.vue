@@ -1,1664 +1,793 @@
 <template>
   <div class="publish-center">
-    <!-- Tab管理区域 -->
-    <div class="tab-management">
-      <div class="tab-header">
-        <div class="tab-list">
-          <div 
-            v-for="tab in tabs" 
-            :key="tab.name"
-            :class="['tab-item', { active: activeTab === tab.name }]"
-            @click="activeTab = tab.name"
+    <!-- Header: template controls -->
+    <el-card class="pc-card pc-card--header" shadow="never">
+      <div class="pc-header-row">
+        <div class="pc-header-left">
+          <el-select
+            v-model="selectedTemplateId"
+            placeholder="載入範本"
+            clearable
+            filterable
+            style="width: 280px"
+            @change="onTemplateSelected"
           >
-            <span>{{ tab.label }}</span>
-            <el-icon 
-              v-if="tabs.length > 1"
-              class="close-icon" 
-              @click.stop="removeTab(tab.name)"
-            >
-              <Close />
-            </el-icon>
-          </div>
+            <el-option
+              v-for="template in templatesStore.templates"
+              :key="template.id"
+              :label="template.name"
+              :value="template.id"
+            />
+          </el-select>
+          <el-button type="primary" plain @click="showSaveTemplateDialog">
+            另存為範本
+          </el-button>
+          <el-button @click="resetForm">重置</el-button>
+          <router-link to="/template-management" class="pc-link">範本管理</router-link>
         </div>
-        <div class="tab-actions">
-          <el-button 
-            type="primary" 
-            size="small" 
-            @click="addTab"
-            class="add-tab-btn"
-          >
-            <el-icon><Plus /></el-icon>
-            新增分頁
-          </el-button>
-          <el-button 
-            type="success" 
-            size="small" 
-            @click="batchPublish"
-            :loading="batchPublishing"
-            class="batch-publish-btn"
-          >
-            批次發佈
-          </el-button>
+        <div class="pc-header-right">
+          <el-tag v-if="loadedTemplateName" type="info">已套用：{{ loadedTemplateName }}</el-tag>
         </div>
       </div>
-    </div>
+    </el-card>
 
-    <!-- 内容区域 -->
-    <div class="publish-content">
-      <div class="tab-content-wrapper">
-        <div 
-          v-for="tab in tabs" 
-          :key="tab.name"
-          v-show="activeTab === tab.name"
-          class="tab-content"
+    <!-- 1. Media -->
+    <el-card class="pc-card" shadow="never">
+      <template #header>
+        <div class="pc-section-header">
+          <h3>1. 媒體素材</h3>
+          <span class="pc-subtle">可上傳一個或多個圖片 / 影片</span>
+        </div>
+      </template>
+      <el-upload
+        drag
+        multiple
+        :auto-upload="true"
+        :action="uploadAction"
+        :headers="authHeaders"
+        :show-file-list="false"
+        :on-success="onUploadSuccess"
+        :on-error="onUploadError"
+        accept="image/*,video/*"
+      >
+        <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+        <div class="el-upload__text">拖曳檔案到此或<em>點擊上傳</em></div>
+        <template #tip>
+          <div class="el-upload__tip">支援多檔上傳。單媒體平台 (Tencent / TikTok / YouTube …) 若上傳多個檔案，會自動拆成多則貼文、每 {{ STAGGER_MINUTES }} 分鐘間隔發佈。</div>
+        </template>
+      </el-upload>
+      <el-button class="pc-mb-8" link @click="openMaterialLibrary">從素材庫挑選</el-button>
+      <div v-if="mediaFiles.length > 0" class="pc-media-list">
+        <div v-for="(file, idx) in mediaFiles" :key="file.path + idx" class="pc-media-item">
+          <el-tag :type="isVideo(file.path) ? 'success' : 'primary'">{{ isVideo(file.path) ? '影片' : '圖片' }}</el-tag>
+          <span class="pc-media-name">{{ file.name }}</span>
+          <el-button text type="danger" @click="removeMedia(idx)">移除</el-button>
+        </div>
+      </div>
+    </el-card>
+
+    <!-- 2. Profiles -->
+    <el-card class="pc-card" shadow="never">
+      <template #header>
+        <div class="pc-section-header">
+          <h3>2. 目標 Profile</h3>
+          <span class="pc-subtle">可複選；每個 profile 會用各自的 AI 設定與系統提示</span>
+        </div>
+      </template>
+      <el-checkbox-group v-model="selectedProfileIds" @change="onProfileSelectionChanged">
+        <el-checkbox
+          v-for="profile in profilesStore.profiles"
+          :key="profile.id"
+          :label="profile.id"
         >
-          <!-- 發佈状态提示 -->
-          <div v-if="tab.publishStatus" class="publish-status">
-            <el-alert
-              :title="tab.publishStatus.message"
-              :type="tab.publishStatus.type"
-              :closable="false"
-              show-icon
-            />
-          </div>
-
-          <!-- 任务进度（已切换到 /jobs 异步發佈管线） -->
-          <div v-if="tab.jobId" class="publish-job-progress">
-            <PublishJobProgress
-              :job="jobsStore.jobsById[tab.jobId]"
-              @cancel="handleCancelJob(tab)"
-            />
-          </div>
-
-          <!-- 影片上传区域 -->
-          <div class="upload-section">
-            <h3>影片</h3>
-            <div class="upload-options">
-              <el-button type="primary" @click="showUploadOptions(tab)" class="upload-btn">
-                <el-icon><Upload /></el-icon>
-                上傳影片
-              </el-button>
-            </div>
-            
-            <!-- 已上传文件列表 -->
-            <div v-if="tab.fileList.length > 0" class="uploaded-files">
-              <h4>已上傳檔案：</h4>
-              <div class="file-list">
-                <div v-for="(file, index) in tab.fileList" :key="index" class="file-item">
-                  <el-link :href="file.url" target="_blank" type="primary">{{ file.name }}</el-link>
-                  <span class="file-size">{{ (file.size / 1024 / 1024).toFixed(2) }}MB</span>
-                  <el-button type="danger" size="small" @click="removeFile(tab, index)">刪除</el-button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 上传选项弹窗 -->
-          <el-dialog
-            v-model="uploadOptionsVisible"
-            title="選擇上傳方式"
-            width="400px"
-            class="upload-options-dialog"
+          {{ profile.name }}
+        </el-checkbox>
+      </el-checkbox-group>
+      <div v-if="selectedProfileIds.length === 0" class="pc-help">尚未選擇任何 profile</div>
+      <div v-for="profileId in selectedProfileIds" :key="`accts-${profileId}`" class="pc-profile-accounts">
+        <div class="pc-profile-title">{{ findProfile(profileId)?.name }} 的帳號：</div>
+        <el-checkbox-group v-model="selectedAccountIds">
+          <el-checkbox
+            v-for="account in accountsForProfile(profileId)"
+            :key="account.id"
+            :label="account.id"
           >
-            <div class="upload-options-content">
-              <el-button type="primary" @click="selectLocalUpload" class="option-btn">
-                <el-icon><Upload /></el-icon>
-                本機上傳
-              </el-button>
-              <el-button type="success" @click="selectMaterialLibrary" class="option-btn">
-                <el-icon><Folder /></el-icon>
-                素材庫
-              </el-button>
-            </div>
-          </el-dialog>
+            {{ account.account_name }} ({{ account.platform }})
+          </el-checkbox>
+        </el-checkbox-group>
+        <span v-if="accountsForProfile(profileId).length === 0" class="pc-help">尚未取得此 profile 的帳號</span>
+      </div>
+    </el-card>
 
-          <!-- 本機上傳弹窗 -->
-          <el-dialog
-            v-model="localUploadVisible"
-            title="本機上傳"
-            width="600px"
-            class="local-upload-dialog"
-          >
-            <el-upload
-              class="video-upload"
-              drag
-              :auto-upload="true"
-              :action="uploadAction"
-              :on-success="(response, file) => handleUploadSuccess(response, file, currentUploadTab)"
-              :on-error="handleUploadError"
-              multiple
-              accept="video/*"
-              :headers="authHeaders"
-            >
-              <el-icon class="el-icon--upload"><Upload /></el-icon>
-              <div class="el-upload__text">
-                將影片檔案拖曳到此處，或<em>點擊上傳</em>
-              </div>
-              <template #tip>
-                <div class="el-upload__tip">
-                  支援 MP4、AVI 等影片格式，可上傳多個檔案
-                </div>
-              </template>
-            </el-upload>
-          </el-dialog>
-
-          <!-- 批次發佈進度对话框 -->
-          <el-dialog
-            v-model="batchPublishDialogVisible"
-            title="批次發佈進度"
-            width="500px"
-            :close-on-click-modal="false"
-            :close-on-press-escape="false"
-            :show-close="false"
-          >
-            <div class="publish-progress">
-              <el-progress 
-                :percentage="publishProgress"
-                :status="publishProgress === 100 ? 'success' : ''"
-              />
-              <div v-if="currentPublishingTab" class="current-publishing">
-                正在發佈：{{ currentPublishingTab.label }}
-              </div>
-              
-              <!-- 發佈结果列表 -->
-              <div class="publish-results" v-if="publishResults.length > 0">
-                <div 
-                  v-for="(result, index) in publishResults" 
-                  :key="index"
-                  :class="['result-item', result.status]"
-                >
-                  <el-icon v-if="result.status === 'success'"><Check /></el-icon>
-                  <el-icon v-else-if="result.status === 'error'"><Close /></el-icon>
-                  <el-icon v-else><InfoFilled /></el-icon>
-                  <span class="label">{{ result.label }}</span>
-                  <span class="message">{{ result.message }}</span>
-                </div>
-              </div>
-            </div>
-            
-            <template #footer>
-              <div class="dialog-footer">
-                <el-button 
-                  @click="cancelBatchPublish" 
-                  :disabled="publishProgress === 100"
-                >
-                  取消發佈
-                </el-button>
-                <el-button 
-                  type="primary" 
-                  @click="batchPublishDialogVisible = false"
-                  v-if="publishProgress === 100"
-                >
-                  關閉
-                </el-button>
-              </div>
-            </template>
-          </el-dialog>
-
-          <!-- 素材庫选择弹窗 -->
-          <el-dialog
-            v-model="materialLibraryVisible"
-            title="選擇素材"
-            width="800px"
-            class="material-library-dialog"
-          >
-            <div class="material-library-content">
-              <el-checkbox-group v-model="selectedMaterials">
-                <div class="material-list">
-                  <div
-                    v-for="material in materials"
-                    :key="material.id"
-                    class="material-item"
-                  >
-                    <el-checkbox :label="material.id" class="material-checkbox">
-                      <div class="material-info">
-                        <div class="material-name">{{ material.filename }}</div>
-                        <div class="material-details">
-                          <span class="file-size">{{ material.filesize }}MB</span>
-                          <span class="upload-time">{{ material.upload_time }}</span>
-                        </div>
-                      </div>
-                    </el-checkbox>
-                  </div>
-                </div>
-              </el-checkbox-group>
-            </div>
-            <template #footer>
-              <div class="dialog-footer">
-                <el-button @click="materialLibraryVisible = false">取消</el-button>
-                <el-button type="primary" @click="confirmMaterialSelection">確定</el-button>
-              </div>
-            </template>
-          </el-dialog>
-
-          <div class="profile-section">
-            <h3>Profile</h3>
-            <el-select
-              v-model="tab.selectedProfileId"
-              placeholder="選擇 Profile（啟用多平台 campaign 模式）"
-              clearable
-              filterable
-              style="width: 100%; max-width: 420px"
-              @change="(value) => handleProfileChange(tab, value)"
-            >
-              <el-option
-                v-for="profile in profileOptions"
-                :key="profile.id"
-                :label="profile.name"
-                :value="profile.id"
-              />
-            </el-select>
-            <div class="profile-hint">
-              選擇 Profile 後，會改走 campaign 準備與多平台排程流程；Facebook、Instagram、Reddit、Telegram、YouTube、TikTok、Threads、Discord、Patreon 建議都從這個模式發佈。
-            </div>
-            <div class="campaign-platform-summary">
-              <div class="campaign-summary-label">Campaign 支援平台</div>
-              <div class="campaign-platform-tags">
-                <el-tag
-                  v-for="platform in campaignPlatformOptions"
-                  :key="platform.value"
-                  effect="plain"
-                  class="campaign-platform-tag"
-                >
-                  {{ platform.label }}
-                </el-tag>
-              </div>
-              <div v-if="tab.selectedProfileId && selectedProfilePlatformLabels(tab).length > 0" class="campaign-summary-label selected-profile-platforms">
-                目前 Profile 已載入：{{ selectedProfilePlatformLabels(tab).join('、') }}
-              </div>
-            </div>
-          </div>
-
-          <!-- 帳號选择 -->
-          <div class="account-section">
-            <h3>帳號</h3>
-            <div class="account-display">
-              <div class="selected-accounts">
-                <el-tag
-                  v-for="(account, index) in tab.selectedAccounts"
-                  :key="index"
-                  closable
-                  @close="removeAccount(tab, index)"
-                  class="account-tag"
-                >
-                  {{ getAccountDisplayName(account) }}
-                </el-tag>
-              </div>
-              <el-button 
-                type="primary" 
-                plain 
-                @click="openAccountDialog(tab)"
-                class="select-account-btn"
-              >
-                選擇帳號
-              </el-button>
-            </div>
-          </div>
-
-          <!-- 帳號选择弹窗 -->
-          <el-dialog
-            v-model="accountDialogVisible"
-            title="選擇帳號"
-            width="600px"
-            class="account-dialog"
-          >
-            <div class="account-dialog-content">
-              <el-checkbox-group v-model="tempSelectedAccounts">
-                <div class="account-list">
-                  <el-checkbox
-                    v-for="account in availableAccounts"
-                    :key="account.id"
-                    :label="account.id"
-                    class="account-item"
-                  >
-                    <div class="account-info">
-                      <span class="account-name">{{ account.name }}</span>                      
-                    </div>
-                  </el-checkbox>
-                </div>
-              </el-checkbox-group>
-            </div>
-
-            <template #footer>
-              <div class="dialog-footer">
-                <el-button @click="accountDialogVisible = false">取消</el-button>
-                <el-button type="primary" @click="confirmAccountSelection">確定</el-button>
-              </div>
-            </template>
-          </el-dialog>
-
-          <el-alert
-            v-if="!tab.selectedProfileId"
-            class="legacy-mode-hint"
-            type="warning"
-            :closable="false"
-            show-icon
-            title="目前是 Legacy 單平台模式"
-            description="這個模式只適用抖音、快手、視頻號、小紅書、X / Twitter 等舊版 uploader。若要發佈 Facebook、Instagram、Reddit、Telegram、YouTube、TikTok、Threads、Discord、Patreon，請先選擇 Profile。"
+    <!-- 3. Processing options -->
+    <el-card class="pc-card" shadow="never">
+      <template #header>
+        <div class="pc-section-header">
+          <h3>3. 處理選項</h3>
+        </div>
+      </template>
+      <div class="pc-options-grid">
+        <el-checkbox v-model="options.watermark">套用浮水印（圖片與影片）</el-checkbox>
+        <el-checkbox v-model="options.intro">加入片頭（影片）</el-checkbox>
+        <el-checkbox v-model="options.outro">加入片尾（影片）</el-checkbox>
+        <el-checkbox v-model="options.linkInFirstComment">連結放第一則留言（支援的平台）</el-checkbox>
+      </div>
+      <el-divider />
+      <div class="pc-screenshots">
+        <el-checkbox v-model="options.screenshots.enabled">從影片擷取截圖</el-checkbox>
+        <div v-if="options.screenshots.enabled" class="pc-screenshots-row">
+          <span>張數：</span>
+          <el-input-number v-model="options.screenshots.count" :min="1" :max="20" />
+          <span class="pc-subtle">指定時間（逗號分隔 HH:MM:SS，留空為隨機）：</span>
+          <el-input
+            v-model="options.screenshots.timestampsRaw"
+            placeholder="如 00:05, 00:30, 01:15"
+            style="width: 280px"
           />
+        </div>
+        <div class="pc-subtle pc-mt-4">
+          檔名格式：<code>原始檔名_YYYYMMDD-HHMMSS_screenshotN.jpg</code>
+        </div>
+      </div>
+    </el-card>
 
-          <!-- 平台选择 -->
-          <div v-if="!tab.selectedProfileId" class="platform-section">
-            <h3>Legacy 平台</h3>
-            <el-radio-group v-model="tab.selectedPlatform" class="platform-radios">
-              <el-radio 
-                v-for="platform in legacyPlatforms" 
-                :key="platform.value"
-                :value="platform.value"
-                class="platform-radio"
+    <!-- 4. Brief -->
+    <el-card class="pc-card" shadow="never">
+      <template #header>
+        <div class="pc-section-header">
+          <h3>4. 貼文簡介</h3>
+          <span class="pc-subtle">告訴 AI 這篇貼文要傳達什麼</span>
+        </div>
+      </template>
+      <el-input
+        v-model="brief"
+        type="textarea"
+        :rows="4"
+        placeholder="例：宣傳新品發佈活動，強調限定折扣與時間，鼓勵留言互動"
+      />
+      <div class="pc-actions">
+        <el-button
+          type="primary"
+          :loading="generating"
+          :disabled="!canGeneratePreviews"
+          @click="generatePreviews"
+        >
+          生成各帳號草稿
+        </el-button>
+        <span v-if="!canGeneratePreviews" class="pc-help">請先選擇至少一個 profile 與帳號</span>
+      </div>
+    </el-card>
+
+    <!-- 5. Per-profile drafts -->
+    <el-card v-if="previews.length > 0" class="pc-card" shadow="never">
+      <template #header>
+        <div class="pc-section-header">
+          <h3>5. 各帳號草稿</h3>
+          <span class="pc-subtle">可逐一編輯，或點選「重新生成」要求 AI 改寫</span>
+        </div>
+      </template>
+      <el-collapse v-model="expandedProfiles">
+        <el-collapse-item
+          v-for="profile in previews"
+          :key="profile.profileId"
+          :name="profile.profileId"
+        >
+          <template #title>
+            <strong>{{ profile.profileName }}</strong>
+            <span class="pc-subtle pc-ml-8">{{ profile.accounts.length }} 個帳號</span>
+          </template>
+          <div v-for="account in profile.accounts" :key="account.accountId" class="pc-account-draft">
+            <div class="pc-account-head">
+              <el-tag :type="account.supportsMultiMedia ? 'success' : 'warning'">{{ account.platform }}</el-tag>
+              <span class="pc-account-name">{{ account.accountName }}</span>
+              <span class="pc-subtle">
+                {{ countChars(account.draft.message) }}
+                <template v-if="account.maxChars">/ {{ account.maxChars }}</template>
+              </span>
+              <el-button
+                size="small"
+                :loading="regeneratingKey === draftKey(profile.profileId, account.accountId)"
+                @click="regenerateAccount(profile, account)"
               >
-                {{ platform.label }}
-              </el-radio>
-            </el-radio-group>
-          </div>
-
-          <!-- 原创声明 -->
-          <div v-if="!tab.selectedProfileId" class="original-section">
-            <el-checkbox
-              v-model="tab.isOriginal"
-              label="聲明原創"
-              class="original-checkbox"
-            />
-          </div>
-
-          <!-- 草稿选项 (仅在視頻號可见) -->
-          <div v-if="!tab.selectedProfileId && tab.selectedPlatform === 'tencent'" class="draft-section">
-            <el-checkbox
-              v-model="tab.isDraft"
-              label="視頻號僅儲存草稿（請使用手機發佈）"
-              class="draft-checkbox"
-            />
-          </div>
-
-          <el-alert
-            v-if="!tab.selectedProfileId && tab.selectedPlatform === 'twitter'"
-            class="twitter-hint"
-            type="info"
-            :closable="false"
-            show-icon
-            title="X / Twitter 會自動將超過 2 分 20 秒的影片切分為多段，並以單一連續回覆串貼文發佈到每個帳號。"
-          />
-
-          <!-- 标签 (仅在抖音可见) -->
-          <div v-if="!tab.selectedProfileId && tab.selectedPlatform === 'douyin'" class="product-section">
-            <h3>商品連結</h3>
+                重新生成
+              </el-button>
+              <el-tag v-if="!account.supportsMultiMedia && mediaFiles.length > 1" type="info" size="small">
+                {{ mediaFiles.length }} 則貼文，每 {{ STAGGER_MINUTES }} 分鐘
+              </el-tag>
+            </div>
             <el-input
-              v-model="tab.productTitle"
-              type="text"
-              :rows="1"
-              placeholder="請輸入商品名稱"
-              maxlength="200"
-              class="product-name-input"
-            />
-            <el-input
-              v-model="tab.productLink"
-              type="text"
-              :rows="1"
-              placeholder="請輸入商品連結"
-              maxlength="200"
-              class="product-link-input"
-            />
-          </div>
-
-          <!-- 標題输入 -->
-          <div class="title-section">
-            <h3>標題</h3>
-            <el-input
-              v-model="tab.title"
-              type="textarea"
-              :rows="3"
-              placeholder="請輸入標題"
-              maxlength="100"
-              show-word-limit
-              class="title-input"
-            />
-          </div>
-
-          <div v-if="tab.selectedProfileId" class="campaign-details-section">
-            <h3>Campaign 補充資訊</h3>
-            <el-input
-              v-model="tab.notes"
+              v-model="account.draft.message"
               type="textarea"
               :rows="4"
-              placeholder="補充內容摘要、賣點、口吻或平台注意事項"
-              class="notes-input"
+              :maxlength="account.maxChars || undefined"
             />
-            <div class="campaign-inline-fields">
-              <el-input
-                v-model="tab.contactDetails"
-                placeholder="聯絡資訊"
-                class="campaign-inline-input"
-              />
-              <el-input
-                v-model="tab.cta"
-                placeholder="CTA"
-                class="campaign-inline-input"
-              />
+            <div v-if="account.supportsFirstComment && options.linkInFirstComment" class="pc-first-comment">
+              <span class="pc-subtle">第一則留言：</span>
+              <el-input v-model="account.draft.firstComment" placeholder="貼文連結等資訊" />
             </div>
           </div>
+        </el-collapse-item>
+      </el-collapse>
+    </el-card>
 
-          <!-- 話題输入 -->
-          <div class="topic-section">
-            <h3>話題</h3>
-            <div class="topic-display">
-              <div class="selected-topics">
-                <el-tag
-                  v-for="(topic, index) in tab.selectedTopics"
-                  :key="index"
-                  closable
-                  @close="removeTopic(tab, index)"
-                  class="topic-tag"
-                >
-                  #{{ topic }}
-                </el-tag>
-              </div>
-              <el-button 
-                type="primary" 
-                plain 
-                @click="openTopicDialog(tab)"
-                class="select-topic-btn"
-              >
-                新增話題
-              </el-button>
-            </div>
-          </div>
+    <!-- 6. Schedule -->
+    <el-card class="pc-card" shadow="never">
+      <template #header>
+        <div class="pc-section-header">
+          <h3>6. 排程</h3>
+        </div>
+      </template>
+      <el-radio-group v-model="schedule.mode">
+        <el-radio label="now">立即發佈</el-radio>
+        <el-radio label="schedule">排程發佈</el-radio>
+      </el-radio-group>
+      <div v-if="schedule.mode === 'schedule'" class="pc-mt-8">
+        <el-date-picker
+          v-model="schedule.startAt"
+          type="datetime"
+          placeholder="選擇首則貼文時間"
+          format="YYYY-MM-DD HH:mm"
+          value-format="YYYY-MM-DDTHH:mm:00"
+          style="width: 280px"
+        />
+        <span class="pc-subtle pc-ml-8">
+          後續單媒體拆分貼文會自動 +{{ STAGGER_MINUTES }} 分鐘
+        </span>
+      </div>
+    </el-card>
 
-          <!-- 新增話題弹窗 -->
-          <el-dialog
-            v-model="topicDialogVisible"
-            title="新增話題"
-            width="600px"
-            class="topic-dialog"
-          >
-            <div class="topic-dialog-content">
-              <!-- 自定义話題输入 -->
-              <div class="custom-topic-input">
-                <el-input
-                  v-model="customTopic"
-                  placeholder="輸入自訂話題"
-                  class="custom-input"
-                >
-                  <template #prepend>#</template>
-                </el-input>
-                <el-button type="primary" @click="addCustomTopic">新增</el-button>
-              </div>
-
-              <!-- 推薦話題 -->
-              <div class="recommended-topics">
-                <h4>推薦話題</h4>
-                <div class="topic-grid">
-                  <el-button
-                    v-for="topic in recommendedTopics"
-                    :key="topic"
-                    :type="currentTab?.selectedTopics?.includes(topic) ? 'primary' : 'default'"
-                    @click="toggleRecommendedTopic(topic)"
-                    class="topic-btn"
-                  >
-                    {{ topic }}
-                  </el-button>
-                </div>
-              </div>
-            </div>
-
-            <template #footer>
-              <div class="dialog-footer">
-                <el-button @click="topicDialogVisible = false">取消</el-button>
-                <el-button type="primary" @click="confirmTopicSelection">確定</el-button>
-              </div>
-            </template>
-          </el-dialog>
-
-          <!-- 排程發佈 -->
-          <div class="schedule-section">
-            <h3>排程發佈</h3>
-            <div class="schedule-controls">
-              <el-switch
-                v-model="tab.scheduleEnabled"
-                active-text="排程發佈"
-                inactive-text="立即發佈"
-              />
-              <div v-if="tab.scheduleEnabled" class="schedule-settings">
-                <div class="schedule-item">
-                  <span class="label">每日發佈影片數：</span>
-                  <el-select v-model="tab.videosPerDay" placeholder="選擇發佈數量">
-                    <el-option
-                      v-for="num in 55"
-                      :key="num"
-                      :label="num"
-                      :value="num"
-                    />
-                  </el-select>
-                </div>
-                <div class="schedule-item">
-                  <span class="label">每日發佈時間：</span>
-                  <el-time-select
-                    v-for="(time, index) in tab.dailyTimes"
-                    :key="index"
-                    v-model="tab.dailyTimes[index]"
-                    start="00:00"
-                    step="00:30"
-                    end="23:30"
-                    placeholder="選擇時間"
-                  />
-                  <el-button
-                    v-if="tab.dailyTimes.length < tab.videosPerDay"
-                    type="primary"
-                    size="small"
-                    @click="tab.dailyTimes.push('10:00')"
-                  >
-                    新增時間
-                  </el-button>
-                </div>
-                <div class="schedule-item">
-                  <span class="label">開始天數：</span>
-                  <el-select v-model="tab.startDays" placeholder="選擇開始天數">
-                    <el-option :label="'明天'" :value="0" />
-                    <el-option :label="'後天'" :value="1" />
-                  </el-select>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 操作按钮 -->
-          <div class="action-buttons">
-            <el-button size="small" @click="cancelPublish(tab)">取消</el-button>
-            <el-button
-              size="small"
-              type="primary"
-              @click="confirmPublish(tab)"
-              :loading="tab.publishing || false"
-            >
-              {{ tab.publishing ? '發佈中...' : '發佈' }}
-            </el-button>
+    <!-- 7. Publish -->
+    <el-card class="pc-card pc-card--footer" shadow="never">
+      <div class="pc-footer-row">
+        <el-button :loading="submitting" type="success" size="large" :disabled="!canSubmit" @click="submit">
+          {{ schedule.mode === 'now' ? '立即發佈' : '送出排程' }}
+        </el-button>
+        <el-button size="large" @click="resetForm">取消</el-button>
+      </div>
+      <div v-if="submitResult" class="pc-submit-result">
+        <el-alert
+          :title="submitResult.message"
+          :type="submitResult.type"
+          :closable="false"
+          show-icon
+        />
+        <div v-if="submitResult.jobs?.length" class="pc-jobs-list">
+          <div v-for="job in submitResult.jobs" :key="job.id">
+            <router-link :to="`/jobs?jobId=${job.id}`" class="pc-link">Job #{{ job.id }}</router-link>
+            <span class="pc-subtle pc-ml-8">{{ job.platform }} — {{ job.totalTargets }} target(s)</span>
           </div>
         </div>
       </div>
-    </div>
+    </el-card>
+
+    <!-- Save template dialog -->
+    <el-dialog v-model="saveTemplateDialogVisible" title="另存為範本" width="520px">
+      <el-form label-position="top">
+        <el-form-item label="名稱" required>
+          <el-input v-model="saveTemplateForm.name" />
+        </el-form-item>
+        <el-form-item label="說明">
+          <el-input v-model="saveTemplateForm.description" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="儲存哪些設定">
+          <el-checkbox-group v-model="saveTemplateForm.includedSettings">
+            <el-checkbox label="profileIds">所選 Profiles</el-checkbox>
+            <el-checkbox label="accountIds">所選帳號</el-checkbox>
+            <el-checkbox label="watermark">浮水印開關</el-checkbox>
+            <el-checkbox label="intro">片頭開關</el-checkbox>
+            <el-checkbox label="outro">片尾開關</el-checkbox>
+            <el-checkbox label="linkInFirstComment">連結放留言</el-checkbox>
+            <el-checkbox label="screenshots">截圖設定</el-checkbox>
+            <el-checkbox label="schedule">排程設定</el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="saveTemplateDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="saveTemplate">儲存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Material library dialog -->
+    <el-dialog v-model="materialLibraryVisible" title="素材庫" width="640px">
+      <el-table :data="materialsList" max-height="420" @selection-change="onMaterialSelectionChange">
+        <el-table-column type="selection" width="48" />
+        <el-table-column prop="filename" label="檔名" />
+        <el-table-column prop="filesize" label="大小 (MB)" width="120" />
+      </el-table>
+      <template #footer>
+        <el-button @click="materialLibraryVisible = false">取消</el-button>
+        <el-button type="primary" @click="addMaterialsFromLibrary">加入</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onBeforeUnmount, onMounted } from 'vue'
-import { Upload, Plus, Close, Folder } from '@element-plus/icons-vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useAccountStore } from '@/stores/account'
-import { useAppStore } from '@/stores/app'
-import { useCampaignsStore } from '@/stores/campaigns'
-import { useJobsStore } from '@/stores/jobs'
+import { UploadFilled } from '@element-plus/icons-vue'
+
 import { useProfilesStore } from '@/stores/profiles'
-import { accountApi } from '@/api/account'
-import { materialApi } from '@/api/material'
+import { usePublishTemplatesStore } from '@/stores/publish-templates'
 import { getToken } from '@/utils/auth'
 import { buildApiUrl } from '@/utils/api-url'
-import { getPlatformLabel, PROFILE_PLATFORM_OPTIONS, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
-import { availableAccountsForTab, buildCampaignPlatformOptions, mergeKnownAccounts, profileAccountsFor, selectedProfilePlatformLabels as selectedProfileLabelsFor } from '@/utils/publish-center-logic'
-import PublishJobProgress from '@/components/PublishJobProgress.vue'
+import { publishCenterApi } from '@/api/publish-center'
+import { materialApi } from '@/api/material'
+
+const STAGGER_MINUTES = 5
+
+const profilesStore = useProfilesStore()
+const templatesStore = usePublishTemplatesStore()
 
 const uploadAction = buildApiUrl('/upload')
-
-// Authorization headers for the in-page <el-upload>. The component owns its
-// own XHR pipeline so we cannot reuse the axios interceptor — we read the
-// canonical token from utils/auth instead. In open mode the helper returns
-// '' and we omit the header entirely.
 const authHeaders = computed(() => {
   const token = getToken()
   return token ? { Authorization: `Bearer ${token}` } : {}
 })
 
-// 当前激活的tab
-const activeTab = ref('tab1')
+const mediaFiles = ref([]) // [{path, name, size}]
+const selectedProfileIds = ref([])
+const selectedAccountIds = ref([])
+const profileAccountCache = reactive({}) // profileId -> [account]
 
-// tab计数器
-let tabCounter = 1
+const options = reactive({
+  watermark: true,
+  intro: true,
+  outro: true,
+  linkInFirstComment: false,
+  screenshots: {
+    enabled: false,
+    count: 3,
+    timestampsRaw: '',
+  },
+})
 
-// 获取应用状态管理
-const appStore = useAppStore()
-const profilesStore = useProfilesStore()
-const campaignsStore = useCampaignsStore()
+const brief = ref('')
+const previews = ref([]) // [{profileId, profileName, accounts: [...]}]
+const expandedProfiles = ref([])
+const generating = ref(false)
+const regeneratingKey = ref(null)
 
-// 上传相关状态
-const uploadOptionsVisible = ref(false)
-const localUploadVisible = ref(false)
+const schedule = reactive({ mode: 'now', startAt: null })
+
+const submitting = ref(false)
+const submitResult = ref(null)
+
+const saveTemplateDialogVisible = ref(false)
+const saveTemplateForm = reactive({
+  name: '',
+  description: '',
+  includedSettings: ['profileIds', 'accountIds', 'watermark', 'intro', 'outro', 'linkInFirstComment', 'screenshots', 'schedule'],
+})
+const saving = ref(false)
+const selectedTemplateId = ref(null)
+const loadedTemplateName = ref('')
+
 const materialLibraryVisible = ref(false)
-const currentUploadTab = ref(null)
+const materialsList = ref([])
 const selectedMaterials = ref([])
-const materials = computed(() => appStore.materials)
 
-// 批次發佈相关状态
-const batchPublishing = ref(false)
-
-const legacyPlatforms = PUBLISH_PLATFORM_OPTIONS
-const campaignPlatformOptions = buildCampaignPlatformOptions(PROFILE_PLATFORM_OPTIONS, PUBLISH_PLATFORM_OPTIONS)
-
-const defaultTabInit = {
-  name: 'tab1',
-  label: '發佈1',
-  fileList: [], // 后端返回的文件名列表
-  displayFileList: [], // 用于显示的文件列表
-  selectedAccounts: [], // 选中的帳號ID列表
-  selectedProfileId: null,
-  selectedPlatform: 'xiaohongshu', // legacy 單平台模式使用
-  title: '',
-  notes: '',
-  contactDetails: '',
-  cta: '',
-  productLink: '', // 商品連結
-  productTitle: '', // 商品名称
-  selectedTopics: [], // 話題列表（不带#号）
-  scheduleEnabled: false, // 排程發佈开关
-  videosPerDay: 1, // 每天發佈影片数量
-  dailyTimes: ['10:00'], // 每天發佈时间点列表
-  startDays: 0, // 从今天开始计算的發佈天数，0表示明天，1表示後天
-  publishStatus: null, // 發佈状态提示（message + type）
-  publishing: false, // 控制發佈按钮的 loading 状态
-  jobId: null, // /jobs 任务 ID；非空时显示进度条
-  campaignId: null,
-  isDraft: false, // 仅視頻號草稿
-  isOriginal: false // 是否聲明原創
-}
-
-// helper to create a fresh deep-copied tab from defaultTabInit
-const makeNewTab = () => {
-  // prefer structuredClone when available (newer browsers/node), fallback to JSON
-  try {
-    return typeof structuredClone === 'function' ? structuredClone(defaultTabInit) : JSON.parse(JSON.stringify(defaultTabInit))
-  } catch (e) {
-    return JSON.parse(JSON.stringify(defaultTabInit))
-  }
-}
-
-// tab页数据 - 默认只有一个tab (use deep copy to avoid shared refs)
-const tabs = reactive([
-  makeNewTab()
-])
-
-// 帳號相关状态
-const accountDialogVisible = ref(false)
-const tempSelectedAccounts = ref([])
-const currentTab = ref(null)
-
-// 获取帳號状态管理
-const accountStore = useAccountStore()
-
-// 任务运行时状态（轮询 /jobs/<id> 获取进度）
-const jobsStore = useJobsStore()
-const profileOptions = computed(() => profilesStore.profiles)
-const allKnownAccounts = computed(() => mergeKnownAccounts(accountStore.accounts, profilesStore.accountsByProfile))
-
-const profileAccountsForTab = (profileId) => profileAccountsFor(profilesStore.accountsByProfile, profileId)
-
-const selectedProfilePlatformLabels = (tab) => selectedProfileLabelsFor(profilesStore.accountsByProfile, tab?.selectedProfileId)
-
-// 根据选择的平台获取可用帳號列表
-const availableAccounts = computed(() =>
-  availableAccountsForTab({
-    currentTab: currentTab.value,
-    legacyAccounts: accountStore.accounts,
-    accountsByProfile: profilesStore.accountsByProfile,
-    getPlatformLabel,
-  })
-)
-
-// 話題相关状态
-const topicDialogVisible = ref(false)
-const customTopic = ref('')
-
-// 推薦話題列表
-const recommendedTopics = [
-  '遊戲', '電影', '音樂', '美食', '旅行', '文化',
-  '科技', '生活', '娛樂', '體育', '教育', '藝術',
-  '健康', '時尚', '美妝', '攝影', '寵物', '汽車'
-]
-
-// 新增新tab
-const addTab = () => {
-  tabCounter++
-  const newTab = makeNewTab()
-  newTab.name = `tab${tabCounter}`
-  newTab.label = `發佈${tabCounter}`
-  tabs.push(newTab)
-  activeTab.value = newTab.name
-}
-
-// 刪除tab
-const removeTab = (tabName) => {
-  const index = tabs.findIndex(tab => tab.name === tabName)
-  if (index > -1) {
-    tabs.splice(index, 1)
-    // 如果刪除的是当前激活的tab，切换到第一个tab
-    if (activeTab.value === tabName && tabs.length > 0) {
-      activeTab.value = tabs[0].name
-    }
-  }
-}
-
-// 处理檔案上傳成功
-const handleUploadSuccess = (response, file, tab) => {
-  if (response.code === 200) {
-    // 获取文件路径
-    const filePath = response.data.path || response.data
-    // 从路径中提取文件名
-    const filename = filePath.split('/').pop()
-    
-    // 保存文件信息到fileList，包含文件路径和其他信息
-    const fileInfo = {
-      name: file.name,
-      url: materialApi.getMaterialPreviewUrl(filename), // 使用getMaterialPreviewUrl生成预览URL
-      path: filePath,
-      size: file.size,
-      type: file.type
-    }
-    
-    // 新增到文件列表
-    tab.fileList.push(fileInfo)
-    
-    // 更新显示列表
-    tab.displayFileList = [...tab.fileList.map(item => ({
-      name: item.name,
-      url: item.url
-    }))]
-    
-    ElMessage.success('檔案上傳成功')
-  } else {
-    ElMessage.error(response.msg || '上傳失敗')
-  }
-}
-
-// 处理檔案上傳失敗
-const handleUploadError = (error) => {
-  ElMessage.error('檔案上傳失敗')
-}
-
-// 刪除已上传文件
-const removeFile = (tab, index) => {
-  // 从文件列表中刪除
-  tab.fileList.splice(index, 1)
-  
-  // 更新显示列表
-  tab.displayFileList = [...tab.fileList.map(item => ({
-    name: item.name,
-    url: item.url
-  }))]
-  
-  ElMessage.success('檔案刪除成功')
-}
-
-// 話題相关方法
-// 打开新增話題弹窗
-const openTopicDialog = (tab) => {
-  currentTab.value = tab
-  topicDialogVisible.value = true
-}
-
-// 新增自定义話題
-const addCustomTopic = () => {
-  if (!customTopic.value.trim()) {
-    ElMessage.warning('請輸入話題內容')
-    return
-  }
-  if (currentTab.value && !currentTab.value.selectedTopics.includes(customTopic.value.trim())) {
-    currentTab.value.selectedTopics.push(customTopic.value.trim())
-    customTopic.value = ''
-    ElMessage.success('話題新增成功')
-  } else {
-    ElMessage.warning('話題已存在')
-  }
-}
-
-// 切换推薦話題
-const toggleRecommendedTopic = (topic) => {
-  if (!currentTab.value) return
-  
-  const index = currentTab.value.selectedTopics.indexOf(topic)
-  if (index > -1) {
-    currentTab.value.selectedTopics.splice(index, 1)
-  } else {
-    currentTab.value.selectedTopics.push(topic)
-  }
-}
-
-// 刪除話題
-const removeTopic = (tab, index) => {
-  tab.selectedTopics.splice(index, 1)
-}
-
-// 确认新增話題
-const confirmTopicSelection = () => {
-  topicDialogVisible.value = false
-  customTopic.value = ''
-  currentTab.value = null
-  ElMessage.success('新增話題完成')
-}
-
-// 帳號选择相关方法
-// 打开帳號选择弹窗
-const openAccountDialog = async (tab) => {
-  currentTab.value = tab
-  if (tab.selectedProfileId && profileAccountsForTab(tab.selectedProfileId).length === 0) {
-    try {
-      await profilesStore.fetchAccountsForProfile(tab.selectedProfileId, { enabled: true })
-    } catch (error) {
-      console.error('載入 Profile 帳號失敗:', error)
-      ElMessage.error('載入 Profile 帳號失敗')
-      return
-    }
-  }
-  tempSelectedAccounts.value = [...tab.selectedAccounts]
-  accountDialogVisible.value = true
-}
-
-// 确认帳號选择
-const confirmAccountSelection = () => {
-  if (currentTab.value) {
-    currentTab.value.selectedAccounts = [...tempSelectedAccounts.value]
-  }
-  accountDialogVisible.value = false
-  currentTab.value = null
-  ElMessage.success('帳號選擇完成')
-}
-
-// 刪除选中的帳號
-const removeAccount = (tab, index) => {
-  tab.selectedAccounts.splice(index, 1)
-}
-
-// 获取帳號显示名称
-const getAccountDisplayName = (accountId) => {
-  const account = allKnownAccounts.value.find(acc => acc.id === accountId)
-  return account ? `${account.name} · ${account.platform}` : accountId
-}
-
-// 取消發佈（在已经入队后取消任务，否则只清状态）
-const cancelPublish = (tab) => {
-  if (tab.jobId) {
-    handleCancelJob(tab)
-  } else {
-    ElMessage.info('已取消發佈')
-  }
-}
-
-// 已入队任务的取消按钮
-const handleCancelJob = async (tab) => {
-  if (!tab.jobId) return
-  try {
-    await jobsStore.cancelJob(tab.jobId)
-    jobsStore.stopPolling(tab.jobId)
-    tab.publishStatus = { message: '任務已取消', type: 'warning' }
-  } catch (error) {
-    console.error('取消任務失敗:', error)
-    ElMessage.error(error?.message || '取消任務失敗')
-  }
-}
-
-// Validate the publish form. Returns null on success or a human error message.
-const validatePublishForm = (tab) => {
-  if (tab.fileList.length === 0) return '請先上傳影片檔案'
-  if (!tab.title.trim()) return '請輸入標題'
-  if (tab.selectedAccounts.length === 0) return '請選擇發佈帳號'
-  if (tab.selectedProfileId) return null
-  if (!tab.selectedPlatform) return '請選擇發佈平台'
-  return null
-}
-
-// Build a /jobs payload from a tab's reactive state. Kept pure so it is
-// easy to unit-test and reuse from the batch-publish path.
-const buildPublishPayload = (tab) => ({
-  platform: tab.selectedPlatform,
-  title: tab.title,
-  tags: tab.selectedTopics,
-  fileList: tab.fileList.map((file) => file.path),
-  accountList: tab.selectedAccounts.map((accountId) => {
-    const account = accountStore.accounts.find((acc) => acc.id === accountId)
-    return account ? account.filePath : accountId
-  }),
-  enableTimer: tab.scheduleEnabled ? 1 : 0,
-  videosPerDay: tab.scheduleEnabled ? tab.videosPerDay || 1 : 1,
-  dailyTimes: tab.scheduleEnabled ? tab.dailyTimes || ['10:00'] : ['10:00'],
-  startDays: tab.scheduleEnabled ? tab.startDays || 0 : 0,
-  category: tab.isOriginal ? 1 : 0,
-  productLink: tab.productLink.trim() || '',
-  productTitle: tab.productTitle.trim() || '',
-  isDraft: tab.isDraft
-})
-
-const guessMediaRole = (filePath) => {
-  const normalized = String(filePath).toLowerCase()
-  if (/\.(mp4|mov|m4v|avi|mkv|webm)$/.test(normalized)) return 'video'
-  if (/\.(jpg|jpeg|png|webp|gif)$/.test(normalized)) return 'image'
-  return 'attachment'
-}
-
-const buildCampaignPayload = (tab, mediaGroupId) => ({
-  profileId: tab.selectedProfileId,
-  mediaGroupId,
-  selectedAccountIds: [...tab.selectedAccounts],
-  title: tab.title,
-  notes: tab.notes,
-  contactDetails: tab.contactDetails,
-  cta: tab.cta,
-  hashtags: [...tab.selectedTopics],
-  uploadToRemote: true,
-  exportToSheet: true,
-  useLlm: true
-})
-
-const handleProfileChange = async (tab, profileId) => {
-  tab.selectedAccounts = []
-  if (!profileId) {
-    return
-  }
-
-  try {
-    await profilesStore.fetchAccountsForProfile(profileId, { enabled: true })
-  } catch (error) {
-    console.error('載入 Profile 帳號失敗:', error)
-    ElMessage.error('載入 Profile 帳號失敗')
-  }
-}
-
-// Confirm publish — enqueues a /jobs task and starts polling. The button is
-// loading-locked until the queue has accepted the job; the per-target
-// progress is then driven by the jobs store.
-const confirmPublish = async (tab) => {
-  if (tab.publishing) {
-    throw new Error('正在發佈中，請稍候...')
-  }
-
-  const validationError = validatePublishForm(tab)
-  if (validationError) {
-    ElMessage.error(validationError)
-    throw new Error(validationError)
-  }
-
-  tab.publishing = true
-  tab.publishStatus = null
-
-  try {
-    if (tab.selectedProfileId) {
-      const mediaGroup = await campaignsStore.createMediaGroup({
-        name: tab.title.trim() || tab.label,
-        items: tab.fileList.map((file) => ({
-          filePath: file.path,
-          role: guessMediaRole(file.path)
-        }))
-      })
-      const campaign = await campaignsStore.prepareCampaign(
-        buildCampaignPayload(tab, mediaGroup.id)
-      )
-      tab.campaignId = campaign?.id ?? null
-
-      const publishResult = await campaignsStore.publishCampaign(campaign.id)
-      const firstJob = publishResult?.jobs?.[0] || null
-      if (firstJob?.id) {
-        tab.jobId = firstJob.id
-        jobsStore.startPolling(firstJob.id)
-      }
-      tab.publishStatus = {
-        message: `Campaign 已準備完成，排入 ${publishResult?.jobs?.length || 0} 個平台任務`,
-        type: publishResult?.jobs?.length ? 'success' : 'warning'
-      }
-    } else {
-      const job = await jobsStore.createJob(buildPublishPayload(tab))
-      tab.jobId = job?.id ?? null
-      tab.publishStatus = {
-        message: `任務已加入佇列（#${job?.id}），共 ${job?.totalTargets} 個目標`,
-        type: 'success'
-      }
-    }
-  } catch (error) {
-    console.error('加入佇列失敗:', error)
-    tab.publishStatus = {
-      message: `加入佇列失敗：${error?.message || '請檢查網路連線'}`,
-      type: 'error'
-    }
-    throw error
-  } finally {
-    tab.publishing = false
-  }
-}
-
-// 显示上传选项
-const showUploadOptions = (tab) => {
-  currentUploadTab.value = tab
-  uploadOptionsVisible.value = true
-}
-
-// 选择本機上傳
-const selectLocalUpload = () => {
-  uploadOptionsVisible.value = false
-  localUploadVisible.value = true
-}
-
-// 選擇素材庫
-const selectMaterialLibrary = async () => {
-  uploadOptionsVisible.value = false
-  
-  // 如果素材庫为空，先获取素材数据
-  if (materials.value.length === 0) {
-    try {
-      const response = await materialApi.getAllMaterials()
-      if (response.code === 200) {
-        appStore.setMaterials(response.data)
-      } else {
-        ElMessage.error('取得素材清單失敗')
-        return
-      }
-    } catch (error) {
-      console.error('取得素材清單失敗:', error)
-      ElMessage.error('取得素材清單失敗')
-      return
-    }
-  }
-  
-  selectedMaterials.value = []
-  materialLibraryVisible.value = true
-}
-
-// 确认素材选择
-const confirmMaterialSelection = () => {
-  if (selectedMaterials.value.length === 0) {
-    ElMessage.warning('請至少選擇一個素材')
-    return
-  }
-  
-  if (currentUploadTab.value) {
-    // 将选中的素材新增到当前tab的文件列表
-    selectedMaterials.value.forEach(materialId => {
-      const material = materials.value.find(m => m.id === materialId)
-      if (material) {
-        const fileInfo = {
-          name: material.filename,
-          url: materialApi.getMaterialPreviewUrl(material.file_path.split('/').pop()),
-          path: material.file_path,
-          size: material.filesize * 1024 * 1024, // 转换为字节
-          type: 'video/mp4'
-        }
-        
-        // 检查是否已存在相同文件
-        const exists = currentUploadTab.value.fileList.some(file => file.path === fileInfo.path)
-        if (!exists) {
-          currentUploadTab.value.fileList.push(fileInfo)
-        }
-      }
-    })
-    
-    // 更新显示列表
-    currentUploadTab.value.displayFileList = [...currentUploadTab.value.fileList.map(item => ({
-      name: item.name,
-      url: item.url
-    }))]
-  }
-  
-  const addedCount = selectedMaterials.value.length
-  materialLibraryVisible.value = false
-  selectedMaterials.value = []
-  currentUploadTab.value = null
-  ElMessage.success(`已新增 ${addedCount} 個素材`)
-}
-
-// 批次發佈对话框状态
-const batchPublishDialogVisible = ref(false)
-const currentPublishingTab = ref(null)
-const publishProgress = ref(0)
-const publishResults = ref([])
-const isCancelled = ref(false)
-
-// 取消批次發佈
-const cancelBatchPublish = () => {
-  isCancelled.value = true
-  ElMessage.info('正在取消發佈...')
-}
-
-// 批次發佈方法
-const batchPublish = async () => {
-  if (batchPublishing.value) return
-  
-  batchPublishing.value = true
-  currentPublishingTab.value = null
-  publishProgress.value = 0
-  publishResults.value = []
-  isCancelled.value = false
-  batchPublishDialogVisible.value = true
-  
-  try {
-    for (let i = 0; i < tabs.length; i++) {
-      if (isCancelled.value) {
-        publishResults.value.push({
-          label: tabs[i].label,
-          status: 'cancelled',
-          message: '已取消'
-        })
-        continue
-      }
-
-      const tab = tabs[i]
-      currentPublishingTab.value = tab
-      publishProgress.value = Math.floor((i / tabs.length) * 100)
-      
-      try {
-        await confirmPublish(tab)
-        publishResults.value.push({
-          label: tab.label,
-          status: 'success',
-          message: '發佈成功'
-        })
-      } catch (error) {
-        publishResults.value.push({
-          label: tab.label,
-          status: 'error',
-          message: error.message
-        })
-        // 不立即返回，继续显示發佈结果
-      }
-    }
-    
-    publishProgress.value = 100
-    
-    // 统计發佈结果
-    const successCount = publishResults.value.filter(r => r.status === 'success').length
-    const failCount = publishResults.value.filter(r => r.status === 'error').length
-    const cancelCount = publishResults.value.filter(r => r.status === 'cancelled').length
-    
-    if (isCancelled.value) {
-      ElMessage.warning(`發佈已取消：${successCount} 個成功，${failCount} 個失敗，${cancelCount} 個未執行`)
-    } else if (failCount > 0) {
-      ElMessage.error(`發佈完成：${successCount} 個成功，${failCount} 個失敗`)
-    } else {
-      ElMessage.success('所有分頁皆已發佈成功')
-      setTimeout(() => {
-        batchPublishDialogVisible.value = false
-      }, 1000)
-    }
-    
-  } catch (error) {
-    console.error('批次發佈失敗:', error)
-    ElMessage.error('批次發佈失敗，請重試')
-  } finally {
-    batchPublishing.value = false
-    isCancelled.value = false
-  }
-}
-
-// Stop every active job poller when the user navigates away. Without this
-// the polling timers keep ticking against the backend in the background.
 onMounted(async () => {
   try {
     await profilesStore.refreshProfiles()
-  } catch (error) {
-    console.error('載入 Profiles 失敗:', error)
+    await templatesStore.refresh()
+  } catch (err) {
+    // Errors handled by axios interceptor
   }
+})
 
+function isVideo(path) {
+  return /\.(mp4|mov|avi|mkv|webm|m4v)$/i.test(path || '')
+}
+
+function countChars(text) {
+  return (text || '').length
+}
+
+function findProfile(profileId) {
+  return profilesStore.profiles.find((p) => p.id === profileId) || null
+}
+
+function accountsForProfile(profileId) {
+  return profileAccountCache[profileId] || []
+}
+
+async function onProfileSelectionChanged() {
+  for (const profileId of selectedProfileIds.value) {
+    if (!profileAccountCache[profileId]) {
+      try {
+        const accounts = await profilesStore.fetchAccountsForProfile(profileId, { enabled: true })
+        profileAccountCache[profileId] = accounts || []
+        // default-select all enabled accounts
+        for (const account of accounts || []) {
+          if (!selectedAccountIds.value.includes(account.id)) {
+            selectedAccountIds.value.push(account.id)
+          }
+        }
+      } catch (err) {
+        profileAccountCache[profileId] = []
+      }
+    }
+  }
+}
+
+function removeMedia(index) {
+  mediaFiles.value.splice(index, 1)
+}
+
+function onUploadSuccess(response, file) {
+  // backend returns {filename, filepath, ...} on /upload
+  const path = response?.data?.filepath || response?.filepath || response?.data?.filename || file.name
+  mediaFiles.value.push({ path, name: file.name, size: file.size })
+}
+
+function onUploadError() {
+  ElMessage.error('檔案上傳失敗')
+}
+
+async function openMaterialLibrary() {
+  materialLibraryVisible.value = true
   try {
-    const response = await accountApi.getAccounts()
-    const legacyAccounts = response?.data || []
-    const structuredAccounts = accountStore.accounts.filter((acc) => acc.profileId != null)
-    accountStore.setAccounts([...legacyAccounts, ...structuredAccounts])
-  } catch (error) {
-    console.error('載入 Legacy 帳號失敗:', error)
+    const response = await materialApi.getAllMaterials()
+    materialsList.value = response?.data || []
+  } catch (err) {
+    materialsList.value = []
   }
-})
+}
 
-onBeforeUnmount(() => {
-  jobsStore.stopAllPolling()
-})
+function onMaterialSelectionChange(rows) {
+  selectedMaterials.value = rows
+}
+
+function addMaterialsFromLibrary() {
+  for (const material of selectedMaterials.value) {
+    mediaFiles.value.push({
+      path: material.filepath || material.file_path || material.filename,
+      name: material.filename,
+      size: material.filesize ? material.filesize * 1024 * 1024 : 0,
+    })
+  }
+  selectedMaterials.value = []
+  materialLibraryVisible.value = false
+}
+
+const canGeneratePreviews = computed(
+  () => selectedProfileIds.value.length > 0 && selectedAccountIds.value.length > 0
+)
+
+const canSubmit = computed(
+  () => canGeneratePreviews.value && mediaFiles.value.length > 0 && previews.value.length > 0
+)
+
+function buildOptionsPayload() {
+  const screenshots = options.screenshots
+  const raw = (screenshots.timestampsRaw || '').trim()
+  let timestamps = null
+  if (raw) {
+    timestamps = raw.split(',').map((s) => s.trim()).filter(Boolean)
+  }
+  return {
+    watermark: options.watermark,
+    intro: options.intro,
+    outro: options.outro,
+    linkInFirstComment: options.linkInFirstComment,
+    screenshots: {
+      enabled: screenshots.enabled,
+      count: screenshots.count,
+      timestamps,
+    },
+  }
+}
+
+async function generatePreviews() {
+  generating.value = true
+  previews.value = []
+  try {
+    const response = await publishCenterApi.preview({
+      profileIds: selectedProfileIds.value,
+      selectedAccountIds: selectedAccountIds.value,
+      brief: brief.value,
+      options: buildOptionsPayload(),
+    })
+    previews.value = response?.data?.profiles || []
+    expandedProfiles.value = previews.value.map((p) => p.profileId)
+  } finally {
+    generating.value = false
+  }
+}
+
+function draftKey(profileId, accountId) {
+  return `${profileId}:${accountId}`
+}
+
+async function regenerateAccount(profile, account) {
+  const key = draftKey(profile.profileId, account.accountId)
+  regeneratingKey.value = key
+  try {
+    const response = await publishCenterApi.regenerate({
+      profileId: profile.profileId,
+      accountId: account.accountId,
+      brief: brief.value,
+      options: buildOptionsPayload(),
+    })
+    const draft = response?.data?.draft
+    if (draft) {
+      account.draft = { ...account.draft, ...draft }
+    }
+  } finally {
+    regeneratingKey.value = null
+  }
+}
+
+function buildSchedulePayload() {
+  if (schedule.mode === 'now') return { publishNow: true }
+  return { publishNow: false, startAt: schedule.startAt }
+}
+
+function buildAccountDraftsPayload() {
+  const out = {}
+  for (const profile of previews.value) {
+    for (const account of profile.accounts) {
+      out[account.accountId] = account.draft
+    }
+  }
+  return out
+}
+
+async function submit() {
+  submitting.value = true
+  submitResult.value = null
+  try {
+    const response = await publishCenterApi.submit({
+      profileIds: selectedProfileIds.value,
+      selectedAccountIds: selectedAccountIds.value,
+      mediaFilePaths: mediaFiles.value.map((file) => file.path),
+      brief: brief.value,
+      options: buildOptionsPayload(),
+      schedule: buildSchedulePayload(),
+      accountDrafts: buildAccountDraftsPayload(),
+    })
+    const data = response?.data || {}
+    submitResult.value = {
+      type: data.jobs?.length ? 'success' : 'warning',
+      message: data.jobs?.length
+        ? `已排入 ${data.jobs.length} 個發佈工作`
+        : '送出成功，但未產生任何工作',
+      jobs: data.jobs,
+      skipped: data.skipped,
+    }
+  } catch (err) {
+    submitResult.value = { type: 'error', message: err?.message || '送出失敗' }
+  } finally {
+    submitting.value = false
+  }
+}
+
+function showSaveTemplateDialog() {
+  saveTemplateForm.name = ''
+  saveTemplateForm.description = ''
+  saveTemplateDialogVisible.value = true
+}
+
+async function saveTemplate() {
+  if (!saveTemplateForm.name.trim()) {
+    ElMessage.warning('請輸入名稱')
+    return
+  }
+  saving.value = true
+  try {
+    await templatesStore.create({
+      name: saveTemplateForm.name,
+      description: saveTemplateForm.description,
+      includedSettings: saveTemplateForm.includedSettings,
+      config: {
+        profileIds: selectedProfileIds.value,
+        accountIds: selectedAccountIds.value,
+        watermark: options.watermark,
+        intro: options.intro,
+        outro: options.outro,
+        linkInFirstComment: options.linkInFirstComment,
+        screenshots: { ...options.screenshots },
+        schedule: { ...schedule },
+      },
+    })
+    saveTemplateDialogVisible.value = false
+    ElMessage.success('已儲存範本')
+  } finally {
+    saving.value = false
+  }
+}
+
+async function onTemplateSelected(templateId) {
+  if (!templateId) {
+    loadedTemplateName.value = ''
+    return
+  }
+  const template = templatesStore.templates.find((t) => t.id === templateId)
+  if (!template) return
+  const include = new Set(template.includedSettings || [])
+  const config = template.config || {}
+  if (include.has('profileIds') && Array.isArray(config.profileIds)) {
+    selectedProfileIds.value = [...config.profileIds]
+    await onProfileSelectionChanged()
+  }
+  if (include.has('accountIds') && Array.isArray(config.accountIds)) {
+    selectedAccountIds.value = [...config.accountIds]
+  }
+  if (include.has('watermark')) options.watermark = !!config.watermark
+  if (include.has('intro')) options.intro = !!config.intro
+  if (include.has('outro')) options.outro = !!config.outro
+  if (include.has('linkInFirstComment')) options.linkInFirstComment = !!config.linkInFirstComment
+  if (include.has('screenshots') && config.screenshots) {
+    Object.assign(options.screenshots, config.screenshots)
+  }
+  if (include.has('schedule') && config.schedule) {
+    Object.assign(schedule, config.schedule)
+  }
+  loadedTemplateName.value = template.name
+}
+
+function resetForm() {
+  mediaFiles.value = []
+  selectedProfileIds.value = []
+  selectedAccountIds.value = []
+  options.watermark = true
+  options.intro = true
+  options.outro = true
+  options.linkInFirstComment = false
+  options.screenshots.enabled = false
+  options.screenshots.count = 3
+  options.screenshots.timestampsRaw = ''
+  brief.value = ''
+  previews.value = []
+  expandedProfiles.value = []
+  schedule.mode = 'now'
+  schedule.startAt = null
+  submitResult.value = null
+  selectedTemplateId.value = null
+  loadedTemplateName.value = ''
+}
 </script>
 
-<style lang="scss" scoped>
-@use '@/styles/variables.scss' as *;
-
+<style scoped>
 .publish-center {
+  padding: 16px;
+  max-width: 1100px;
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
-  height: 100%;
-  
-  // Tab管理区域
-  .tab-management {
-    background-color: #fff;
-    border-radius: 4px;
-    box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
-    margin-bottom: 20px;
-    padding: 15px 20px;
-    
-    .tab-header {
-      display: flex;
-      align-items: flex-start;
-      gap: 15px;
-      
-      .tab-list {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-        flex: 1;
-        min-width: 0;
-        
-        .tab-item {
-           display: flex;
-           align-items: center;
-           gap: 6px;
-           padding: 6px 12px;
-           background-color: #f5f7fa;
-           border: 1px solid #dcdfe6;
-           border-radius: 4px;
-           cursor: pointer;
-           transition: all 0.3s;
-           font-size: 14px;
-           height: 32px;
-           
-           &:hover {
-             background-color: #ecf5ff;
-             border-color: #b3d8ff;
-           }
-           
-           &.active {
-             background-color: #409eff;
-             border-color: #409eff;
-             color: #fff;
-             
-             .close-icon {
-               color: #fff;
-               
-               &:hover {
-                 background-color: rgba(255, 255, 255, 0.2);
-               }
-             }
-           }
-           
-           .close-icon {
-             padding: 2px;
-             border-radius: 2px;
-             cursor: pointer;
-             transition: background-color 0.3s;
-             font-size: 12px;
-             
-             &:hover {
-               background-color: rgba(0, 0, 0, 0.1);
-             }
-           }
-         }
-       }
-       
-      .tab-actions {
-        display: flex;
-        gap: 10px;
-        flex-shrink: 0;
-        
-        .add-tab-btn,
-        .batch-publish-btn {
-          display: flex;
-          align-items: center;
-          gap: 4px;
-          height: 32px;
-          padding: 6px 12px;
-          font-size: 14px;
-          white-space: nowrap;
-        }
-      }
-    }
-  }
-  
-  // 批次發佈進度对话框样式
-  .publish-progress {
-    padding: 20px;
-    
-    .current-publishing {
-      margin: 15px 0;
-      text-align: center;
-      color: #606266;
-    }
-
-    .publish-results {
-      margin-top: 20px;
-      border-top: 1px solid #EBEEF5;
-      padding-top: 15px;
-      max-height: 300px;
-      overflow-y: auto;
-
-      .result-item {
-        display: flex;
-        align-items: center;
-        padding: 8px 0;
-        color: #606266;
-
-        .el-icon {
-          margin-right: 8px;
-        }
-
-        .label {
-          margin-right: 10px;
-          font-weight: 500;
-        }
-
-        .message {
-          color: #909399;
-        }
-
-        &.success {
-          color: #67C23A;
-        }
-
-        &.error {
-          color: #F56C6C;
-        }
-
-        &.cancelled {
-          color: #909399;
-        }
-      }
-    }
-  }
-
-  .dialog-footer {
-    text-align: right;
-  }
-  
-  // 内容区域
-  .publish-content {
-    flex: 1;
-    background-color: #fff;
-    border-radius: 4px;
-    box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
-    padding: 20px;
-    
-    .tab-content-wrapper {
-      display: flex;
-      justify-content: center;
-      
-      .tab-content {
-        width: 100%;
-        max-width: 800px;
-        
-        h3 {
-          font-size: 16px;
-          font-weight: 500;
-          color: $text-primary;
-          margin: 0 0 10px 0;
-        }
-        
-        .upload-section,
-        .profile-section,
-        .account-section,
-        .platform-section,
-        .title-section,
-        .campaign-details-section,
-        .product-section,
-        .topic-section,
-        .schedule-section {
-          margin-bottom: 30px;
-        }
-
-        .profile-section {
-          .profile-hint {
-            margin-top: 8px;
-            color: #909399;
-            font-size: 13px;
-            line-height: 1.6;
-          }
-
-          .campaign-platform-summary {
-            margin-top: 12px;
-            padding: 12px;
-            background-color: #f5f7fa;
-            border-radius: 6px;
-
-            .campaign-summary-label {
-              color: #606266;
-              font-size: 13px;
-              margin-bottom: 8px;
-
-              &.selected-profile-platforms {
-                margin-top: 8px;
-                margin-bottom: 0;
-              }
-            }
-
-            .campaign-platform-tags {
-              display: flex;
-              flex-wrap: wrap;
-              gap: 8px;
-            }
-          }
-        }
-
-        .product-section {
-          .product-name-input,
-          .product-link-input {
-            margin-bottom: 5px;
-          }
-        }
-        
-        .video-upload {
-          width: 100%;
-          
-          :deep(.el-upload-dragger) {
-            width: 100%;
-            height: 180px;
-          }
-        }
-        
-        .account-input {
-          max-width: 400px;
-        }
-        
-        .platform-buttons {
-          display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
-          
-          .platform-btn {
-            min-width: 80px;
-          }
-        }
-        
-        .title-input {
-          max-width: 600px;
-        }
-
-        .campaign-details-section {
-          .notes-input {
-            max-width: 700px;
-            margin-bottom: 12px;
-          }
-
-          .campaign-inline-fields {
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-
-            .campaign-inline-input {
-              max-width: 340px;
-            }
-          }
-        }
-        
-        .topic-display {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-          
-          .selected-topics {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            min-height: 32px;
-            
-            .topic-tag {
-              font-size: 14px;
-            }
-          }
-          
-          .select-topic-btn {
-            align-self: flex-start;
-          }
-        }
-        
-        .schedule-controls {
-          display: flex;
-          flex-direction: column;
-          gap: 15px;
-
-          .schedule-settings {
-            margin-top: 15px;
-            padding: 15px;
-            background-color: #f5f7fa;
-            border-radius: 4px;
-
-            .schedule-item {
-              display: flex;
-              align-items: center;
-              margin-bottom: 15px;
-
-              &:last-child {
-                margin-bottom: 0;
-              }
-
-              .label {
-                min-width: 120px;
-                margin-right: 10px;
-              }
-
-              .el-time-select {
-                margin-right: 10px;
-              }
-
-              .el-button {
-                margin-left: 10px;
-              }
-            }
-          }
-        }
-        
-        .action-buttons {
-          display: flex;
-          justify-content: flex-end;
-          gap: 10px;
-          margin-top: 30px;
-          padding-top: 20px;
-          border-top: 1px solid #ebeef5;
-        }
-
-        .legacy-mode-hint {
-          margin: 0 0 20px;
-        }
-
-        .draft-section {
-          margin: 20px 0;
-
-          .draft-checkbox {
-            display: block;
-            margin: 10px 0;
-          }
-        }
-
-        .twitter-hint {
-          margin: -10px 0 20px;
-        }
-
-        .original-section {
-          margin: 10px 0 20px;
-
-          .original-checkbox {
-            display: block;
-            margin: 10px 0;
-          }
-        }
-      }
-    }
-  }
-
-  // 已上传文件列表样式
-  .uploaded-files {
-    margin-top: 20px;
-    
-    h4 {
-      font-size: 16px;
-      font-weight: 500;
-      margin-bottom: 12px;
-      color: #303133;
-    }
-    
-    .file-list {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      
-      .file-item {
-        display: flex;
-        align-items: center;
-        padding: 10px 15px;
-        background-color: #f5f7fa;
-        border-radius: 4px;
-        
-        .el-link {
-          margin-right: 10px;
-          max-width: 300px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-        
-        .file-size {
-          color: #909399;
-          font-size: 13px;
-          margin-right: auto;
-        }
-      }
-    }
-  }
-  
-  // 新增話題弹窗样式
-  .topic-dialog {
-    .topic-dialog-content {
-      .custom-topic-input {
-        display: flex;
-        gap: 12px;
-        margin-bottom: 24px;
-        
-        .custom-input {
-          flex: 1;
-        }
-      }
-      
-      .recommended-topics {
-        h4 {
-          margin: 0 0 16px 0;
-          font-size: 16px;
-          font-weight: 500;
-          color: #303133;
-        }
-        
-        .topic-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-          gap: 12px;
-          
-          .topic-btn {
-            height: 36px;
-            font-size: 14px;
-            border-radius: 6px;
-            min-width: 100px;
-            padding: 0 12px;
-            white-space: nowrap;
-            text-align: center;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            
-            &.el-button--primary {
-              background-color: #409eff;
-              border-color: #409eff;
-              color: white;
-            }
-          }
-        }
-      }
-    }
-    
-    .dialog-footer {
-      display: flex;
-      justify-content: flex-end;
-      gap: 12px;
-    }
-  }
+  gap: 14px;
+}
+.pc-card {
+  border-radius: 8px;
+}
+.pc-card--header :deep(.el-card__body),
+.pc-card--footer :deep(.el-card__body) {
+  padding: 14px 18px;
+}
+.pc-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.pc-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pc-section-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.pc-section-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.pc-subtle {
+  color: #888;
+  font-size: 12px;
+}
+.pc-help {
+  color: #b0b0b0;
+  font-size: 12px;
+  margin-top: 4px;
+}
+.pc-mb-8 {
+  margin-bottom: 8px;
+}
+.pc-mt-4 {
+  margin-top: 4px;
+}
+.pc-mt-8 {
+  margin-top: 8px;
+}
+.pc-ml-8 {
+  margin-left: 8px;
+}
+.pc-media-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pc-media-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: #f7f7f7;
+  border-radius: 6px;
+}
+.pc-media-name {
+  flex: 1;
+}
+.pc-profile-accounts {
+  margin-top: 12px;
+  padding: 8px 10px;
+  background: #fafafa;
+  border-radius: 6px;
+}
+.pc-profile-title {
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.pc-options-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 14px;
+}
+.pc-screenshots {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pc-screenshots-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pc-actions {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pc-account-draft {
+  border-top: 1px solid #f0f0f0;
+  padding: 10px 0;
+}
+.pc-account-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.pc-account-name {
+  font-weight: 500;
+}
+.pc-first-comment {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pc-footer-row {
+  display: flex;
+  gap: 10px;
+}
+.pc-submit-result {
+  margin-top: 12px;
+}
+.pc-jobs-list {
+  margin-top: 8px;
+}
+.pc-link {
+  color: var(--el-color-primary);
+  text-decoration: none;
 }
 </style>

@@ -25,8 +25,11 @@ from myUtils import jobs as job_runtime
 from myUtils import llm_client
 from myUtils import media_groups as media_group_store
 from myUtils import media_pipeline
+from myUtils import platform_capabilities
 from myUtils import profiles as profile_registry
 from myUtils import prepared_publishers
+from myUtils import publish_orchestrator
+from myUtils import publish_templates as template_store
 from myUtils import account_events
 from myUtils import rclone_storage
 from myUtils import meta_auth
@@ -2134,17 +2137,20 @@ def _derive_watermark_spec(profile: profile_registry.Profile, data: dict) -> dic
 def _resolve_file_record_path(file_record_id: int, db_path: Path) -> str | None:
     """Look up a file_record's file_path by ID."""
     import sqlite3
+    conn = None
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT file_path FROM file_records WHERE id = ?", (file_record_id,)
         ).fetchone()
-        conn.close()
         if row:
             return row["file_path"]
     except Exception:
         pass
+    finally:
+        if conn is not None:
+            conn.close()
     return None
 
 
@@ -2188,11 +2194,27 @@ def _prepare_campaign_media_artifacts(
         "rawVideoUrl": "",
         "rawImageLocalPaths": [],
         "rawVideoLocalPath": "",
+        "screenshotPaths": [],
+        "screenshotUrls": [],
         "transcriptText": str(request_data.get("transcriptText", "") or "").strip(),
     }
 
+    screenshots_spec = request_data.get("screenshots") if isinstance(request_data.get("screenshots"), dict) else {}
+    screenshots_enabled = bool(screenshots_spec.get("enabled"))
+    screenshots_count = int(screenshots_spec.get("count") or 0) if screenshots_enabled else 0
+    screenshots_timestamps = screenshots_spec.get("timestamps") if isinstance(screenshots_spec.get("timestamps"), list) else None
+
     for media_file in media_files:
-        source_path = Path(media_file["file_path"]).expanduser().resolve()
+        raw_path = Path(media_file["file_path"]).expanduser()
+        if not raw_path.is_absolute():
+            # file_records stores filenames relative to videoFile/ (the
+            # /upload endpoint writes there). Resolve to the canonical
+            # absolute location so downstream ffmpeg / Pillow calls work
+            # regardless of the worker's current working directory.
+            candidate = Path(BASE_DIR) / "videoFile" / raw_path
+            if candidate.exists():
+                raw_path = candidate
+        source_path = raw_path.resolve()
         publish_path = source_path
         artifact_kind = None
 
@@ -2208,8 +2230,11 @@ def _prepare_campaign_media_artifacts(
                 media_pipeline.concat_videos(concat_parts, concat_output)
                 source_path = concat_output
                 publish_path = concat_output
-            except Exception:
-                pass  # Fall back to original on concat failure
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Intro/outro concat failed for campaign %d, file %s: %s",
+                    campaign_id, source_path, exc,
+                )
 
         if watermark_spec and not tiktok_only and _is_image_file(source_path):
             artifact_kind = "watermarked_image"
@@ -2224,6 +2249,7 @@ def _prepare_campaign_media_artifacts(
                 watermark_text=watermark_spec.get("text"),
                 watermark_image_path=watermark_spec.get("imagePath"),
                 seed=campaign_id * 1000 + int(media_file["file_record_id"]),
+                opacity=int(float(watermark_spec.get("opacity", 0.5)) * 255),
                 style=watermark_spec.get("style", "static"),
                 angle=float(watermark_spec.get("angle", -30)),
                 color=watermark_spec.get("color", "white"),
@@ -2258,6 +2284,52 @@ def _prepare_campaign_media_artifacts(
                 metadata={"role": media_file["role"]},
                 db_path=db_path,
             )
+
+        if screenshots_enabled and _is_video_file(publish_path):
+            try:
+                shots_dir = media_pipeline.build_campaign_workspace(campaign_id) / "screenshots"
+                shots = media_pipeline.extract_video_screenshots(
+                    publish_path,
+                    shots_dir,
+                    count=screenshots_count if not screenshots_timestamps else None,
+                    timestamps=screenshots_timestamps,
+                    seed=campaign_id * 1000 + int(media_file["file_record_id"]),
+                )
+                for shot_path in shots:
+                    artifacts_context["screenshotPaths"].append(str(shot_path))
+                    public_shot_url = None
+                    if upload_to_remote:
+                        try:
+                            remote_shot = rclone_storage.upload_artifact(
+                                shot_path,
+                                campaign_id=campaign_id,
+                                artifact_subdir="screenshots",
+                            )
+                            public_shot_url = remote_shot.public_url
+                            if public_shot_url:
+                                artifacts_context["screenshotUrls"].append(public_shot_url)
+                        except Exception as exc:  # noqa: BLE001
+                            logging.getLogger(__name__).warning(
+                                "Screenshot remote upload failed for campaign %d: %s",
+                                campaign_id, exc,
+                            )
+                    campaign_store.add_campaign_artifact(
+                        campaign_id,
+                        source_file_record_id=media_file["file_record_id"],
+                        artifact_kind="screenshot",
+                        local_path=str(shot_path),
+                        public_url=public_shot_url,
+                        metadata={
+                            "role": media_file["role"],
+                            "source_video": str(publish_path),
+                        },
+                        db_path=db_path,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logging.getLogger(__name__).warning(
+                    "Screenshot extraction failed for campaign %d, file %s: %s",
+                    campaign_id, publish_path, exc,
+                )
 
         public_url = None
         raw_public_url = None
@@ -2395,28 +2467,31 @@ def _build_generation_prompt(
     system_prompt = str((profile.settings or {}).get("systemPrompt", "") or "").strip()
     if not system_prompt:
         system_prompt = "You write concise, platform-native social media copy."
-    user_prompt = "\n".join(
-        [
-            f"Platform: {platform}",
-            f"Media group: {media_group.name}",
-            f"Max chars: {rule.max_chars if rule.max_chars is not None else 'none'}",
-            f"Required hashtag count: {rule.hashtag_count}",
-            f"Require emoji: {rule.require_emoji}",
-            f"Require contact details: {rule.require_contact_details}",
-            f"Require CTA: {rule.require_cta}",
-            f"Title: {request_data.get('title', '')}",
-            f"Notes: {request_data.get('notes', '')}",
-            f"Transcript: {media_context.get('transcriptText', '')}",
-            f"Contact details: {request_data.get('contactDetails', '')}",
-            f"CTA: {request_data.get('cta', '')}",
-            "Return JSON with keys: message, hashtags, firstComment, contactDetails, cta.",
-        ]
-    )
-    return system_prompt, user_prompt
+    user_lines = [
+        f"Platform: {platform}",
+        f"Media group: {media_group.name}",
+        f"Max chars: {rule.max_chars if rule.max_chars is not None else 'none'}",
+        f"Required hashtag count: {rule.hashtag_count}",
+        f"Require emoji: {rule.require_emoji}",
+        f"Require contact details: {rule.require_contact_details}",
+        f"Require CTA: {rule.require_cta}",
+        f"Title: {request_data.get('title', '')}",
+        f"Notes: {request_data.get('notes', '')}",
+        f"Transcript: {media_context.get('transcriptText', '')}",
+        f"Contact details: {request_data.get('contactDetails', '')}",
+        f"CTA: {request_data.get('cta', '')}",
+    ]
+    account_context = str(request_data.get("_accountContext") or "").strip()
+    if account_context:
+        user_lines.append("")
+        user_lines.append("Account context (apply any account-specific rules from the system prompt):")
+        user_lines.append(account_context)
+    user_lines.append("Return JSON with keys: message, hashtags, firstComment, contactDetails, cta.")
+    return system_prompt, "\n".join(user_lines)
 
 
 def _resolve_ai_config(profile: profile_registry.Profile) -> dict:
-    """Resolve AI service config from profile settings, falling back to env vars."""
+    """Resolve AI service config from profile settings. Returns None values if not configured; callers fall back to env vars."""
     ai_services = (profile.settings or {}).get("aiServices") or []
     if ai_services:
         svc = ai_services[0]  # Use first configured service
@@ -2478,6 +2553,50 @@ def _generate_platform_draft(
         contact_details=str(request_data.get("contactDetails", "") or "").strip(),
         cta=str(request_data.get("cta", "") or "").strip(),
         default_hashtags=request_data.get("hashtags") or [],
+    )
+
+
+def _generate_account_draft(
+    account: profile_registry.Account,
+    profile: profile_registry.Profile,
+    media_group: media_group_store.MediaGroup,
+    request_data: dict,
+    media_context: dict,
+    *,
+    regenerate: bool = False,
+) -> dict:
+    """Generate a draft for a specific account, honouring per-account
+    rules the user may have written in the profile's system prompt.
+
+    The user's system prompt may include a *Platform specification* (or
+    *Account specification*) section that lists per-platform or per-account
+    rules. We surface the account context to the LLM so it can apply those
+    rules. When ``regenerate`` is true a small randomised nonce is appended
+    to the user prompt so the LLM produces a fresh variation.
+
+    The account context is passed via a side channel
+    (``_accountContext``) that only the LLM prompt builder reads — never
+    via ``notes``, since the fallback path echoes ``notes`` directly into
+    the visible message body.
+    """
+    extended_data = dict(request_data or {})
+    nonce_suffix = ""
+    if regenerate:
+        nonce_suffix = f"\nRegeneration nonce: {uuid.uuid4().hex[:8]}"
+
+    account_context_lines = [
+        f"Platform: {account.platform}",
+        f"Account name: {account.account_name}",
+        "If the system prompt contains a 'Platform specification' or "
+        "'Account specification' section with rules for this account, follow them.",
+    ]
+    extended_data["_accountContext"] = "\n".join(account_context_lines) + nonce_suffix
+    return _generate_platform_draft(
+        account.platform,
+        profile,
+        media_group,
+        extended_data,
+        media_context,
     )
 
 
@@ -4031,6 +4150,8 @@ def profiles_delete(profile_id):
         profile_registry.delete_profile(profile_id, db_path=_current_db_path())
     except LookupError:
         return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
+    except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     return jsonify({"code": 200, "msg": "deleted", "data": None}), 200
 
 
@@ -4934,6 +5055,304 @@ def sse_stream(status_queue, login_id=None, idle_timeout=SSE_IDLE_TIMEOUT_SECOND
     finally:
         if login_id is not None:
             active_queues.pop(login_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Publish Center — preview / regenerate / submit + template CRUD
+# ---------------------------------------------------------------------------
+
+def _publish_center_preview_payload(*, profile, accounts, drafts_by_account):
+    profile_payload = {
+        "profileId": profile.id,
+        "profileName": profile.name,
+        "profileSlug": profile.slug,
+        "accounts": [],
+    }
+    for account in accounts:
+        draft = drafts_by_account.get(account.id) or {}
+        try:
+            rule = content_rules.get_platform_rule(account.platform)
+        except ValueError:
+            rule = None
+        profile_payload["accounts"].append({
+            "accountId": account.id,
+            "accountName": account.account_name,
+            "platform": account.platform,
+            "draft": draft,
+            "maxChars": rule.max_chars if rule is not None else None,
+            "supportsFirstComment": platform_capabilities.platform_supports_first_comment(account.platform),
+            "supportsMultiMedia": platform_capabilities.platform_supports_multi_media(account.platform),
+        })
+    return profile_payload
+
+
+def _publish_center_load_profile(profile_id: int, *, db_path: Path) -> profile_registry.Profile:
+    return profile_registry.get_profile(int(profile_id), db_path=db_path)
+
+
+def _publish_center_load_accounts(profile_id: int, selected: list[int] | None, *, db_path: Path) -> list[profile_registry.Account]:
+    rows = profile_registry.list_accounts(profile_id=profile_id, enabled=True, db_path=db_path)
+    if not selected:
+        return list(rows)
+    allowed = {int(a) for a in selected}
+    return [account for account in rows if account.id in allowed]
+
+
+def _build_preview_media_context(brief: str) -> dict:
+    return {
+        "imageUrls": [],
+        "videoUrl": "",
+        "imageLocalPaths": [],
+        "videoLocalPath": "",
+        "rawImageUrls": [],
+        "rawVideoUrl": "",
+        "rawImageLocalPaths": [],
+        "rawVideoLocalPath": "",
+        "screenshotPaths": [],
+        "screenshotUrls": [],
+        "transcriptText": "",
+        "brief": brief or "",
+    }
+
+
+def _preview_media_group_stub(name: str):
+    """Build a transient MediaGroup-shaped object for preview prompts.
+
+    No DB rows are written; this only carries the name forwarded to the
+    LLM prompt so the user sees a sensible preview without committing
+    to a media group on every preview keystroke.
+    """
+    from dataclasses import dataclass as _dc
+
+    @_dc(slots=True)
+    class _Stub:
+        id: int = 0
+        name: str = ""
+        notes: str = ""
+        primary_video_file_id: int | None = None
+        created_at: str | None = None
+        updated_at: str | None = None
+    return _Stub(id=0, name=name)
+
+
+@app.route("/publish-center/preview", methods=["POST"])
+def publish_center_preview():
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        profile_ids = data.get("profileIds") or []
+        if not profile_ids:
+            raise ValueError("profileIds is required")
+        selected_account_ids = data.get("selectedAccountIds") or None
+        brief = str(data.get("brief", "") or "")
+        options = data.get("options") or {}
+
+        results = []
+        media_group_stub = _preview_media_group_stub(name=brief[:50] or "publish-center-preview")
+        media_context = _build_preview_media_context(brief)
+        for profile_id in profile_ids:
+            profile = _publish_center_load_profile(profile_id, db_path=db_path)
+            accounts = _publish_center_load_accounts(
+                profile.id, selected_account_ids, db_path=db_path
+            )
+            request_data = publish_orchestrator._request_data_for_options(
+                brief=brief, options=options, profile=profile
+            )
+
+            drafts_by_account: dict[int, dict] = {}
+            cached_per_platform: dict[str, dict] = {}
+            for account in accounts:
+                cached = cached_per_platform.get(account.platform)
+                if cached is None:
+                    try:
+                        cached = _generate_account_draft(
+                            account, profile, media_group_stub, request_data, media_context
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        rule = content_rules.PLATFORM_RULES.get(account.platform)
+                        max_chars = (rule.max_chars if rule is not None else None) or 1000
+                        cached = {
+                            "message": brief.strip()[:max_chars] or brief.strip(),
+                            "hashtags": [],
+                            "firstComment": "",
+                            "charCount": len(brief.strip()),
+                            "error": str(exc),
+                        }
+                    cached_per_platform[account.platform] = cached
+                drafts_by_account[account.id] = dict(cached)
+
+            results.append(
+                _publish_center_preview_payload(
+                    profile=profile, accounts=accounts, drafts_by_account=drafts_by_account
+                )
+            )
+    except LookupError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "ok", "data": {"profiles": results}}), 200
+
+
+@app.route("/publish-center/regenerate", methods=["POST"])
+def publish_center_regenerate():
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        profile_id = int(data.get("profileId"))
+        account_id = int(data.get("accountId"))
+        brief = str(data.get("brief", "") or "")
+        options = data.get("options") or {}
+        profile = _publish_center_load_profile(profile_id, db_path=db_path)
+        account = profile_registry.get_account(account_id, db_path=db_path)
+        if account.profile_id != profile.id:
+            raise ValueError("Account does not belong to the specified profile")
+
+        request_data = publish_orchestrator._request_data_for_options(
+            brief=brief, options=options, profile=profile
+        )
+        media_group_stub = _preview_media_group_stub(name=brief[:50] or "publish-center-regenerate")
+        media_context = _build_preview_media_context(brief)
+        draft = _generate_account_draft(
+            account, profile, media_group_stub, request_data, media_context, regenerate=True,
+        )
+    except LookupError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "ok", "data": {"draft": draft}}), 200
+
+
+@app.route("/publish-center/submit", methods=["POST"])
+def publish_center_submit():
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        profile_ids = [int(v) for v in (data.get("profileIds") or []) if v]
+        if not profile_ids:
+            raise ValueError("profileIds is required")
+        media_file_paths = data.get("mediaFilePaths") or []
+        if not media_file_paths:
+            raise ValueError("mediaFilePaths is required")
+        selected_account_ids = data.get("selectedAccountIds") or None
+        brief = str(data.get("brief", "") or "")
+        options = data.get("options") or {}
+        schedule = data.get("schedule") or None
+        account_drafts = data.get("accountDrafts") or {}
+
+        result = publish_orchestrator.submit_publish(
+            profile_ids=profile_ids,
+            selected_account_ids=[int(v) for v in selected_account_ids] if selected_account_ids else None,
+            media_file_paths=[str(p) for p in media_file_paths],
+            brief=brief,
+            options=options,
+            schedule=schedule,
+            account_drafts=account_drafts,
+            db_path=db_path,
+            prepare_artifacts=_prepare_campaign_media_artifacts,
+            generate_account_draft=_generate_account_draft,
+            ensure_file_record_for_path=_ensure_file_record_for_path,
+            artifact_payloads_for_platform=_artifact_payloads_for_platform,
+            job_to_payload=_job_to_payload,
+        )
+    except LookupError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).exception("publish-center submit failed")
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({
+        "code": 200,
+        "msg": "queued",
+        "data": {
+            "campaignIds": result.campaign_ids,
+            "jobs": result.jobs,
+            "skipped": result.skipped,
+        },
+    }), 200
+
+
+def _template_payload(template):
+    return {
+        "id": template.id,
+        "name": template.name,
+        "slug": template.slug,
+        "description": template.description,
+        "config": template.config or {},
+        "includedSettings": template.included_settings or [],
+        "createdAt": template.created_at,
+        "updatedAt": template.updated_at,
+    }
+
+
+@app.route("/publish-templates", methods=["GET"])
+def publish_templates_list():
+    db_path = _current_db_path()
+    rows = template_store.list_templates(db_path=db_path)
+    return jsonify({
+        "code": 200,
+        "msg": "ok",
+        "data": {"templates": [_template_payload(t) for t in rows]},
+    }), 200
+
+
+@app.route("/publish-templates", methods=["POST"])
+def publish_templates_create():
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        template = template_store.create_template(
+            name=str(data.get("name") or "").strip(),
+            description=str(data.get("description") or "").strip(),
+            config=data.get("config") if isinstance(data.get("config"), dict) else {},
+            included_settings=data.get("includedSettings") if isinstance(data.get("includedSettings"), list) else None,
+            db_path=db_path,
+        )
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "created", "data": _template_payload(template)}), 200
+
+
+@app.route("/publish-templates/<int:template_id>", methods=["GET"])
+def publish_templates_get(template_id):
+    db_path = _current_db_path()
+    try:
+        template = template_store.get_template(template_id, db_path=db_path)
+    except LookupError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    return jsonify({"code": 200, "msg": "ok", "data": _template_payload(template)}), 200
+
+
+@app.route("/publish-templates/<int:template_id>", methods=["PATCH"])
+def publish_templates_update(template_id):
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        kwargs: dict = {"db_path": db_path}
+        if "name" in data:
+            kwargs["name"] = str(data.get("name") or "").strip()
+        if "description" in data:
+            kwargs["description"] = str(data.get("description") or "").strip()
+        if "config" in data:
+            kwargs["config"] = data.get("config") if isinstance(data.get("config"), dict) else {}
+        if "includedSettings" in data:
+            kwargs["included_settings"] = data.get("includedSettings") if isinstance(data.get("includedSettings"), list) else []
+        template = template_store.update_template(template_id, **kwargs)
+    except LookupError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "updated", "data": _template_payload(template)}), 200
+
+
+@app.route("/publish-templates/<int:template_id>", methods=["DELETE"])
+def publish_templates_delete(template_id):
+    db_path = _current_db_path()
+    try:
+        template_store.get_template(template_id, db_path=db_path)
+        template_store.delete_template(template_id, db_path=db_path)
+    except LookupError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    return jsonify({"code": 200, "msg": "deleted", "data": None}), 200
+
 
 _maybe_start_account_maintenance_scheduler()
 

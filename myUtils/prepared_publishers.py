@@ -53,6 +53,45 @@ class PreparedPublishError(RuntimeError):
     """Raised when a prepared publish cannot be completed."""
 
 
+def _first_comment_text(payload: dict) -> str:
+    """Return the trimmed first-comment text, or empty string."""
+    draft = payload.get("draft") or {}
+    text = str(draft.get("firstComment") or payload.get("firstComment") or "").strip()
+    return text
+
+
+def _try_post_first_comment(
+    *,
+    platform: str,
+    post_id: str | None,
+    text: str,
+    poster,
+    logger=None,
+) -> None:
+    """Best-effort: post a follow-up comment via ``poster(post_id, text)``.
+
+    A failure is logged but does not propagate, so a flaky comments API
+    cannot fail the main publish. ``poster`` must accept ``(post_id, text)``
+    and may return any value.
+    """
+    if not (post_id and text):
+        return
+    try:
+        poster(post_id, text)
+    except Exception as exc:  # noqa: BLE001
+        if logger is not None:
+            try:
+                logger("first_comment_failed", platform=platform, post_id=post_id, error=str(exc))
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "first-comment post failed on %s for post %s: %s",
+                platform, post_id, exc,
+            )
+
+
 def _get_session(session=None):
     if session is not None:
         return session
@@ -531,6 +570,23 @@ def publish_facebook_sync(account, payload: dict, *, session=None) -> list[Any]:
         return results
 
     _post("feed", data={"access_token": access_token, "message": message})
+    first_comment = _first_comment_text(payload)
+    if first_comment:
+        # Extract the post_id from the last response; on /feed Facebook
+        # returns "{page_id}_{post_id}" already; on /photos it's two
+        # separate keys.
+        last = results[-1] if results else {}
+        post_id = last.get("post_id") or last.get("id")
+
+        def _poster(pid, text):
+            response = http.post(
+                f"{FACEBOOK_GRAPH_ROOT}/{pid}/comments",
+                data={"access_token": access_token, "message": text},
+                timeout=60,
+            )
+            _raise_for_status(response)
+            results.append(_response_payload(response))
+        _try_post_first_comment(platform="facebook", post_id=post_id, text=first_comment, poster=_poster)
     return results
 
 
@@ -628,7 +684,20 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
         timeout=120,
     )
     _raise_for_status(publish_response)
-    return {"container_id": container_id, "publish": _response_payload(publish_response)}
+    publish_body = _response_payload(publish_response)
+    first_comment = _first_comment_text(payload)
+    if first_comment:
+        media_id = publish_body.get("id") if isinstance(publish_body, dict) else None
+
+        def _poster(pid, text):
+            response = http.post(
+                f"{FACEBOOK_GRAPH_ROOT}/{pid}/comments",
+                data={"message": text, "access_token": access_token},
+                timeout=60,
+            )
+            _raise_for_status(response)
+        _try_post_first_comment(platform="instagram", post_id=media_id, text=first_comment, poster=_poster)
+    return {"container_id": container_id, "publish": publish_body}
 
 
 def _threads_create_container(http, user_id: str, access_token: str, data: dict) -> str:

@@ -76,6 +76,7 @@ class CampaignPost:
     sheet_row: dict | None = None
     status: str = CAMPAIGN_POST_DRAFT
     last_published_job_id: int | None = None
+    file_record_ids: list[int] | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -142,6 +143,18 @@ def _row_to_campaign_artifact(row: sqlite3.Row) -> CampaignArtifact:
 
 
 def _row_to_campaign_post(row: sqlite3.Row) -> CampaignPost:
+    file_record_ids = None
+    try:
+        raw = row["file_record_ids_json"]
+    except (IndexError, KeyError):
+        raw = None
+    if raw:
+        try:
+            decoded = json.loads(raw)
+            if isinstance(decoded, list):
+                file_record_ids = [int(v) for v in decoded]
+        except (TypeError, ValueError):
+            file_record_ids = None
     return CampaignPost(
         id=row["id"],
         campaign_id=row["campaign_id"],
@@ -151,6 +164,7 @@ def _row_to_campaign_post(row: sqlite3.Row) -> CampaignPost:
         sheet_row=_json_load(row["sheet_row_json"], {}),
         status=row["status"],
         last_published_job_id=row["last_published_job_id"],
+        file_record_ids=file_record_ids,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -388,8 +402,12 @@ def add_campaign_post(
     sheet_row: dict | None = None,
     status: str = CAMPAIGN_POST_DRAFT,
     last_published_job_id: int | None = None,
+    file_record_ids: list[int] | None = None,
     db_path: Path | None = None,
 ) -> CampaignPost:
+    file_ids_json: str | None = None
+    if file_record_ids is not None:
+        file_ids_json = json.dumps([int(v) for v in file_record_ids], ensure_ascii=False)
     with _connect(db_path) as conn:
         cursor = conn.execute(
             """
@@ -400,9 +418,10 @@ def add_campaign_post(
                 draft_json,
                 sheet_row_json,
                 status,
-                last_published_job_id
+                last_published_job_id,
+                file_record_ids_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 campaign_id,
@@ -412,6 +431,7 @@ def add_campaign_post(
                 json.dumps(sheet_row or {}, ensure_ascii=False),
                 status,
                 last_published_job_id,
+                file_ids_json,
             ),
         )
         conn.commit()
@@ -459,6 +479,7 @@ def update_campaign_post(
     sheet_row: dict | None = None,
     status: str | None = None,
     last_published_job_id: int | None | object = _UNSET,
+    file_record_ids: list[int] | None | object = _UNSET,
     db_path: Path | None = None,
 ) -> CampaignPost:
     current = get_campaign_post(post_id, db_path=db_path)
@@ -471,12 +492,26 @@ def update_campaign_post(
         if last_published_job_id is _UNSET
         else last_published_job_id
     )
+    if file_record_ids is _UNSET:
+        next_file_record_ids = current.file_record_ids
+    else:
+        next_file_record_ids = (
+            None
+            if file_record_ids is None
+            else [int(v) for v in file_record_ids]
+        )
+    file_ids_json = (
+        None
+        if next_file_record_ids is None
+        else json.dumps(next_file_record_ids, ensure_ascii=False)
+    )
     with _connect(db_path) as conn:
         conn.execute(
             """
             UPDATE campaign_posts
             SET account_ids_json = ?, draft_json = ?, sheet_row_json = ?,
-                status = ?, last_published_job_id = ?, updated_at = ?
+                status = ?, last_published_job_id = ?,
+                file_record_ids_json = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -485,6 +520,7 @@ def update_campaign_post(
                 json.dumps(next_sheet_row or {}, ensure_ascii=False),
                 next_status,
                 next_last_published_job_id,
+                file_ids_json,
                 _now_iso(),
                 post_id,
             ),

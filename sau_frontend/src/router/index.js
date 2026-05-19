@@ -12,6 +12,7 @@ import TermsOfUse from '../views/TermsOfUse.vue'
 import TikTokReviewStatus from '../views/TikTokReviewStatus.vue'
 import OAuthReviewStatus from '../views/OAuthReviewStatus.vue'
 import ProfileManagement from '../views/ProfileManagement.vue'
+import TemplateManagement from '../views/TemplateManagement.vue'
 
 import { getToken } from '@/utils/auth'
 
@@ -56,6 +57,12 @@ const routes = [
     path: '/publish-center',
     name: 'PublishCenter',
     component: PublishCenter,
+    meta: { title: 'Socialupload' }
+  },
+  {
+    path: '/template-management',
+    name: 'TemplateManagement',
+    component: TemplateManagement,
     meta: { title: 'Socialupload' }
   },
   {

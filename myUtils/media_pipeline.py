@@ -155,6 +155,102 @@ def concat_videos(
     return output
 
 
+def _parse_timestamp(value) -> float:
+    """Parse a timestamp expressed as float seconds or ``"HH:MM:SS[.fraction]"``."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("empty timestamp")
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) == 2:
+            minutes, seconds = parts
+            return int(minutes) * 60 + float(seconds)
+        if len(parts) == 3:
+            hours, minutes, seconds = parts
+            return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        raise ValueError(f"unsupported timestamp format: {text!r}")
+    return float(text)
+
+
+def extract_video_screenshots(
+    source_path: str | Path,
+    output_dir: str | Path,
+    *,
+    count: int | None = None,
+    timestamps: list | tuple | None = None,
+    seed: int = 0,
+    quality: int = 2,
+    runner=run_subprocess,
+    duration_reader=probe_video_duration,
+    date_stamp: str | None = None,
+) -> list[Path]:
+    """Extract still images from a video at given or random offsets.
+
+    The output filename uses the format
+    ``{original_stem}_{YYYYMMDD-HHMMSS}_screenshot{N}.jpg`` where N is the
+    1-based index of the screenshot in the resulting list.
+
+    If ``timestamps`` is provided it overrides ``count`` and is taken as
+    the explicit offsets (float seconds, or ``"HH:MM:SS"`` strings). Otherwise
+    ``count`` evenly-spaced offsets are placed inside the video duration
+    with deterministic jitter driven by ``seed`` so repeated extractions
+    on the same seed produce identical results.
+    """
+    source = Path(source_path).expanduser().resolve()
+    out_dir = Path(output_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if timestamps is not None:
+        offsets = [_parse_timestamp(item) for item in timestamps]
+    else:
+        if not count or count < 1:
+            raise ValueError("count must be >= 1 when timestamps is not provided")
+        duration = duration_reader(source, runner=runner)
+        if duration <= 0:
+            raise ValueError(f"video has non-positive duration: {duration}")
+        rng = random.Random(seed)
+        offsets = []
+        for index in range(count):
+            # Distribute roughly evenly across the timeline, avoiding the
+            # very first and last 1% so we don't grab a blank frame.
+            segment_start = duration * (index + 0.05) / count
+            segment_end = duration * (index + 0.95) / count
+            offsets.append(rng.uniform(segment_start, segment_end))
+
+    if not offsets:
+        return []
+
+    if date_stamp is None:
+        from datetime import datetime as _dt
+        date_stamp = _dt.now().strftime("%Y%m%d-%H%M%S")
+
+    stem = source.stem
+    results: list[Path] = []
+    for index, offset in enumerate(offsets, start=1):
+        output_path = out_dir / f"{stem}_{date_stamp}_screenshot{index}.jpg"
+        runner(
+            [
+                FFMPEG_COMMAND,
+                "-y",
+                "-ss",
+                f"{max(0.0, float(offset)):.3f}",
+                "-i",
+                str(source),
+                "-frames:v",
+                "1",
+                "-q:v",
+                str(int(quality)),
+                str(output_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        results.append(output_path)
+    return results
+
+
 def extract_video_audio(
     source_path: str | Path,
     output_path: str | Path,

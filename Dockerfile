@@ -32,7 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends libnss3 \
     libxrandr2 \
     libgbm1 \
     libxkbcommon0 \
-    libasound2 && rm -rf /var/lib/apt/lists/*
+    libasound2 \
+    ffmpeg && rm -rf /var/lib/apt/lists/*
 
 RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
