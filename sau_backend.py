@@ -2176,12 +2176,22 @@ def _prepare_campaign_media_artifacts(
     outro_ids = request_data.get("outros") or profile_settings.get("outros") or []
     intro_paths = []
     outro_paths = []
+    def _resolve_aux_path(file_record_id: int) -> str | None:
+        raw = _resolve_file_record_path(int(file_record_id), db_path)
+        if not raw:
+            return None
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            videofile_candidate = Path(BASE_DIR) / "videoFile" / candidate
+            if videofile_candidate.exists():
+                candidate = videofile_candidate
+        return str(candidate.resolve())
     for fid in intro_ids:
-        p = _resolve_file_record_path(int(fid), db_path)
+        p = _resolve_aux_path(fid)
         if p:
             intro_paths.append(p)
     for fid in outro_ids:
-        p = _resolve_file_record_path(int(fid), db_path)
+        p = _resolve_aux_path(fid)
         if p:
             outro_paths.append(p)
 
