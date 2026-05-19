@@ -2397,43 +2397,57 @@ def _prepare_campaign_media_artifacts(
     )
     primary_video = next((item for item in media_files if item["role"] == "video"), None)
     if should_transcribe and primary_video is not None and not artifacts_context["transcriptText"]:
-        source_path = Path(primary_video["file_path"]).expanduser().resolve()
-        audio_path = media_pipeline.prepare_campaign_artifact_path(
-            campaign_id,
-            source_path,
-            artifact_kind="audio",
-            suffix=".wav",
-        )
-        media_pipeline.extract_video_audio(source_path, audio_path)
-        transcribe_kwargs = {}
-        if ai_config["api_base_url"]:
-            transcribe_kwargs["api_base_url"] = ai_config["api_base_url"]
-        if ai_config["api_key"]:
-            transcribe_kwargs["api_key"] = ai_config["api_key"]
-        transcript = llm_client.transcribe_audio(audio_path, **transcribe_kwargs)
-        transcript_path = media_pipeline.prepare_campaign_artifact_path(
-            campaign_id,
-            source_path,
-            artifact_kind="transcript",
-            suffix=".txt",
-        )
-        transcript_path.write_text(transcript.text, encoding="utf-8")
-        artifacts_context["transcriptText"] = transcript.text
-        campaign_store.add_campaign_artifact(
-            campaign_id,
-            source_file_record_id=primary_video["file_record_id"],
-            artifact_kind="audio",
-            local_path=str(audio_path),
-            db_path=db_path,
-        )
-        campaign_store.add_campaign_artifact(
-            campaign_id,
-            source_file_record_id=primary_video["file_record_id"],
-            artifact_kind="transcript",
-            local_path=str(transcript_path),
-            metadata={"text": transcript.text},
-            db_path=db_path,
-        )
+        raw_video = Path(primary_video["file_path"]).expanduser()
+        if not raw_video.is_absolute():
+            candidate = Path(BASE_DIR) / "videoFile" / raw_video
+            if candidate.exists():
+                raw_video = candidate
+        source_path = raw_video.resolve()
+        try:
+            audio_path = media_pipeline.prepare_campaign_artifact_path(
+                campaign_id,
+                source_path,
+                artifact_kind="audio",
+                suffix=".wav",
+            )
+            media_pipeline.extract_video_audio(source_path, audio_path)
+            transcribe_kwargs = {}
+            if ai_config["api_base_url"]:
+                transcribe_kwargs["api_base_url"] = ai_config["api_base_url"]
+            if ai_config["api_key"]:
+                transcribe_kwargs["api_key"] = ai_config["api_key"]
+            transcript = llm_client.transcribe_audio(audio_path, **transcribe_kwargs)
+            transcript_path = media_pipeline.prepare_campaign_artifact_path(
+                campaign_id,
+                source_path,
+                artifact_kind="transcript",
+                suffix=".txt",
+            )
+            transcript_path.write_text(transcript.text, encoding="utf-8")
+            artifacts_context["transcriptText"] = transcript.text
+            campaign_store.add_campaign_artifact(
+                campaign_id,
+                source_file_record_id=primary_video["file_record_id"],
+                artifact_kind="audio",
+                local_path=str(audio_path),
+                db_path=db_path,
+            )
+            campaign_store.add_campaign_artifact(
+                campaign_id,
+                source_file_record_id=primary_video["file_record_id"],
+                artifact_kind="transcript",
+                local_path=str(transcript_path),
+                metadata={"text": transcript.text},
+                db_path=db_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Transcription is optional context for the LLM. If the video
+            # has no audio stream, or the transcription API rejects the
+            # request, we still want the publish to go through.
+            logging.getLogger(__name__).warning(
+                "Audio extraction / transcription failed for campaign %d: %s",
+                campaign_id, exc,
+            )
 
     return artifacts_context
 

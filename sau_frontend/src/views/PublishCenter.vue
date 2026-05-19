@@ -417,8 +417,22 @@ function removeMedia(index) {
 }
 
 function onUploadSuccess(response, file) {
-  // backend returns {filename, filepath, ...} on /upload
-  const path = response?.data?.filepath || response?.filepath || response?.data?.filename || file.name
+  // /upload returns { code: 200, msg, data: '<uuid>_<filename>' } — the
+  // axios body's `data` field is the *string* filename relative to
+  // videoFile/. el-upload hands us that raw body, not the file object,
+  // so we cannot reuse file.name (which would drop the uuid prefix).
+  let path = null
+  if (typeof response?.data === 'string') {
+    path = response.data
+  } else if (typeof response === 'string') {
+    path = response
+  } else if (response?.data?.filepath) {
+    path = response.data.filepath
+  }
+  if (!path) {
+    ElMessage.error('檔案上傳成功但無法解析路徑')
+    return
+  }
   mediaFiles.value.push({ path, name: file.name, size: file.size })
 }
 
