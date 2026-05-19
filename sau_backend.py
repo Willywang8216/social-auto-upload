@@ -2313,13 +2313,15 @@ def _prepare_campaign_media_artifacts(
             if raw_public_url:
                 artifacts_context["rawVideoUrl"] = raw_public_url
 
+    ai_config = _resolve_ai_config(profile)
+    has_ai = bool(
+        ai_config["api_base_url"] and ai_config["api_key"]
+    ) or bool(
+        os.environ.get("SAU_LLM_API_KEY") and os.environ.get("SAU_LLM_API_BASE_URL")
+    )
     should_transcribe = bool(
         request_data.get("transcribe", False)
-        or (
-            not artifacts_context["transcriptText"]
-            and os.environ.get("SAU_LLM_API_KEY")
-            and os.environ.get("SAU_LLM_API_BASE_URL")
-        )
+        or (not artifacts_context["transcriptText"] and has_ai)
     )
     primary_video = next((item for item in media_files if item["role"] == "video"), None)
     if should_transcribe and primary_video is not None and not artifacts_context["transcriptText"]:
@@ -2331,7 +2333,12 @@ def _prepare_campaign_media_artifacts(
             suffix=".wav",
         )
         media_pipeline.extract_video_audio(source_path, audio_path)
-        transcript = llm_client.transcribe_audio(audio_path)
+        transcribe_kwargs = {}
+        if ai_config["api_base_url"]:
+            transcribe_kwargs["api_base_url"] = ai_config["api_base_url"]
+        if ai_config["api_key"]:
+            transcribe_kwargs["api_key"] = ai_config["api_key"]
+        transcript = llm_client.transcribe_audio(audio_path, **transcribe_kwargs)
         transcript_path = media_pipeline.prepare_campaign_artifact_path(
             campaign_id,
             source_path,
@@ -2408,6 +2415,19 @@ def _build_generation_prompt(
     return system_prompt, user_prompt
 
 
+def _resolve_ai_config(profile: profile_registry.Profile) -> dict:
+    """Resolve AI service config from profile settings, falling back to env vars."""
+    ai_services = (profile.settings or {}).get("aiServices") or []
+    if ai_services:
+        svc = ai_services[0]  # Use first configured service
+        return {
+            "api_base_url": svc.get("apiBaseUrl") or None,
+            "api_key": svc.get("apiKey") or None,
+            "model": svc.get("model") or None,
+        }
+    return {"api_base_url": None, "api_key": None, "model": None}
+
+
 def _generate_platform_draft(
     platform: str,
     profile: profile_registry.Profile,
@@ -2415,11 +2435,13 @@ def _generate_platform_draft(
     request_data: dict,
     media_context: dict,
 ) -> dict:
-    should_use_llm = bool(
-        request_data.get("useLlm", True)
-        and os.environ.get("SAU_LLM_API_KEY")
-        and os.environ.get("SAU_LLM_API_BASE_URL")
+    ai_config = _resolve_ai_config(profile)
+    has_ai = bool(
+        ai_config["api_base_url"] and ai_config["api_key"]
+    ) or bool(
+        os.environ.get("SAU_LLM_API_KEY") and os.environ.get("SAU_LLM_API_BASE_URL")
     )
+    should_use_llm = bool(request_data.get("useLlm", True)) and has_ai
 
     raw_draft = None
     if should_use_llm:
@@ -2431,7 +2453,14 @@ def _generate_platform_draft(
                 request_data,
                 media_context,
             )
-            result = llm_client.generate_chat_completion(system_prompt, user_prompt)
+            kwargs = {}
+            if ai_config["api_base_url"]:
+                kwargs["api_base_url"] = ai_config["api_base_url"]
+            if ai_config["api_key"]:
+                kwargs["api_key"] = ai_config["api_key"]
+            if ai_config["model"]:
+                kwargs["model"] = ai_config["model"]
+            result = llm_client.generate_chat_completion(system_prompt, user_prompt, **kwargs)
             raw_draft = result.parsed_json or {"message": result.content}
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).warning(

@@ -1286,7 +1286,21 @@ onMounted(() => {
   window.addEventListener('message', handleTwitterOauthMessage)
   setTimeout(() => {
     fetchAccounts(true)
-  }, 100)
+    // Auto-open dialog from query params (navigated from ProfileManagement)
+    const editId = route.query.editAccountId
+    const addToProfile = route.query.addAccountToProfile
+    if (editId) {
+      const account = accountStore.accounts.find(a => String(a.id) === String(editId))
+      if (account) {
+        handleEdit(account)
+      }
+      router.replace({ query: {} })
+    } else if (addToProfile) {
+      handleAddAccount()
+      accountForm.profileId = Number(addToProfile)
+      router.replace({ query: {} })
+    }
+  }, 300)
 })
 
 const resetTikTokHealth = () => {

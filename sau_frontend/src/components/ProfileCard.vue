@@ -69,6 +69,22 @@
         </div>
       </el-collapse-item>
 
+      <!-- AI Services Section -->
+      <el-collapse-item title="AI 服務" name="aiServices">
+        <div class="section-content">
+          <div v-if="aiServices.length > 0">
+            <div v-for="(svc, idx) in aiServices" :key="idx" class="ai-service-row">
+              <div class="ai-service-info">
+                <strong>{{ svc.name || '服務 ' + (idx + 1) }}</strong>
+                <span class="ai-service-detail">{{ svc.apiBaseUrl }}</span>
+                <el-tag size="small" type="info">{{ svc.model || 'gpt-4.1-mini' }}</el-tag>
+              </div>
+            </div>
+          </div>
+          <el-empty v-else description="使用全域設定 (SAU_LLM_API_BASE_URL)" :image-size="40" />
+        </div>
+      </el-collapse-item>
+
       <!-- Intro/Outro Section -->
       <el-collapse-item title="片頭 / 片尾" name="intros">
         <div class="section-content">
@@ -149,6 +165,7 @@
               class="account-row"
               draggable="true"
               @dragstart="onDragStart($event, account)"
+              @click="emit('account-click', account)"
             >
               <span class="account-platform">
                 <el-tag size="small" :type="platformTagType(account.platformSlug)">
@@ -163,9 +180,21 @@
               >
                 {{ account.connectionLabel || account.status }}
               </el-tag>
+              <el-button
+                size="small"
+                type="danger"
+                text
+                class="account-delete-btn"
+                @click.stop="emit('account-delete', account)"
+              >
+                <el-icon><Delete /></el-icon>
+              </el-button>
             </div>
             <el-empty v-if="filteredAccounts.length === 0" description="無符合條件的帳號" :image-size="40" />
           </div>
+          <el-button size="small" type="primary" text @click="emit('add-account', profile.id)" style="margin-top: 8px;">
+            <el-icon><Plus /></el-icon> 新增帳號
+          </el-button>
         </div>
       </el-collapse-item>
     </el-collapse>
@@ -182,7 +211,7 @@ const props = defineProps({
   materials: { type: Array, default: () => [] }
 })
 
-const emit = defineEmits(['edit', 'delete', 'account-drop', 'edit-intros', 'remove-intro', 'remove-outro'])
+const emit = defineEmits(['edit', 'delete', 'account-drop', 'account-click', 'account-delete', 'add-account', 'edit-intros', 'remove-intro', 'remove-outro'])
 
 const activeSections = ref(['accounts'])
 const searchQuery = ref('')
@@ -201,6 +230,8 @@ const watermarkStyleLabel = computed(() => {
   const map = { static: '靜態', moving: '動態移動', slanted: '傾斜', repeated: '重複鋪滿' }
   return map[watermark.value.style] || '靜態'
 })
+
+const aiServices = computed(() => settings.value.aiServices || [])
 
 const introIds = computed(() => settings.value.intros || [])
 const outroIds = computed(() => settings.value.outros || [])
@@ -447,5 +478,38 @@ function onDrop(event) {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 120px;
+}
+
+.account-delete-btn {
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.account-row:hover .account-delete-btn {
+  opacity: 1;
+}
+
+.ai-service-row {
+  padding: 8px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.ai-service-row:last-child {
+  border-bottom: none;
+}
+
+.ai-service-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-service-detail {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
 }
 </style>

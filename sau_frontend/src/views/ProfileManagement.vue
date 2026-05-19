@@ -27,6 +27,9 @@
         @edit="openEditDialog"
         @delete="handleDelete"
         @account-drop="handleAccountDrop"
+        @account-click="handleAccountClick"
+        @account-delete="handleAccountDelete"
+        @add-account="handleAddAccount"
         @edit-intros="openIntroOutroPicker(profile)"
         @remove-intro="(id) => removeIntroOutro(profile, 'intros', id)"
         @remove-outro="(id) => removeIntroOutro(profile, 'outros', id)"
@@ -106,6 +109,40 @@
             </el-form-item>
           </el-col>
         </el-row>
+        <el-divider content-position="left">AI 服務</el-divider>
+        <p class="form-hint">可指定多組 AI 服務，發佈時會優先使用此設定而非全域環境變數</p>
+        <div v-for="(svc, idx) in form.aiServices" :key="idx" class="ai-service-form-row">
+          <el-row :gutter="12">
+            <el-col :span="6">
+              <el-form-item label="名稱" size="small">
+                <el-input v-model="svc.name" placeholder="OpenAI" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="9">
+              <el-form-item label="API Base URL" size="small">
+                <el-input v-model="svc.apiBaseUrl" placeholder="https://api.openai.com/v1" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="5">
+              <el-form-item label="Model" size="small">
+                <el-input v-model="svc.model" placeholder="gpt-4.1-mini" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="4">
+              <el-form-item label=" " size="small">
+                <el-button type="danger" text @click="form.aiServices.splice(idx, 1)">
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-form-item label="API Key" size="small">
+            <el-input v-model="svc.apiKey" type="password" show-password placeholder="sk-..." />
+          </el-form-item>
+        </div>
+        <el-button size="small" type="primary" text @click="form.aiServices.push({ name: '', apiBaseUrl: '', apiKey: '', model: '' })">
+          <el-icon><Plus /></el-icon> 新增 AI 服務
+        </el-button>
         <el-divider content-position="left">其他設定</el-divider>
         <el-form-item label="聯絡資訊">
           <el-input v-model="form.contactDetails" placeholder="Email、社群連結等" />
@@ -166,13 +203,16 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { Plus, Delete } from '@element-plus/icons-vue'
 import { profilesApi } from '@/api/profiles'
+import { accountApi } from '@/api/account'
 import { materialApi } from '@/api/material'
 import { useProfilesStore } from '@/stores/profiles'
 import ProfileCard from '@/components/ProfileCard.vue'
 
+const router = useRouter()
 const profilesStore = useProfilesStore()
 
 const loading = ref(true)
@@ -197,6 +237,7 @@ const form = reactive({
   watermarkOpacity: 50,
   watermarkFontSize: 24,
   watermarkColor: 'white',
+  aiServices: [],
   contactDetails: '',
   ctaText: ''
 })
@@ -243,6 +284,7 @@ function openCreateDialog() {
     name: '', description: '', systemPrompt: '',
     watermarkText: '', watermarkStyle: 'static', watermarkPosition: 'random',
     watermarkAngle: -30, watermarkOpacity: 50, watermarkFontSize: 24, watermarkColor: 'white',
+    aiServices: [],
     contactDetails: '', ctaText: ''
   })
   dialogVisible.value = true
@@ -264,6 +306,7 @@ function openEditDialog(profile) {
     watermarkOpacity: Math.round((wm.opacity ?? 0.5) * 100),
     watermarkFontSize: wm.fontSize || 24,
     watermarkColor: wm.color || 'white',
+    aiServices: (settings.aiServices || []).map(s => ({ ...s })),
     contactDetails: settings.contactDetails || '',
     ctaText: settings.ctaText || ''
   })
@@ -290,6 +333,7 @@ async function submitForm() {
         fontSize: form.watermarkFontSize,
         color: form.watermarkColor
       },
+      aiServices: form.aiServices.filter(s => s.apiBaseUrl),
       contactDetails: form.contactDetails,
       ctaText: form.ctaText
     }
@@ -339,6 +383,34 @@ async function handleAccountDrop(accountId, sourceProfileId, targetProfileId) {
     await profilesStore.fetchAccountsForProfile(targetProfileId)
   } catch (e) {
     ElMessage.error(e?.message || '移動帳號失敗')
+  }
+}
+
+function handleAccountClick(account) {
+  router.push({ path: '/account-management', query: { editAccountId: account.id } })
+}
+
+function handleAddAccount(profileId) {
+  router.push({ path: '/account-management', query: { addAccountToProfile: profileId } })
+}
+
+async function handleAccountDelete(account) {
+  try {
+    await ElMessageBox.confirm(
+      `確定要刪除帳號「${account.accountName || account.name}」嗎？`,
+      '確認刪除',
+      { type: 'warning', confirmButtonText: '刪除', cancelButtonText: '取消' }
+    )
+    await accountApi.deleteAccount(account.id)
+    ElMessage.success('帳號已刪除')
+    // Refresh accounts for all profiles
+    for (const p of profiles.value) {
+      await profilesStore.fetchAccountsForProfile(p.id)
+    }
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error(e?.message || '刪除失敗')
+    }
   }
 }
 
@@ -439,5 +511,18 @@ onMounted(async () => {
 
 :deep(.el-transfer-panel) {
   width: 260px;
+}
+
+.ai-service-form-row {
+  padding: 12px;
+  margin-bottom: 8px;
+  background: var(--el-fill-color-lighter);
+  border-radius: 6px;
+}
+
+.form-hint {
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+  margin: 0 0 12px 0;
 }
 </style>
