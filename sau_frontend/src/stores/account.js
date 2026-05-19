@@ -111,6 +111,7 @@ export const useAccountStore = defineStore('account', () => {
     else if (platformSlug === 'reddit') detail = config.redditUserName || ''
     else if (platformSlug === 'youtube') detail = config.channelTitle || ''
     else if (platformSlug === 'tiktok') detail = config.displayName || config.openId || ''
+    else if (platformSlug === 'twitter') detail = config.twitterUserName ? `@${config.twitterUserName}` : ''
 
     const hasCredential = Boolean(
       config.accessToken ||

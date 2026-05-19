@@ -42,7 +42,7 @@ from myUtils import x_review
 from myUtils import tiktok_auth
 from myUtils import tiktok_review
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
-from myUtils.login import reddit_cookie_gen, twitter_cookie_gen
+from myUtils.login import reddit_cookie_gen, twitter_cookie_gen, twitter_cookie_gen_legacy
 from myUtils.postVideo import (
     post_video_DouYin,
     post_video_ks,
@@ -1530,12 +1530,16 @@ def _run_account_connection_check(*, account_id: int, db_path: Path):
             config['discordWebhookChannel'] = result.get('channel_id', config.get('discordWebhookChannel', ''))
             summary = f"Discord webhook: {config.get('discordWebhookName') or account.account_name}"
         elif account.platform == profile_registry.PLATFORM_TWITTER:
-            result = prepared_publishers.validate_twitter_config_live(config)
-            twitter_data = result.get('data', {})
-            config['twitterUserId'] = twitter_data.get('id', config.get('twitterUserId', ''))
-            config['twitterUserName'] = twitter_data.get('username', config.get('twitterUserName', ''))
-            config['twitterDisplayName'] = twitter_data.get('name', config.get('twitterDisplayName', ''))
-            summary = f"Twitter user: @{config.get('twitterUserName') or account.account_name}"
+            twitter_auth_type = str(config.get("twitterAuthType") or account.auth_type or "cookie").strip().lower()
+            if twitter_auth_type == "cookie":
+                summary = f"Twitter cookie account: {account.account_name}"
+            else:
+                result = prepared_publishers.validate_twitter_config_live(config)
+                twitter_data = result.get('data', {})
+                config['twitterUserId'] = twitter_data.get('id', config.get('twitterUserId', ''))
+                config['twitterUserName'] = twitter_data.get('username', config.get('twitterUserName', ''))
+                config['twitterDisplayName'] = twitter_data.get('name', config.get('twitterDisplayName', ''))
+                summary = f"Twitter user: @{config.get('twitterUserName') or account.account_name}"
         else:
             raise ValueError('Connection check is implemented only for Facebook, Instagram, Threads, Telegram, Discord, and Twitter')
 
@@ -1754,6 +1758,9 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 updated = profile_registry.update_account(account_id, config=config, auth_type='oauth', status=1, db_path=db_path)
                 summary = f"Instagram credentials re-synced: {config.get('instagramUserName') or updated.account_name}"
         elif account.platform == profile_registry.PLATFORM_TWITTER:
+            twitter_auth_type = str(config.get("twitterAuthType") or account.auth_type or "cookie").strip().lower()
+            if twitter_auth_type == "cookie":
+                raise ValueError("Twitter cookie accounts do not support token refresh; use OAuth 2.0 API mode instead")
             refreshed = prepared_publishers.refresh_twitter_access_token(config)
             config.update({
                 'accessToken': refreshed['access_token'],
@@ -1888,6 +1895,10 @@ def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_sec
         if expires_at is None:
             return False
         return expires_at <= (prepared_publishers._utc_now() + timedelta(seconds=skew_seconds))
+    # Cookie-based accounts don't have API tokens to refresh
+    auth_type = str(config.get("twitterAuthType") or account.auth_type or "").strip().lower()
+    if account.platform == profile_registry.PLATFORM_TWITTER and auth_type == "cookie":
+        return False
     access_token = str(config.get('accessToken') or '').strip()
     if not access_token:
         return True
@@ -2107,10 +2118,34 @@ def _derive_watermark_spec(profile: profile_registry.Profile, data: dict) -> dic
     if watermark is None:
         watermark = (profile.settings or {}).get("watermark")
     if isinstance(watermark, str) and watermark.strip():
-        return {"text": watermark.strip()}
+        return {"text": watermark.strip(), "style": "static", "position": "random", "angle": -30, "opacity": 0.5, "fontSize": 24, "color": "white"}
     if isinstance(watermark, dict):
-        return dict(watermark)
+        spec = dict(watermark)
+        spec.setdefault("style", "static")
+        spec.setdefault("position", "random")
+        spec.setdefault("angle", -30)
+        spec.setdefault("opacity", 0.5)
+        spec.setdefault("fontSize", 24)
+        spec.setdefault("color", "white")
+        return spec
     return {}
+
+
+def _resolve_file_record_path(file_record_id: int, db_path: Path) -> str | None:
+    """Look up a file_record's file_path by ID."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT file_path FROM file_records WHERE id = ?", (file_record_id,)
+        ).fetchone()
+        conn.close()
+        if row:
+            return row["file_path"]
+    except Exception:
+        pass
+    return None
 
 
 def _prepare_campaign_media_artifacts(
@@ -2128,6 +2163,22 @@ def _prepare_campaign_media_artifacts(
     watermark_spec = _derive_watermark_spec(profile, request_data)
     selected_platforms = set(selected_platforms or set())
     tiktok_only = selected_platforms == {profile_registry.PLATFORM_TIKTOK}
+
+    # Resolve intro/outro file paths from profile settings
+    profile_settings = profile.settings or {}
+    intro_ids = request_data.get("intros") or profile_settings.get("intros") or []
+    outro_ids = request_data.get("outros") or profile_settings.get("outros") or []
+    intro_paths = []
+    outro_paths = []
+    for fid in intro_ids:
+        p = _resolve_file_record_path(int(fid), db_path)
+        if p:
+            intro_paths.append(p)
+    for fid in outro_ids:
+        p = _resolve_file_record_path(int(fid), db_path)
+        if p:
+            outro_paths.append(p)
+
     artifacts_context = {
         "imageUrls": [],
         "videoUrl": "",
@@ -2145,6 +2196,21 @@ def _prepare_campaign_media_artifacts(
         publish_path = source_path
         artifact_kind = None
 
+        # Concat intro/outro for videos before watermarking
+        if _is_video_file(source_path) and (intro_paths or outro_paths):
+            concat_parts = intro_paths + [str(source_path)] + outro_paths
+            concat_output = media_pipeline.prepare_campaign_artifact_path(
+                campaign_id,
+                source_path,
+                artifact_kind="concat",
+            )
+            try:
+                media_pipeline.concat_videos(concat_parts, concat_output)
+                source_path = concat_output
+                publish_path = concat_output
+            except Exception:
+                pass  # Fall back to original on concat failure
+
         if watermark_spec and not tiktok_only and _is_image_file(source_path):
             artifact_kind = "watermarked_image"
             publish_path = media_pipeline.prepare_campaign_artifact_path(
@@ -2158,6 +2224,9 @@ def _prepare_campaign_media_artifacts(
                 watermark_text=watermark_spec.get("text"),
                 watermark_image_path=watermark_spec.get("imagePath"),
                 seed=campaign_id * 1000 + int(media_file["file_record_id"]),
+                style=watermark_spec.get("style", "static"),
+                angle=float(watermark_spec.get("angle", -30)),
+                color=watermark_spec.get("color", "white"),
             )
         elif watermark_spec and not tiktok_only and _is_video_file(source_path):
             artifact_kind = "watermarked_video"
@@ -2173,6 +2242,11 @@ def _prepare_campaign_media_artifacts(
                 watermark_image_path=watermark_spec.get("imagePath"),
                 seed=campaign_id * 1000 + int(media_file["file_record_id"]),
                 duration_seconds=request_data.get("durationSeconds"),
+                style=watermark_spec.get("style", "static"),
+                angle=float(watermark_spec.get("angle", -30)) * 3.14159 / 180,
+                opacity=float(watermark_spec.get("opacity", 0.5)),
+                fontsize=int(watermark_spec.get("fontSize", 24)),
+                color=watermark_spec.get("color", "white"),
             )
 
         if artifact_kind is not None:
@@ -3922,6 +3996,15 @@ def profiles_patch(profile_id):
     return jsonify({"code": 200, "msg": "updated", "data": _profile_payload(profile)}), 200
 
 
+@app.route("/profiles/<int:profile_id>", methods=["DELETE"])
+def profiles_delete(profile_id):
+    try:
+        profile_registry.delete_profile(profile_id, db_path=_current_db_path())
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
+    return jsonify({"code": 200, "msg": "deleted", "data": None}), 200
+
+
 @app.route("/profiles/<int:profile_id>/accounts", methods=["GET"])
 def profile_accounts_list(profile_id):
     db_path = _current_db_path()
@@ -4097,6 +4180,9 @@ def accounts_health_summary():
             detail = config.get('channelTitle', '')
         elif account.platform == profile_registry.PLATFORM_TIKTOK:
             detail = config.get('displayName', '') or config.get('openId', '')
+        elif account.platform == profile_registry.PLATFORM_TWITTER:
+            twitter_user = config.get('twitterUserName', '')
+            detail = f"@{twitter_user}" if twitter_user else ''
         has_credential = bool(config.get('accessToken') or config.get('accessTokenEnv') or config.get('botTokenEnv') or config.get('webhookUrlEnv') or account.cookie_path)
         if detail or config.get('lastConnectionCheckAt') or config.get('lastManualRefreshAt') or config.get('lastAutoRefreshAt') or config.get('connectedAt') or config.get('accessTokenUpdatedAt'):
             return 'ready'
@@ -4786,6 +4872,11 @@ def run_async_function(type,id,status_queue):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(get_ks_cookie(id,status_queue))
+            loop.close()
+        case '7':
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(twitter_cookie_gen_legacy(id, status_queue))
             loop.close()
 
 # SSE stream generator. Exits as soon as a terminal status ("200" or "500")

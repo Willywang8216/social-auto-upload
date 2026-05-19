@@ -28,6 +28,10 @@
                 <el-icon><User /></el-icon>
                 <span>帳號管理</span>
               </el-menu-item>
+              <el-menu-item index="/profile-management">
+                <el-icon><Folder /></el-icon>
+                <span>Profile 管理</span>
+              </el-menu-item>
               <el-menu-item index="/material-management">
                 <el-icon><Picture /></el-icon>
                 <span>素材庫</span>
@@ -92,7 +96,7 @@ import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   HomeFilled, User, DataAnalysis,
-  Fold, Picture, Upload, List, Connection
+  Fold, Picture, Upload, List, Connection, Folder
 } from '@element-plus/icons-vue'
 
 const route = useRoute()

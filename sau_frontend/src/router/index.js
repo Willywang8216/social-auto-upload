@@ -11,6 +11,7 @@ import PrivacyPolicy from '../views/PrivacyPolicy.vue'
 import TermsOfUse from '../views/TermsOfUse.vue'
 import TikTokReviewStatus from '../views/TikTokReviewStatus.vue'
 import OAuthReviewStatus from '../views/OAuthReviewStatus.vue'
+import ProfileManagement from '../views/ProfileManagement.vue'
 
 import { getToken } from '@/utils/auth'
 
@@ -37,6 +38,12 @@ const routes = [
     path: '/account-management',
     name: 'AccountManagement',
     component: AccountManagement,
+    meta: { title: 'Socialupload' }
+  },
+  {
+    path: '/profile-management',
+    name: 'ProfileManagement',
+    component: ProfileManagement,
     meta: { title: 'Socialupload' }
   },
   {

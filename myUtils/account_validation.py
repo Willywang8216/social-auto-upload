@@ -249,6 +249,14 @@ def validate_structured_account_config(
                     metadata["threads"] = prepared_publishers.validate_threads_config_live(config, session=session)
                 else:
                     warnings.append('Threads live 驗證已略過，等待 OAuth Connect 自動填入 threadUserId / accessToken')
+            elif platform == profiles.PLATFORM_TWITTER:
+                twitter_auth_type = str(config.get("twitterAuthType") or "cookie").strip().lower()
+                if twitter_auth_type == "cookie":
+                    warnings.append("Twitter cookie 模式不支援 live API 驗證，請確認 cookie 檔案有效")
+                elif _present(_config_value(config, 'accessToken')):
+                    metadata["twitter"] = prepared_publishers.validate_twitter_config_live(config, session=session)
+                else:
+                    warnings.append('Twitter live 驗證已略過，等待 OAuth Connect 自動填入 accessToken')
             elif platform == profiles.PLATFORM_DISCORD:
                 metadata["discord"] = prepared_publishers.validate_discord_config_live(config, session=session)
             elif platform == profiles.PLATFORM_TIKTOK:

@@ -31,6 +31,15 @@ export const useProfilesStore = defineStore('profiles', () => {
     activeProfileId.value = profileId
   }
 
+  async function deleteProfile(profileId) {
+    await profilesApi.delete(profileId)
+    profiles.value = profiles.value.filter((p) => p.id !== profileId)
+    delete accountsByProfile[profileId]
+    if (activeProfileId.value === profileId) {
+      activeProfileId.value = profiles.value.length > 0 ? profiles.value[0].id : null
+    }
+  }
+
   return {
     profiles,
     accountsByProfile,
@@ -38,6 +47,7 @@ export const useProfilesStore = defineStore('profiles', () => {
     activeProfileId,
     refreshProfiles,
     fetchAccountsForProfile,
-    setActiveProfile
+    setActiveProfile,
+    deleteProfile
   }
 })

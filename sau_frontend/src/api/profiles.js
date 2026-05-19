@@ -17,6 +17,10 @@ export const profilesApi = {
     return http.patch(`/profiles/${profileId}`, payload)
   },
 
+  delete(profileId) {
+    return http.delete(`/profiles/${profileId}`)
+  },
+
   listAccounts(profileId, params = {}) {
     return http.get(`/profiles/${profileId}/accounts`, params)
   },

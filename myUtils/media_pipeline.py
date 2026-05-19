@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import subprocess
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
@@ -97,6 +99,60 @@ def probe_video_duration(
     if duration is None:
         raise ValueError(f"ffprobe did not return a duration for {resolved}")
     return float(duration)
+
+
+def concat_videos(
+    parts: list[str | Path],
+    output_path: str | Path,
+    *,
+    runner=run_subprocess,
+) -> Path:
+    """Concatenate video files using ffmpeg concat demuxer. Returns output_path."""
+    if not parts:
+        raise ValueError("concat_videos requires at least one input file")
+    resolved_parts = [str(Path(p).expanduser().resolve()) for p in parts]
+    output = Path(output_path).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    if len(resolved_parts) == 1:
+        import shutil
+        shutil.copy2(resolved_parts[0], str(output))
+        return output
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        for p in resolved_parts:
+            f.write(f"file '{p}'\n")
+        list_path = f.name
+
+    try:
+        runner(
+            [
+                FFMPEG_COMMAND, "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", list_path,
+                "-c", "copy",
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError:
+        runner(
+            [
+                FFMPEG_COMMAND, "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", list_path,
+                "-c:v", "libx264", "-c:a", "aac",
+                "-movflags", "+faststart",
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        os.unlink(list_path)
+
+    return output
 
 
 def extract_video_audio(
@@ -212,19 +268,86 @@ def _build_text_filter(
     *,
     opacity: float,
     fontsize: int,
+    color: str = "white",
+    angle: float = 0.0,
 ) -> str:
     escaped = _escape_drawtext(watermark_text)
     parts = []
     for window in timeline:
+        angle_part = f":angle={angle:.4f}" if angle else ""
         parts.append(
             "drawtext="
             f"text='{escaped}':"
-            f"fontcolor=white@{opacity:.2f}:"
+            f"fontcolor={color}@{opacity:.2f}:"
             f"fontsize={fontsize}:"
             f"x={window.x_expr}:"
             f"y={window.y_expr}:"
             f"enable='between(t,{window.start_seconds},{window.end_seconds})'"
+            f"{angle_part}"
         )
+    return ",".join(parts)
+
+
+def _build_moving_text_filter(
+    watermark_text: str,
+    duration: float,
+    *,
+    opacity: float,
+    fontsize: int,
+    color: str = "white",
+    seed: int = 0,
+) -> str:
+    """Build a drawtext filter with continuously moving position."""
+    escaped = _escape_drawtext(watermark_text)
+    rng = random.Random(seed)
+    period = rng.uniform(3.0, 8.0)
+    x_speed = rng.uniform(20, 80)
+    y_speed = rng.uniform(15, 60)
+    x_start = rng.randint(50, 300)
+    y_start = rng.randint(50, 200)
+    direction_x = rng.choice([-1, 1])
+    direction_y = rng.choice([-1, 1])
+
+    x_expr = f"mod({x_start}+{direction_x}*{x_speed:.1f}*t\\,w-text_w)"
+    y_expr = f"mod({y_start}+{direction_y}*{y_speed:.1f}*t\\,h-text_h)"
+
+    return (
+        "drawtext="
+        f"text='{escaped}':"
+        f"fontcolor={color}@{opacity:.2f}:"
+        f"fontsize={fontsize}:"
+        f"x={x_expr}:"
+        f"y={y_expr}"
+    )
+
+
+def _build_repeated_text_filter(
+    watermark_text: str,
+    *,
+    opacity: float,
+    fontsize: int,
+    color: str = "white",
+    cols: int = 3,
+    rows: int = 3,
+    angle: float = -0.52,
+) -> str:
+    """Build a tiled drawtext filter with fixed grid positions."""
+    escaped = _escape_drawtext(watermark_text)
+    parts = []
+    for r in range(rows):
+        for c in range(cols):
+            x_expr = f"(w/{cols})*{c}+(w/{cols}-text_w)/2"
+            y_expr = f"(h/{rows})*{r}+(h/{rows}-text_h)/2"
+            angle_part = f":angle={angle:.4f}" if angle else ""
+            parts.append(
+                "drawtext="
+                f"text='{escaped}':"
+                f"fontcolor={color}@{opacity:.2f}:"
+                f"fontsize={fontsize}:"
+                f"x={x_expr}:"
+                f"y={y_expr}"
+                f"{angle_part}"
+            )
     return ",".join(parts)
 
 
@@ -254,6 +377,9 @@ def apply_video_watermark(
     duration_seconds: float | None = None,
     opacity: float = 0.18,
     fontsize: int = 48,
+    color: str = "white",
+    style: str = "static",
+    angle: float = -0.52,
     runner=run_subprocess,
     duration_reader=probe_video_duration,
 ) -> VideoWatermarkPlan:
@@ -298,12 +424,33 @@ def apply_video_watermark(
             str(output),
         ]
     else:
-        filter_chain = _build_text_filter(
-            watermark_text or "",
-            timeline,
-            opacity=opacity,
-            fontsize=fontsize,
-        )
+        if style == "moving":
+            filter_chain = _build_moving_text_filter(
+                watermark_text or "",
+                duration,
+                opacity=opacity,
+                fontsize=fontsize,
+                color=color,
+                seed=seed,
+            )
+        elif style == "repeated":
+            filter_chain = _build_repeated_text_filter(
+                watermark_text or "",
+                opacity=opacity,
+                fontsize=fontsize,
+                color=color,
+                angle=angle,
+            )
+        else:
+            use_angle = angle if style == "slanted" else 0.0
+            filter_chain = _build_text_filter(
+                watermark_text or "",
+                timeline,
+                opacity=opacity,
+                fontsize=fontsize,
+                color=color,
+                angle=use_angle,
+            )
         command = [
             FFMPEG_COMMAND,
             "-y",
@@ -328,6 +475,11 @@ def apply_image_watermark(
     watermark_image_path: str | Path | None = None,
     seed: int,
     opacity: int = 72,
+    style: str = "static",
+    angle: float = -30.0,
+    color: str = "white",
+    cols: int = 3,
+    rows: int = 3,
 ) -> Path:
     if not watermark_text and not watermark_image_path:
         raise ValueError("watermark_text or watermark_image_path is required")
@@ -341,6 +493,19 @@ def apply_image_watermark(
     output = Path(output_path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
+
+    def _parse_color(color_str: str, alpha: int) -> tuple:
+        named = {
+            "white": (255, 255, 255),
+            "black": (0, 0, 0),
+            "red": (255, 0, 0),
+            "green": (0, 255, 0),
+            "blue": (0, 0, 255),
+            "yellow": (255, 255, 0),
+            "gray": (128, 128, 128),
+        }
+        rgb = named.get(color_str.lower(), (255, 255, 255))
+        return (*rgb, alpha)
 
     with Image.open(source) as base_image:
         base = base_image.convert("RGBA")
@@ -361,8 +526,20 @@ def apply_image_watermark(
                     lambda value: int(value * (opacity / 255))
                 )
                 resized.putalpha(alpha)
-                x, y = _random_pixel_position(base.size, resized.size, rng)
-                overlay.alpha_composite(resized, (x, y))
+                if style == "slanted":
+                    rotated = resized.rotate(angle, expand=True, resample=Image.BICUBIC)
+                    x, y = _random_pixel_position(base.size, rotated.size, rng)
+                    overlay.alpha_composite(rotated, (x, y))
+                elif style == "repeated":
+                    wm_w, wm_h = resized.size
+                    for r_i in range(max(1, base.height // (wm_h + 80))):
+                        for c_i in range(max(1, base.width // (wm_w + 80))):
+                            x = c_i * (wm_w + 80) + 20
+                            y = r_i * (wm_h + 80) + 20
+                            overlay.alpha_composite(resized, (x, y))
+                else:
+                    x, y = _random_pixel_position(base.size, resized.size, rng)
+                    overlay.alpha_composite(resized, (x, y))
         else:
             font_size = max(18, int(min(base.size) * 0.045))
             try:
@@ -371,11 +548,40 @@ def apply_image_watermark(
                 font = ImageFont.load_default()
             drawer = ImageDraw.Draw(overlay)
             text = watermark_text or ""
-            bbox = drawer.textbbox((0, 0), text, font=font)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            x, y = _random_pixel_position(base.size, (text_width, text_height), rng)
-            drawer.text((x, y), text, fill=(255, 255, 255, opacity), font=font)
+            fill_color = _parse_color(color, opacity)
+
+            if style == "repeated":
+                bbox = drawer.textbbox((0, 0), text, font=font)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+                for r_i in range(rows):
+                    for c_i in range(cols):
+                        x = int(base.width / cols * c_i + (base.width / cols - tw) / 2)
+                        y = int(base.height / rows * r_i + (base.height / rows - th) / 2)
+                        if angle:
+                            txt_layer = Image.new("RGBA", (tw + 40, th + 40), (0, 0, 0, 0))
+                            txt_drawer = ImageDraw.Draw(txt_layer)
+                            txt_drawer.text((20, 20), text, fill=fill_color, font=font)
+                            rotated = txt_layer.rotate(angle, expand=True, resample=Image.BICUBIC)
+                            overlay.alpha_composite(rotated, (x - 20, y - 20))
+                        else:
+                            drawer.text((x, y), text, fill=fill_color, font=font)
+            elif style == "slanted":
+                bbox = drawer.textbbox((0, 0), text, font=font)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+                txt_layer = Image.new("RGBA", (tw + 40, th + 40), (0, 0, 0, 0))
+                txt_drawer = ImageDraw.Draw(txt_layer)
+                txt_drawer.text((20, 20), text, fill=fill_color, font=font)
+                rotated = txt_layer.rotate(angle, expand=True, resample=Image.BICUBIC)
+                x, y = _random_pixel_position(base.size, rotated.size, rng)
+                overlay.alpha_composite(rotated, (x, y))
+            else:
+                bbox = drawer.textbbox((0, 0), text, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                x, y = _random_pixel_position(base.size, (text_width, text_height), rng)
+                drawer.text((x, y), text, fill=fill_color, font=font)
 
         composited = Image.alpha_composite(base, overlay)
         if output.suffix.lower() in {".jpg", ".jpeg"}:

@@ -98,6 +98,29 @@ async def cookie_auth_xhs(account_file):
             return True
 
 
+async def cookie_auth_twitter(account_file):
+    if not account_file.exists():
+        return False
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
+            context = await browser.new_context(storage_state=account_file)
+            context = await set_init_script(context)
+            page = await context.new_page()
+            await page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(3000)
+            # If redirected to login, cookie is expired
+            if "/login" in page.url or "/i/flow/login" in page.url:
+                await context.close()
+                await browser.close()
+                return False
+            await context.close()
+            await browser.close()
+            return True
+    except Exception:
+        return False
+
+
 async def check_cookie(type, file_path):
     match type:
         # 小红书
@@ -112,6 +135,9 @@ async def check_cookie(type, file_path):
         # 快手
         case 4:
             return await cookie_auth_ks(Path(BASE_DIR / "cookiesFile" / file_path))
+        # Twitter / X
+        case 7:
+            return await cookie_auth_twitter(Path(BASE_DIR / "cookiesFile" / file_path))
         case _:
             return False
 

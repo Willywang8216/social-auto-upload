@@ -21,12 +21,16 @@ ROLE_VIDEO = "video"
 ROLE_IMAGE = "image"
 ROLE_THUMBNAIL = "thumbnail"
 ROLE_ATTACHMENT = "attachment"
+ROLE_INTRO = "intro"
+ROLE_OUTRO = "outro"
 
 SUPPORTED_ITEM_ROLES = {
     ROLE_VIDEO,
     ROLE_IMAGE,
     ROLE_THUMBNAIL,
     ROLE_ATTACHMENT,
+    ROLE_INTRO,
+    ROLE_OUTRO,
 }
 
 _UNSET = object()

@@ -131,6 +131,39 @@ async def twitter_cookie_gen(cookie_path: str, status_queue) -> None:
         success_check=_is_logged_in,
     )
 
+
+async def twitter_cookie_gen_legacy(id, status_queue) -> None:
+    """Legacy Twitter cookie flow: open browser, wait for login, save to cookiesFile/<uuid>.json, insert into user_info."""
+
+    async def _is_logged_in(page):
+        try:
+            if (
+                await page.locator("a[aria-label='Profile']").count() > 0
+                or await page.locator("a[data-testid='AppTabBar_Profile_Link']").count() > 0
+            ):
+                return True
+            return "x.com/home" in page.url and await page.locator("text=What is happening").count() == 0
+        except Exception:
+            return False
+
+    cookie_uuid = uuid.uuid4()
+    cookie_path = str(Path(BASE_DIR / "cookiesFile" / f"{cookie_uuid}.json"))
+    await _browser_cookie_gen(
+        login_url="https://x.com/login",
+        cookie_path=cookie_path,
+        status_queue=status_queue,
+        success_check=_is_logged_in,
+    )
+    # Insert into user_info table (legacy accounts)
+    with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT INTO user_info (type, filePath, userName, status) VALUES (?, ?, ?, ?)',
+            (7, f"{cookie_uuid}.json", id, 1),
+        )
+        conn.commit()
+
+
 # 抖音登录
 async def douyin_cookie_gen(id,status_queue):
     url_changed_event = asyncio.Event()
