@@ -1,0 +1,319 @@
+[
+  {
+    "id": "taiwan-equality-campaign",
+    "nameZh": "台灣彩虹平權大平台協會",
+    "nameEn": "Taiwan Equality Campaign",
+    "intro": "起源於 2016 年成立的「婚姻平權大平台」，2020 年正式立案更名。透過平權立法與遊說、社會溝通與教育、數位倡議、國際合作，為同志社群爭取平權，邁向多元共好的台灣。",
+    "services": ["平權立法倡議", "政治遊說", "社會教育", "國際合作", "公投／選舉倡議"],
+    "website": "https://equallove.tw",
+    "email": "equallovetw@equallove.tw",
+    "phone": "(04) 2390-0254",
+    "social": {
+      "facebook": "https://www.facebook.com/equallovetw",
+      "instagram": "https://www.instagram.com/equallove.tw/",
+      "linkedin": "https://www.linkedin.com/company/taiwan-equality-campaign"
+    },
+    "region": "Taipei",
+    "source": "https://equallove.tw/en/about-us"
+  },
+  {
+    "id": "taiwan-tongzhi-hotline-association",
+    "nameZh": "台灣同志諮詢熱線協會",
+    "nameEn": "Taiwan Tongzhi Hotline Association",
+    "intro": "創立於 1998 年，是台灣歷史最悠久、規模最大的全國性 LGBTQ+ 組織。每年服務超過 5 萬人，工作涵蓋性別教育、同志父母支持、熱線諮詢、老年同志、愛滋防治、伴侶暴力、跨性別、社群培力等八大領域。",
+    "services": ["同志諮詢熱線", "家長親友支持", "性別教育", "愛滋防治", "老年同志", "跨性別倡議", "親密暴力防治"],
+    "website": "https://hotline.org.tw",
+    "email": null,
+    "phone": "(02) 2392-1970",
+    "social": {
+      "facebook": "https://www.facebook.com/hotline.org.tw",
+      "instagram": "https://www.instagram.com/taiwan_lgbtq_hotline/"
+    },
+    "region": "Taipei / Kaohsiung",
+    "source": "https://hotline.org.tw/english/209"
+  },
+  {
+    "id": "tgeea",
+    "nameZh": "台灣性別平等教育協會",
+    "nameEn": "Taiwan Gender Equity Education Association (TGEEA)",
+    "intro": "2002 年由教師與性平倡議者共同創立，是台灣首個由專業教師組成的性別平等教育組織。透過師資培訓、教材研發、政策監督與國際倡議，將性別正義落實於教育現場。",
+    "services": ["性平教育種子教師培訓", "教材／教具開發", "性別平等教育法監督", "CEDAW 影子報告", "倡議與政策遊說"],
+    "website": "https://tgeea.org.tw",
+    "email": null,
+    "phone": null,
+    "social": {
+      "facebook": "https://www.facebook.com/tgeea2002/"
+    },
+    "region": "Nationwide",
+    "source": "https://tgeea.org.tw/about-en/"
+  },
+  {
+    "id": "taiwan-gdi-association",
+    "nameZh": "台灣基地協會",
+    "nameEn": "Taiwan GDi Association",
+    "intro": "2010 年於台中發跡（前身「彩虹天堂社區中心」），2013 年正式立案為全國性社福組織，是中部最重要的 LGBTQ+ 友善據點。經營台中部屋社區中心，提供個案工作、支持團體、愛滋篩檢、教育倡議與在地研究調查。",
+    "services": ["個案工作（認同／伴侶／家庭／HIV／成癮）", "支持團體", "愛滋篩檢", "教育宣導", "在地倡議與研究"],
+    "website": "https://www.gdi.org.tw",
+    "email": null,
+    "phone": null,
+    "social": {
+      "facebook": "https://www.facebook.com/twgdi/"
+    },
+    "region": "Taichung",
+    "source": "https://www.gdi.org.tw/en"
+  },
+  {
+    "id": "taiwan-hiv-story",
+    "nameZh": "臺灣感染誌協會",
+    "nameEn": "Taiwan HIV Story Association",
+    "intro": "以促進愛滋病毒感染者尊嚴與福祉為宗旨，透過生命故事書寫、平權倡議、藝術賦權與愛滋教育，連結社群、翻轉污名，朝愛滋友善社會前進。",
+    "services": ["感染者故事撰寫培力", "藥局地圖", "U=U 平權倡議", "藝術賦權課程", "愛滋教育監督"],
+    "website": "https://hiv-story.org",
+    "email": null,
+    "phone": null,
+    "social": {
+      "facebook": "https://www.facebook.com/HIVStory/",
+      "instagram": "https://www.instagram.com/hivstory/"
+    },
+    "region": "Taipei",
+    "source": "https://hiv-story.org/about/bylaws/"
+  },
+  {
+    "id": "hand-angel",
+    "nameZh": "手天使",
+    "nameEn": "Hand Angel",
+    "intro": "台灣首個倡議重度身心障礙者「性權」的小型 NGO，由志工為符合條件的重障朋友提供人道的性服務，並推動身障者性權的公共討論。",
+    "services": ["重障者人道性服務", "身障性權倡議", "公眾教育"],
+    "website": "https://www.handangel.org",
+    "email": null,
+    "phone": null,
+    "social": {
+      "facebook": "https://www.facebook.com/handangeltw/"
+    },
+    "region": "Nationwide",
+    "source": "https://www.bbc.com/news/av/magazine-39724523"
+  },
+  {
+    "id": "praa-taiwan",
+    "nameZh": "愛滋感染者權益促進會",
+    "nameEn": "Persons with HIV/AIDS Rights Advocacy Association of Taiwan (PRAA)",
+    "intro": "台灣第一個由愛滋感染者及其家屬、朋友共同發起、長期投入愛滋平權運動的非營利互助團體。協助感染者爭取居住、就業、就學、就醫等基本人權，推動感染者除罪化。",
+    "services": ["愛滋諮詢", "權益侵害個案處理", "醫院與監所訪視", "政策監督", "愛滋平權倡導"],
+    "website": "https://praatw.org",
+    "email": "service@praatw.org",
+    "phone": "(02) 2550-5963",
+    "social": {
+      "facebook": "https://www.facebook.com/praatw/"
+    },
+    "region": "Taipei",
+    "source": "https://praatw.org/en/introduction"
+  },
+  {
+    "id": "twmen",
+    "nameZh": "臺灣男性協會",
+    "nameEn": "Taiwanese Association of Men",
+    "intro": "2018 年成立，是台灣（也可能是亞洲）第一個由男性視角倡議性別平等的組織。鼓勵不同樣貌的男子氣概，討論男性在家庭、心理健康、家暴、性侵等議題中的經驗，鬆動父權結構。",
+    "services": ["男性議題倡議", "校園與社群討論團體", "刊物與專欄", "性別平等教育"],
+    "website": "https://twmen.wordpress.com",
+    "email": null,
+    "phone": null,
+    "social": {
+      "facebook": "https://www.facebook.com/twmen2018"
+    },
+    "region": "Taipei",
+    "source": "http://www.taipeitimes.com/News/taiwan/archives/2019/02/12/2003709602"
+  },
+  {
+    "id": "taiwan-rainbow-civil-action",
+    "nameZh": "臺灣彩虹公民行動協會",
+    "nameEn": "Taiwan Rainbow Civil Action Association",
+    "intro": "臺灣同志遊行（亞洲規模最大的同志遊行之一）的官方主辦單位，每年於台北舉辦遊行，凝聚社群、傳遞性／別議題訴求，並推動友善選民投票指南等公民倡議。",
+    "services": ["臺灣同志遊行主辦", "彩虹大使倡議", "PrideWatch 友善選民指南", "社群協作平台"],
+    "website": "https://www.taiwanpride.lgbt",
+    "email": null,
+    "phone": null,
+    "social": {
+      "facebook": "https://www.facebook.com/TWPride"
+    },
+    "region": "Taipei",
+    "source": "https://www.taiwanpride.lgbt/press2022/conference1006"
+  },
+  {
+    "id": "taiwan-lourdes",
+    "nameZh": "台灣露德協會",
+    "nameEn": "Taiwan Lourdes Association",
+    "intro": "長期陪伴愛滋感染者、家屬與社會大眾的全國性組織，於台北、台中、花東設有辦公室。提供愛滋諮詢、感染者支持團體（特別關注女性感染者）、藥癮復元、教育宣導與政策倡議。",
+    "services": ["愛滋諮詢專線", "女性感染者培力", "藥癮復元支持", "支持團體陪伴", "愛滋教育宣導"],
+    "website": "https://www.lourdes.org.tw",
+    "email": null,
+    "phone": "(02) 2371-1406",
+    "social": {
+      "facebook": "https://www.facebook.com/Taiwan.Lourdes"
+    },
+    "region": "Taipei / Taichung / Hualien",
+    "source": "https://www.lourdes.org.tw/"
+  },
+  {
+    "id": "knowhiv-heart",
+    "nameZh": "台灣新滋識同盟",
+    "nameEn": "HEART (Know HIV)",
+    "intro": "由具有醫療專業背景的第一線工作者組成，致力於推廣 HIV 與性病的篩檢、預防性投藥（PrEP/PEP）與最新治療資訊，並減少社會對 HIV 的標籤化。",
+    "services": ["HIV／性病衛教", "篩檢推廣", "PrEP／PEP 資訊", "減少污名宣導"],
+    "website": "https://knowhiv.org",
+    "email": null,
+    "phone": "0905-139-669",
+    "social": {
+      "facebook": "https://www.facebook.com/knowhiv"
+    },
+    "region": "Taipei",
+    "source": "https://knowhiv.org/about/us"
+  },
+  {
+    "id": "kaohsiung-pride",
+    "nameZh": "高雄市同志遊行聯盟協會",
+    "nameEn": "Kaohsiung Pride",
+    "intro": "秉持「讓高雄成為一個同志願意回家的城市」，主辦高雄同志大遊行，是南部最大的性／別少數發聲舞台。長期關注性別議題、城鄉資源落差、職場校園霸凌等議題。",
+    "services": ["高雄同志大遊行主辦", "性別議題倡議", "選舉性別友善監督", "南部社群連結"],
+    "website": "http://www.khpride.org",
+    "email": null,
+    "phone": null,
+    "social": {
+      "facebook": "https://www.facebook.com/khpride/",
+      "instagram": "https://www.instagram.com/khpride/"
+    },
+    "region": "Kaohsiung",
+    "source": "http://www.khpride.org/"
+  },
+  {
+    "id": "nknu-gige",
+    "nameZh": "國立高雄師範大學性別教育研究所",
+    "nameEn": "Graduate Institute of Gender Education, NKNU",
+    "intro": "2000 年創立，是亞洲第一個從事性別平等教育專業師資與實務工作者養成的高等學術研究單位。2011 年增設博士學位學程，培育跨領域性別研究人才。",
+    "services": ["性別教育碩／博士培訓", "性別平等教育師資進修", "性別研究資源整合", "學術研究與出版"],
+    "website": "https://gender.nknu.edu.tw",
+    "email": "gender@nknu.edu.tw",
+    "phone": "(07) 717-2930 ext 2011",
+    "social": {},
+    "region": "Kaohsiung",
+    "source": "https://gender.nknu.edu.tw/gigeweb/E1.htm"
+  },
+  {
+    "id": "tas-bravo",
+    "nameZh": "臺灣青少年性別文教會",
+    "nameEn": "Taiwan Adolescent Association On Sexualities (TAS / Bravo!)",
+    "intro": "2005 年於高雄成立，又名「好性會」，是台灣會員平均年齡最年輕的 NPO。以尊重與多元為核心，透過文化、學術與教育交流，串連青少年與校園性別社團，倡議青少年福利與多元性別權利。",
+    "services": ["校園性別社團輔導", "青少年性／別議題諮詢", "性別平等教育推廣", "工作坊與營隊", "研究與出版"],
+    "website": "http://tasdata.blogspot.com",
+    "email": "tasbravo@gmail.com",
+    "phone": "(07) 536-4490",
+    "social": {
+      "facebook": "https://www.facebook.com/tas.bravo/"
+    },
+    "region": "Kaohsiung",
+    "source": "http://tasdata.blogspot.com/2014/02/about-tas.html"
+  },
+  {
+    "id": "tainan-sprout",
+    "nameZh": "台南市台南新芽協會",
+    "nameEn": "Tainan Sprout",
+    "intro": "2016 年由一群關心家鄉的台南青年成立，是在地公民團體。雖非專屬 LGBTQ+ 組織，但持續推動性別平權（協辦台南彩虹遊行、促成議會性平連線）以及交通、轉型正義、居住正義、環境等議題。",
+    "services": ["在地公民議題倡議", "性別平等推動", "議會監督", "公民教育講座", "AI 議會觀測機器人"],
+    "website": "https://www.tnsprout.org",
+    "email": null,
+    "phone": null,
+    "social": {
+      "facebook": "https://www.facebook.com/tainansprout/"
+    },
+    "region": "Tainan",
+    "source": "https://www.tnsprout.org/"
+  },
+  {
+    "id": "positive-alliance",
+    "nameZh": "帕斯堤聯盟",
+    "nameEn": "Positive Alliance (Pastey Union)",
+    "intro": "由愛滋感染者組成的培力聯盟，因應愛滋部分負擔政策與其衍生的污名歧視而集結。透過敘說、行動與社群實踐，擴大感染者參與，倡議感染者權益。",
+    "services": ["感染者培力", "倡議行動", "社群連結", "感染者敘事"],
+    "website": null,
+    "email": null,
+    "phone": null,
+    "social": {
+      "facebook": "https://www.facebook.com/PositiveAlliance/"
+    },
+    "region": "Taipei",
+    "source": "https://tci.ncl.edu.tw/cgi-bin/gs32/gsweb.cgi?o=dnclresource&s=id%3D%22104THU00201015%22.&searchmode=basic"
+  },
+  {
+    "id": "care-aids-taiwan",
+    "nameZh": "台灣懷愛協會",
+    "nameEn": "Care AIDS Association of R.O.C. (Taiwan)",
+    "intro": "1999 年於台中成立的社團法人。以關懷及照顧愛滋病毒感染者、擴大愛滋病醫療服務、提高愛滋醫療品質、喚起社會對愛滋認識為宗旨。",
+    "services": ["感染者關懷", "醫療資源連結", "愛滋衛教", "社會教育"],
+    "website": null,
+    "email": null,
+    "phone": null,
+    "social": {},
+    "region": "Taichung",
+    "source": "https://org.twincn.com/item.aspx?no=54938752&sn=433345"
+  },
+  {
+    "id": "par-three-office",
+    "nameZh": "帕三小事務所",
+    "nameEn": "Par-Three Office",
+    "intro": "2015 年由「帕斯提聯盟」與「小 YG 行動聯盟」合組而成。名稱刻意提問：面對愛滋議題時社會究竟在「怕三小」？藉由污名歧視調查與青少年男同志議題，推動愛滋去污名與議題本身的對話。",
+    "services": ["愛滋污名歧視調查", "青少年男同志議題", "倡議與社群對話"],
+    "website": null,
+    "email": null,
+    "phone": null,
+    "social": {
+      "facebook": "https://www.facebook.com/parthreeoffice/"
+    },
+    "region": "Taipei",
+    "source": "https://hivstorymedia.org/2018/10/09/face100_bobo/"
+  },
+  {
+    "id": "taiwan-love-and-hope",
+    "nameZh": "台灣愛之希望協會",
+    "nameEn": "Taiwan Love and Hope Association",
+    "intro": "1999 年創辦，是南台灣第一個推動愛滋防治、也是少數關心物質濫用議題的南部 NGO。結合醫療、輔導與社工專業，以「防疫宣導、陪伴關懷、個案增權、感染者知識教育」為工作核心，並經營 HERO 整合性 STD/HIV 醫療中心。",
+    "services": ["匿名篩檢與諮詢", "教育訓練與講座", "藥癮復元團體", "感染者支持團體", "HERO 整合醫療中心"],
+    "website": "https://www.taiwanlovehope.org",
+    "email": null,
+    "phone": null,
+    "social": {
+      "facebook": "https://www.facebook.com/taiwanlovehope/"
+    },
+    "region": "Kaohsiung / Tainan",
+    "source": "https://www.taiwanlovehope.org/OnePage.aspx?mid=25&id=6"
+  },
+  {
+    "id": "sunshine-queer-center",
+    "nameZh": "陽光酷兒中心",
+    "nameEn": "Sunshine Queer Center",
+    "intro": "2010 年由台灣愛之希望協會於高雄成立，是南台灣同志的家。提供匿名愛滋／性病篩檢、身心靈健康諮詢、社群活動講座，以及外展 Mpox 疫苗接種等友善健康服務。",
+    "services": ["匿名 HIV／STD 篩檢", "健康諮詢", "社群講座", "Mpox 疫苗接種外展", "同志友善聚會空間"],
+    "website": "http://www.sunshinequeer.tw",
+    "email": null,
+    "phone": "(07) 235-1010",
+    "social": {
+      "facebook": "https://www.facebook.com/sunshinequeer/",
+      "threads": "https://www.threads.net/@sunshine10khh"
+    },
+    "region": "Kaohsiung",
+    "source": "https://hotline.org.tw/you-shan-kong-jian/2789"
+  },
+  {
+    "id": "south-rainbow-no6",
+    "nameZh": "南方彩虹街6號",
+    "nameEn": "South Rainbow Street No.6",
+    "intro": "2012 年由台灣愛之希望協會於台南成立，獲台南市政府衛生局支持的同志健康中心。延續陽光酷兒中心模式，為南台灣 LGBTQ+ 社群提供友善的健康促進、篩檢轉介與社群陪伴。",
+    "services": ["同志友善健康促進", "篩檢諮詢與轉介", "社群活動", "電話／面對面諮詢"],
+    "website": "https://www.taiwanlovehope.org/OnePage.aspx?mid=48",
+    "email": null,
+    "phone": null,
+    "social": {
+      "facebook": "https://www.facebook.com/southrainbow6/"
+    },
+    "region": "Tainan",
+    "source": "https://health.tainan.gov.tw/page.asp?mainid=%7B821569E9-B60B-4FAD-BA34-B3CD8F7CD616%7D"
+  }
+]
