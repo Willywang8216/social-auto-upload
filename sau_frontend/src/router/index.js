@@ -13,7 +13,6 @@ import TikTokReviewStatus from '../views/TikTokReviewStatus.vue'
 import OAuthReviewStatus from '../views/OAuthReviewStatus.vue'
 import ProfileManagement from '../views/ProfileManagement.vue'
 import TemplateManagement from '../views/TemplateManagement.vue'
-import Resources from '../views/Resources.vue'
 
 import { getToken } from '@/utils/auth'
 
@@ -65,12 +64,6 @@ const routes = [
     name: 'TemplateManagement',
     component: TemplateManagement,
     meta: { title: 'Socialupload' }
-  },
-  {
-    path: '/resources',
-    name: 'Resources',
-    component: Resources,
-    meta: { title: 'Socialupload — LGBTQIA+ Resources' }
   },
   {
     path: '/jobs',

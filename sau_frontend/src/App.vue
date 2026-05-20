@@ -48,10 +48,6 @@
                 <el-icon><List /></el-icon>
                 <span>任務中心</span>
               </el-menu-item>
-              <el-menu-item index="/resources">
-                <el-icon><Service /></el-icon>
-                <span>友善資源</span>
-              </el-menu-item>
               <el-menu-item index="/oauth-review">
                 <el-icon><Connection /></el-icon>
                 <span>OAuth 狀態</span>
@@ -104,7 +100,7 @@ import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   HomeFilled, User, DataAnalysis,
-  Fold, Picture, Upload, List, Connection, Folder, Files, Service
+  Fold, Picture, Upload, List, Connection, Folder, Files
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
