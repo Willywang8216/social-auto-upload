@@ -89,7 +89,17 @@ def validate_structured_account_config(
             warnings.append("未指定 cookiePath；後端會自動產生預設路徑")
 
     if platform == profiles.PLATFORM_PATREON:
-        warnings.append("Patreon 目前僅支援內容產生 / 匯出，不支援直接 API 發佈")
+        has_access_token = _present(_config_value(config, "accessToken"))
+        patreon_auth_type = str(config.get("patreonAuthType") or "cookie").strip().lower()
+        if patreon_auth_type == "cookie":
+            if not cookie_path:
+                warnings.append("未指定 cookiePath；後端會自動產生預設路徑")
+        elif patreon_auth_type == "api":
+            if not has_access_token:
+                warnings.append("Patreon accessToken 可在 OAuth Connect 完成後自動回填")
+        else:
+            if not has_access_token and not cookie_path:
+                errors.append("Patreon 帳號需要 cookiePath 或 OAuth accessToken")
 
     if platform == profiles.PLATFORM_REDDIT:
         reddit_auth_type = str(config.get("redditAuthType") or "api").strip().lower()
@@ -259,6 +269,12 @@ def validate_structured_account_config(
                     warnings.append('Twitter live 驗證已略過，等待 OAuth Connect 自動填入 accessToken')
             elif platform == profiles.PLATFORM_DISCORD:
                 metadata["discord"] = prepared_publishers.validate_discord_config_live(config, session=session)
+            elif platform == profiles.PLATFORM_PATREON:
+                patreon_auth_type = str(config.get("patreonAuthType") or "cookie").strip().lower()
+                if patreon_auth_type == "api" and _present(_config_value(config, 'accessToken')):
+                    metadata["patreon"] = prepared_publishers.validate_patreon_config_live(config, session=session)
+                else:
+                    warnings.append('Patreon cookie 模式不支援 live API 驗證，請確認 cookie 檔案有效')
             elif platform == profiles.PLATFORM_TIKTOK:
                 metadata["creator_info"] = prepared_publishers.query_tiktok_creator_info(config, session=session)
         except Exception as exc:  # noqa: BLE001

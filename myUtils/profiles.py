@@ -171,6 +171,7 @@ DIRECT_PUBLISH_PLATFORMS: frozenset[str] = frozenset(
         PLATFORM_YOUTUBE,
         PLATFORM_THREADS,
         PLATFORM_DISCORD,
+        PLATFORM_PATREON,
     }
 )
 
@@ -196,6 +197,7 @@ COOKIE_REQUIRED_PLATFORMS: frozenset[str] = frozenset(
         PLATFORM_BAIJIAHAO,
         PLATFORM_MEDIUM,
         PLATFORM_SUBSTACK,
+        PLATFORM_PATREON,
     }
 )
 

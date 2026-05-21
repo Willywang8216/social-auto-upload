@@ -111,6 +111,9 @@
         <el-checkbox v-model="options.intro">加入片頭（影片）</el-checkbox>
         <el-checkbox v-model="options.outro">加入片尾（影片）</el-checkbox>
         <el-checkbox v-model="options.linkInFirstComment">連結放第一則留言（支援的平台）</el-checkbox>
+        <el-checkbox v-if="hasTiktokSelected" v-model="options.tiktokDirectPost">
+          直接發佈到 TikTok（跳過草稿）
+        </el-checkbox>
       </div>
       <el-divider />
       <div class="pc-screenshots">
@@ -305,7 +308,7 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 
 import { useProfilesStore } from '@/stores/profiles'
@@ -336,11 +339,28 @@ const options = reactive({
   intro: true,
   outro: true,
   linkInFirstComment: false,
+  tiktokDirectPost: false,
   screenshots: {
     enabled: false,
     count: 3,
     timestampsRaw: '',
   },
+})
+
+// True when any selected account is on TikTok. Drives the visibility of
+// the "Direct post (skip draft)" toggle in section 3, which TikTok's app
+// review specifically wants demonstrated alongside an explicit user
+// confirmation modal.
+const hasTiktokSelected = computed(() => {
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    for (const account of accounts) {
+      if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
+        return true
+      }
+    }
+  }
+  return false
 })
 
 const brief = ref('')
@@ -486,6 +506,7 @@ function buildOptionsPayload() {
     intro: options.intro,
     outro: options.outro,
     linkInFirstComment: options.linkInFirstComment,
+    tiktokDirectPost: options.tiktokDirectPost,
     screenshots: {
       enabled: screenshots.enabled,
       count: screenshots.count,
@@ -550,6 +571,25 @@ function buildAccountDraftsPayload() {
 }
 
 async function submit() {
+  // TikTok's app review requires explicit user confirmation before
+  // video.publish (direct-post) fires. The toggle only flips the
+  // behaviour for TikTok accounts in this batch — gate it behind a
+  // modal so the consent moment is visible in the demo recording.
+  if (hasTiktokSelected.value && options.tiktokDirectPost) {
+    try {
+      await ElMessageBox.confirm(
+        '即將直接發佈到 TikTok 個人檔案（跳過草稿，無法在 TikTok App 內二次編輯）。確認要繼續嗎？',
+        '確認直接發佈到 TikTok',
+        {
+          type: 'warning',
+          confirmButtonText: '是，直接發佈',
+          cancelButtonText: '取消',
+        },
+      )
+    } catch (cancelled) {
+      return
+    }
+  }
   submitting.value = true
   submitResult.value = null
   try {

@@ -537,8 +537,43 @@
 
           <template v-else-if="accountForm.platform === 'patreon'">
             <el-divider content-position="left">Patreon 設定</el-divider>
+            <el-form-item label="Connection health" v-if="isStructuredAccountForm && accountForm.id">
+              <AccountConnectionPanel :rows="patreonHealthRows" :actions="patreonHealthActions" />
+            </el-form-item>
+            <el-form-item label="Auth type">
+              <el-select v-model="accountForm.patreonAuthType" style="width: 100%">
+                <el-option label="Cookie-based (browser login)" value="cookie" />
+                <el-option label="OAuth API" value="api" />
+              </el-select>
+            </el-form-item>
+            <template v-if="accountForm.patreonAuthType === 'cookie'">
+              <div class="quick-connect-row" style="margin-bottom: 10px;">
+                <el-button type="primary" plain size="large" style="width:100%" @click="acquireCookie()">
+                  Login with Browser
+                </el-button>
+              </div>
+              <div class="field-hint">Click to open a browser, log in to Patreon, and the cookie will be saved automatically.</div>
+              <el-form-item label="Cookie Path">
+                <el-input v-model="accountForm.cookiePath" placeholder="Auto-generated" />
+              </el-form-item>
+            </template>
+            <template v-else>
+              <el-form-item label="Connection">
+                <el-button type="primary" @click="connectWithPatreon">Connect with Patreon</el-button>
+              </el-form-item>
+            </template>
             <el-form-item label="Campaign ID">
-              <el-input v-model="accountForm.patreonCampaignId" />
+              <el-input v-model="accountForm.patreonCampaignId" placeholder="Auto-filled after OAuth connect" />
+            </el-form-item>
+            <el-form-item label="Access Mode">
+              <el-select v-model="accountForm.patreonAccessMode" style="width: 100%">
+                <el-option label="Public (Everyone)" value="public" />
+                <el-option label="Patrons only" value="patrons" />
+                <el-option label="Specific tier" value="tier" />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="accountForm.patreonAccessMode === 'tier'" label="Tier Name">
+              <el-input v-model="accountForm.patreonTierName" />
             </el-form-item>
           </template>
 
@@ -630,6 +665,7 @@ import { threadsApi } from '@/api/threads'
 import { twitterApi } from '@/api/x'
 import { tiktokApi } from '@/api/tiktok'
 import { youtubeApi } from '@/api/youtube'
+import { patreonApi } from '@/api/patreon'
 import AccountTabPane from '@/components/AccountTabPane.vue'
 import AccountConnectionPanel from '@/components/AccountConnectionPanel.vue'
 import AccountTextFieldList from '@/components/AccountTextFieldList.vue'
@@ -749,6 +785,10 @@ const makeEmptyAccountForm = () => ({
   videoCoverTimestampMs: '',
   webhookUrlEnv: '',
   patreonCampaignId: '',
+  patreonAuthType: 'cookie',
+  patreonAccessMode: 'public',
+  patreonTierName: '',
+  patreonUserName: '',
   advancedConfigText: '',
   twitterAuthType: 'cookie',
   apiKeyEnv: '',
@@ -867,6 +907,18 @@ const discordHealthRows = computed(() => [
 ])
 const discordHealthActions = computed(() => [
   { label: 'Check Discord connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('discord') }
+])
+
+const patreonHealthRows = computed(() => [
+  { label: 'Auth type', value: accountForm.patreonAuthType === 'api' ? 'OAuth' : 'Cookie' },
+  { label: 'Username', value: accountForm.patreonUserName || '—' },
+  { label: 'Campaign', value: accountForm.patreonCampaignId || '—' },
+  { label: 'Access token', value: presentLabel(accountForm.accessToken) },
+  { label: 'Token updated', value: accountForm.accessTokenUpdatedAt || '—' },
+])
+const patreonHealthActions = computed(() => [
+  { label: 'Connect with Patreon', type: 'primary', onClick: connectWithPatreon },
+  { label: 'Refresh Patreon token', onClick: () => refreshStructuredToken('patreon') },
 ])
 
 const twitterHealthRows = computed(() => [
@@ -1070,6 +1122,10 @@ const loadStructuredFieldsFromConfig = (config) => {
   accountForm.videoCoverTimestampMs = config.videoCoverTimestampMs != null ? String(config.videoCoverTimestampMs) : ''
   accountForm.webhookUrlEnv = config.webhookUrlEnv || ''
   accountForm.patreonCampaignId = config.campaignId || ''
+  accountForm.patreonAuthType = config.patreonAuthType || 'cookie'
+  accountForm.patreonAccessMode = config.accessMode || 'public'
+  accountForm.patreonTierName = config.tierName || ''
+  accountForm.patreonUserName = config.patreonUserName || ''
   accountForm.twitterAuthType = config.twitterAuthType || 'cookie'
   accountForm.apiKeyEnv = config.apiKeyEnv || ''
   accountForm.apiKeySecretEnv = config.apiKeySecretEnv || ''
@@ -1284,8 +1340,9 @@ onMounted(() => {
   window.addEventListener('message', handleThreadsOauthMessage)
   window.addEventListener('message', handleMetaOauthMessage)
   window.addEventListener('message', handleTwitterOauthMessage)
-  setTimeout(() => {
-    fetchAccounts(true)
+  window.addEventListener('message', handlePatreonOauthMessage)
+  setTimeout(async () => {
+    await fetchAccounts(true)
     // Auto-open dialog from query params (navigated from ProfileManagement)
     const editId = route.query.editAccountId
     const addToProfile = route.query.addAccountToProfile
@@ -1572,7 +1629,7 @@ async function ensureAccountSaved() {
     return false
   }
   try {
-    const authType = ((accountForm.platform === 'reddit' && accountForm.redditAuthType === 'cookie') || (accountForm.platform === 'twitter' && accountForm.twitterAuthType === 'cookie')) ? 'cookie' : 'oauth'
+    const authType = ((accountForm.platform === 'reddit' && accountForm.redditAuthType === 'cookie') || (accountForm.platform === 'twitter' && accountForm.twitterAuthType === 'cookie') || (accountForm.platform === 'patreon' && accountForm.patreonAuthType === 'cookie')) ? 'cookie' : 'oauth'
     const payload = {
       profileId: accountForm.profileId,
       platform: accountForm.platform,
@@ -1627,6 +1684,10 @@ async function quickConnect() {
   else if (platform === 'twitter') {
     if (accountForm.twitterAuthType === 'cookie') await acquireCookie()
     else await connectWithTwitterApi()
+  }
+  else if (platform === 'patreon') {
+    if (accountForm.patreonAuthType === 'cookie') await acquireCookie()
+    else await connectWithPatreon()
   }
   else ElMessage.warning('此平台不支援 OAuth 連線')
 }
@@ -1739,6 +1800,31 @@ async function connectWithThreads() {
     popup.close()
     console.error('Threads connect 啟動失敗:', error)
     ElMessage.error(error?.message || 'Threads connect 啟動失敗')
+  }
+}
+
+async function connectWithPatreon() {
+  if (!validateConnectPlatform('patreon')) return
+  if (!await ensureAccountSaved()) return
+
+  const popup = window.open('', `patreon-connect-${accountForm.id || Date.now()}`, 'width=720,height=820')
+  if (!popup) {
+    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
+    return
+  }
+  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to Patreon...</p>')
+  try {
+    const response = await patreonApi.startOAuth({
+      profileId: accountForm.profileId,
+      accountId: accountForm.id,
+      accountName: accountForm.name,
+      scopes: ['identity', 'campaigns', 'campaigns.posts']
+    })
+    popup.location = response.data.authorizeUrl
+  } catch (error) {
+    popup.close()
+    console.error('Patreon connect 啟動失敗:', error)
+    ElMessage.error(error?.message || 'Patreon connect 啟動失敗')
   }
 }
 
@@ -1977,6 +2063,26 @@ function handleTwitterOauthMessage(event) {
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
   accountForm.twitterAuthType = 'api'
   ElMessage.success('Twitter/X 已連線')
+  dialogVisible.value = false
+  refreshAccounts()
+}
+
+function handlePatreonOauthMessage(event) {
+  const payload = event?.data
+  if (!payload || payload.type !== 'sau:patreon-oauth') return
+  if (!payload.ok) {
+    ElMessage.error(payload.error || 'Patreon 授權失敗')
+    return
+  }
+  const data = payload.data || {}
+  accountForm.accessToken = data.accessToken || accountForm.accessToken
+  accountForm.refreshToken = data.refreshToken || accountForm.refreshToken
+  accountForm.patreonUserName = data.patreonUserName || accountForm.patreonUserName
+  if (data.campaignId) accountForm.patreonCampaignId = data.campaignId
+  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
+  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
+  accountForm.patreonAuthType = 'api'
+  ElMessage.success('Patreon 已連線')
   dialogVisible.value = false
   refreshAccounts()
 }
@@ -2326,6 +2432,12 @@ const buildStructuredConfig = () => {
       break
     case 'patreon':
       assignIfValue(config, 'campaignId', accountForm.patreonCampaignId.trim())
+      assignIfValue(config, 'patreonAuthType', accountForm.patreonAuthType)
+      assignIfValue(config, 'accessMode', accountForm.patreonAccessMode)
+      if (accountForm.patreonAccessMode === 'tier') {
+        assignIfValue(config, 'tierName', accountForm.patreonTierName.trim())
+      }
+      assignIfValue(config, 'patreonUserName', accountForm.patreonUserName.trim())
       break
     default:
       break
@@ -2417,6 +2529,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('message', handleThreadsOauthMessage)
   window.removeEventListener('message', handleMetaOauthMessage)
   window.removeEventListener('message', handleTwitterOauthMessage)
+  window.removeEventListener('message', handlePatreonOauthMessage)
 })
 </script>
 

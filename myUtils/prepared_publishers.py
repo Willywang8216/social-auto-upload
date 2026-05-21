@@ -937,7 +937,17 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         updated_config = _apply_tiktok_token_payload(updated_config, {'access_token': access_token}, creator_info)
     media = _extract_media(payload)
     message = _payload_message(payload)
-    publish_mode = str(config.get("publishMode") or "direct").strip().lower()
+    # Per-publish override has precedence over the account-level default:
+    # the Publish Center exposes an explicit "Direct post (skip draft)"
+    # toggle that, when checked, must reach this point true regardless of
+    # what publishMode the user picked on the account form. This is what
+    # the TikTok app review explicitly asks us to demonstrate alongside
+    # a confirmation modal in the UI.
+    payload_direct_post = payload.get("tiktokDirectPost")
+    if isinstance(payload_direct_post, bool):
+        publish_mode = "direct" if payload_direct_post else "draft"
+    else:
+        publish_mode = str(config.get("publishMode") or "direct").strip().lower()
     post_mode = "DIRECT_POST" if publish_mode == "direct" else "MEDIA_UPLOAD"
     privacy_level = str(config.get("privacyLevel") or "PUBLIC_TO_EVERYONE")
 
@@ -1591,3 +1601,28 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
         )
         _raise_for_status(playlist_response)
     return result
+
+
+# ---- Patreon ----
+
+PATREON_IDENTITY_URL = "https://www.patreon.com/api/oauth2/v2/identity"
+
+
+def validate_patreon_config_live(config: dict[str, Any], *, session=None) -> dict:
+    """Validate Patreon account config via the OAuth identity endpoint.
+
+    Since Patreon's public API v2 does not support post creation,
+    validation is limited to checking that the OAuth token is valid.
+    """
+    access_token = str(_config_value(config, "accessToken") or "").strip()
+    if not access_token:
+        raise PreparedPublishError("Patreon validation requires accessToken or accessTokenEnv")
+    http = _get_session(session)
+    response = http.get(
+        PATREON_IDENTITY_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+        params={"fields[user]": "full_name,url"},
+        timeout=120,
+    )
+    _raise_for_status(response)
+    return _response_payload(response)

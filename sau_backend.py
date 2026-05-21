@@ -44,8 +44,10 @@ from myUtils import x_auth
 from myUtils import x_review
 from myUtils import tiktok_auth
 from myUtils import tiktok_review
+from myUtils import patreon_auth
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.login import reddit_cookie_gen, twitter_cookie_gen, twitter_cookie_gen_legacy
+from uploader.patreon_uploader.main import patreon_cookie_gen
 from myUtils.postVideo import (
     post_video_DouYin,
     post_video_ks,
@@ -72,6 +74,7 @@ TWITTER_PLATFORM_ALIASES = {"twitter", "x"}
 COOKIE_ACQUISITION_GENERATORS = {
     "reddit": reddit_cookie_gen,
     "twitter": twitter_cookie_gen,
+    "patreon": patreon_cookie_gen,
 }
 
 active_queues = {}
@@ -175,6 +178,13 @@ def _tiktok_callback_base_url() -> str:
     if configured:
         return configured.rstrip("/")
     return "https://socialupload.iamwillywang.com/oauth/tiktok/callback"
+
+
+def _patreon_callback_base_url() -> str:
+    configured = str(os.environ.get("SAU_PATREON_CALLBACK_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return "https://socialupload.iamwillywang.com/oauth/patreon/callback"
 
 
 def _tiktok_webhook_log_path() -> Path:
@@ -5376,6 +5386,188 @@ def publish_templates_delete(template_id):
     except LookupError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
     return jsonify({"code": 200, "msg": "deleted", "data": None}), 200
+
+
+# ---- Patreon OAuth ----
+
+_PATREON_OAUTH_REQUESTS: dict[str, dict] = {}
+
+
+@app.route('/oauth/patreon/start', methods=['POST'])
+def patreon_oauth_start():
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        raw_account_id = data.get('accountId')
+        if raw_account_id in (None, ''):
+            raise ValueError('Please save the Patreon account before connecting OAuth')
+        account_id = int(raw_account_id)
+        account = profile_registry.get_account(account_id, db_path=db_path)
+        if account.platform != profile_registry.PLATFORM_PATREON:
+            raise ValueError('OAuth connect is only available for Patreon accounts on this route')
+        state_token = patreon_auth.build_state_token()
+        redirect_uri = str(data.get('redirectUri') or _patreon_callback_base_url() or patreon_auth.default_redirect_uri()).strip()
+        scopes = data.get('scopes') if isinstance(data.get('scopes'), list) and data.get('scopes') else list(patreon_auth.DEFAULT_SCOPES)
+        config = dict(account.config or {})
+        client_id_env = str(config.get('clientIdEnv') or patreon_auth.CLIENT_ID_ENV)
+        authorize_url = patreon_auth.build_authorize_url_from_env(
+            state=state_token,
+            redirect_uri=redirect_uri,
+            scopes=tuple(str(scope) for scope in scopes),
+            client_id_env=client_id_env,
+        )
+        _PATREON_OAUTH_REQUESTS[state_token] = {
+            'state_token': state_token,
+            'profile_id': account.profile_id,
+            'account_id': account.id,
+            'account_name': account.account_name,
+            'redirect_uri': redirect_uri,
+            'scopes': [str(scope) for scope in scopes],
+        }
+        account_events.record_event(
+            account_id=account.id,
+            profile_id=account.profile_id,
+            platform=account.platform,
+            account_name=account.account_name,
+            action='oauth_start',
+            status='ok',
+            summary='Patreon OAuth flow started',
+            metadata={'state': state_token, 'redirectUri': redirect_uri, 'scopes': scopes},
+            db_path=db_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({'code': 400, 'msg': str(exc), 'data': None}), 400
+    return jsonify({'code': 200, 'msg': 'ok', 'data': {'authorizeUrl': authorize_url, 'state': state_token}}), 200
+
+
+@app.route('/oauth/patreon/callback', methods=['GET'])
+def patreon_oauth_callback():
+    db_path = _current_db_path()
+    state_token = str(request.args.get('state', '') or '')
+    code = str(request.args.get('code', '') or '')
+    error = str(request.args.get('error', '') or '')
+    request_state = _PATREON_OAUTH_REQUESTS.pop(state_token, None)
+    if not request_state:
+        return Response('Unknown Patreon OAuth state', status=400, mimetype='text/plain')
+
+    if error:
+        if request_state.get('account_id'):
+            account_events.record_event(
+                account_id=request_state['account_id'],
+                profile_id=request_state.get('profile_id'),
+                platform=profile_registry.PLATFORM_PATREON,
+                account_name=request_state.get('account_name', ''),
+                action='oauth_callback',
+                status='error',
+                summary='Patreon OAuth callback failed',
+                error_text=error,
+                metadata={'state': state_token},
+                db_path=db_path,
+            )
+        return Response(
+            """<html><body><script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'sau:patreon-oauth', ok: false, error: %r }, '*');
+            }
+            window.close();
+            </script><p>Patreon authorization failed. You may close this window.</p></body></html>""" % error,
+            mimetype='text/html',
+        )
+
+    try:
+        if not request_state.get('account_id'):
+            raise ValueError('Patreon OAuth request is missing accountId')
+        account = profile_registry.get_account(int(request_state['account_id']), db_path=db_path)
+        config = dict(account.config or {})
+        client_id_env = str(config.get('clientIdEnv') or patreon_auth.CLIENT_ID_ENV)
+        client_secret_env = str(config.get('clientSecretEnv') or patreon_auth.CLIENT_SECRET_ENV)
+        token_payload = patreon_auth.exchange_code_for_token(
+            code=code,
+            redirect_uri=request_state['redirect_uri'],
+            client_id_env=client_id_env,
+            client_secret_env=client_secret_env,
+        )
+        access_token = str(token_payload.get('access_token') or '')
+        refresh_token = str(token_payload.get('refresh_token') or '')
+        user_info = patreon_auth.fetch_identity(access_token=access_token) if access_token else {}
+        campaigns_info = patreon_auth.fetch_campaigns(access_token=access_token) if access_token else {}
+
+        merged_config = dict(config)
+        if access_token:
+            merged_config['accessToken'] = access_token
+        if refresh_token:
+            merged_config['refreshToken'] = refresh_token
+        merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
+        expires_in = token_payload.get('expires_in')
+        if expires_in not in (None, ''):
+            merged_config['accessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+
+        # Extract user info from Patreon identity response
+        user_data = (user_info.get('data') or {}).get('attributes') or {}
+        merged_config['patreonUserName'] = str(user_data.get('full_name') or merged_config.get('patreonUserName') or '')
+        merged_config['patreonUserId'] = str((user_info.get('data') or {}).get('id') or merged_config.get('patreonUserId') or '')
+
+        # Auto-fill campaignId if available and not already set
+        campaigns_data = campaigns_info.get('data') or []
+        if campaigns_data and not merged_config.get('campaignId'):
+            first_campaign = campaigns_data[0]
+            merged_config['campaignId'] = str(first_campaign.get('id') or '')
+
+        merged_config['patreonAuthType'] = 'api'
+        merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
+        updated = profile_registry.update_account(
+            account.id,
+            config=merged_config,
+            auth_type='oauth',
+            db_path=db_path,
+        )
+        callback_payload = {
+            'state': state_token,
+            'status': 'ok',
+            'accountId': updated.id,
+            'accountName': updated.account_name,
+            'accessToken': merged_config.get('accessToken', ''),
+            'refreshToken': merged_config.get('refreshToken', ''),
+            'patreonUserName': merged_config.get('patreonUserName', ''),
+            'patreonUserId': merged_config.get('patreonUserId', ''),
+            'campaignId': merged_config.get('campaignId', ''),
+            'accessTokenExpiresAt': merged_config.get('accessTokenExpiresAt', ''),
+            'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
+            'connectedAt': merged_config.get('connectedAt', ''),
+        }
+        account_events.record_event(
+            account_id=updated.id,
+            profile_id=updated.profile_id,
+            platform=updated.platform,
+            account_name=updated.account_name,
+            action='oauth_callback',
+            status='ok',
+            summary=f"Patreon connected: {merged_config.get('patreonUserName') or updated.account_name}",
+            metadata={'state': state_token, 'campaignId': merged_config.get('campaignId', '')},
+            db_path=db_path,
+        )
+        html = f"""<html><body><script>
+        if (window.opener) {{
+          window.opener.postMessage({{ type: 'sau:patreon-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
+        }}
+        window.close();
+        </script><p>Patreon authorization completed. You may close this window.</p></body></html>"""
+        return Response(html, mimetype='text/html')
+    except Exception as exc:  # noqa: BLE001
+        if request_state.get('account_id'):
+            account_events.record_event(
+                account_id=request_state['account_id'],
+                profile_id=request_state.get('profile_id'),
+                platform=profile_registry.PLATFORM_PATREON,
+                account_name=request_state.get('account_name', ''),
+                action='oauth_callback',
+                status='error',
+                summary='Patreon OAuth callback failed',
+                error_text=str(exc),
+                metadata={'state': state_token},
+                db_path=db_path,
+            )
+        return Response(f"<html><body><p>Patreon callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
 
 
 _maybe_start_account_maintenance_scheduler()

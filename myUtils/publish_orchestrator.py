@@ -286,6 +286,7 @@ def submit_publish(
         platform_draft_cache: dict[str, dict] = {}
 
         link_in_first_comment = bool((options or {}).get("linkInFirstComment"))
+        tiktok_direct_post = bool((options or {}).get("tiktokDirectPost"))
 
         artifacts = [
             artifact.to_dict()
@@ -339,7 +340,11 @@ def submit_publish(
                         status=campaign_store.CAMPAIGN_POST_READY,
                         db_path=db_path,
                     )
-                    payload = _build_payload(campaign, post, draft, artifacts, platform, artifact_payloads_for_platform)
+                    payload = _build_payload(
+                        campaign, post, draft, artifacts, platform,
+                        artifact_payloads_for_platform,
+                        tiktok_direct_post=tiktok_direct_post,
+                    )
                     targets = [
                         (
                             f"account:{account.id}",
@@ -365,7 +370,11 @@ def submit_publish(
                             status=campaign_store.CAMPAIGN_POST_READY,
                             db_path=db_path,
                         )
-                        payload = _build_payload(campaign, post, draft, artifacts, platform, artifact_payloads_for_platform)
+                        payload = _build_payload(
+                            campaign, post, draft, artifacts, platform,
+                            artifact_payloads_for_platform,
+                            tiktok_direct_post=tiktok_direct_post,
+                        )
                         payload["fileRecordIds"] = [single_id]
                         targets = [
                             (
@@ -400,8 +409,11 @@ def _compute_schedule_at(base_time: datetime | None, offset_index: int) -> datet
     return anchor + timedelta(minutes=STAGGER_MINUTES * offset_index)
 
 
-def _build_payload(campaign, post, draft, artifacts, platform, artifact_payloads_for_platform):
-    return {
+def _build_payload(
+    campaign, post, draft, artifacts, platform, artifact_payloads_for_platform,
+    *, tiktok_direct_post: bool = False,
+):
+    payload = {
         "campaignId": campaign.id,
         "campaignPostId": post.id,
         "platform": platform,
@@ -410,6 +422,12 @@ def _build_payload(campaign, post, draft, artifacts, platform, artifact_payloads
         "sheetRow": {},
         "artifacts": artifact_payloads_for_platform(artifacts, platform),
     }
+    if platform == "tiktok":
+        # publish_tiktok_sync reads payload.tiktokDirectPost first, then
+        # falls back to account.config.publishMode. The explicit per-publish
+        # toggle (with confirmation modal) is what TikTok review requires.
+        payload["tiktokDirectPost"] = tiktok_direct_post
+    return payload
 
 
 def _enqueue_post(platform, payload, targets, campaign, post, job_to_payload, db_path):

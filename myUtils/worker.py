@@ -376,6 +376,28 @@ async def _run_platform_upload(
         await app.main()
         return
 
+    if platform == "patreon":
+        from uploader.patreon_uploader.main import PatreonPost
+
+        import tempfile, os
+        body_text = payload.get("body", "") or title
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
+            tmp.write(body_text)
+            body_file = tmp.name
+
+        try:
+            app = PatreonPost(
+                title=title,
+                body_file=body_file,
+                tags=tags,
+                publish_date=schedule_at,
+                account_file=str(account_file),
+            )
+            await app.main()
+        finally:
+            os.unlink(body_file)
+        return
+
     raise ValueError(f"Unsupported publish platform: {platform!r}")
 
 
@@ -567,6 +589,57 @@ async def _publish_prepared_discord(
     await asyncio.to_thread(prepared_publishers.publish_discord_sync, account, payload)
 
 
+async def _publish_prepared_patreon(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account,
+    account_file: Path | None,
+) -> None:
+    if not account_file:
+        raise ValueError("Prepared Patreon publish requires a cookie-backed account (storage_state)")
+
+    from uploader.patreon_uploader.main import (
+        PatreonPost,
+        PATREON_ACCESS_PUBLIC,
+        PATREON_PUBLISH_STRATEGY_IMMEDIATE,
+    )
+
+    config = dict(account.config or {}) if account else {}
+    title = payload.get("message") or payload.get("draft", {}).get("message", "") or ""
+    body_text = payload.get("draft", {}).get("body", "") or title
+    tags = payload.get("draft", {}).get("hashtags", []) or payload.get("tags", []) or []
+
+    file_paths = _prepared_artifact_local_paths(payload)
+    attachments = [str(p) for p in file_paths if p.exists()]
+
+    access_mode = str(config.get("accessMode") or PATREON_ACCESS_PUBLIC).lower()
+    tier_name = str(config.get("tierName") or "").strip() or None
+    publish_strategy = str(config.get("publishStrategy") or PATREON_PUBLISH_STRATEGY_IMMEDIATE).lower()
+
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
+        tmp.write(body_text)
+        body_file = tmp.name
+
+    try:
+        app = PatreonPost(
+            title=title or "Campaign post",
+            body_file=body_file,
+            tags=tags,
+            publish_date=0,
+            account_file=str(account_file),
+            attachments=attachments or None,
+            access_mode=access_mode,
+            tier_name=tier_name,
+            publish_strategy=publish_strategy,
+        )
+        await app.publish()
+    finally:
+        os.unlink(body_file)
+
+
 async def _publish_prepared_not_implemented(
     platform: str,
     payload: dict,
@@ -592,7 +665,7 @@ PREPARED_PUBLISHER_REGISTRY: dict[str, Callable[..., Awaitable[None]]] = {
     "tiktok": _publish_prepared_tiktok,
     "threads": _publish_prepared_threads,
     "discord": _publish_prepared_discord,
-    "patreon": _publish_prepared_not_implemented,
+    "patreon": _publish_prepared_patreon,
 }
 
 

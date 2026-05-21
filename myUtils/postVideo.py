@@ -108,6 +108,27 @@ def post_video_twitter(title, files, tags, account_file, publish_date=0):
         asyncio.run(app.main(), debug=False)
 
 
+def post_patreon_video(title, files, tags, account_file, body_file=None, access_mode='public', publish_strategy='immediate'):
+    from uploader.patreon_uploader.main import PatreonPost
+
+    account_files = [Path(BASE_DIR / "cookiesFile" / file) for file in account_file]
+    for cookie in account_files:
+        attachments = [str(Path(BASE_DIR / "videoFile" / file)) for file in files] if files else []
+        body = body_file or ""
+        if not body and files:
+            body = str(Path(BASE_DIR / "videoFile" / files[0]))
+        app = PatreonPost(
+            title=title,
+            body_file=body,
+            tags=tags,
+            publish_date=0,
+            account_file=str(cookie),
+            attachments=attachments or None,
+            access_mode=access_mode,
+            publish_strategy=publish_strategy,
+        )
+        asyncio.run(app.publish(), debug=False)
+
 
 # post_video("333",["demo.mp4"],"d","d")
 # post_video_DouYin("333",["demo.mp4"],"d","d")
