@@ -824,7 +824,7 @@ const makeEmptyAccountForm = () => ({
   lastConnectionCheckAt: '',
   accessTokenEnv: '',
   publishMode: 'direct',
-  privacyLevel: 'PUBLIC_TO_EVERYONE',
+  privacyLevel: 'SELF_ONLY',
   disableComment: false,
   disableDuet: false,
   disableStitch: false,
@@ -1191,7 +1191,7 @@ const loadStructuredFieldsFromConfig = (config) => {
   accountForm.lastConnectionCheckAt = config.lastConnectionCheckAt || ''
   accountForm.accessTokenEnv = config.accessTokenEnv || ''
   accountForm.publishMode = config.publishMode || 'direct'
-  accountForm.privacyLevel = config.privacyLevel || 'PUBLIC_TO_EVERYONE'
+  accountForm.privacyLevel = config.privacyLevel || 'SELF_ONLY'
   accountForm.disableComment = Boolean(config.disableComment)
   accountForm.disableDuet = Boolean(config.disableDuet)
   accountForm.disableStitch = Boolean(config.disableStitch)

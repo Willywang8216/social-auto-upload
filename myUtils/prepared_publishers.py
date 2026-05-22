@@ -1013,6 +1013,11 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     post_mode = "DIRECT_POST" if publish_mode == "direct" else "MEDIA_UPLOAD"
     privacy_level = str(config.get("privacyLevel") or "SELF_ONLY").strip().upper()
 
+    # Sandbox/development apps (client_key starts with "sb") can ONLY use SELF_ONLY
+    client_key = os.environ.get("TIKTOK_CLIENT_KEY", "")
+    if client_key.startswith("sb") and privacy_level != "SELF_ONLY":
+        privacy_level = "SELF_ONLY"
+
     if media["videos"]:
         video_item = media["videos"][0]
         _validate_tiktok_video_artifact(video_item, message=message, config=config)
