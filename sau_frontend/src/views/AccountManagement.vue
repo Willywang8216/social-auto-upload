@@ -2304,10 +2304,24 @@ function handleTikTokOauthMessage(event) {
   accountForm.refreshTokenExpiresAt = data.refreshTokenExpiresAt || ''
   accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || ''
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
-  loadTikTokHealth(accountForm.id || null)
-  ElMessage.success('TikTok 已連線')
-  dialogVisible.value = false
-  refreshAccounts()
+  // Persist the OAuth tokens and user info to the backend
+  if (accountForm.id) {
+    profilesApi.updateAccount(accountForm.id, {
+      config: buildStructuredConfig(),
+      authType: 'oauth',
+    }).then(() => {
+      loadTikTokHealth(accountForm.id)
+      ElMessage.success('TikTok 已連線')
+      dialogVisible.value = false
+      refreshAccounts()
+    }).catch((err) => {
+      ElMessage.error('儲存 TikTok 連線失敗: ' + (err?.message || err))
+    })
+  } else {
+    ElMessage.success('TikTok 已連線')
+    dialogVisible.value = false
+    refreshAccounts()
+  }
 }
 
 const closeSSEConnection = () => {
