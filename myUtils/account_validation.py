@@ -221,8 +221,13 @@ def validate_structured_account_config(
                 warnings.append("未指定 cookiePath；後端會自動產生預設路徑")
 
     if platform == profiles.PLATFORM_TIKTOK:
-        if not _present(_config_value(config, "accessToken")):
-            errors.append("TikTok 帳號缺少 accessToken 或 accessTokenEnv")
+        has_access_token = _present(_config_value(config, "accessToken"))
+        if auth_type == 'oauth':
+            if not has_access_token:
+                warnings.append("TikTok accessToken 可在 OAuth Connect 完成後自動回填")
+        else:
+            if not has_access_token:
+                errors.append("TikTok 帳號缺少 accessToken 或 accessTokenEnv")
         publish_mode = str(config.get("publishMode") or "direct").strip().lower()
         if publish_mode not in {"direct", "draft"}:
             errors.append("TikTok publishMode 只支援 direct 或 draft")
