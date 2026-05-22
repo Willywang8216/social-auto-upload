@@ -35,7 +35,7 @@
       <el-table :data="accounts" style="width: 100%" :default-sort="defaultSort" @sort-change="onSortChange">
         <el-table-column label="頭像" width="80">
           <template #default="scope">
-            <el-avatar :src="getDefaultAvatar(scope.row.name)" :size="40" />
+            <el-avatar :src="scope.row.config?.avatarUrl || getDefaultAvatar(scope.row.name)" :size="40" />
           </template>
         </el-table-column>
         <el-table-column prop="name" label="名稱" min-width="180" sortable="custom" />
