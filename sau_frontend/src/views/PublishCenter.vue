@@ -199,6 +199,12 @@
               </el-tag>
             </div>
             <el-input
+              v-if="isBlogPlatform(account.platform)"
+              v-model="account.draft.title"
+              placeholder="Post title"
+              style="margin-bottom: 8px;"
+            />
+            <el-input
               v-model="account.draft.message"
               type="textarea"
               :rows="4"
@@ -403,6 +409,10 @@ function isVideo(path) {
 
 function countChars(text) {
   return (text || '').length
+}
+
+function isBlogPlatform(platform) {
+  return ['teaching_blog', 'nw_sw_blog'].includes(platform)
 }
 
 function findProfile(profileId) {

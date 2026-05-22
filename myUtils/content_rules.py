@@ -65,6 +65,8 @@ PLATFORM_RULES: dict[str, PlatformRule] = {
     "tiktok": PlatformRule("tiktok", max_chars=2200),
     "reddit": PlatformRule("reddit"),
     "discord": PlatformRule("discord"),
+    "teaching_blog": PlatformRule("teaching_blog", long_form=True),
+    "nw_sw_blog": PlatformRule("nw_sw_blog", long_form=True),
 }
 
 

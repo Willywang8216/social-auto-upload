@@ -49,6 +49,8 @@ PLATFORM_YOUTUBE = "youtube"
 PLATFORM_THREADS = "threads"
 PLATFORM_DISCORD = "discord"
 PLATFORM_PATREON = "patreon"
+PLATFORM_TEACHING_BLOG = "teaching_blog"
+PLATFORM_NW_SW_BLOG = "nw_sw_blog"
 
 SUPPORTED_PLATFORMS: tuple[str, ...] = (
     PLATFORM_DOUYIN,
@@ -69,6 +71,8 @@ SUPPORTED_PLATFORMS: tuple[str, ...] = (
     PLATFORM_THREADS,
     PLATFORM_DISCORD,
     PLATFORM_PATREON,
+    PLATFORM_TEACHING_BLOG,
+    PLATFORM_NW_SW_BLOG,
 )
 
 # Legacy numeric platform codes still used by the Flask backend's `type` column.
@@ -172,6 +176,8 @@ DIRECT_PUBLISH_PLATFORMS: frozenset[str] = frozenset(
         PLATFORM_THREADS,
         PLATFORM_DISCORD,
         PLATFORM_PATREON,
+        PLATFORM_TEACHING_BLOG,
+        PLATFORM_NW_SW_BLOG,
     }
 )
 

@@ -39,6 +39,8 @@ SUPPORTED_VALIDATION_PLATFORMS = {
     profiles.PLATFORM_BAIJIAHAO,
     profiles.PLATFORM_MEDIUM,
     profiles.PLATFORM_SUBSTACK,
+    profiles.PLATFORM_TEACHING_BLOG,
+    profiles.PLATFORM_NW_SW_BLOG,
 }
 
 
@@ -227,6 +229,26 @@ def validate_structured_account_config(
         if profile_settings.get("watermark"):
             warnings.append("TikTok 會改用原始未加浮水印素材；請確認原始素材符合 TikTok 發佈規範")
 
+    if platform == profiles.PLATFORM_TEACHING_BLOG:
+        if not _present(_config_value(config, "repoOwner")):
+            errors.append("Teaching Blog 帳號缺少 repoOwner")
+        if not _present(_config_value(config, "repoName")):
+            errors.append("Teaching Blog 帳號缺少 repoName")
+        if not _present(_config_value(config, "githubToken", default_env="SAU_TEACHING_BLOG_GITHUB_TOKEN")):
+            errors.append("Teaching Blog 帳號缺少 githubToken 或 githubTokenEnv")
+
+    if platform == profiles.PLATFORM_NW_SW_BLOG:
+        if not _present(config.get("apiBase")):
+            errors.append("NW/SW Blog 帳號缺少 apiBase")
+        if not _present(_config_value(config, "apiToken", default_env="SAU_NW_SW_BLOG_API_TOKEN")):
+            errors.append("NW/SW Blog 帳號缺少 apiToken 或 apiTokenEnv")
+        persona = str(config.get("persona") or "").strip()
+        if persona and persona not in ("sexualwill", "nakedwill"):
+            errors.append(f"NW/SW Blog persona 必須為 sexualwill 或 nakedwill，目前為 '{persona}'")
+        locale = str(config.get("locale") or "").strip()
+        if locale and locale not in ("en", "zh"):
+            errors.append(f"NW/SW Blog locale 必須為 en 或 zh，目前為 '{locale}'")
+
     if perform_live_checks and not errors:
         try:
             if platform == profiles.PLATFORM_TELEGRAM:
@@ -277,6 +299,16 @@ def validate_structured_account_config(
                     warnings.append('Patreon cookie 模式不支援 live API 驗證，請確認 cookie 檔案有效')
             elif platform == profiles.PLATFORM_TIKTOK:
                 metadata["creator_info"] = prepared_publishers.query_tiktok_creator_info(config, session=session)
+            elif platform == profiles.PLATFORM_TEACHING_BLOG:
+                if _present(_config_value(config, 'githubToken', default_env="SAU_TEACHING_BLOG_GITHUB_TOKEN")) and _present(config.get('repoOwner')) and _present(config.get('repoName')):
+                    metadata["teaching_blog"] = prepared_publishers.validate_teaching_blog_config_live(config, session=session)
+                else:
+                    warnings.append('Teaching Blog live 驗證已略過，等待 githubToken / repoOwner / repoName')
+            elif platform == profiles.PLATFORM_NW_SW_BLOG:
+                if _present(_config_value(config, 'apiToken', default_env="SAU_NW_SW_BLOG_API_TOKEN")) and _present(config.get('apiBase')):
+                    metadata["nw_sw_blog"] = prepared_publishers.validate_nw_sw_blog_config_live(config, session=session)
+                else:
+                    warnings.append('NW/SW Blog live 驗證已略過，等待 apiToken / apiBase')
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{platform} live 驗證失敗: {exc}")
 

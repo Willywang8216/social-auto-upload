@@ -1626,3 +1626,192 @@ def validate_patreon_config_live(config: dict[str, Any], *, session=None) -> dic
     )
     _raise_for_status(response)
     return _response_payload(response)
+
+
+# ---- Teaching Blog (GitHub Contents API) ----
+
+GITHUB_API_ROOT = "https://api.github.com"
+
+
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Parse YAML frontmatter from Markdown text. Returns (metadata_dict, body_without_frontmatter)."""
+    if not text.startswith("---"):
+        return {}, text
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}, text
+    fm_text = parts[1].strip()
+    body = parts[2].strip()
+    meta: dict[str, Any] = {}
+    for line in fm_text.splitlines():
+        if ":" in line:
+            key, _, val = line.partition(":")
+            meta[key.strip()] = val.strip().strip('"').strip("'")
+    return meta, body
+
+
+def _slugify_title(title: str) -> str:
+    """Turn a title into a filesystem-safe slug."""
+    import re as _re
+    slug = _re.sub(r"[^a-z0-9]+", "-", title.lower().strip()).strip("-")
+    return slug or "post"
+
+
+def publish_teaching_blog_sync(
+    account,
+    payload: dict,
+    *,
+    session=None,
+) -> list[dict[str, Any]]:
+    """Publish a Markdown post to a GitHub repo via the Contents API."""
+    config = account.config or {}
+    owner = str(_config_value(config, "repoOwner") or "").strip()
+    repo = str(_config_value(config, "repoName") or "").strip()
+    branch = str(_config_value(config, "branch") or "main").strip()
+    content_dir = str(_config_value(config, "contentDir") or "content/posts").strip("/")
+    token = str(_config_value(config, "githubToken", default_env="SAU_TEACHING_BLOG_GITHUB_TOKEN") or "").strip()
+
+    if not owner:
+        raise PreparedPublishError("Teaching Blog account requires repoOwner in config")
+    if not repo:
+        raise PreparedPublishError("Teaching Blog account requires repoName in config")
+    if not token:
+        raise PreparedPublishError("Teaching Blog account requires githubToken or githubTokenEnv")
+
+    message = _payload_message(payload)
+    if not message:
+        raise PreparedPublishError("Teaching Blog publish requires a message (Markdown body)")
+
+    title_from_draft = str((payload.get("draft") or {}).get("title") or "").strip()
+    frontmatter, _body = _parse_frontmatter(message)
+    title = title_from_draft or frontmatter.get("title") or _message_title(payload)
+    slug = _slugify_title(title)
+
+    # Build frontmatter if not already present
+    if not message.startswith("---"):
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        lines = [
+            "---",
+            f"title: \"{title}\"",
+            f"date: {date_str}",
+            "---",
+            "",
+            message,
+        ]
+        message = "\n".join(lines)
+
+    file_path = f"{content_dir}/{slug}.md"
+    content_b64 = base64.b64encode(message.encode("utf-8")).decode("ascii")
+
+    http = _get_session(session)
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    # Check if file already exists (to get SHA for update)
+    existing_sha = None
+    get_url = f"{GITHUB_API_ROOT}/repos/{owner}/{repo}/contents/{file_path}"
+    get_resp = http.get(get_url, headers=headers, params={"ref": branch}, timeout=30)
+    if get_resp.status_code == 200:
+        existing_sha = get_resp.json().get("sha")
+
+    # PUT (create or update)
+    put_body: dict[str, Any] = {
+        "message": f"publish: {title}",
+        "content": content_b64,
+        "branch": branch,
+    }
+    if existing_sha:
+        put_body["sha"] = existing_sha
+
+    put_resp = http.put(get_url, headers=headers, json=put_body, timeout=30)
+    _raise_for_status(put_resp)
+    result = put_resp.json()
+
+    return [{"path": file_path, "sha": result.get("content", {}).get("sha"), "url": result.get("content", {}).get("html_url")}]
+
+
+def validate_teaching_blog_config_live(config: dict[str, Any], *, session=None) -> dict:
+    """Validate Teaching Blog config by checking GitHub repo access."""
+    owner = str(_config_value(config, "repoOwner") or "").strip()
+    repo = str(_config_value(config, "repoName") or "").strip()
+    token = str(_config_value(config, "githubToken", default_env="SAU_TEACHING_BLOG_GITHUB_TOKEN") or "").strip()
+    if not owner or not repo or not token:
+        raise PreparedPublishError("Teaching Blog validation requires repoOwner, repoName, and githubToken")
+    http = _get_session(session)
+    url = f"{GITHUB_API_ROOT}/repos/{owner}/{repo}"
+    resp = http.get(url, headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}, timeout=30)
+    _raise_for_status(resp)
+    data = resp.json()
+    return {"repo_full_name": data.get("full_name"), "default_branch": data.get("default_branch"), "private": data.get("private")}
+
+
+# ---- NW/SW Blog (sexualwill.com REST API) ----
+
+def publish_nw_sw_blog_sync(
+    account,
+    payload: dict,
+    *,
+    session=None,
+) -> list[dict[str, Any]]:
+    """Publish an MDX post to the NW/SW blog REST API."""
+    config = account.config or {}
+    api_base = str(_config_value(config, "apiBase") or "").strip().rstrip("/")
+    api_token = str(_config_value(config, "apiToken", default_env="SAU_NW_SW_BLOG_API_TOKEN") or "").strip()
+    persona = str(_config_value(config, "persona") or "").strip()
+    locale = str(_config_value(config, "locale") or "en").strip()
+
+    if not api_base:
+        raise PreparedPublishError("NW/SW Blog account requires apiBase in config")
+    if not api_token:
+        raise PreparedPublishError("NW/SW Blog account requires apiToken or apiTokenEnv")
+    if persona not in ("sexualwill", "nakedwill"):
+        raise PreparedPublishError(f"NW/SW Blog persona must be 'sexualwill' or 'nakedwill', got '{persona}'")
+    if locale not in ("en", "zh"):
+        raise PreparedPublishError(f"NW/SW Blog locale must be 'en' or 'zh', got '{locale}'")
+
+    message = _payload_message(payload)
+    if not message:
+        raise PreparedPublishError("NW/SW Blog publish requires a message (MDX body)")
+
+    title = str((payload.get("draft") or {}).get("title") or "").strip()
+    if not title:
+        title = _message_title(payload)
+
+    http = _get_session(session)
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "title": title,
+        "content": message,
+        "persona": persona,
+        "locale": locale,
+        "status": "published",
+    }
+
+    resp = http.post(f"{api_base}/api/admin/posts", headers=headers, json=body, timeout=60)
+    _raise_for_status(resp)
+    result = resp.json()
+    return [result]
+
+
+def validate_nw_sw_blog_config_live(config: dict[str, Any], *, session=None) -> dict:
+    """Validate NW/SW Blog config by listing posts (read-only check)."""
+    api_base = str(_config_value(config, "apiBase") or "").strip().rstrip("/")
+    api_token = str(_config_value(config, "apiToken", default_env="SAU_NW_SW_BLOG_API_TOKEN") or "").strip()
+    if not api_base or not api_token:
+        raise PreparedPublishError("NW/SW Blog validation requires apiBase and apiToken")
+    http = _get_session(session)
+    resp = http.get(
+        f"{api_base}/api/admin/posts",
+        headers={"Authorization": f"Bearer {api_token}"},
+        params={"limit": 1},
+        timeout=30,
+    )
+    _raise_for_status(resp)
+    data = resp.json()
+    return {"posts_accessible": True, "count": len(data) if isinstance(data, list) else data.get("total", 0)}

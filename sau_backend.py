@@ -32,6 +32,9 @@ from myUtils import publish_orchestrator
 from myUtils import publish_templates as template_store
 from myUtils import account_events
 from myUtils import rclone_storage
+from myUtils import analytics_store
+from myUtils import analytics_sync
+from myUtils import analytics_advisor
 from myUtils import meta_auth
 from myUtils import meta_review
 from myUtils import reddit_auth
@@ -5568,6 +5571,148 @@ def patreon_oauth_callback():
                 db_path=db_path,
             )
         return Response(f"<html><body><p>Patreon callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
+
+
+# ---------------------------------------------------------------------------
+#  Analytics API routes
+# ---------------------------------------------------------------------------
+
+
+@app.route('/analytics/sync', methods=['POST'])
+def analytics_sync_route():
+    """Trigger analytics sync for all accounts or a specific account."""
+    db_path = _current_db_path()
+    body = request.get_json(silent=True) or {}
+    account_id = body.get('accountId')
+
+    try:
+        if account_id:
+            result = analytics_sync.sync_account_analytics(int(account_id), db_path=db_path)
+            return jsonify({"code": 200, "msg": "ok", "data": result})
+        else:
+            result = analytics_sync.sync_all_analytics(db_path=db_path)
+            return jsonify({"code": 200, "msg": "ok", "data": result})
+    except Exception as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
+@app.route('/analytics/sync/status', methods=['GET'])
+def analytics_sync_status_route():
+    """Get recent sync log entries."""
+    db_path = _current_db_path()
+    account_id = request.args.get('accountId', type=int)
+    limit = request.args.get('limit', 20, type=int)
+    try:
+        entries = analytics_store.list_sync_log(account_id=account_id, limit=limit, db_path=db_path)
+        return jsonify({"code": 200, "msg": "ok", "data": entries})
+    except Exception as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
+@app.route('/analytics/overview', methods=['GET'])
+def analytics_overview_route():
+    """Get aggregated analytics stats."""
+    db_path = _current_db_path()
+    platform = request.args.get('platform')
+    account_id = request.args.get('accountId', type=int)
+    date_from = request.args.get('dateFrom')
+    date_to = request.args.get('dateTo')
+    try:
+        stats = analytics_store.get_aggregate_stats(
+            platform=platform, account_id=account_id,
+            date_from=date_from, date_to=date_to,
+            db_path=db_path,
+        )
+        return jsonify({"code": 200, "msg": "ok", "data": stats})
+    except Exception as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
+@app.route('/analytics/videos', methods=['GET'])
+def analytics_videos_route():
+    """List videos with latest metrics."""
+    db_path = _current_db_path()
+    platform = request.args.get('platform')
+    account_id = request.args.get('accountId', type=int)
+    limit = request.args.get('limit', 100, type=int)
+    try:
+        videos = analytics_store.get_latest_snapshots(
+            platform=platform, account_id=account_id,
+            limit=limit, db_path=db_path,
+        )
+        return jsonify({"code": 200, "msg": "ok", "data": videos})
+    except Exception as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
+@app.route('/analytics/videos/<platform_video_id>/history', methods=['GET'])
+def analytics_video_history_route(platform_video_id):
+    """Get time series for one video."""
+    db_path = _current_db_path()
+    days = request.args.get('days', 30, type=int)
+    try:
+        history = analytics_store.get_snapshot_history(platform_video_id, days=days, db_path=db_path)
+        return jsonify({"code": 200, "msg": "ok", "data": history})
+    except Exception as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
+@app.route('/analytics/top-videos', methods=['GET'])
+def analytics_top_videos_route():
+    """Get top performing videos."""
+    db_path = _current_db_path()
+    platform = request.args.get('platform')
+    account_id = request.args.get('accountId', type=int)
+    metric = request.args.get('metric', 'views')
+    limit = request.args.get('limit', 10, type=int)
+    try:
+        videos = analytics_store.get_top_videos(
+            platform=platform, account_id=account_id,
+            metric=metric, limit=limit, db_path=db_path,
+        )
+        return jsonify({"code": 200, "msg": "ok", "data": videos})
+    except Exception as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
+@app.route('/analytics/trends', methods=['GET'])
+def analytics_trends_route():
+    """Get daily aggregated metric trends."""
+    db_path = _current_db_path()
+    platform = request.args.get('platform')
+    account_id = request.args.get('accountId', type=int)
+    date_from = request.args.get('dateFrom')
+    date_to = request.args.get('dateTo')
+    metric = request.args.get('metric', 'views')
+    try:
+        trends = analytics_store.get_trends(
+            platform=platform, account_id=account_id,
+            date_from=date_from, date_to=date_to,
+            metric=metric, db_path=db_path,
+        )
+        return jsonify({"code": 200, "msg": "ok", "data": trends})
+    except Exception as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
+@app.route('/analytics/advice', methods=['POST'])
+def analytics_advice_route():
+    """Get AI-powered analytics advice."""
+    db_path = _current_db_path()
+    body = request.get_json(silent=True) or {}
+    platform = body.get('platform')
+    account_id = body.get('accountId')
+    date_from = body.get('dateFrom')
+    date_to = body.get('dateTo')
+    try:
+        advice = analytics_advisor.generate_advice(
+            platform=platform, account_id=account_id,
+            date_from=date_from, date_to=date_to,
+            db_path=db_path,
+        )
+        return jsonify({"code": 200, "msg": "ok", "data": advice})
+    except Exception as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
 
 
 _maybe_start_account_maintenance_scheduler()

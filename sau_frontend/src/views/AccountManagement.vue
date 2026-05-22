@@ -577,6 +577,53 @@
             </el-form-item>
           </template>
 
+          <template v-else-if="accountForm.platform === 'teaching_blog'">
+            <el-divider content-position="left">Teaching Blog 設定</el-divider>
+            <el-form-item label="Connection health" v-if="isStructuredAccountForm && accountForm.id">
+              <AccountConnectionPanel :rows="teachingBlogHealthRows" :actions="teachingBlogHealthActions" />
+            </el-form-item>
+            <el-form-item label="GitHub Token Env">
+              <el-input v-model="accountForm.githubTokenEnv" placeholder="SAU_TEACHING_BLOG_GITHUB_TOKEN" />
+            </el-form-item>
+            <el-form-item label="Repo Owner">
+              <el-input v-model="accountForm.repoOwner" placeholder="e.g. your-github-username" />
+            </el-form-item>
+            <el-form-item label="Repo Name">
+              <el-input v-model="accountForm.repoName" placeholder="e.g. my-teaching-blog" />
+            </el-form-item>
+            <el-form-item label="Branch">
+              <el-input v-model="accountForm.contentBranch" placeholder="main" />
+            </el-form-item>
+            <el-form-item label="Content Directory">
+              <el-input v-model="accountForm.contentDir" placeholder="content/posts" />
+            </el-form-item>
+          </template>
+
+          <template v-else-if="accountForm.platform === 'nw_sw_blog'">
+            <el-divider content-position="left">NW/SW Blog 設定</el-divider>
+            <el-form-item label="Connection health" v-if="isStructuredAccountForm && accountForm.id">
+              <AccountConnectionPanel :rows="nwSwBlogHealthRows" :actions="nwSwBlogHealthActions" />
+            </el-form-item>
+            <el-form-item label="API Base URL">
+              <el-input v-model="accountForm.apiBase" placeholder="https://sexualwill.com" />
+            </el-form-item>
+            <el-form-item label="API Token Env">
+              <el-input v-model="accountForm.apiTokenEnv" placeholder="SAU_NW_SW_BLOG_API_TOKEN" />
+            </el-form-item>
+            <el-form-item label="Persona">
+              <el-select v-model="accountForm.blogPersona" style="width: 100%">
+                <el-option label="Sexualwill" value="sexualwill" />
+                <el-option label="Nakedwill" value="nakedwill" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="Locale">
+              <el-select v-model="accountForm.blogLocale" style="width: 100%">
+                <el-option label="English" value="en" />
+                <el-option label="中文" value="zh" />
+              </el-select>
+            </el-form-item>
+          </template>
+
           <el-form-item label="進階 JSON">
             <el-input
               v-model="accountForm.advancedConfigText"
@@ -789,6 +836,15 @@ const makeEmptyAccountForm = () => ({
   patreonAccessMode: 'public',
   patreonTierName: '',
   patreonUserName: '',
+  repoOwner: '',
+  repoName: '',
+  contentBranch: 'main',
+  contentDir: 'content/posts',
+  githubTokenEnv: '',
+  apiBase: '',
+  apiTokenEnv: '',
+  blogPersona: 'sexualwill',
+  blogLocale: 'en',
   advancedConfigText: '',
   twitterAuthType: 'cookie',
   apiKeyEnv: '',
@@ -919,6 +975,27 @@ const patreonHealthRows = computed(() => [
 const patreonHealthActions = computed(() => [
   { label: 'Connect with Patreon', type: 'primary', onClick: connectWithPatreon },
   { label: 'Refresh Patreon token', onClick: () => refreshStructuredToken('patreon') },
+])
+
+const teachingBlogHealthRows = computed(() => [
+  { label: 'Repo owner', value: accountForm.repoOwner || '—' },
+  { label: 'Repo name', value: accountForm.repoName || '—' },
+  { label: 'Branch', value: accountForm.contentBranch || 'main' },
+  { label: 'Content dir', value: accountForm.contentDir || 'content/posts' },
+  { label: 'GitHub token', value: presentLabel(accountForm.githubTokenEnv ? '(env)' : '') },
+])
+const teachingBlogHealthActions = computed(() => [
+  { label: 'Check connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('teaching_blog') },
+])
+
+const nwSwBlogHealthRows = computed(() => [
+  { label: 'API base', value: accountForm.apiBase || '—' },
+  { label: 'Persona', value: accountForm.blogPersona || '—' },
+  { label: 'Locale', value: accountForm.blogLocale || '—' },
+  { label: 'API token', value: presentLabel(accountForm.apiTokenEnv ? '(env)' : '') },
+])
+const nwSwBlogHealthActions = computed(() => [
+  { label: 'Check connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('nw_sw_blog') },
 ])
 
 const twitterHealthRows = computed(() => [
@@ -1133,6 +1210,15 @@ const loadStructuredFieldsFromConfig = (config) => {
   accountForm.twitterUserName = config.twitterUserName || ''
   accountForm.twitterDisplayName = config.twitterDisplayName || ''
   accountForm.redditAuthType = config.redditAuthType || 'api'
+  accountForm.githubTokenEnv = config.githubTokenEnv || ''
+  accountForm.repoOwner = config.repoOwner || ''
+  accountForm.repoName = config.repoName || ''
+  accountForm.contentBranch = config.branch || 'main'
+  accountForm.contentDir = config.contentDir || 'content/posts'
+  accountForm.apiBase = config.apiBase || ''
+  accountForm.apiTokenEnv = config.apiTokenEnv || ''
+  accountForm.blogPersona = config.persona || 'sexualwill'
+  accountForm.blogLocale = config.locale || 'en'
 }
 
 const openProfileDialog = () => {
@@ -2438,6 +2524,19 @@ const buildStructuredConfig = () => {
         assignIfValue(config, 'tierName', accountForm.patreonTierName.trim())
       }
       assignIfValue(config, 'patreonUserName', accountForm.patreonUserName.trim())
+      break
+    case 'teaching_blog':
+      assignIfValue(config, 'githubTokenEnv', accountForm.githubTokenEnv.trim())
+      assignIfValue(config, 'repoOwner', accountForm.repoOwner.trim())
+      assignIfValue(config, 'repoName', accountForm.repoName.trim())
+      assignIfValue(config, 'branch', accountForm.contentBranch.trim() || 'main')
+      assignIfValue(config, 'contentDir', accountForm.contentDir.trim() || 'content/posts')
+      break
+    case 'nw_sw_blog':
+      assignIfValue(config, 'apiBase', accountForm.apiBase.trim())
+      assignIfValue(config, 'apiTokenEnv', accountForm.apiTokenEnv.trim())
+      assignIfValue(config, 'persona', accountForm.blogPersona)
+      assignIfValue(config, 'locale', accountForm.blogLocale)
       break
     default:
       break

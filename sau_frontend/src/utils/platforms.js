@@ -100,6 +100,20 @@ const PROFILE_PLATFORM_METADATA = [
     label: 'Patreon',
     tagType: 'warning',
     aliases: ['patreon']
+  },
+  {
+    accountType: null,
+    publishSlug: 'teaching_blog',
+    label: 'Teaching Blog',
+    tagType: 'success',
+    aliases: ['teaching_blog', 'teachingblog']
+  },
+  {
+    accountType: null,
+    publishSlug: 'nw_sw_blog',
+    label: 'NW/SW Blog',
+    tagType: 'danger',
+    aliases: ['nw_sw_blog', 'nwswblog']
   }
 ]
 

@@ -13,6 +13,7 @@ import TikTokReviewStatus from '../views/TikTokReviewStatus.vue'
 import OAuthReviewStatus from '../views/OAuthReviewStatus.vue'
 import ProfileManagement from '../views/ProfileManagement.vue'
 import TemplateManagement from '../views/TemplateManagement.vue'
+import VideoAnalytics from '../views/VideoAnalytics.vue'
 
 import { getToken } from '@/utils/auth'
 
@@ -69,6 +70,12 @@ const routes = [
     path: '/jobs',
     name: 'Jobs',
     component: JobsView,
+    meta: { title: 'Socialupload' }
+  },
+  {
+    path: '/video-analytics',
+    name: 'VideoAnalytics',
+    component: VideoAnalytics,
     meta: { title: 'Socialupload' }
   },
   {

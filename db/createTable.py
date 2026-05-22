@@ -328,6 +328,62 @@ CREATE TABLE IF NOT EXISTS account_events (
 )
 """
 
+VIDEO_ANALYTICS_VIDEOS = """
+CREATE TABLE IF NOT EXISTS video_analytics_videos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    platform_video_id TEXT NOT NULL UNIQUE,
+    file_record_id INTEGER,
+    title TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    thumbnail_url TEXT DEFAULT '',
+    published_at DATETIME,
+    duration_seconds INTEGER DEFAULT 0,
+    last_synced_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY(file_record_id) REFERENCES file_records(id) ON DELETE SET NULL
+)
+"""
+
+VIDEO_ANALYTICS_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS video_analytics_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    platform_video_id TEXT NOT NULL,
+    file_record_id INTEGER,
+    title TEXT DEFAULT '',
+    thumbnail_url TEXT DEFAULT '',
+    published_at DATETIME,
+    snapshot_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    views INTEGER DEFAULT 0,
+    likes INTEGER DEFAULT 0,
+    comments INTEGER DEFAULT 0,
+    shares INTEGER DEFAULT 0,
+    watch_time_seconds INTEGER DEFAULT 0,
+    engagement_rate REAL DEFAULT 0.0,
+    raw_metrics_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY(file_record_id) REFERENCES file_records(id) ON DELETE SET NULL
+)
+"""
+
+ANALYTICS_SYNC_LOG = """
+CREATE TABLE IF NOT EXISTS analytics_sync_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    videos_synced INTEGER DEFAULT 0,
+    error_text TEXT,
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    finished_at DATETIME,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+)
+"""
+
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_accounts_profile ON accounts(profile_id)",
     "CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform)",
@@ -366,6 +422,17 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_account_events_platform ON account_events(platform)",
     "CREATE INDEX IF NOT EXISTS idx_account_events_action ON account_events(action)",
     "CREATE INDEX IF NOT EXISTS idx_account_events_created_at ON account_events(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_vav_account ON video_analytics_videos(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_vav_platform ON video_analytics_videos(platform)",
+    "CREATE INDEX IF NOT EXISTS idx_vav_published ON video_analytics_videos(published_at)",
+    "CREATE INDEX IF NOT EXISTS idx_vas_account ON video_analytics_snapshots(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_vas_platform ON video_analytics_snapshots(platform)",
+    "CREATE INDEX IF NOT EXISTS idx_vas_video_id ON video_analytics_snapshots(platform_video_id)",
+    "CREATE INDEX IF NOT EXISTS idx_vas_snapshot_at ON video_analytics_snapshots(snapshot_at)",
+    "CREATE INDEX IF NOT EXISTS idx_vas_file_record ON video_analytics_snapshots(file_record_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_vas_unique_snapshot ON video_analytics_snapshots(account_id, platform_video_id, snapshot_at)",
+    "CREATE INDEX IF NOT EXISTS idx_asl_account ON analytics_sync_log(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_asl_status ON analytics_sync_log(status)",
 ]
 
 
@@ -473,6 +540,9 @@ def bootstrap(db_path: Path = DB_PATH) -> None:
         cursor.execute(THREADS_OAUTH_REQUESTS)
         cursor.execute(TIKTOK_REVIEW_EVENTS)
         cursor.execute(ACCOUNT_EVENTS)
+        cursor.execute(VIDEO_ANALYTICS_VIDEOS)
+        cursor.execute(VIDEO_ANALYTICS_SNAPSHOTS)
+        cursor.execute(ANALYTICS_SYNC_LOG)
         _ensure_required_columns(conn)
         for statement in INDEXES:
             cursor.execute(statement)
