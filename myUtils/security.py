@@ -40,6 +40,7 @@ from typing import Iterable
 PUBLIC_PATHS: frozenset[str] = frozenset({
     "/",
     "/login",
+    "/getFile",
     "/privacy",
     "/privacy/",
     "/terms",

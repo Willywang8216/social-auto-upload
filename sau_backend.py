@@ -65,6 +65,8 @@ from myUtils.security import (
 from myUtils.worker import default_executor, run_worker_drain
 from utils.files_times import generate_schedule_time_next_day
 
+_worker_drain_lock = threading.Lock()
+
 # Map the legacy numeric `type` field to the platform slug used by the job runtime.
 LEGACY_PLATFORM_CODES = {
     1: "xiaohongshu",
@@ -2392,6 +2394,25 @@ def _prepare_campaign_media_artifacts(
                     metadata={"role": media_file["role"]},
                     db_path=db_path,
                 )
+        else:
+            # No remote upload — serve the file via the local /getFile endpoint
+            # so platforms like TikTok (PULL_FROM_URL) can access it.
+            try:
+                from flask import request as _flask_request
+                base_url = _flask_request.host_url.rstrip("/")
+                served_filename = Path(publish_path).name
+                public_url = f"{base_url}/getFile?filename={served_filename}"
+            except RuntimeError:
+                public_url = None
+            campaign_store.add_campaign_artifact(
+                campaign_id,
+                source_file_record_id=media_file["file_record_id"],
+                artifact_kind="local",
+                local_path=str(publish_path),
+                public_url=public_url,
+                metadata={"role": media_file["role"]},
+                db_path=db_path,
+            )
 
         if _is_image_file(publish_path):
             artifacts_context["imageLocalPaths"].append(str(publish_path))
@@ -5259,6 +5280,19 @@ def publish_center_regenerate():
     return jsonify({"code": 200, "msg": "ok", "data": {"draft": draft}}), 200
 
 
+def _start_worker_drain_thread():
+    """Spawn a daemon thread to drain queued jobs (non-blocking)."""
+    if _worker_drain_lock.locked():
+        return  # worker already running
+    def _run():
+        with _worker_drain_lock:
+            try:
+                run_worker_drain(default_executor)
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception("Background worker drain failed")
+    threading.Thread(target=_run, daemon=True).start()
+
+
 @app.route("/publish-center/submit", methods=["POST"])
 def publish_center_submit():
     db_path = _current_db_path()
@@ -5296,6 +5330,10 @@ def publish_center_submit():
     except Exception as exc:  # noqa: BLE001
         logging.getLogger(__name__).exception("publish-center submit failed")
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    # Auto-trigger the worker in a daemon thread so jobs don't stay stuck at "queued".
+    if result.jobs:
+        _start_worker_drain_thread()
+
     return jsonify({
         "code": 200,
         "msg": "queued",

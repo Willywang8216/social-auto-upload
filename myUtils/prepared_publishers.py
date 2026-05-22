@@ -105,6 +105,31 @@ def _raise_for_status(response) -> None:
         response.raise_for_status()
 
 
+def _raise_tiktok_error(response) -> None:
+    """Raise a PreparedPublishError with TikTok-specific error details."""
+    try:
+        body = response.json()
+        error = body.get("error") or {}
+        code = str(error.get("code") or "").strip()
+        message = str(error.get("message") or "").strip()
+    except Exception:  # noqa: BLE001
+        code = ""
+        message = ""
+    if code == "unaudited_client_can_only_post_to_private_accounts":
+        raise PreparedPublishError(
+            "TikTok app is in development mode — can only post to private accounts. "
+            "Submit your app for review at developers.tiktok.com or set your TikTok account to private for testing."
+        )
+    if code == "url_ownership_unverified":
+        raise PreparedPublishError(
+            "TikTok requires domain ownership verification for PULL_FROM_URL. "
+            "Using FILE_UPLOAD mode instead."
+        )
+    if message:
+        raise PreparedPublishError(f"TikTok API error ({code}): {message}")
+    response.raise_for_status()
+
+
 def _config_value(config: dict[str, Any], key: str, *, default_env: str | None = None) -> Any:
     direct = config.get(key)
     if direct not in (None, ""):
@@ -889,36 +914,35 @@ def _validate_tiktok_video_artifact(item: dict[str, Any], *, message: str, confi
         raise PreparedPublishError(f"TikTok caption exceeds {TIKTOK_MAX_CAPTION_CHARS} characters for direct publishing")
 
     public_url = str(item.get("public_url") or "").strip()
-    if not public_url:
-        raise PreparedPublishError("TikTok video publish requires a public_url")
-
     local_path = str(item.get("local_path") or "").strip()
-    if not local_path:
-        return
 
-    source = Path(local_path).expanduser().resolve()
-    if not source.exists():
-        raise PreparedPublishError(f"TikTok video artifact not found: {source}")
+    if not public_url and not local_path:
+        raise PreparedPublishError("TikTok video publish requires either a public_url or a local_path")
 
-    suffix = source.suffix.lower()
-    if suffix not in TIKTOK_ALLOWED_VIDEO_SUFFIXES:
-        raise PreparedPublishError("TikTok video publish currently supports only MP4 or WebM artifacts")
+    if local_path:
+        source = Path(local_path).expanduser().resolve()
+        if not source.exists():
+            raise PreparedPublishError(f"TikTok video artifact not found: {source}")
 
-    file_size = source.stat().st_size
-    if file_size > TIKTOK_MAX_PULL_FROM_URL_BYTES:
-        raise PreparedPublishError("TikTok PULL_FROM_URL video uploads currently support up to 1 GB in this implementation")
+        suffix = source.suffix.lower()
+        if suffix not in TIKTOK_ALLOWED_VIDEO_SUFFIXES:
+            raise PreparedPublishError("TikTok video publish currently supports only MP4 or WebM artifacts")
 
-    duration_seconds = media_pipeline.probe_video_duration(source)
-    if duration_seconds < TIKTOK_MIN_VIDEO_SECONDS or duration_seconds > TIKTOK_MAX_VIDEO_SECONDS:
-        raise PreparedPublishError("TikTok videos must be between 3 seconds and 10 minutes for the current direct publishing flow")
+        file_size = source.stat().st_size
+        if file_size > TIKTOK_MAX_PULL_FROM_URL_BYTES:
+            raise PreparedPublishError("TikTok video uploads currently support up to 1 GB")
 
-    cover_timestamp_raw = config.get("videoCoverTimestampMs")
-    if cover_timestamp_raw not in (None, ""):
-        cover_timestamp_ms = int(cover_timestamp_raw)
-        if cover_timestamp_ms < 0:
-            raise PreparedPublishError("TikTok video_cover_timestamp_ms must be >= 0")
-        if cover_timestamp_ms > int(duration_seconds * 1000):
-            raise PreparedPublishError("TikTok video_cover_timestamp_ms must not exceed the video duration")
+        duration_seconds = media_pipeline.probe_video_duration(source)
+        if duration_seconds < TIKTOK_MIN_VIDEO_SECONDS or duration_seconds > TIKTOK_MAX_VIDEO_SECONDS:
+            raise PreparedPublishError("TikTok videos must be between 3 seconds and 10 minutes for the current direct publishing flow")
+
+        cover_timestamp_raw = config.get("videoCoverTimestampMs")
+        if cover_timestamp_raw not in (None, ""):
+            cover_timestamp_ms = int(cover_timestamp_raw)
+            if cover_timestamp_ms < 0:
+                raise PreparedPublishError("TikTok video_cover_timestamp_ms must be >= 0")
+            if cover_timestamp_ms > int(duration_seconds * 1000):
+                raise PreparedPublishError("TikTok video_cover_timestamp_ms must not exceed the video duration")
 
 
 def _validate_tiktok_photo_payload(public_urls: list[str], *, message: str) -> None:
@@ -926,6 +950,44 @@ def _validate_tiktok_photo_payload(public_urls: list[str], *, message: str) -> N
         raise PreparedPublishError(f"TikTok caption exceeds {TIKTOK_MAX_CAPTION_CHARS} characters for direct publishing")
     if len(public_urls) > 35:
         raise PreparedPublishError("TikTok photo publish supports up to 35 images")
+
+TIKTOK_FILE_UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024  # 5 MB minimum per TikTok docs
+
+
+def _tiktok_file_upload(http, video_path: Path, upload_url: str) -> None:
+    """Upload a video file to TikTok via chunked PUT to the presigned upload_url."""
+    import mimetypes
+
+    total_size = video_path.stat().st_size
+    chunk_size = TIKTOK_FILE_UPLOAD_CHUNK_SIZE
+    mime_type = mimetypes.guess_type(video_path.name)[0] or "video/mp4"
+
+    with video_path.open("rb") as fh:
+        offset = 0
+        while offset < total_size:
+            chunk = fh.read(chunk_size)
+            if not chunk:
+                break
+            chunk_len = len(chunk)
+            start = offset
+            end = offset + chunk_len - 1
+            headers = {
+                "Content-Type": mime_type,
+                "Content-Length": str(chunk_len),
+                "Content-Range": f"bytes {start}-{end}/{total_size}",
+            }
+            for attempt in range(3):
+                resp = http.put(upload_url, headers=headers, data=chunk, timeout=300)
+                if resp.status_code in (200, 201, 206):
+                    break
+                if resp.status_code >= 500 and attempt < 2:
+                    import time
+                    time.sleep(2 ** attempt)
+                    continue
+                _raise_for_status(resp)
+            else:
+                _raise_for_status(resp)
+            offset += chunk_len
 
 
 def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
@@ -949,44 +1011,92 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     else:
         publish_mode = str(config.get("publishMode") or "direct").strip().lower()
     post_mode = "DIRECT_POST" if publish_mode == "direct" else "MEDIA_UPLOAD"
-    privacy_level = str(config.get("privacyLevel") or "PUBLIC_TO_EVERYONE")
+    privacy_level = str(config.get("privacyLevel") or "SELF_ONLY").strip().upper()
 
     if media["videos"]:
         video_item = media["videos"][0]
         _validate_tiktok_video_artifact(video_item, message=message, config=config)
         public_url = video_item.get("public_url") or ""
-        request_body = {
-            "post_info": {
-                "title": message[:TIKTOK_MAX_CAPTION_CHARS],
-                "privacy_level": privacy_level,
-                "disable_duet": bool(config.get("disableDuet", False)),
-                "disable_comment": bool(config.get("disableComment", False)),
-                "disable_stitch": bool(config.get("disableStitch", False)),
-            },
-            "source_info": {
-                "source": "PULL_FROM_URL",
-                "video_url": public_url,
-            },
-            "post_mode": post_mode,
+        local_path = str(video_item.get("local_path") or "").strip()
+
+        post_info = {
+            "title": message[:TIKTOK_MAX_CAPTION_CHARS],
+            "privacy_level": privacy_level,
+            "disable_duet": bool(config.get("disableDuet", False)),
+            "disable_comment": bool(config.get("disableComment", False)),
+            "disable_stitch": bool(config.get("disableStitch", False)),
         }
         if config.get("videoCoverTimestampMs") not in (None, ""):
-            request_body["post_info"]["video_cover_timestamp_ms"] = int(config["videoCoverTimestampMs"])
-        response = http.post(
-            TIKTOK_VIDEO_INIT_URL,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            },
-            json=request_body,
-            timeout=120,
-        )
-        _raise_for_status(response)
-        return {
-            "creator_info": creator_info,
-            "publish": _response_payload(response),
-            "request": request_body,
-            "updated_config": updated_config,
-        }
+            post_info["video_cover_timestamp_ms"] = int(config["videoCoverTimestampMs"])
+
+        # Use FILE_UPLOAD when we have a local file (TikTok requires domain
+        # ownership verification for PULL_FROM_URL, which is impractical).
+        if local_path and Path(local_path).expanduser().resolve().is_file():
+            video_path = Path(local_path).expanduser().resolve()
+            file_size = video_path.stat().st_size
+            # TikTok requires chunk_size to match actual upload chunks.
+            # For simplicity, upload as a single chunk (up to 4 GB max).
+            chunk_size = file_size
+            total_chunks = 1
+            request_body = {
+                "post_info": post_info,
+                "source_info": {
+                    "source": "FILE_UPLOAD",
+                    "video_size": file_size,
+                    "chunk_size": chunk_size,
+                    "total_chunk_count": total_chunks,
+                },
+                "post_mode": post_mode,
+            }
+            response = http.post(
+                TIKTOK_VIDEO_INIT_URL,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+                json=request_body,
+                timeout=120,
+            )
+            if response.status_code != 200:
+                _raise_tiktok_error(response)
+            resp_data = response.json()
+            resp_data_inner = resp_data.get("data") or resp_data
+            upload_url = resp_data_inner.get("upload_url") or ""
+            if not upload_url:
+                raise PreparedPublishError("TikTok FILE_UPLOAD init did not return an upload_url")
+            _tiktok_file_upload(http, video_path, upload_url)
+            return {
+                "creator_info": creator_info,
+                "publish": resp_data,
+                "request": request_body,
+                "updated_config": updated_config,
+            }
+        else:
+            # Fallback to PULL_FROM_URL when we only have a public URL
+            request_body = {
+                "post_info": post_info,
+                "source_info": {
+                    "source": "PULL_FROM_URL",
+                    "video_url": public_url,
+                },
+                "post_mode": post_mode,
+            }
+            response = http.post(
+                TIKTOK_VIDEO_INIT_URL,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+                json=request_body,
+                timeout=120,
+            )
+            _raise_for_status(response)
+            return {
+                "creator_info": creator_info,
+                "publish": _response_payload(response),
+                "request": request_body,
+                "updated_config": updated_config,
+            }
 
     if media["images"]:
         public_urls = [item.get("public_url") or "" for item in media["images"][:35]]
