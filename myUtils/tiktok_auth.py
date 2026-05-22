@@ -17,7 +17,9 @@ TIKTOK_OAUTH_TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
 TIKTOK_USER_INFO_URL = "https://open.tiktokapis.com/v2/user/info/"
 DEFAULT_SCOPES = ("user.info.basic", "video.upload", "video.publish")
 CLIENT_KEY_ENV = "TIKTOK_CLIENT_KEY"
+CLIENT_KEY_ENV_FALLBACKS = ("TIKTOK_APP_CLIENT_KEY", "TIKTOK_APP_KEY")
 CLIENT_SECRET_ENV = "TIKTOK_CLIENT_SECRET"
+CLIENT_SECRET_ENV_FALLBACKS = ("SAU_TIKTOK_CLIENT_SECRET", "TIKTOK_APP_SECRET")
 REDIRECT_URI_ENV = "TIKTOK_REDIRECT_URI"
 
 
@@ -33,11 +35,16 @@ def _get_session(session=None):
     return requests.Session()
 
 
-def _required_env(name: str) -> str:
+def _required_env(name: str, *, fallbacks: tuple[str, ...] = ()) -> str:
     value = str(os.environ.get(name, "") or "").strip()
-    if not value:
-        raise TikTokOAuthError(f"Missing required environment variable: {name}")
-    return value
+    if value:
+        return value
+    for fb in fallbacks:
+        value = str(os.environ.get(fb, "") or "").strip()
+        if value:
+            return value
+    all_names = ", ".join([name, *fallbacks])
+    raise TikTokOAuthError(f"Missing required environment variable: one of {all_names}")
 
 
 def default_redirect_uri() -> str:
@@ -77,7 +84,7 @@ def build_authorize_url_from_env(
     scopes: tuple[str, ...] | list[str] = DEFAULT_SCOPES,
 ) -> str:
     return build_authorize_url(
-        client_key=_required_env(CLIENT_KEY_ENV),
+        client_key=_required_env(CLIENT_KEY_ENV, fallbacks=CLIENT_KEY_ENV_FALLBACKS),
         redirect_uri=redirect_uri or default_redirect_uri(),
         state=state,
         scopes=scopes,
@@ -94,8 +101,8 @@ def exchange_code_for_token(
     response = http.post(
         TIKTOK_OAUTH_TOKEN_URL,
         data={
-            "client_key": _required_env(CLIENT_KEY_ENV),
-            "client_secret": _required_env(CLIENT_SECRET_ENV),
+            "client_key": _required_env(CLIENT_KEY_ENV, fallbacks=CLIENT_KEY_ENV_FALLBACKS),
+            "client_secret": _required_env(CLIENT_SECRET_ENV, fallbacks=CLIENT_SECRET_ENV_FALLBACKS),
             "code": code,
             "grant_type": "authorization_code",
             "redirect_uri": redirect_uri,
@@ -114,8 +121,8 @@ def refresh_access_token(*, refresh_token: str, session=None) -> dict[str, Any]:
     response = http.post(
         TIKTOK_OAUTH_TOKEN_URL,
         data={
-            "client_key": _required_env(CLIENT_KEY_ENV),
-            "client_secret": _required_env(CLIENT_SECRET_ENV),
+            "client_key": _required_env(CLIENT_KEY_ENV, fallbacks=CLIENT_KEY_ENV_FALLBACKS),
+            "client_secret": _required_env(CLIENT_SECRET_ENV, fallbacks=CLIENT_SECRET_ENV_FALLBACKS),
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
         },

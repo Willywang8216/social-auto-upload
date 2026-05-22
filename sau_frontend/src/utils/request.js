@@ -42,7 +42,10 @@ request.interceptors.response.use(
   },
   (error) => {
     console.error('回應錯誤:', error)
-    
+
+    // Extract backend error message from response body if available
+    const backendMsg = error.response?.data?.msg || error.response?.data?.message || ''
+
     // 处理HTTP错误状态码
     if (error.response) {
       const { status } = error.response
@@ -60,18 +63,18 @@ request.interceptors.response.use(
           }
           break
         case 404:
-          ElMessage.error('找不到請求位址')
+          ElMessage.error(backendMsg || '找不到請求位址')
           break
         case 500:
-          ElMessage.error('伺服器內部錯誤')
+          ElMessage.error(backendMsg || '伺服器內部錯誤')
           break
         default:
-          ElMessage.error('網路錯誤')
+          ElMessage.error(backendMsg || '請求失敗')
       }
     } else {
       ElMessage.error('網路連線失敗')
     }
-    
+
     return Promise.reject(error)
   }
 )
