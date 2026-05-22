@@ -7,6 +7,7 @@ import { getApiBaseUrl } from '@/utils/api-url'
 // 创建axios实例
 const request = axios.create({
   baseURL: getApiBaseUrl(),
+  timeout: 30000,
   headers: {
     'Content-Type': 'application/json'
   }

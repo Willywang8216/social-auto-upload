@@ -29,7 +29,7 @@
           <el-option
             v-for="acc in oauthAccounts"
             :key="acc.id"
-            :label="`${acc.platform} - ${acc.account_name}`"
+            :label="`${acc.platform} - ${acc.accountName || acc.name}`"
             :value="acc.id"
           />
         </el-select>
@@ -226,19 +226,21 @@ import { ElMessage } from 'element-plus'
 import { Refresh, View, Star, TrendCharts, VideoCamera } from '@element-plus/icons-vue'
 import { useAnalyticsStore } from '@/stores/analytics'
 import { useAccountStore } from '@/stores/account'
+import { useProfilesStore } from '@/stores/profiles'
 import { accountApi } from '@/api/account'
 import AnalyticsChart from '@/components/AnalyticsChart.vue'
 import AdvisorPanel from '@/components/AdvisorPanel.vue'
 
 const store = useAnalyticsStore()
 const accountStore = useAccountStore()
+const profilesStore = useProfilesStore()
 
 const dateRange = ref(null)
 const engagementTrends = ref([])
 
 const oauthAccounts = computed(() => {
   return (accountStore.accounts || []).filter(
-    a => a.auth_type === 'oauth' && ['youtube', 'tiktok'].includes(a.platform)
+    a => a.authType === 'oauth' && ['youtube', 'tiktok'].includes(a.platformSlug)
   )
 })
 
@@ -360,6 +362,7 @@ async function handleGetAdvice() {
 }
 
 async function fetchEngagementTrends() {
+  store.loading.engagementTrends = true
   try {
     const { analyticsApi } = await import('@/api/analytics')
     const res = await analyticsApi.getTrends({
@@ -369,21 +372,33 @@ async function fetchEngagementTrends() {
       dateTo: store.filters.dateTo,
       metric: 'engagement_rate',
     })
-    engagementTrends.value = res || []
+    engagementTrends.value = res?.data || []
   } catch {
     engagementTrends.value = []
+  } finally {
+    store.loading.engagementTrends = false
   }
 }
 
 // --- Init ---
 
 onMounted(async () => {
-  // Load accounts if not already in store
+  // Load accounts if not already in store (from both legacy + profiles)
   if (!accountStore.accounts?.length) {
     try {
-      const accounts = await accountApi.getAccounts()
-      accountStore.setAccounts(accounts || [])
-    } catch { /* ignore */ }
+      const profiles = await profilesStore.refreshProfiles()
+      const legacyResponse = await accountApi.getAccounts()
+      const legacyAccounts = legacyResponse?.data || []
+      const structuredGroups = await Promise.all(
+        profiles.map(async (profile) => {
+          const items = await profilesStore.fetchAccountsForProfile(profile.id)
+          return items.map((item) => ({ ...item, profileName: profile.name }))
+        })
+      )
+      accountStore.setAccounts([...legacyAccounts, ...structuredGroups.flat()])
+    } catch (e) {
+      console.error('Failed to load accounts for analytics:', e)
+    }
   }
   await store.refreshAll()
   await fetchEngagementTrends()

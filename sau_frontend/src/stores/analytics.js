@@ -15,6 +15,7 @@ export const useAnalyticsStore = defineStore('analytics', () => {
     videos: false,
     topVideos: false,
     trends: false,
+    engagementTrends: false,
     sync: false,
     advice: false,
   })
@@ -35,7 +36,7 @@ export const useAnalyticsStore = defineStore('analytics', () => {
         dateFrom: filters.dateFrom,
         dateTo: filters.dateTo,
       })
-      overview.value = res
+      overview.value = res?.data
     } finally {
       loading.overview = false
     }
@@ -49,7 +50,7 @@ export const useAnalyticsStore = defineStore('analytics', () => {
         accountId: filters.accountId,
         ...params,
       })
-      videos.value = res || []
+      videos.value = res?.data || []
     } finally {
       loading.videos = false
     }
@@ -63,7 +64,7 @@ export const useAnalyticsStore = defineStore('analytics', () => {
         accountId: filters.accountId,
         ...params,
       })
-      topVideos.value = res || []
+      topVideos.value = res?.data || []
     } finally {
       loading.topVideos = false
     }
@@ -79,7 +80,7 @@ export const useAnalyticsStore = defineStore('analytics', () => {
         dateTo: filters.dateTo,
         metric,
       })
-      trends.value = res || []
+      trends.value = res?.data || []
     } finally {
       loading.trends = false
     }
@@ -91,7 +92,7 @@ export const useAnalyticsStore = defineStore('analytics', () => {
       const res = accountId
         ? await analyticsApi.syncAccount(accountId)
         : await analyticsApi.syncAll()
-      return res
+      return res?.data
     } finally {
       loading.sync = false
     }
@@ -106,7 +107,7 @@ export const useAnalyticsStore = defineStore('analytics', () => {
         dateFrom: filters.dateFrom,
         dateTo: filters.dateTo,
       })
-      advice.value = res
+      advice.value = res?.data
     } finally {
       loading.advice = false
     }
@@ -114,7 +115,7 @@ export const useAnalyticsStore = defineStore('analytics', () => {
 
   async function fetchSyncStatus() {
     const res = await analyticsApi.getSyncStatus({ limit: 10 })
-    syncStatus.value = res || []
+    syncStatus.value = res?.data || []
   }
 
   async function refreshAll() {
