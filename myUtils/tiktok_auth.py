@@ -111,9 +111,12 @@ def exchange_code_for_token(
     )
     response.raise_for_status()
     payload = response.json()
-    if payload.get("error"):
-        raise TikTokOAuthError(str(payload.get("error_description") or payload["error"]))
-    return payload
+    # TikTok v2 wraps tokens in "data" and always includes "error" with code="ok" on success
+    error_obj = payload.get("error") or {}
+    error_code = str(error_obj.get("code") or payload.get("error") or "").strip().lower()
+    if error_code and error_code != "ok":
+        raise TikTokOAuthError(str(error_obj.get("message") or payload.get("error_description") or error_code))
+    return payload.get("data") or payload
 
 
 def refresh_access_token(*, refresh_token: str, session=None) -> dict[str, Any]:
@@ -130,9 +133,12 @@ def refresh_access_token(*, refresh_token: str, session=None) -> dict[str, Any]:
     )
     response.raise_for_status()
     payload = response.json()
-    if payload.get("error"):
-        raise TikTokOAuthError(str(payload.get("error_description") or payload["error"]))
-    return payload
+    # TikTok v2 wraps tokens in "data" and always includes "error" with code="ok" on success
+    error_obj = payload.get("error") or {}
+    error_code = str(error_obj.get("code") or payload.get("error") or "").strip().lower()
+    if error_code and error_code != "ok":
+        raise TikTokOAuthError(str(error_obj.get("message") or payload.get("error_description") or error_code))
+    return payload.get("data") or payload
 
 
 def fetch_user_info(
@@ -150,6 +156,9 @@ def fetch_user_info(
     )
     response.raise_for_status()
     payload = response.json()
-    if payload.get("error"):
-        raise TikTokOAuthError(str(payload.get("error").get("message") or payload["error"]))
+    # TikTok v2 wraps user data in "data" and always includes "error" with code="ok" on success
+    error_obj = payload.get("error") or {}
+    error_code = str(error_obj.get("code") or "").strip().lower()
+    if error_code and error_code != "ok":
+        raise TikTokOAuthError(str(error_obj.get("message") or error_code))
     return payload
