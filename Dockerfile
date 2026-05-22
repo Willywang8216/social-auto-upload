@@ -2,11 +2,11 @@ FROM node:22.21.1 AS builder
 
 WORKDIR /app
 
-RUN npm config set registry https://registry.npmmirror.com
+RUN npm config set registry https://registry.npmjs.org
 
 COPY sau_frontend .
 
-RUN npm install
+RUN npm install --legacy-peer-deps
 
 ENV NODE_ENV=production
 ENV PATH=/app/node_modules/.bin:$PATH
