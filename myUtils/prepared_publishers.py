@@ -954,12 +954,11 @@ def _validate_tiktok_photo_payload(public_urls: list[str], *, message: str) -> N
 TIKTOK_FILE_UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024  # 5 MB minimum per TikTok docs
 
 
-def _tiktok_file_upload(http, video_path: Path, upload_url: str) -> None:
+def _tiktok_file_upload(http, video_path: Path, upload_url: str, chunk_size: int) -> None:
     """Upload a video file to TikTok via chunked PUT to the presigned upload_url."""
     import mimetypes
 
     total_size = video_path.stat().st_size
-    chunk_size = TIKTOK_FILE_UPLOAD_CHUNK_SIZE
     mime_type = mimetypes.guess_type(video_path.name)[0] or "video/mp4"
 
     with video_path.open("rb") as fh:
@@ -1039,8 +1038,9 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         if local_path and Path(local_path).expanduser().resolve().is_file():
             video_path = Path(local_path).expanduser().resolve()
             file_size = video_path.stat().st_size
-            # TikTok requires chunk_size to match actual upload chunks.
-            # For simplicity, upload as a single chunk (up to 4 GB max).
+            # TikTok sandbox requires total_chunk_count=1. The upload function
+            # MUST use the same chunk_size declared here, or the presigned URL
+            # rejects the PUT with 416 Range Not Satisfiable.
             chunk_size = file_size
             total_chunks = 1
             request_body = {
@@ -1069,7 +1069,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             upload_url = resp_data_inner.get("upload_url") or ""
             if not upload_url:
                 raise PreparedPublishError("TikTok FILE_UPLOAD init did not return an upload_url")
-            _tiktok_file_upload(http, video_path, upload_url)
+            _tiktok_file_upload(http, video_path, upload_url, chunk_size)
             return {
                 "creator_info": creator_info,
                 "publish": resp_data,
