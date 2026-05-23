@@ -707,6 +707,51 @@ def delete_file():
             "data": None
         }), 500
 
+@app.route('/deleteFiles', methods=['POST'])
+def delete_files_batch():
+    data = _read_json_body()
+    ids = data.get('ids', [])
+    if not ids:
+        return jsonify({'code': 400, 'msg': 'No IDs provided', 'data': None}), 400
+
+    succeeded = []
+    failed = []
+    try:
+        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            for file_id in ids:
+                try:
+                    cursor.execute("SELECT * FROM file_records WHERE id = ?", (int(file_id),))
+                    record = cursor.fetchone()
+                    if not record:
+                        failed.append({'id': file_id, 'error': 'Not found'})
+                        continue
+                    record = dict(record)
+                    file_path = Path(BASE_DIR / "videoFile" / record['file_path'])
+                    if file_path.exists():
+                        try:
+                            file_path.unlink()
+                        except Exception:
+                            pass
+                    cursor.execute("DELETE FROM file_records WHERE id = ?", (record['id'],))
+                    succeeded.append(record['id'])
+                except Exception as e:
+                    failed.append({'id': file_id, 'error': str(e)})
+            conn.commit()
+    except Exception as e:
+        return jsonify({'code': 500, 'msg': f'Batch delete failed: {e}', 'data': None}), 500
+
+    return jsonify({
+        'code': 200,
+        'msg': f'Deleted {len(succeeded)} files',
+        'data': {
+            'succeeded': len(succeeded),
+            'failed': len(failed),
+            'details': {'succeeded': succeeded, 'failed': failed}
+        }
+    }), 200
+
 @app.route('/deleteAccount', methods=['GET'])
 def delete_account():
     account_id = request.args.get('id')
@@ -3597,6 +3642,7 @@ def oauth_admin_status():
         profile_registry.PLATFORM_INSTAGRAM,
         profile_registry.PLATFORM_THREADS,
         profile_registry.PLATFORM_TWITTER,
+        profile_registry.PLATFORM_TIKTOK,
     }:
         return jsonify({'code': 400, 'msg': 'Unsupported platform for OAuth status', 'data': None}), 400
 
@@ -3623,6 +3669,10 @@ def oauth_admin_status():
         redirect_uri = _twitter_callback_base_url()
         request_state = x_review.latest_oauth_request(account_id=account_id, db_path=db_path)
         products = ['Twitter/X OAuth 2.0']
+    elif platform == profile_registry.PLATFORM_TIKTOK:
+        redirect_uri = _tiktok_callback_base_url() or tiktok_auth.default_redirect_uri()
+        request_state = tiktok_review.latest_oauth_request(account_id=account_id, db_path=db_path)
+        products = ['TikTok Login Kit', 'Content Posting API']
 
     events = account_events.list_events(limit=25, account_id=account_id, platform=platform, db_path=db_path)
     last_start = next((event for event in events if event.action == 'oauth_start'), None)

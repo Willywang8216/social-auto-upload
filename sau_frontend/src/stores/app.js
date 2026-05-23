@@ -47,6 +47,12 @@ export const useAppStore = defineStore('app', () => {
       materials.value.splice(index, 1)
     }
   }
+
+  // 批量删除素材
+  const removeMaterials = (ids) => {
+    const idSet = new Set(ids)
+    materials.value = materials.value.filter(m => !idSet.has(m.id))
+  }
   
   // 设置账号管理页面刷新状态
   const setAccountRefreshing = (status) => {
@@ -64,6 +70,7 @@ export const useAppStore = defineStore('app', () => {
     setMaterials,
     addMaterial,
     removeMaterial,
+    removeMaterials,
     setAccountRefreshing
   }
 })

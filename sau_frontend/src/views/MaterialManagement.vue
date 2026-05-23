@@ -15,6 +15,13 @@
           @input="handleSearch"
         />
         <div class="action-buttons">
+          <el-button
+            v-if="selectedMaterials.length > 0"
+            type="danger"
+            @click="handleBatchDelete"
+          >
+            批量刪除 ({{ selectedMaterials.length }})
+          </el-button>
           <el-button type="primary" @click="handleUploadMaterial">上傳素材</el-button>
           <el-button type="info" @click="fetchMaterials" :loading="false">
             <el-icon :class="{ 'is-loading': isRefreshing }"><Refresh /></el-icon>
@@ -25,7 +32,8 @@
       </div>
       
       <div v-if="filteredMaterials.length > 0" class="material-list">
-        <el-table :data="filteredMaterials" style="width: 100%">
+        <el-table :data="filteredMaterials" style="width: 100%" @selection-change="handleSelectionChange">
+          <el-table-column type="selection" width="48" />
           <el-table-column prop="uuid" label="UUID" width="180" />
           <el-table-column prop="filename" label="檔案名稱" width="300" />
           <el-table-column prop="filesize" label="檔案大小" width="120">
@@ -155,6 +163,9 @@ const appStore = useAppStore()
 const searchKeyword = ref('')
 const isRefreshing = ref(false)
 const isUploading = ref(false)
+
+// 批量选择
+const selectedMaterials = ref([])
 
 // 对话框控制
 const uploadDialogVisible = ref(false)
@@ -344,7 +355,7 @@ const handleDelete = (material) => {
     .then(async () => {
       try {
         const response = await materialApi.deleteMaterial(material.id)
-        
+
         if (response.code === 200) {
           appStore.removeMaterial(material.id)
           ElMessage.success('刪除成功')
@@ -354,6 +365,45 @@ const handleDelete = (material) => {
       } catch (error) {
         console.error('刪除素材失敗:', error)
         ElMessage.error('刪除失敗')
+      }
+    })
+    .catch(() => {
+      // 取消刪除
+    })
+}
+
+// 選擇變更
+const handleSelectionChange = (rows) => {
+  selectedMaterials.value = rows
+}
+
+// 批量刪除
+const handleBatchDelete = () => {
+  const count = selectedMaterials.value.length
+  ElMessageBox.confirm(
+    `確定要刪除選取的 ${count} 個素材嗎？`,
+    '警告',
+    {
+      confirmButtonText: '確定',
+      cancelButtonText: '取消',
+      type: 'warning',
+    }
+  )
+    .then(async () => {
+      try {
+        const ids = selectedMaterials.value.map(m => m.id)
+        const response = await materialApi.deleteBatchMaterials(ids)
+
+        if (response.code === 200) {
+          appStore.removeMaterials(ids)
+          selectedMaterials.value = []
+          ElMessage.success(`成功刪除 ${response.data?.succeeded ?? count} 個素材`)
+        } else {
+          ElMessage.error(response.msg || '批量刪除失敗')
+        }
+      } catch (error) {
+        console.error('批量刪除失敗:', error)
+        ElMessage.error('批量刪除失敗')
       }
     })
     .catch(() => {

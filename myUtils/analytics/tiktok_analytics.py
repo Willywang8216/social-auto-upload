@@ -1,8 +1,6 @@
 """TikTok API analytics fetcher.
 
 Uses the TikTok Content Posting API to list videos and fetch metrics.
-Note: the current OAuth scopes (user.info.basic, video.upload, video.publish)
-may not include video.list — if so, the fetcher will raise a clear error.
 """
 
 from __future__ import annotations
@@ -13,6 +11,7 @@ from typing import Any
 
 import requests
 
+from myUtils import tiktok_auth
 from myUtils.analytics.base import compute_engagement_rate
 
 logger = logging.getLogger(__name__)
@@ -22,27 +21,12 @@ TIKTok_VIDEO_QUERY_URL = "https://open.tiktokapis.com/v2/video/query/"
 
 
 def _refresh_token(config: dict[str, Any], session: requests.Session) -> str:
-    """Refresh TikTok access token."""
+    """Refresh TikTok access token using tiktok_auth (reads credentials from env vars)."""
     refresh_token = str(config.get("refreshToken") or "").strip()
-    client_key = str(config.get("clientKey") or "").strip()
-    client_secret = str(config.get("clientSecret") or "").strip()
-
     if not refresh_token:
         raise ValueError("TikTok analytics requires refreshToken in account config")
-
-    resp = session.post(
-        "https://open.tiktokapis.com/v2/oauth/token/",
-        data={
-            "client_key": client_key,
-            "client_secret": client_secret,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json().get("data", {})
-    access_token = data.get("access_token")
+    data = tiktok_auth.refresh_access_token(refresh_token=refresh_token, session=session)
+    access_token = str(data.get("access_token") or "").strip()
     if not access_token:
         raise ValueError("TikTok token refresh did not return access_token")
     return access_token

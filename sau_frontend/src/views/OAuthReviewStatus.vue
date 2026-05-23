@@ -155,6 +155,7 @@ const OAUTH_PLATFORMS = [
   { value: 'facebook', label: 'Facebook' },
   { value: 'instagram', label: 'Instagram' },
   { value: 'threads', label: 'Threads' },
+  { value: 'tiktok', label: 'TikTok' },
 ]
 
 const route = useRoute()
@@ -222,6 +223,11 @@ const credentialRows = computed(() => {
     rows.unshift(
       { label: 'Username', value: config.threadsUserName || '' },
       { label: 'User ID', value: config.threadUserId || config.userId || '' }
+    )
+  } else if (platform.value === 'tiktok') {
+    rows.unshift(
+      { label: 'Display name', value: config.tiktokDisplayName || config.displayName || '' },
+      { label: 'Open ID', value: config.tiktokOpenId || config.openId || '' }
     )
   }
 

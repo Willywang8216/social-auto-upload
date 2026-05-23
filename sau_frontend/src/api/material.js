@@ -18,6 +18,11 @@ export const materialApi = {
   deleteMaterial: (id) => {
     return http.get(`/deleteFile?id=${id}`)
   },
+
+  // 批量删除素材
+  deleteBatchMaterials: (ids) => {
+    return http.post('/deleteFiles', { ids })
+  },
   
   // 下载素材
   downloadMaterial: (filePath) => {
