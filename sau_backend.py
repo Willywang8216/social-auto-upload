@@ -1386,7 +1386,10 @@ def _profile_payload(profile: profile_registry.Profile) -> dict:
 
 
 def _account_payload(account: profile_registry.Account) -> dict:
-    return account.to_dict()
+    payload = account.to_dict()
+    if account.platform == "tiktok":
+        payload["isSandbox"] = os.environ.get("TIKTOK_CLIENT_KEY", "").startswith("sb")
+    return payload
 
 
 def _media_group_payload(

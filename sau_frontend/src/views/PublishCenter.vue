@@ -111,9 +111,17 @@
         <el-checkbox v-model="options.intro">加入片頭（影片）</el-checkbox>
         <el-checkbox v-model="options.outro">加入片尾（影片）</el-checkbox>
         <el-checkbox v-model="options.linkInFirstComment">連結放第一則留言（支援的平台）</el-checkbox>
-        <el-checkbox v-if="hasTiktokSelected" v-model="options.tiktokDirectPost">
+        <el-checkbox v-if="hasTiktokSelected && !isTiktokSandbox" v-model="options.tiktokDirectPost">
           直接發佈到 TikTok（跳過草稿）
         </el-checkbox>
+        <el-alert
+          v-if="isTiktokSandbox"
+          title="TikTok 開發模式：影片將直接發佈到個人檔案（草稿功能需通過 App 審核後才能使用）"
+          type="info"
+          show-icon
+          :closable="false"
+          style="margin-top: 8px;"
+        />
       </div>
       <el-divider />
       <div class="pc-screenshots">
@@ -362,6 +370,18 @@ const hasTiktokSelected = computed(() => {
     const accounts = profileAccountCache[profileId] || []
     for (const account of accounts) {
       if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
+        return true
+      }
+    }
+  }
+  return false
+})
+
+const isTiktokSandbox = computed(() => {
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    for (const account of accounts) {
+      if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id) && account.isSandbox) {
         return true
       }
     }
