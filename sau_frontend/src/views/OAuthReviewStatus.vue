@@ -34,10 +34,10 @@
                 <span>{{ p.label }}</span>
                 <el-tag
                   v-if="allStatuses[p.value]"
-                  :type="allStatuses[p.value].lastCallback?.status === 'ok' ? 'success' : (allStatuses[p.value].lastCallback ? 'danger' : 'info')"
+                  :type="summaryTagType(allStatuses[p.value])"
                   size="small"
                 >
-                  {{ allStatuses[p.value].lastCallback ? (allStatuses[p.value].lastCallback.status === 'ok' ? '連線正常' : '連線失敗') : '無資料' }}
+                  {{ summaryTagLabel(allStatuses[p.value]) }}
                 </el-tag>
               </div>
             </template>
@@ -45,6 +45,7 @@
               <div class="kv compact"><span>Account</span><strong>{{ allStatuses[p.value].account?.account_name || '—' }}</strong></div>
               <div class="kv compact"><span>Last check</span><strong>{{ allStatuses[p.value].lastCallback?.created_at || '—' }}</strong></div>
               <div class="kv compact"><span>Expires</span><strong>{{ allStatuses[p.value].expiresAt || '—' }}</strong></div>
+              <div v-if="allStatuses[p.value].recommendedAction" class="kv compact"><span>Action</span><strong>{{ actionLabel(allStatuses[p.value].recommendedAction) }}</strong></div>
             </template>
             <el-empty v-else description="尚未設定" :image-size="60" />
           </el-card>
@@ -107,7 +108,7 @@
           <template #header>Last request / callback</template>
           <div v-if="status.lastRequest || status.lastCallback" class="event-card">
             <div class="kv"><span>Last request</span><strong>{{ status.lastRequest?.requestedAt || '—' }}</strong></div>
-            <div class="kv"><span>Request status</span><strong>{{ status.lastRequest?.status || status.lastStart?.status || '—' }}</strong></div>
+            <div class="kv"><span>Request status</span><strong>{{ requestStatusLabel(status.lastRequest?.status || status.lastStart?.status) }}</strong></div>
             <div class="kv"><span>Last callback</span><strong>{{ status.lastCallback?.created_at || '—' }}</strong></div>
             <div class="kv"><span>Callback status</span><strong>{{ status.lastCallback?.status || '—' }}</strong></div>
             <div class="kv"><span>Summary</span><strong>{{ status.lastCallback?.summary || '—' }}</strong></div>
@@ -238,6 +239,56 @@ const title = computed(() => platform.value ? `${platform.value} status` : 'OAut
 
 function backToAll() {
   router.replace({ path: '/oauth-review' })
+}
+
+const STATUS_LABELS = {
+  completed: '已完成',
+  pending_ig_selection: '等待選擇 IG 帳號',
+  pending_page_selection: '等待選擇粉絲專頁',
+  started: '進行中',
+  error: '失敗',
+}
+
+const ACTION_LABELS = {
+  reconnect: '需重新連線',
+  refresh: '需重新整理 Token',
+  connect: '需連線帳號',
+}
+
+function requestStatusLabel(status) {
+  return STATUS_LABELS[status] || status || '—'
+}
+
+function actionLabel(action) {
+  return ACTION_LABELS[action] || action || '—'
+}
+
+function summaryTagType(s) {
+  if (!s) return 'info'
+  if (s.account) {
+    return s.reconnectRequired ? 'danger' : 'success'
+  }
+  const cbStatus = s.lastCallback?.status
+  if (cbStatus === 'ok') return 'success'
+  if (cbStatus && isPendingStatus(s.lastRequest?.status)) return 'warning'
+  if (cbStatus) return 'danger'
+  return 'info'
+}
+
+function summaryTagLabel(s) {
+  if (!s) return '無資料'
+  if (s.account) {
+    return s.reconnectRequired ? '需重新連線' : '已連線'
+  }
+  const cbStatus = s.lastCallback?.status
+  if (cbStatus === 'ok') return '連線正常'
+  if (cbStatus && isPendingStatus(s.lastRequest?.status)) return '進行中'
+  if (cbStatus) return '連線失敗'
+  return '無資料'
+}
+
+function isPendingStatus(status) {
+  return status === 'pending_ig_selection' || status === 'pending_page_selection'
 }
 
 function goToAccountQueue() {
