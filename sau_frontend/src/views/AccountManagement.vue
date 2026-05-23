@@ -1801,7 +1801,6 @@ async function connectWithTikTok() {
       profileId: accountForm.profileId,
       accountId: accountForm.id,
       accountName: accountForm.name,
-      scopes: ['user.info.basic', 'video.upload', 'video.publish']
     })
     popup.location = response.data.authorizeUrl
   } catch (error) {
@@ -2178,7 +2177,11 @@ async function finalizeMetaPageSelection(page, tokenData, accountName, targetAcc
     const accountId = targetAccountId || accountForm.id
     console.log('🔍 finalizeMetaPageSelection called:', { page: { id: page.id, name: page.name, igUserId: page.igUserId, hasAccessToken: Boolean(page.access_token) }, tokenData: { hasUserAccessToken: Boolean(tokenData.userAccessToken), metaUserAccessTokenExpiresAt: tokenData.metaUserAccessTokenExpiresAt }, targetAccountId: accountId, currentFormId: accountForm.id })
     const isIG = Boolean(page.igUserId)
+    // Read existing config to preserve fields like avatarUrl that the backend saved
+    const existingAccount = accountStore.accounts.find(a => String(a.id) === String(accountId))
+    const existingConfig = existingAccount?.config || {}
     const config = {
+      ...existingConfig,
       pageId: page.id,
       facebookPageName: page.name,
       accessToken: page.access_token,
@@ -2245,13 +2248,20 @@ async function handleMetaOauthMessage(event) {
   // Non-selector path: backend auto-selected (single page/IG).
   // The backend already saved the config in the callback, but we explicitly
   // PATCH here to make sure the frontend state is in sync.
+  // Merge with existing config to preserve fields like avatarUrl.
   try {
+    const existingAccount = accountStore.accounts.find(a => String(a.id) === String(targetAccountId))
+    const existingConfig = existingAccount?.config || {}
     const config = {
+      ...existingConfig,
       pageId: data.pageId || '',
       facebookPageName: data.facebookPageName || '',
       accessToken: data.accessToken || '',
       accessTokenUpdatedAt: data.accessTokenUpdatedAt || new Date().toISOString(),
       connectedAt: data.connectedAt || new Date().toISOString(),
+    }
+    if (data.avatarUrl) {
+      config.avatarUrl = data.avatarUrl
     }
     if (data.platform === 'instagram') {
       config.igUserId = data.igUserId || ''

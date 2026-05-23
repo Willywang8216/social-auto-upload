@@ -1731,6 +1731,9 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
             if channel_items:
                 snippet = channel_items[0].get('snippet', {}) if isinstance(channel_items[0], dict) else {}
                 config['channelTitle'] = snippet.get('title', config.get('channelTitle', ''))
+                avatar_url = snippet.get('thumbnails', {}).get('default', {}).get('url')
+                if avatar_url:
+                    config['avatarUrl'] = avatar_url
             updated = profile_registry.update_account(
                 account_id,
                 config=config,
@@ -1745,7 +1748,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 raise ValueError('Threads account is missing accessToken')
             refreshed = threads_auth.refresh_long_lived_token(access_token=access_token)
             next_access_token = str(refreshed.get('access_token') or access_token)
-            me_payload = threads_auth.fetch_me(access_token=next_access_token) if next_access_token else {}
+            me_payload = threads_auth.fetch_me(access_token=next_access_token, fields=('id', 'username', 'threads_profile_picture_url')) if next_access_token else {}
             config.update({
                 'accessToken': next_access_token,
                 'accessTokenUpdatedAt': now,
@@ -1754,6 +1757,8 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 'userId': str(me_payload.get('id') or config.get('userId') or config.get('threadUserId') or ''),
                 'threadsUserName': str(me_payload.get('username') or config.get('threadsUserName') or ''),
             })
+            if me_payload.get('threads_profile_picture_url'):
+                config['avatarUrl'] = str(me_payload.get('threads_profile_picture_url'))
             expires_in = refreshed.get('expires_in')
             if expires_in:
                 config['accessTokenExpiresAt'] = (
@@ -1792,6 +1797,14 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 config['accessToken'] = str(selected_page.get('access_token') or config.get('accessToken') or '')
                 if config.get('metaUserAccessTokenExpiresAt'):
                     config['accessTokenExpiresAt'] = str(config.get('metaUserAccessTokenExpiresAt'))
+                # Fetch Facebook page profile picture
+                try:
+                    pic_resp = session.get(f"{meta_auth.META_GRAPH_ROOT}/{config['pageId']}", params={"fields": "picture.type(large)", "access_token": config['accessToken']}, timeout=15)
+                    pic_url = pic_resp.json().get("picture", {}).get("data", {}).get("url")
+                    if pic_url:
+                        config['avatarUrl'] = pic_url
+                except Exception:
+                    pass
                 updated = profile_registry.update_account(account_id, config=config, auth_type='oauth', status=1, db_path=db_path)
                 summary = f"Facebook credentials re-synced: {config.get('facebookPageName') or updated.account_name}"
             else:
@@ -2891,7 +2904,7 @@ def meta_oauth_callback():
             # Fetch Facebook page profile picture
             try:
                 page_token = selected_page.get('access_token') or user_access_token
-                pic_resp = session.get(f"{META_GRAPH_ROOT}/{merged_config['pageId']}", params={"fields": "picture.type(large)", "access_token": page_token}, timeout=15)
+                pic_resp = session.get(f"{meta_auth.META_GRAPH_ROOT}/{merged_config['pageId']}", params={"fields": "picture.type(large)", "access_token": page_token}, timeout=15)
                 pic_data = pic_resp.json()
                 pic_url = pic_data.get("picture", {}).get("data", {}).get("url")
                 if pic_url:
@@ -2919,6 +2932,7 @@ def meta_oauth_callback():
                 'accessToken': merged_config.get('accessToken', ''),
                 'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
                 'connectedAt': merged_config.get('connectedAt', ''),
+                'avatarUrl': merged_config.get('avatarUrl', ''),
             }
             persisted = {
                 'platform': updated.platform,
@@ -2928,6 +2942,7 @@ def meta_oauth_callback():
                 'accountName': updated.account_name,
                 'pageId': merged_config.get('pageId', ''),
                 'facebookPageName': merged_config.get('facebookPageName', ''),
+                'avatarUrl': merged_config.get('avatarUrl', ''),
             }
             summary = f"Facebook connected: {merged_config.get('facebookPageName') or updated.account_name}"
         else:
@@ -3024,6 +3039,7 @@ def meta_oauth_callback():
                 'accessToken': merged_config.get('accessToken', ''),
                 'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
                 'connectedAt': merged_config.get('connectedAt', ''),
+                'avatarUrl': merged_config.get('avatarUrl', ''),
             }
             persisted = {
                 'platform': updated.platform,

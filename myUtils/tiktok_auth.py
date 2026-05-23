@@ -79,6 +79,7 @@ def build_authorize_url(
             "scope": ",".join(scopes),
             "redirect_uri": redirect_uri,
             "state": state,
+            "disable_auto_auth": "1",
         }
     )
     return f"{TIKTOK_AUTHORIZE_URL}?{query}"
