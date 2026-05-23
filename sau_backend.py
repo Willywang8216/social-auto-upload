@@ -4014,6 +4014,17 @@ def tiktok_oauth_callback():
     if not request_state:
         return Response('Unknown TikTok OAuth state', status=400, mimetype='text/plain')
 
+    # Idempotency: if already completed (duplicate callback), return stored result
+    if request_state.status == 'completed' and request_state.result:
+        result = request_state.result
+        html = f"""<html><body><script>
+        if (window.opener) {{
+          window.opener.postMessage({{ type: 'sau:tiktok-oauth', ok: true, data: {json.dumps(result, ensure_ascii=False)} }}, '*');
+        }}
+        window.close();
+        </script><p>TikTok authorization completed. You may close this window.</p></body></html>"""
+        return Response(html, mimetype='text/html')
+
     if error:
         tiktok_review.complete_oauth_request(
             state_token,
@@ -4061,9 +4072,13 @@ def tiktok_oauth_callback():
             code=code,
             redirect_uri=request_state.redirect_uri,
         )
+        if not isinstance(token_payload, dict):
+            token_payload = {}
         access_token = str(token_payload.get('access_token') or '')
         refresh_token = str(token_payload.get('refresh_token') or '')
         user_info = tiktok_auth.fetch_user_info(access_token=access_token) if access_token else {}
+        if not isinstance(user_info, dict):
+            user_info = {}
         account_id = request_state.account_id
         if account_id:
             account = profile_registry.get_account(int(account_id), db_path=db_path)
@@ -4140,6 +4155,7 @@ def tiktok_oauth_callback():
         </script><p>TikTok authorization completed. You may close this window.</p></body></html>"""
         return Response(html, mimetype='text/html')
     except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).exception("TikTok OAuth callback failed for state=%s", state_token)
         tiktok_review.complete_oauth_request(
             state_token,
             status='error',

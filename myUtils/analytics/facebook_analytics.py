@@ -73,25 +73,26 @@ def fetch_video_metrics(
     results = []
 
     for vid_id in video_ids:
-        # Get basic engagement (likes, comments, shares)
+        likes = comments = shares = 0
+        raw_engagement = {}
+
+        # Get engagement — reactions.summary works on video objects
         try:
             resp = session.get(
                 f"{META_GRAPH_ROOT}/{vid_id}",
                 params={
-                    "fields": "likes.summary(true),comments.summary(true),shares",
+                    "fields": "reactions.summary(total_count),comments.summary(true),shares",
                     "access_token": access_token,
                 },
                 timeout=30,
             )
             resp.raise_for_status()
-            item = resp.json()
+            raw_engagement = resp.json()
+            likes = int(raw_engagement.get("reactions", {}).get("summary", {}).get("total_count", 0))
+            comments = int(raw_engagement.get("comments", {}).get("summary", {}).get("total_count", 0))
+            shares = int(raw_engagement.get("shares", {}).get("count", 0))
         except Exception as exc:
             logger.warning("Facebook: failed to fetch engagement for %s: %s", vid_id, exc)
-            item = {}
-
-        likes = int(item.get("likes", {}).get("summary", {}).get("total_count", 0))
-        comments = int(item.get("comments", {}).get("summary", {}).get("total_count", 0))
-        shares = int(item.get("shares", {}).get("count", 0))
 
         # Get video view count from the video_insights edge
         views = 0
@@ -118,7 +119,7 @@ def fetch_video_metrics(
             "likes": likes,
             "comments": comments,
             "shares": shares,
-            "raw_metrics": item,
+            "raw_metrics": raw_engagement,
         })
 
     return results
