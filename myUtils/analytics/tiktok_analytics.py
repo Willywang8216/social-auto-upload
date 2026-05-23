@@ -42,17 +42,18 @@ def list_videos(
     cursor = None
 
     while len(videos) < max_results:
-        params = {"max_results": min(max_results - len(videos), 20)}
+        json_body: dict[str, Any] = {"max_count": min(max_results - len(videos), 20)}
         if cursor:
-            params["cursor"] = cursor
+            json_body["cursor"] = cursor
 
-        resp = session.get(
+        resp = session.post(
             TIKTok_VIDEO_LIST_URL,
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json; charset=UTF-8",
             },
-            params=params,
+            json=json_body,
+            params={"fields": "id,title,create_time,cover_image_url,view_count,like_count,comment_count,share_count,duration"},
             timeout=30,
         )
         resp.raise_for_status()

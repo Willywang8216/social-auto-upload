@@ -64,38 +64,62 @@ def fetch_video_metrics(
     access_token: str,
     session: requests.Session,
 ) -> list[dict]:
-    """Fetch engagement metrics for a list of Facebook video IDs."""
+    """Fetch engagement metrics for a list of Facebook video IDs.
+
+    Uses per-video queries because the batch ``?ids=`` endpoint does not
+    support ``likes.summary(true)`` and ``views`` is not a direct field
+    (view counts come from the ``video_insights`` edge).
+    """
     results = []
 
-    for i in range(0, len(video_ids), 50):
-        batch = video_ids[i:i + 50]
-        ids_str = ",".join(batch)
-        resp = session.get(
-            META_GRAPH_ROOT,
-            params={
-                "ids": ids_str,
-                "fields": "id,views,likes.summary(true),comments.summary(true),shares",
-                "access_token": access_token,
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    for vid_id in video_ids:
+        # Get basic engagement (likes, comments, shares)
+        try:
+            resp = session.get(
+                f"{META_GRAPH_ROOT}/{vid_id}",
+                params={
+                    "fields": "likes.summary(true),comments.summary(true),shares",
+                    "access_token": access_token,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            item = resp.json()
+        except Exception as exc:
+            logger.warning("Facebook: failed to fetch engagement for %s: %s", vid_id, exc)
+            item = {}
 
-        for vid_id, item in data.items():
-            views = int(item.get("views", 0))
-            likes = int(item.get("likes", {}).get("summary", {}).get("total_count", 0))
-            comments = int(item.get("comments", {}).get("summary", {}).get("total_count", 0))
-            shares = int(item.get("shares", {}).get("count", 0))
+        likes = int(item.get("likes", {}).get("summary", {}).get("total_count", 0))
+        comments = int(item.get("comments", {}).get("summary", {}).get("total_count", 0))
+        shares = int(item.get("shares", {}).get("count", 0))
 
-            results.append({
-                "platform_video_id": vid_id,
-                "views": views,
-                "likes": likes,
-                "comments": comments,
-                "shares": shares,
-                "raw_metrics": item,
-            })
+        # Get video view count from the video_insights edge
+        views = 0
+        try:
+            insight_resp = session.get(
+                f"{META_GRAPH_ROOT}/{vid_id}/video_insights",
+                params={
+                    "metric": "total_video_views",
+                    "access_token": access_token,
+                },
+                timeout=30,
+            )
+            insight_resp.raise_for_status()
+            for data_point in insight_resp.json().get("data", []):
+                for val in data_point.get("values", []):
+                    views += int(val.get("value", 0))
+        except Exception:
+            # video_insights may not be available for all videos
+            pass
+
+        results.append({
+            "platform_video_id": vid_id,
+            "views": views,
+            "likes": likes,
+            "comments": comments,
+            "shares": shares,
+            "raw_metrics": item,
+        })
 
     return results
 

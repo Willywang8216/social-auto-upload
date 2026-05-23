@@ -23,12 +23,24 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 
 def _refresh_token(config: dict[str, Any], session: requests.Session) -> str:
-    """Refresh YouTube access token and return the new access_token."""
-    client_id = str(config.get("clientId") or "").strip()
-    client_secret = str(config.get("clientSecret") or "").strip()
+    """Refresh YouTube access token and return the new access_token.
+
+    Client credentials are stored as environment variable names in the
+    account config (``clientIdEnv`` / ``clientSecretEnv``) and resolved
+    at runtime — matching the pattern used by ``youtube_auth.py``.
+    """
+    import os
+
+    client_id_env = config.get("clientIdEnv") or "YT_CLIENT_ID"
+    client_secret_env = config.get("clientSecretEnv") or "YT_CLIENT_SECRET"
+    client_id = str(os.environ.get(client_id_env, "") or "").strip()
+    client_secret = str(os.environ.get(client_secret_env, "") or "").strip()
     refresh_token = str(config.get("refreshToken") or "").strip()
     if not client_id or not client_secret or not refresh_token:
-        raise ValueError("YouTube analytics requires clientId, clientSecret, and refreshToken in account config")
+        raise ValueError(
+            "YouTube analytics requires env vars "
+            f"{client_id_env}/{client_secret_env} and refreshToken in account config"
+        )
 
     resp = session.post(
         GOOGLE_TOKEN_URL,

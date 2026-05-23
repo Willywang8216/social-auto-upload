@@ -1818,6 +1818,8 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 config['facebookPageName'] = str(page.get('name') or config.get('facebookPageName') or '')
                 config['igUserId'] = str(ig_user.get('id') or config.get('igUserId') or '')
                 config['instagramUserName'] = str(ig_user.get('username') or config.get('instagramUserName') or '')
+                if ig_user.get('profile_picture_url'):
+                    config['avatarUrl'] = str(ig_user.get('profile_picture_url'))
                 config['accessToken'] = str(page.get('access_token') or config.get('accessToken') or '')
                 if config.get('metaUserAccessTokenExpiresAt'):
                     config['accessTokenExpiresAt'] = str(config.get('metaUserAccessTokenExpiresAt'))
@@ -2886,6 +2888,16 @@ def meta_oauth_callback():
             merged_config['pageId'] = str(selected_page.get('id') or merged_config.get('pageId') or '')
             merged_config['facebookPageName'] = str(selected_page.get('name') or merged_config.get('facebookPageName') or '')
             merged_config['accessToken'] = str(selected_page.get('access_token') or user_access_token or '')
+            # Fetch Facebook page profile picture
+            try:
+                page_token = selected_page.get('access_token') or user_access_token
+                pic_resp = session.get(f"{META_GRAPH_ROOT}/{merged_config['pageId']}", params={"fields": "picture.type(large)", "access_token": page_token}, timeout=15)
+                pic_data = pic_resp.json()
+                pic_url = pic_data.get("picture", {}).get("data", {}).get("url")
+                if pic_url:
+                    merged_config['avatarUrl'] = pic_url
+            except Exception:
+                pass
             merged_config['metaUserAccessToken'] = user_access_token
             now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')
             merged_config['accessTokenUpdatedAt'] = now_utc
@@ -2928,6 +2940,7 @@ def meta_oauth_callback():
                 ig_accounts.append({
                     'igUserId': str(ig_user.get('id') or ''),
                     'instagramUserName': str(ig_user.get('username') or ''),
+                    'profilePictureUrl': str(ig_user.get('profile_picture_url') or ''),
                     'pageId': str(page.get('id') or ''),
                     'facebookPageName': str(page.get('name') or ''),
                     'pageAccessToken': str(page.get('access_token') or ''),
@@ -2983,6 +2996,8 @@ def meta_oauth_callback():
             merged_config['facebookPageName'] = selected_ig['facebookPageName']
             merged_config['igUserId'] = selected_ig['igUserId']
             merged_config['instagramUserName'] = selected_ig['instagramUserName']
+            if selected_ig.get('profilePictureUrl'):
+                merged_config['avatarUrl'] = selected_ig['profilePictureUrl']
             merged_config['accessToken'] = selected_ig['pageAccessToken'] or user_access_token
             merged_config['metaUserAccessToken'] = user_access_token
             now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')
@@ -3172,6 +3187,9 @@ def youtube_oauth_callback():
             merged_config['channelId'] = first.get('id')
         if snippet.get('title'):
             merged_config['channelTitle'] = snippet.get('title')
+        avatar_url = snippet.get('thumbnails', {}).get('default', {}).get('url')
+        if avatar_url:
+            merged_config['avatarUrl'] = avatar_url
         merged_config['scope'] = str(token_payload.get('scope') or merged_config.get('scope') or ' '.join(request_state.scopes))
         merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
         updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
@@ -3837,7 +3855,7 @@ def threads_oauth_callback():
         short_lived_access_token = str(token_payload.get('access_token') or '')
         long_lived_payload = threads_auth.exchange_for_long_lived_token(access_token=short_lived_access_token) if short_lived_access_token else {}
         access_token = str(long_lived_payload.get('access_token') or short_lived_access_token)
-        me_payload = threads_auth.fetch_me(access_token=access_token) if access_token else {}
+        me_payload = threads_auth.fetch_me(access_token=access_token, fields=('id', 'username', 'threads_profile_picture_url')) if access_token else {}
         merged_config = dict(account.config or {})
         if access_token:
             merged_config['accessToken'] = access_token
@@ -3847,6 +3865,8 @@ def threads_oauth_callback():
             merged_config['userId'] = str(user_id)
         if me_payload.get('username'):
             merged_config['threadsUserName'] = str(me_payload.get('username') or '')
+        if me_payload.get('threads_profile_picture_url'):
+            merged_config['avatarUrl'] = str(me_payload.get('threads_profile_picture_url'))
         merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
         expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
         if expires_in not in (None, ''):
