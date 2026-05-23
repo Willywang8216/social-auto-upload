@@ -115,16 +115,22 @@ def sync_account_analytics(account_id: int, db_path: Path = analytics_store.DB_P
 def sync_all_analytics(db_path: Path = analytics_store.DB_PATH) -> dict:
     """Sync analytics for all enabled OAuth accounts.
 
-    Returns {"synced": int, "errors": list[str]}.
+    Returns {"synced": int, "skipped": int, "errors": list[str], "skipped_details": list[str]}.
     """
     accounts = list_accounts(enabled=True, db_path=db_path)
     synced = 0
+    skipped = 0
     errors = []
+    skipped_details = []
 
     for account in accounts:
         if account.platform not in SUPPORTED_PLATFORMS:
+            skipped += 1
+            skipped_details.append(f"{account.platform}/{account.account_name}: platform not supported")
             continue
         if account.auth_type != "oauth":
+            skipped += 1
+            skipped_details.append(f"{account.platform}/{account.account_name}: auth_type is '{account.auth_type}', not 'oauth'")
             continue
 
         result = sync_account_analytics(account.id, db_path=db_path)
@@ -133,4 +139,4 @@ def sync_all_analytics(db_path: Path = analytics_store.DB_PATH) -> dict:
         elif result["status"] == "error":
             errors.append(f"{account.platform}/{account.account_name}: {result['error']}")
 
-    return {"synced": synced, "errors": errors}
+    return {"synced": synced, "skipped": skipped, "errors": errors, "skipped_details": skipped_details}

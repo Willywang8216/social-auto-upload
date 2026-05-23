@@ -345,7 +345,16 @@ function onDateChange(val) {
 async function handleSync() {
   try {
     const result = await store.syncNow()
-    ElMessage.success(`同步完成：${result?.synced ?? 0} 個帳號`)
+    const synced = result?.synced ?? 0
+    const skipped = result?.skipped ?? 0
+    const errorCount = result?.errors?.length ?? 0
+    if (synced > 0) {
+      ElMessage.success(`同步完成：${synced} 個帳號已同步`)
+    } else if (skipped > 0) {
+      ElMessage.warning(`無可同步的帳號：${skipped} 個帳號被略過（需為 OAuth 類型）`)
+    } else {
+      ElMessage.info('無可同步的帳號')
+    }
     await store.refreshAll()
     await fetchEngagementTrends()
   } catch (e) {
@@ -383,22 +392,20 @@ async function fetchEngagementTrends() {
 // --- Init ---
 
 onMounted(async () => {
-  // Load accounts if not already in store (from both legacy + profiles)
-  if (!accountStore.accounts?.length) {
-    try {
-      const profiles = await profilesStore.refreshProfiles()
-      const legacyResponse = await accountApi.getAccounts()
-      const legacyAccounts = legacyResponse?.data || []
-      const structuredGroups = await Promise.all(
-        profiles.map(async (profile) => {
-          const items = await profilesStore.fetchAccountsForProfile(profile.id)
-          return items.map((item) => ({ ...item, profileName: profile.name }))
-        })
-      )
-      accountStore.setAccounts([...legacyAccounts, ...structuredGroups.flat()])
-    } catch (e) {
-      console.error('Failed to load accounts for analytics:', e)
-    }
+  // Always load fresh accounts for analytics (never rely on stale store data)
+  try {
+    const profiles = await profilesStore.refreshProfiles()
+    const legacyResponse = await accountApi.getAccounts()
+    const legacyAccounts = legacyResponse?.data || []
+    const structuredGroups = await Promise.all(
+      profiles.map(async (profile) => {
+        const items = await profilesStore.fetchAccountsForProfile(profile.id)
+        return items.map((item) => ({ ...item, profileName: profile.name }))
+      })
+    )
+    accountStore.setAccounts([...legacyAccounts, ...structuredGroups.flat()])
+  } catch (e) {
+    console.error('Failed to load accounts for analytics:', e)
   }
   await store.refreshAll()
   await fetchEngagementTrends()

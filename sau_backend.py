@@ -3627,6 +3627,19 @@ def twitter_oauth_callback():
         return Response(f"<html><body><p>Twitter callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
 
 
+def _default_scopes_for_platform(platform: str) -> list[str]:
+    """Return the current default OAuth scopes for a platform."""
+    if platform == profile_registry.PLATFORM_TIKTOK:
+        return list(tiktok_auth.DEFAULT_SCOPES)
+    if platform == profile_registry.PLATFORM_REDDIT:
+        return list(reddit_auth.DEFAULT_SCOPES)
+    if platform == profile_registry.PLATFORM_YOUTUBE:
+        return list(youtube_auth.DEFAULT_SCOPES)
+    if platform == profile_registry.PLATFORM_THREADS:
+        return list(threads_auth.DEFAULT_SCOPES)
+    return []
+
+
 @app.route('/admin/oauth/status', methods=['GET'])
 def oauth_admin_status():
     db_path = _current_db_path()
@@ -3635,6 +3648,17 @@ def oauth_admin_status():
     account_id = int(raw_account_id) if raw_account_id not in (None, '') and str(raw_account_id).isdigit() else None
     if not platform:
         return jsonify({'code': 200, 'msg': 'ok', 'data': {}}), 200
+
+    # Auto-discover account when none specified
+    if account_id is None and platform:
+        try:
+            all_accounts = profile_registry.list_accounts(db_path=db_path)
+            for acc in all_accounts:
+                if acc.platform == platform and acc.auth_type == 'oauth':
+                    account_id = acc.id
+                    break
+        except Exception:
+            pass
     if platform not in {
         profile_registry.PLATFORM_REDDIT,
         profile_registry.PLATFORM_YOUTUBE,
@@ -3709,7 +3733,7 @@ def oauth_admin_status():
             'accountId': account_id,
             'redirectUri': redirect_uri,
             'selectedProducts': products,
-            'selectedScopes': request_state.scopes if request_state else [],
+            'selectedScopes': request_state.scopes if request_state and request_state.scopes else _default_scopes_for_platform(platform),
             'lastRequest': _oauth_request_to_status(request_state),
             'lastStart': last_start.to_dict() if last_start else None,
             'lastCallback': last_callback.to_dict() if last_callback else None,
@@ -3921,6 +3945,19 @@ def tiktok_oauth_start():
             status='started',
             db_path=db_path,
         )
+        _start_account_id = int(data.get('accountId')) if data.get('accountId') not in (None, '') else None
+        if _start_account_id:
+            account_events.record_event(
+                account_id=_start_account_id,
+                profile_id=int(data.get('profileId')) if data.get('profileId') not in (None, '') else None,
+                platform=profile_registry.PLATFORM_TIKTOK,
+                account_name=data.get('accountName'),
+                action='oauth_start',
+                status='started',
+                summary=f"TikTok OAuth started: {data.get('accountName')}",
+                metadata={'state': state_token, 'scopes': scopes},
+                db_path=db_path,
+            )
     except Exception as exc:  # noqa: BLE001
         return jsonify({'code': 400, 'msg': str(exc), 'data': None}), 400
     return jsonify({'code': 200, 'msg': 'ok', 'data': {'authorizeUrl': authorize_url, 'state': state_token}}), 200
@@ -3956,6 +3993,18 @@ def tiktok_oauth_callback():
             status='error',
             db_path=db_path,
         )
+        if request_state.account_id:
+            account_events.record_event(
+                account_id=int(request_state.account_id),
+                profile_id=request_state.profile_id,
+                platform=profile_registry.PLATFORM_TIKTOK,
+                account_name=request_state.account_name,
+                action='oauth_callback',
+                status='error',
+                summary=f"TikTok OAuth error: {error[:100]}",
+                metadata={'state': state_token, 'error': error},
+                db_path=db_path,
+            )
         return Response(
             """<html><body><script>
             if (window.opener) {
@@ -4030,6 +4079,18 @@ def tiktok_oauth_callback():
             status='ok',
             db_path=db_path,
         )
+        if account_id:
+            account_events.record_event(
+                account_id=int(account_id),
+                profile_id=request_state.profile_id,
+                platform=profile_registry.PLATFORM_TIKTOK,
+                account_name=request_state.account_name,
+                action='oauth_callback',
+                status='ok',
+                summary=f"TikTok connected: {callback_payload.get('displayName') or request_state.account_name}",
+                metadata={'state': state_token, 'openId': callback_payload.get('openId', ''), 'scope': callback_payload.get('scope', '')},
+                db_path=db_path,
+            )
         html = f"""<html><body><script>
         if (window.opener) {{
           window.opener.postMessage({{ type: 'sau:tiktok-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
@@ -4057,6 +4118,18 @@ def tiktok_oauth_callback():
             status='error',
             db_path=db_path,
         )
+        if request_state and request_state.account_id:
+            account_events.record_event(
+                account_id=int(request_state.account_id),
+                profile_id=request_state.profile_id,
+                platform=profile_registry.PLATFORM_TIKTOK,
+                account_name=request_state.account_name,
+                action='oauth_callback',
+                status='error',
+                summary=f"TikTok OAuth failed: {str(exc)[:100]}",
+                metadata={'state': state_token, 'error': str(exc)},
+                db_path=db_path,
+            )
         return Response(
             f"<html><body><p>TikTok callback failed: {exc}</p></body></html>",
             status=500,
@@ -4190,7 +4263,7 @@ def tiktok_admin_status():
             'redirectUri': redirect_uri,
             'webhookUri': f'{origin}/webhooks/tiktok',
             'selectedProducts': ['Login Kit for Web', 'Content Posting API', 'Webhooks'],
-            'selectedScopes': ['user.info.basic', 'video.upload', 'video.publish'],
+            'selectedScopes': list(tiktok_auth.DEFAULT_SCOPES),
             'accountId': account_id,
             'lastRequest': _oauth_request_to_status(tiktok_review.latest_oauth_request(account_id=account_id, db_path=db_path)),
             'lastCallback': _event_payload_to_status(tiktok_review.latest_review_event('callback', account_id=account_id, db_path=db_path)),
