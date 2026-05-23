@@ -67,8 +67,10 @@ def fetch_video_metrics(
     """Fetch engagement metrics for a list of Facebook video IDs.
 
     Uses per-video queries because the batch ``?ids=`` endpoint does not
-    support ``likes.summary(true)`` and ``views`` is not a direct field
-    (view counts come from the ``video_insights`` edge).
+    support engagement summaries. ``reactions.summary(total_count)`` is
+    used instead of ``likes.summary(true)`` because the latter returns
+    400 for Video objects. View counts come from the ``video_insights``
+    edge.
     """
     results = []
 

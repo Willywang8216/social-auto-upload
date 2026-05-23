@@ -4124,7 +4124,7 @@ def tiktok_oauth_callback():
         tiktok_review.complete_oauth_request(
             state_token,
             status='completed',
-            result=persisted_callback_payload,
+            result=callback_payload,
             db_path=db_path,
         )
         _append_tiktok_review_event(
