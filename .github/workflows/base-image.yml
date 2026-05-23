@@ -8,10 +8,6 @@ on:
       - 'Dockerfile.base'
       - 'requirements.txt'
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: sau-base
-
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -26,12 +22,9 @@ jobs:
       - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Downcase owner name
-        run: echo "OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - name: Build and push base image
         uses: docker/build-push-action@v6
@@ -39,6 +32,4 @@ jobs:
           context: .
           file: Dockerfile.base
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          tags: ghcr.io/willywang8216/sau-base:latest
