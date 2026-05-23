@@ -3720,8 +3720,13 @@ def oauth_admin_status():
             else:
                 expiry = str(config.get('accessTokenExpiresAt') or '')
                 expires_at = prepared_publishers._parse_iso_datetime(expiry)
-                recommended_action = 'refresh' if expiry or config.get('accessToken') else 'connect'
-                reconnect_required = False
+                if expiry and expires_at and expires_at <= prepared_publishers._utc_now():
+                    recommended_action = 'reconnect'
+                    reconnect_required = True
+                elif expiry and expires_at:
+                    recommended_action = 'refresh'
+                else:
+                    recommended_action = 'refresh' if config.get('accessToken') else 'connect'
         except LookupError:
             account_payload = None
 

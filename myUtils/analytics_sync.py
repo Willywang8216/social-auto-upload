@@ -17,7 +17,7 @@ from myUtils.profiles import Account, get_account, list_accounts
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_PLATFORMS = {"youtube", "tiktok"}
+SUPPORTED_PLATFORMS = {"youtube", "tiktok", "facebook", "instagram", "threads"}
 
 
 def _sync_youtube(account: Account, db_path: Path, session: requests.Session) -> int:
@@ -31,6 +31,27 @@ def _sync_tiktok(account: Account, db_path: Path, session: requests.Session) -> 
     from myUtils.analytics.tiktok_analytics import sync_tiktok_account
     config = account.config or {}
     videos = sync_tiktok_account(config, session)
+    return _store_videos(account, videos, db_path)
+
+
+def _sync_facebook(account: Account, db_path: Path, session: requests.Session) -> int:
+    from myUtils.analytics.facebook_analytics import sync_facebook_account
+    config = account.config or {}
+    videos = sync_facebook_account(config, session)
+    return _store_videos(account, videos, db_path)
+
+
+def _sync_instagram(account: Account, db_path: Path, session: requests.Session) -> int:
+    from myUtils.analytics.instagram_analytics import sync_instagram_account
+    config = account.config or {}
+    videos = sync_instagram_account(config, session)
+    return _store_videos(account, videos, db_path)
+
+
+def _sync_threads(account: Account, db_path: Path, session: requests.Session) -> int:
+    from myUtils.analytics.threads_analytics import sync_threads_account
+    config = account.config or {}
+    videos = sync_threads_account(config, session)
     return _store_videos(account, videos, db_path)
 
 
@@ -72,6 +93,9 @@ def _store_videos(account: Account, videos: list[dict], db_path: Path) -> int:
 _SYNC_FUNCTIONS = {
     "youtube": _sync_youtube,
     "tiktok": _sync_tiktok,
+    "facebook": _sync_facebook,
+    "instagram": _sync_instagram,
+    "threads": _sync_threads,
 }
 
 

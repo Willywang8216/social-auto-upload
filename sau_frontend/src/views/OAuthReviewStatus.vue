@@ -17,7 +17,7 @@
           <el-option v-for="p in OAUTH_PLATFORMS" :key="p.value" :label="p.label" :value="p.value" />
         </el-select>
       </div>
-      <el-button type="primary" @click="refreshStatus" :loading="loading">Refresh</el-button>
+      <el-button type="primary" @click="refreshStatus" :loading="loading">重新載入</el-button>
     </div>
 
     <!-- All-platforms summary view -->
@@ -88,6 +88,23 @@
             <div class="kv"><span>Reconnect</span><strong>{{ status.reconnectRequired ? 'yes' : 'no' }}</strong></div>
             <div class="kv"><span>Action</span><strong>{{ status.recommendedAction || '—' }}</strong></div>
             <div class="jump-actions">
+              <el-button
+                v-if="status.accountId && status.recommendedAction === 'refresh'"
+                type="warning"
+                size="small"
+                :loading="refreshingToken"
+                @click="handleRefreshToken"
+              >
+                Refresh Token
+              </el-button>
+              <el-button
+                v-if="status.accountId && status.recommendedAction === 'reconnect'"
+                type="danger"
+                size="small"
+                @click="goToAccountQueue"
+              >
+                重新連線
+              </el-button>
               <el-button plain size="small" @click="goToAccountQueue">Open account queue</el-button>
             </div>
           </div>
@@ -148,6 +165,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { oauthApi } from '@/api/oauth'
+import { profilesApi } from '@/api/profiles'
 import { buildAccountQueueNavigationQuery } from '@/utils/accountQueueRouting'
 
 const OAUTH_PLATFORMS = [
@@ -162,6 +180,7 @@ const OAUTH_PLATFORMS = [
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
+const refreshingToken = ref(false)
 const selectedPlatform = ref('')
 const allStatuses = reactive({})
 const status = reactive({
@@ -301,6 +320,20 @@ function goToAccountQueue() {
     sort: status.reconnectRequired ? 'urgency' : 'expiry',
   })
   router.push({ path: '/account-management', query })
+}
+
+async function handleRefreshToken() {
+  if (!status.accountId) return
+  refreshingToken.value = true
+  try {
+    await profilesApi.refreshAccountToken(status.accountId)
+    ElMessage.success('Token 已重新整理')
+    await refreshStatus()
+  } catch (e) {
+    ElMessage.error('Token 重新整理失敗：' + (e.message || e))
+  } finally {
+    refreshingToken.value = false
+  }
 }
 
 function onPlatformChange(value) {
