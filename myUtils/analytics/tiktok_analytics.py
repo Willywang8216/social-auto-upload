@@ -56,6 +56,26 @@ def list_videos(
             params={"fields": "id,title,create_time,cover_image_url,view_count,like_count,comment_count,share_count,duration"},
             timeout=30,
         )
+
+        # Check for scope/auth errors BEFORE raise_for_status, because
+        # TikTok returns 401 for insufficient scopes instead of a JSON body.
+        if resp.status_code == 401:
+            err_code = ""
+            try:
+                err_body = resp.json()
+                err_code = err_body.get("error", {}).get("code", "")
+            except Exception:
+                pass
+            if err_code in ("scope_not_authorized", "insufficient_scope"):
+                raise ValueError(
+                    "TikTok account lacks video.list scope. "
+                    "Re-authorize with video.list permission to enable analytics."
+                )
+            raise ValueError(
+                "TikTok API returned 401 Unauthorized. "
+                "The account may be missing the video.list scope — re-authorize to fix."
+            )
+
         resp.raise_for_status()
         body = resp.json()
 
