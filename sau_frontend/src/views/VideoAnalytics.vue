@@ -16,6 +16,9 @@
         >
           <el-option label="YouTube" value="youtube" />
           <el-option label="TikTok" value="tiktok" />
+          <el-option label="Facebook" value="facebook" />
+          <el-option label="Instagram" value="instagram" />
+          <el-option label="Threads" value="threads" />
         </el-select>
 
         <el-select
@@ -238,9 +241,13 @@ const profilesStore = useProfilesStore()
 const dateRange = ref(null)
 const engagementTrends = ref([])
 
+const SUPPORTED_ANALYTICS_PLATFORMS = ['youtube', 'tiktok', 'facebook', 'instagram', 'threads']
+
 const oauthAccounts = computed(() => {
   return (accountStore.accounts || []).filter(
-    a => a.authType === 'oauth' && ['youtube', 'tiktok'].includes(a.platformSlug)
+    a => a.authType === 'oauth'
+      && SUPPORTED_ANALYTICS_PLATFORMS.includes(a.platformSlug)
+      && (!store.filters.platform || a.platformSlug === store.filters.platform)
   )
 })
 
@@ -351,9 +358,14 @@ async function handleSync() {
     if (synced > 0) {
       ElMessage.success(`同步完成：${synced} 個帳號已同步`)
     } else if (skipped > 0) {
-      ElMessage.warning(`無可同步的帳號：${skipped} 個帳號被略過（需為 OAuth 類型）`)
+      const detail = result.skipped_details?.slice(0, 2).join('\n') || ''
+      ElMessage.warning({ message: `${skipped} 個帳號被略過${detail ? ':\n' + detail : ''}`, duration: 8000, showClose: true })
     } else {
       ElMessage.info('無可同步的帳號')
+    }
+    if (errorCount > 0) {
+      const errorDetail = result.errors?.slice(0, 3).join('\n') || ''
+      ElMessage.warning({ message: `同步完成但有 ${errorCount} 個錯誤:\n${errorDetail}`, duration: 10000, showClose: true })
     }
     await store.refreshAll()
     await fetchEngagementTrends()
