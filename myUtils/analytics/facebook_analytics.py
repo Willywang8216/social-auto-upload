@@ -66,38 +66,19 @@ def fetch_video_metrics(
 ) -> list[dict]:
     """Fetch engagement metrics for a list of Facebook video IDs.
 
-    Uses per-video queries because the batch ``?ids=`` endpoint does not
-    support engagement summaries. ``reactions.summary(total_count)`` is
-    used instead of ``likes.summary(true)`` because the latter returns
-    400 for Video objects. View counts come from the ``video_insights``
-    edge.
+    Facebook Video objects do NOT support ``likes``, ``comments``, or
+    ``shares`` fields (those are Post-only). View counts come from the
+    ``video_insights`` edge, which requires the ``read_insights``
+    permission.  If that permission is missing we log once and return
+    zeros for all metrics.
     """
     results = []
+    insights_perm_missing_logged = False
 
     for vid_id in video_ids:
-        likes = comments = shares = 0
-        raw_engagement = {}
-
-        # Get engagement — reactions.summary works on video objects
-        try:
-            resp = session.get(
-                f"{META_GRAPH_ROOT}/{vid_id}",
-                params={
-                    "fields": "reactions.summary(total_count),comments.summary(true),shares",
-                    "access_token": access_token,
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            raw_engagement = resp.json()
-            likes = int(raw_engagement.get("reactions", {}).get("summary", {}).get("total_count", 0))
-            comments = int(raw_engagement.get("comments", {}).get("summary", {}).get("total_count", 0))
-            shares = int(raw_engagement.get("shares", {}).get("count", 0))
-        except Exception as exc:
-            logger.warning("Facebook: failed to fetch engagement for %s: %s", vid_id, exc)
+        views = 0
 
         # Get video view count from the video_insights edge
-        views = 0
         try:
             insight_resp = session.get(
                 f"{META_GRAPH_ROOT}/{vid_id}/video_insights",
@@ -111,17 +92,18 @@ def fetch_video_metrics(
             for data_point in insight_resp.json().get("data", []):
                 for val in data_point.get("values", []):
                     views += int(val.get("value", 0))
-        except Exception:
-            # video_insights may not be available for all videos
-            pass
+        except Exception as exc:
+            if not insights_perm_missing_logged:
+                logger.warning("Facebook: video_insights unavailable for %s: %s", vid_id, exc)
+                insights_perm_missing_logged = True
 
         results.append({
             "platform_video_id": vid_id,
             "views": views,
-            "likes": likes,
-            "comments": comments,
-            "shares": shares,
-            "raw_metrics": raw_engagement,
+            "likes": 0,
+            "comments": 0,
+            "shares": 0,
+            "raw_metrics": {},
         })
 
     return results

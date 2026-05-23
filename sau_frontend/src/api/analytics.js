@@ -7,6 +7,9 @@ export const analyticsApi = {
   syncAccount(accountId) {
     return http.post('/analytics/sync', { accountId })
   },
+  syncJobStatus(jobId) {
+    return http.get('/analytics/sync/job', { jobId })
+  },
   getSyncStatus(params = {}) {
     return http.get('/analytics/sync/status', params)
   },

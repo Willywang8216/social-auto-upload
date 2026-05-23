@@ -5799,22 +5799,52 @@ def patreon_oauth_callback():
 # ---------------------------------------------------------------------------
 
 
+_sync_jobs = {}
+_sync_jobs_lock = threading.Lock()
+
+
 @app.route('/analytics/sync', methods=['POST'])
 def analytics_sync_route():
-    """Trigger analytics sync for all accounts or a specific account."""
+    """Trigger analytics sync for all accounts or a specific account (async)."""
     db_path = _current_db_path()
     body = request.get_json(silent=True) or {}
     account_id = body.get('accountId')
 
-    try:
-        if account_id:
-            result = analytics_sync.sync_account_analytics(int(account_id), db_path=db_path)
-            return jsonify({"code": 200, "msg": "ok", "data": result})
-        else:
-            result = analytics_sync.sync_all_analytics(db_path=db_path)
-            return jsonify({"code": 200, "msg": "ok", "data": result})
-    except Exception as exc:
-        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+    with _sync_jobs_lock:
+        running = any(j['status'] == 'running' for j in _sync_jobs.values())
+        if running:
+            return jsonify({"code": 409, "msg": "A sync is already running", "data": None}), 409
+
+    job_id = uuid.uuid4().hex[:8]
+    with _sync_jobs_lock:
+        _sync_jobs[job_id] = {'status': 'running', 'result': None, 'started_at': datetime.now().isoformat()}
+
+    def _run_sync():
+        try:
+            if account_id:
+                result = analytics_sync.sync_account_analytics(int(account_id), db_path=db_path)
+            else:
+                result = analytics_sync.sync_all_analytics(db_path=db_path)
+            with _sync_jobs_lock:
+                _sync_jobs[job_id] = {'status': 'completed', 'result': result, 'finished_at': datetime.now().isoformat()}
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Analytics sync job %s failed", job_id)
+            with _sync_jobs_lock:
+                _sync_jobs[job_id] = {'status': 'error', 'result': {'error': str(exc)}, 'finished_at': datetime.now().isoformat()}
+
+    threading.Thread(target=_run_sync, daemon=True).start()
+    return jsonify({"code": 200, "msg": "sync started", "data": {"jobId": job_id}})
+
+
+@app.route('/analytics/sync/job', methods=['GET'])
+def analytics_sync_job_status():
+    """Poll sync job status."""
+    job_id = request.args.get('jobId', '')
+    with _sync_jobs_lock:
+        job = _sync_jobs.get(job_id)
+    if not job:
+        return jsonify({"code": 404, "msg": "Job not found", "data": None}), 404
+    return jsonify({"code": 200, "msg": "ok", "data": job})
 
 
 @app.route('/analytics/sync/status', methods=['GET'])
@@ -5939,4 +5969,4 @@ def analytics_advice_route():
 _maybe_start_account_maintenance_scheduler()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0' ,port=5409)
+    app.run(host='0.0.0.0', port=5409, threaded=True)

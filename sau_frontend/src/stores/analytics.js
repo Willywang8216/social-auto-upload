@@ -92,7 +92,21 @@ export const useAnalyticsStore = defineStore('analytics', () => {
       const res = accountId
         ? await analyticsApi.syncAccount(accountId)
         : await analyticsApi.syncAll()
-      return res?.data
+      const jobId = res?.data?.jobId
+      if (!jobId) return res?.data
+
+      // Poll for completion (max 4 minutes)
+      let result = null
+      for (let i = 0; i < 120; i++) {
+        await new Promise(r => setTimeout(r, 2000))
+        const poll = await analyticsApi.syncJobStatus(jobId)
+        const job = poll?.data
+        if (job?.status === 'completed' || job?.status === 'error') {
+          result = job.result
+          break
+        }
+      }
+      return result
     } finally {
       loading.sync = false
     }
