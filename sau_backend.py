@@ -16,7 +16,7 @@ from queue import Queue
 from flask_cors import CORS
 from myUtils.auth import check_cookie
 from myUtils import account_validation
-from flask import Flask, request, jsonify, Response, render_template, send_from_directory, current_app, url_for
+from flask import Flask, request, jsonify, Response, render_template, send_from_directory, current_app, url_for, redirect
 from utils.conf_defaults import BASE_DIR
 from myUtils import campaigns as campaign_store
 from myUtils import content_rules
@@ -5964,6 +5964,55 @@ def analytics_advice_route():
         return jsonify({"code": 200, "msg": "ok", "data": advice})
     except Exception as exc:
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
+@app.route('/analytics/thumbnail/<platform_video_id>')
+def analytics_thumbnail_proxy(platform_video_id):
+    """Proxy TikTok thumbnails: fetch a fresh signed URL from TikTok's API and redirect."""
+    db_path = _current_db_path()
+    try:
+        import requests as _requests
+        from myUtils import tiktok_auth
+
+        # Find the TikTok account
+        from myUtils.profiles import list_accounts
+        accounts = list_accounts(enabled=True, db_path=db_path)
+        tiktok_accounts = [a for a in accounts if a.platform == 'tiktok']
+        if not tiktok_accounts:
+            return '', 404
+
+        config = dict(tiktok_accounts[0].config or {})
+        refresh_token = str(config.get('refreshToken') or '').strip()
+        if not refresh_token:
+            return '', 404
+
+        data = tiktok_auth.refresh_access_token(refresh_token=refresh_token)
+        access_token = str(data.get('access_token') or '').strip()
+        if not access_token:
+            return '', 404
+
+        resp = _requests.post(
+            'https://open.tiktokapis.com/v2/video/query/',
+            headers={
+                'Authorization': f'Bearer {access_token}',
+                'Content-Type': 'application/json; charset=UTF-8',
+            },
+            params={'fields': 'id,cover_image_url'},
+            json={'filters': {'video_ids': [platform_video_id]}},
+            timeout=15,
+        )
+        if not resp.ok:
+            return '', 502
+        body = resp.json()
+        videos = body.get('data', {}).get('videos', [])
+        if not videos:
+            return '', 404
+        fresh_url = videos[0].get('cover_image_url', '')
+        if not fresh_url:
+            return '', 404
+        return redirect(fresh_url)
+    except Exception:
+        return '', 502
 
 
 _maybe_start_account_maintenance_scheduler()

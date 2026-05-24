@@ -137,8 +137,8 @@
         <el-table-column label="縮圖" width="80">
           <template #default="{ row }">
             <img
-              v-if="row.thumbnail_url"
-              :src="row.thumbnail_url"
+              v-if="row.thumbnail_url || row.platform === 'tiktok'"
+              :src="thumbnailSrc(row)"
               class="video-thumbnail"
               alt=""
             />
@@ -179,8 +179,8 @@
         <el-table-column label="縮圖" width="80">
           <template #default="{ row }">
             <img
-              v-if="row.thumbnail_url"
-              :src="row.thumbnail_url"
+              v-if="row.thumbnail_url || row.platform === 'tiktok'"
+              :src="thumbnailSrc(row)"
               class="video-thumbnail"
               alt=""
             />
@@ -315,6 +315,13 @@ function formatNumber(n) {
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'
   if (n >= 1000) return (n / 1000).toFixed(1) + 'K'
   return String(n)
+}
+
+function thumbnailSrc(row) {
+  if (row.platform === 'tiktok') {
+    return `/analytics/thumbnail/${row.platform_video_id}`
+  }
+  return row.thumbnail_url || ''
 }
 
 function formatPercent(r) {

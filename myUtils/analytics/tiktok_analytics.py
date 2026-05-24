@@ -139,8 +139,9 @@ def fetch_video_metrics(
                 from datetime import datetime, timezone
                 published_at = datetime.fromtimestamp(create_time, tz=timezone.utc).isoformat()
 
+            video_id = str(item.get("id", ""))
             results.append({
-                "platform_video_id": str(item.get("id", "")),
+                "platform_video_id": video_id,
                 "title": item.get("title", ""),
                 "description": "",
                 "thumbnail_url": item.get("cover_image_url", ""),
