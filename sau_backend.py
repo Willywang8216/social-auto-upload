@@ -438,6 +438,10 @@ def get_file():
     if not target.is_relative_to(base_dir):
         return jsonify({"code": 400, "msg": "Invalid filename", "data": None}), 400
     if not target.is_file():
+        # Try redirecting to remote storage CDN
+        cdn = _get_cdn_url_for_file(filename)
+        if cdn:
+            return redirect(cdn, code=302)
         return jsonify({"code": 404, "msg": "File not found", "data": None}), 404
 
     return send_from_directory(str(base_dir), target.name)
@@ -514,14 +518,24 @@ def upload_save():
         # 保存文件
         file.save(filepath)
 
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        db_path = Path(BASE_DIR / "db" / "database.db")
+        with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                                 INSERT INTO file_records (filename, filesize, file_path)
             VALUES (?, ?, ?)
                                 ''', (filename, round(float(os.path.getsize(filepath)) / (1024 * 1024),2), final_filename))
+            file_record_id = cursor.lastrowid
             conn.commit()
             print("✅ 上传文件已记录")
+
+        # Upload to remote storage in background
+        threading.Thread(
+            target=_upload_file_to_storage,
+            args=(filepath, final_filename, file_record_id),
+            kwargs={"db_path": db_path},
+            daemon=True,
+        ).start()
 
         return jsonify({
             "code": 200,
@@ -687,6 +701,10 @@ def delete_file():
             else:
                 print(f"⚠️ 实际文件不存在: {file_path}")
 
+            # Delete from remote storage if applicable
+            if record.get('storage_key') and record.get('storage_backend_id'):
+                _delete_file_from_storage(record['storage_key'], record['storage_backend_id'], db_path=Path(BASE_DIR / "db" / "database.db"))
+
             # 删除数据库记录
             cursor.execute("DELETE FROM file_records WHERE id = ?", (file_id,))
             conn.commit()
@@ -735,6 +753,8 @@ def delete_files_batch():
                             file_path.unlink()
                         except Exception:
                             pass
+                    if record.get('storage_key') and record.get('storage_backend_id'):
+                        _delete_file_from_storage(record['storage_key'], record['storage_backend_id'], db_path=Path(BASE_DIR / "db" / "database.db"))
                     cursor.execute("DELETE FROM file_records WHERE id = ?", (record['id'],))
                     succeeded.append(record['id'])
                 except Exception as e:
@@ -2138,6 +2158,154 @@ def _load_file_record(file_record_id: int, *, db_path: Path) -> dict:
     return {key: row[key] for key in row.keys()}
 
 
+def _load_default_storage_backend(*, db_path: Path) -> dict | None:
+    """Load the default storage_backends row, or None if not configured."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM storage_backends WHERE is_default = 1 AND enabled = 1"
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def _get_cdn_url_for_file(filename: str) -> str | None:
+    """Look up a file's CDN URL from file_records. Returns None if not found."""
+    try:
+        db_path = _ensure_legacy_db_ready()
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT storage_cdn_url, storage_key, storage_backend_id FROM file_records WHERE file_path = ?",
+                (filename,),
+            ).fetchone()
+        if not row:
+            return None
+        if row["storage_cdn_url"]:
+            return row["storage_cdn_url"]
+        if row["storage_key"] and row["storage_backend_id"]:
+            backend = _load_storage_backend_by_id(row["storage_backend_id"], db_path=db_path)
+            if backend:
+                from myUtils.do_spaces import client_from_row
+                client = client_from_row(backend)
+                return client.cdn_url_for(row["storage_key"])
+    except Exception:
+        pass
+    return None
+
+
+def _load_storage_backend_by_id(backend_id: int, *, db_path: Path) -> dict | None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM storage_backends WHERE id = ?", (backend_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def _upload_file_to_storage(file_path: Path, final_filename: str, file_record_id: int, *, db_path: Path) -> None:
+    """Upload a file to the default storage backend in the background."""
+    try:
+        backend_row = _load_default_storage_backend(db_path=db_path)
+        if not backend_row:
+            return
+        from myUtils.do_spaces import client_from_row
+        from datetime import datetime
+        client = client_from_row(backend_row)
+        now = datetime.utcnow()
+        storage_key = f"uploads/{now:%Y/%m}/{final_filename}"
+        content_type = ""
+        ext = file_path.suffix.lower()
+        if ext in (".mp4", ".mov", ".avi", ".mkv"):
+            content_type = "video/mp4"
+        elif ext in (".jpg", ".jpeg"):
+            content_type = "image/jpeg"
+        elif ext in (".png",):
+            content_type = "image/png"
+        elif ext in (".webp",):
+            content_type = "image/webp"
+        cdn = client.upload_file(file_path, storage_key, content_type)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE file_records SET storage_backend_id = ?, storage_key = ?, storage_cdn_url = ? WHERE id = ?",
+                (backend_row["id"], storage_key, cdn, file_record_id),
+            )
+            conn.commit()
+        logger.info("Uploaded %s to storage: %s", final_filename, storage_key)
+    except Exception:
+        logger.exception("Failed to upload %s to storage", final_filename)
+
+
+def _download_file_from_storage(file_path: str, *, db_path: Path) -> Path | None:
+    """Download a file from storage if it has a storage_key. Returns local path or None."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT storage_key, storage_backend_id FROM file_records WHERE file_path = ? AND storage_key IS NOT NULL",
+            (file_path,),
+        ).fetchone()
+    if not row:
+        return None
+    backend_row = _load_storage_backend_by_id(row["storage_backend_id"], db_path=db_path)
+    if not backend_row:
+        return None
+    from myUtils.do_spaces import client_from_row
+    client = client_from_row(backend_row)
+    local_path = Path(BASE_DIR) / "videoFile" / file_path
+    if local_path.exists():
+        return local_path
+    try:
+        client.download_file(row["storage_key"], local_path)
+        return local_path
+    except Exception:
+        logger.exception("Failed to download %s from storage", file_path)
+        return None
+
+
+def _delete_file_from_storage(storage_key: str, backend_id: int, *, db_path: Path) -> None:
+    """Best-effort delete a file from remote storage."""
+    try:
+        backend_row = _load_storage_backend_by_id(backend_id, db_path=db_path)
+        if not backend_row:
+            return
+        from myUtils.do_spaces import client_from_row
+        client = client_from_row(backend_row)
+        client.delete_object(storage_key)
+    except Exception:
+        logger.warning("Failed to delete %s from storage", storage_key)
+
+
+def _cleanup_local_files(*, db_path: Path, max_age_hours: int = 24) -> int:
+    """Remove local copies of files that have been uploaded to remote storage."""
+    removed = 0
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT id, file_path FROM file_records
+                WHERE storage_key IS NOT NULL
+                  AND local_cleaned_at IS NULL
+                  AND upload_time < datetime('now', ?)
+            """, (f"-{max_age_hours} hours",)).fetchall()
+            for row in rows:
+                local = Path(BASE_DIR) / "videoFile" / row["file_path"]
+                if local.exists():
+                    try:
+                        local.unlink()
+                        removed += 1
+                    except Exception:
+                        continue
+                conn.execute(
+                    "UPDATE file_records SET local_cleaned_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (row["id"],),
+                )
+            conn.commit()
+    except Exception:
+        logger.exception("Local file cleanup failed")
+    if removed:
+        logger.info("Cleaned up %d local files already in storage", removed)
+    return removed
+
+
 def _ensure_file_record_for_path(file_path: str, *, db_path: Path) -> int:
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
@@ -2264,6 +2432,11 @@ def _prepare_campaign_media_artifacts(
             videofile_candidate = Path(BASE_DIR) / "videoFile" / candidate
             if videofile_candidate.exists():
                 candidate = videofile_candidate
+            else:
+                # Try downloading from remote storage
+                downloaded = _download_file_from_storage(raw, db_path=db_path)
+                if downloaded:
+                    candidate = downloaded
         return str(candidate.resolve())
     for fid in intro_ids:
         p = _resolve_aux_path(fid)
@@ -2303,6 +2476,11 @@ def _prepare_campaign_media_artifacts(
             candidate = Path(BASE_DIR) / "videoFile" / raw_path
             if candidate.exists():
                 raw_path = candidate
+            else:
+                # Try downloading from remote storage
+                downloaded = _download_file_from_storage(media_file["file_path"], db_path=db_path)
+                if downloaded:
+                    raw_path = downloaded
         source_path = raw_path.resolve()
         publish_path = source_path
         artifact_kind = None
@@ -6052,6 +6230,22 @@ try:
     do_spaces.ensure_bucket()
 except Exception:
     logging.getLogger(__name__).warning("Failed to ensure DO Spaces bucket on startup")
+
+
+def _periodic_local_cleanup():
+    """Background thread that cleans up local files already in remote storage."""
+    import time
+    while True:
+        time.sleep(6 * 3600)  # every 6 hours
+        try:
+            db = Path(BASE_DIR / "db" / "database.db")
+            if db.exists():
+                _cleanup_local_files(db_path=db)
+        except Exception:
+            logging.getLogger(__name__).exception("Periodic local cleanup failed")
+
+
+threading.Thread(target=_periodic_local_cleanup, daemon=True, name="local-cleanup").start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5409, threaded=True)

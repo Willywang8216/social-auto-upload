@@ -384,6 +384,24 @@ CREATE TABLE IF NOT EXISTS analytics_sync_log (
 )
 """
 
+STORAGE_BACKENDS = """
+CREATE TABLE IF NOT EXISTS storage_backends (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT 'do_spaces',
+    bucket TEXT NOT NULL,
+    region TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    access_key TEXT NOT NULL,
+    secret_key TEXT NOT NULL,
+    cdn_url TEXT NOT NULL DEFAULT '',
+    is_default INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_accounts_profile ON accounts(profile_id)",
     "CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform)",
@@ -433,6 +451,9 @@ INDEXES = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_vas_unique_snapshot ON video_analytics_snapshots(account_id, platform_video_id, snapshot_at)",
     "CREATE INDEX IF NOT EXISTS idx_asl_account ON analytics_sync_log(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_asl_status ON analytics_sync_log(status)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_sb_default ON storage_backends(is_default) WHERE is_default = 1",
+    "CREATE INDEX IF NOT EXISTS idx_fr_storage_key ON file_records(storage_key)",
+    "CREATE INDEX IF NOT EXISTS idx_fr_storage_backend ON file_records(storage_backend_id)",
 ]
 
 
@@ -444,6 +465,15 @@ REQUIRED_COLUMNS = {
         "auth_type": "auth_type TEXT NOT NULL DEFAULT 'cookie'",
         "config_json": "config_json TEXT NOT NULL DEFAULT '{}'",
         "enabled": "enabled INTEGER NOT NULL DEFAULT 1",
+    },
+    "file_records": {
+        "storage_backend_id": "storage_backend_id INTEGER REFERENCES storage_backends(id) ON DELETE SET NULL",
+        "storage_key": "storage_key TEXT",
+        "storage_cdn_url": "storage_cdn_url TEXT",
+        "local_cleaned_at": "local_cleaned_at DATETIME",
+    },
+    "campaign_artifacts": {
+        "storage_backend_id": "storage_backend_id INTEGER REFERENCES storage_backends(id) ON DELETE SET NULL",
     },
 }
 
@@ -543,9 +573,32 @@ def bootstrap(db_path: Path = DB_PATH) -> None:
         cursor.execute(VIDEO_ANALYTICS_VIDEOS)
         cursor.execute(VIDEO_ANALYTICS_SNAPSHOTS)
         cursor.execute(ANALYTICS_SYNC_LOG)
+        cursor.execute(STORAGE_BACKENDS)
         _ensure_required_columns(conn)
         for statement in INDEXES:
             cursor.execute(statement)
+        # Seed default storage backend from env vars if present
+        import os
+        do_key = os.environ.get("DO_SPACES_KEY", "")
+        if do_key:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO storage_backends
+                (slug, label, provider, bucket, region, endpoint, access_key, secret_key, cdn_url, is_default)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    "default",
+                    "Default DO Spaces",
+                    "do_spaces",
+                    os.environ.get("DO_SPACES_BUCKET", "sau-media"),
+                    os.environ.get("DO_SPACES_REGION", "sgp1"),
+                    f"https://{os.environ.get('DO_SPACES_REGION', 'sgp1')}.digitaloceanspaces.com",
+                    do_key,
+                    os.environ.get("DO_SPACES_SECRET", ""),
+                    os.environ.get("DO_SPACES_CDN_URL", ""),
+                ),
+            )
         conn.commit()
     _stamp_alembic_head(db_path)
 

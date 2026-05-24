@@ -162,7 +162,9 @@ class PublishWorker:
 
         try:
             async with self._concurrency.slot(target.account_ref):
-                result = self._executor(job.platform, job.payload, target)
+                # Inject db_path into payload so executors can resolve remote files
+                payload = {**job.payload, "_db_path": str(self._db_path)}
+                result = self._executor(job.platform, payload, target)
                 if inspect.isawaitable(result):
                     await result
         except asyncio.CancelledError:
@@ -263,14 +265,49 @@ def _resolve_account_path(account_ref: str) -> Path:
     return candidate  # let the uploader complain with its own error
 
 
-def _resolve_file_path(file_ref: str) -> Path:
+def _resolve_file_path(file_ref: str, *, db_path: Path | None = None) -> Path:
     candidate = Path(file_ref)
     if candidate.is_absolute() and candidate.exists():
         return candidate
     legacy = Path(BASE_DIR) / "videoFile" / file_ref
     if legacy.exists():
         return legacy
+    # Try downloading from remote storage
+    if db_path is not None:
+        downloaded = _try_download_from_storage(file_ref, db_path)
+        if downloaded is not None:
+            return downloaded
     return candidate
+
+
+def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
+    """Look up file_ref in file_records. If stored remotely, download to local."""
+    import sqlite3
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT storage_key, storage_backend_id FROM file_records WHERE file_path = ? AND storage_key IS NOT NULL",
+                (file_ref,),
+            ).fetchone()
+        if not row:
+            return None
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            backend = conn.execute(
+                "SELECT * FROM storage_backends WHERE id = ?", (row["storage_backend_id"],)
+            ).fetchone()
+        if not backend:
+            return None
+        from myUtils.do_spaces import client_from_row
+        client = client_from_row(dict(backend))
+        local_path = Path(BASE_DIR) / "videoFile" / file_ref
+        if local_path.exists():
+            return local_path
+        client.download_file(row["storage_key"], local_path)
+        return local_path
+    except Exception:
+        return None
 
 
 def _prepared_artifact_local_paths(payload: dict) -> list[Path]:
@@ -283,6 +320,44 @@ def _prepared_artifact_local_paths(payload: dict) -> list[Path]:
         seen.add(local_path)
         paths.append(Path(local_path))
     return paths
+
+
+def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
+    """Download missing artifact files from remote storage before publish."""
+    import sqlite3
+    for artifact in payload.get("artifacts", []) or []:
+        local_path = artifact.get("local_path")
+        if not local_path:
+            continue
+        p = Path(local_path)
+        if p.exists():
+            continue
+        # Try to find the source file_record and download from its storage
+        source_id = artifact.get("source_file_record_id")
+        if not source_id:
+            continue
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT storage_key, storage_backend_id, file_path FROM file_records WHERE id = ? AND storage_key IS NOT NULL",
+                    (int(source_id),),
+                ).fetchone()
+            if not row:
+                continue
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                backend = conn.execute(
+                    "SELECT * FROM storage_backends WHERE id = ?", (row["storage_backend_id"],)
+                ).fetchone()
+            if not backend:
+                continue
+            from myUtils.do_spaces import client_from_row
+            client = client_from_row(dict(backend))
+            p.parent.mkdir(parents=True, exist_ok=True)
+            client.download_file(row["storage_key"], p)
+        except Exception:
+            continue
 
 
 async def _run_platform_upload(
@@ -768,9 +843,15 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
 
     from myUtils.cookie_storage import decrypted_storage_state
 
+    db_path_str = payload.pop("_db_path", None)
+    db_path = Path(db_path_str) if db_path_str else None
+
     structured_account = _resolve_structured_account(target.account_ref)
     canonical_account_file = _resolve_account_path(target.account_ref)
     if payload.get("campaignId") and payload.get("campaignPostId"):
+        # Ensure artifact files are available locally
+        if db_path:
+            _ensure_artifact_paths_local(payload, db_path=db_path)
         if structured_account is not None and structured_account.cookie_path:
             with decrypted_storage_state(canonical_account_file) as plain_path:
                 await _run_prepared_campaign_upload(
@@ -792,7 +873,7 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
 
     if platform == "twitter":
         thread_file_refs = payload.get("threadFileRefs") or [target.file_ref]
-        thread_file_paths = [_resolve_file_path(file_ref) for file_ref in thread_file_refs]
+        thread_file_paths = [_resolve_file_path(file_ref, db_path=db_path) for file_ref in thread_file_refs]
         with decrypted_storage_state(canonical_account_file) as plain_path:
             await _run_platform_upload(
                 platform,
@@ -803,7 +884,7 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
             )
         return
 
-    file_path = _resolve_file_path(target.file_ref)
+    file_path = _resolve_file_path(target.file_ref, db_path=db_path)
     with decrypted_storage_state(canonical_account_file) as plain_path:
         await _run_platform_upload(
             platform,
