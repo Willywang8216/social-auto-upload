@@ -187,6 +187,7 @@ def fetch_user_info(*, access_token: str, session=None) -> dict[str, Any]:
     response = http.get(
         X_ME_URL,
         headers={"Authorization": f"Bearer {access_token}"},
+        params={"user.fields": "profile_image_url"},
         timeout=120,
     )
     response.raise_for_status()

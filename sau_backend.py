@@ -1877,6 +1877,8 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 config['twitterUserId'] = user_data.get('id', config.get('twitterUserId', ''))
                 config['twitterUserName'] = user_data.get('username', config.get('twitterUserName', ''))
                 config['twitterDisplayName'] = user_data.get('name', config.get('twitterDisplayName', ''))
+                if user_data.get('profile_image_url'):
+                    config['avatarUrl'] = str(user_data['profile_image_url'])
             expires_in = refreshed.get('expires_in')
             if expires_in:
                 config['accessTokenExpiresAt'] = (
@@ -3041,7 +3043,7 @@ def meta_oauth_callback():
                 selected_page = pages[0]
             if selected_page is None and len(pages) > 1:
                 savable_pages = [
-                    {'id': str(p.get('id') or ''), 'name': str(p.get('name') or ''), 'access_token': str(p.get('access_token') or '')}
+                    {'id': str(p.get('id') or ''), 'name': str(p.get('name') or ''), 'access_token': str(p.get('access_token') or ''), 'pictureUrl': str(p.get('picture', {}).get('data', {}).get('url') or '')}
                     for p in pages if isinstance(p, dict)
                 ]
                 pages_json = json.dumps(savable_pages)
@@ -3760,6 +3762,8 @@ def twitter_oauth_callback():
             merged_config['twitterUserId'] = str(user_data.get('id') or merged_config.get('twitterUserId') or '')
             merged_config['twitterUserName'] = str(user_data.get('username') or merged_config.get('twitterUserName') or '')
             merged_config['twitterDisplayName'] = str(user_data.get('name') or merged_config.get('twitterDisplayName') or '')
+            if user_data.get('profile_image_url'):
+                merged_config['avatarUrl'] = str(user_data['profile_image_url'])
         merged_config['scope'] = str(token_payload.get('scope') or merged_config.get('scope') or ' '.join(request_state.scopes))
         merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
         merged_config['twitterAuthType'] = 'api'
@@ -3784,6 +3788,7 @@ def twitter_oauth_callback():
             'accessTokenExpiresAt': merged_config.get('accessTokenExpiresAt', ''),
             'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
             'connectedAt': merged_config.get('connectedAt', ''),
+            'avatarUrl': merged_config.get('avatarUrl', ''),
         }
         x_review.complete_oauth_request(
             state_token,
@@ -4080,6 +4085,7 @@ def threads_oauth_callback():
             'accessTokenExpiresAt': merged_config.get('accessTokenExpiresAt', ''),
             'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
             'connectedAt': merged_config.get('connectedAt', ''),
+            'avatarUrl': merged_config.get('avatarUrl', ''),
         }
         threads_review.complete_oauth_request(
             state_token,

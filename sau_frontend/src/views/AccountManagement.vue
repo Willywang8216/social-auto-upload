@@ -2125,6 +2125,7 @@ function handleThreadsOauthMessage(event) {
   accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
   accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
+  accountForm.avatarUrl = data.avatarUrl || accountForm.avatarUrl
   ElMessage.success('Threads 已連線')
   dialogVisible.value = false
   refreshAccounts()
@@ -2146,6 +2147,7 @@ function handleTwitterOauthMessage(event) {
   accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
   accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
   accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
+  accountForm.avatarUrl = data.avatarUrl || accountForm.avatarUrl
   accountForm.twitterAuthType = 'api'
   ElMessage.success('Twitter/X 已連線')
   dialogVisible.value = false
@@ -2193,6 +2195,9 @@ async function finalizeMetaPageSelection(page, tokenData, accountName, targetAcc
       config.metaUserAccessTokenExpiresAt = tokenData.metaUserAccessTokenExpiresAt
       config.accessTokenExpiresAt = tokenData.metaUserAccessTokenExpiresAt
     }
+    if (page.pictureUrl) {
+      config.avatarUrl = page.pictureUrl
+    }
     if (isIG) {
       config.igUserId = page.igUserId
       config.instagramUserName = page.instagramUserName
@@ -2208,6 +2213,9 @@ async function finalizeMetaPageSelection(page, tokenData, accountName, targetAcc
       accountForm.pageId = page.id
       accountForm.facebookPageName = page.name
       accountForm.accessToken = page.access_token
+      if (page.pictureUrl) {
+        accountForm.avatarUrl = page.pictureUrl
+      }
       if (isIG) {
         accountForm.igUserId = page.igUserId
         accountForm.instagramUserName = page.instagramUserName

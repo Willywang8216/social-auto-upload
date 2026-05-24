@@ -143,7 +143,7 @@ def fetch_managed_pages(*, access_token: str, session=None) -> dict[str, Any]:
         META_ME_ACCOUNTS_URL,
         params={
             'access_token': access_token,
-            'fields': 'id,name,access_token,instagram_business_account{id,username,profile_picture_url}',
+            'fields': 'id,name,access_token,picture.type(large),instagram_business_account{id,username,profile_picture_url}',
         },
         timeout=120,
     )
