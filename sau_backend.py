@@ -47,6 +47,7 @@ from myUtils import x_auth
 from myUtils import x_review
 from myUtils import tiktok_auth
 from myUtils import tiktok_review
+from myUtils import do_spaces
 from myUtils import patreon_auth
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.login import reddit_cookie_gen, twitter_cookie_gen, twitter_cookie_gen_legacy
@@ -5968,13 +5969,17 @@ def analytics_advice_route():
 
 @app.route('/analytics/thumbnail/<platform_video_id>')
 def analytics_thumbnail_proxy(platform_video_id):
-    """Proxy TikTok thumbnails: fetch a fresh signed URL from TikTok's API and redirect."""
+    """Proxy TikTok thumbnails: fetch a fresh signed URL from TikTok's API and redirect.
+
+    TikTok CDN blocks server-side requests (cloud IP), so we cannot download
+    and store thumbnails in DO Spaces. Instead, fetch a fresh signed URL from
+    the TikTok API on each request and redirect the browser to it.
+    """
     db_path = _current_db_path()
     try:
         import requests as _requests
         from myUtils import tiktok_auth
 
-        # Find the TikTok account
         from myUtils.profiles import list_accounts
         accounts = list_accounts(enabled=True, db_path=db_path)
         tiktok_accounts = [a for a in accounts if a.platform == 'tiktok']
@@ -6016,6 +6021,12 @@ def analytics_thumbnail_proxy(platform_video_id):
 
 
 _maybe_start_account_maintenance_scheduler()
+
+# Ensure DO Spaces bucket exists on startup
+try:
+    do_spaces.ensure_bucket()
+except Exception:
+    logging.getLogger(__name__).warning("Failed to ensure DO Spaces bucket on startup")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5409, threaded=True)

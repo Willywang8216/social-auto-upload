@@ -77,6 +77,7 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
 PUBLIC_PREFIXES: tuple[str, ...] = (
     "/assets/",
     "/static/",
+    "/analytics/thumbnail/",
 )
 
 # The login endpoint is protected, but auth is read from a query-string

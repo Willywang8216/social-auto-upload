@@ -12,10 +12,13 @@ from pathlib import Path
 import requests
 
 from myUtils import analytics_store
+from myUtils import do_spaces
 from myUtils.analytics.base import compute_engagement_rate
 from myUtils.profiles import Account, get_account, list_accounts
 
 logger = logging.getLogger(__name__)
+
+DO_SPACES_CDN_PREFIX = do_spaces.DO_SPACES_CDN_URL
 
 SUPPORTED_PLATFORMS = {"youtube", "tiktok", "facebook", "instagram", "threads"}
 
@@ -55,17 +58,53 @@ def _sync_threads(account: Account, db_path: Path, session: requests.Session) ->
     return _store_videos(account, videos, db_path)
 
 
+def _store_thumbnail(
+    original_url: str,
+    platform: str,
+    video_id: str,
+    session: requests.Session,
+) -> str:
+    """Download a thumbnail from the platform CDN and upload to DO Spaces.
+
+    Returns the DO Spaces CDN URL on success, or the original URL as fallback.
+    Skips the upload if the URL is already a DO Spaces CDN URL.
+    """
+    if not original_url:
+        return original_url
+    if DO_SPACES_CDN_PREFIX and original_url.startswith(DO_SPACES_CDN_PREFIX):
+        return original_url  # already stored in DO Spaces
+
+    try:
+        resp = session.get(original_url, timeout=15, stream=True)
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "image/jpeg")
+        ext = ".webp" if "webp" in content_type else ".jpg"
+        key = f"thumbnails/{platform}/{video_id}{ext}"
+        return do_spaces.upload_bytes(resp.content, key, content_type)
+    except Exception:
+        logger.debug("Thumbnail download failed for %s/%s, using original URL", platform, video_id)
+        return original_url
+
+
 def _store_videos(account: Account, videos: list[dict], db_path: Path) -> int:
     """Store fetched video data into analytics tables. Returns count stored."""
     count = 0
+    session = requests.Session()
     for v in videos:
+        # Upload thumbnail to DO Spaces for permanent storage
+        thumb_url = v.get("thumbnail_url", "")
+        if thumb_url:
+            thumb_url = _store_thumbnail(
+                thumb_url, account.platform, v["platform_video_id"], session
+            )
+
         analytics_store.upsert_video(
             account_id=account.id,
             platform=account.platform,
             platform_video_id=v["platform_video_id"],
             title=v.get("title", ""),
             description=v.get("description", ""),
-            thumbnail_url=v.get("thumbnail_url", ""),
+            thumbnail_url=thumb_url,
             published_at=v.get("published_at"),
             duration_seconds=v.get("duration_seconds", 0),
             db_path=db_path,
@@ -81,7 +120,7 @@ def _store_videos(account: Account, videos: list[dict], db_path: Path) -> int:
             watch_time_seconds=v.get("watch_time_seconds", 0),
             engagement_rate=v.get("engagement_rate", 0.0),
             title=v.get("title", ""),
-            thumbnail_url=v.get("thumbnail_url", ""),
+            thumbnail_url=thumb_url,
             published_at=v.get("published_at"),
             raw_metrics=v.get("raw_metrics", {}),
             db_path=db_path,

@@ -15,6 +15,8 @@ dependencies = [
   # writes plaintext cookies, but the dependency is always installed so
   # the encryption code path is unconditionally importable.
   "cryptography>=42.0.0",
+  # `boto3` powers DigitalOcean Spaces (S3-compatible) thumbnail/media storage
+  "boto3>=1.28",
   "loguru==0.7.3",
   # `utils/login_qrcode.py` imports these at runtime. Keep them mirrored
   # with requirements.txt because Docker / legacy installs still use it.

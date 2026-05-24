@@ -31,6 +31,9 @@ COPY --from=builder /app/dist/vite.svg /app/assets
 
 RUN cp conf.example.py conf.py
 
+# Install any new deps not yet in the base image (idempotent)
+RUN pip install --no-cache-dir -r requirements.txt
+
 RUN mkdir -p /app/videoFile
 RUN mkdir -p /app/cookiesFile
 
