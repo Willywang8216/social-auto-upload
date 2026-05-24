@@ -538,13 +538,24 @@ async def _publish_prepared_tiktok(
         try:
             from datetime import datetime, timezone
             from myUtils import analytics_store
+            now = datetime.now(timezone.utc).isoformat()
             title = str((payload.get('title') or payload.get('message') or '')[:200])
+            video_id = f"pub:{publish_id}"
             analytics_store.upsert_video(
                 account_id=account.id,
                 platform='tiktok',
-                platform_video_id=f"pub:{publish_id}",
+                platform_video_id=video_id,
                 title=title,
-                published_at=datetime.now(timezone.utc).isoformat(),
+                published_at=now,
+            )
+            analytics_store.record_snapshot(
+                account_id=account.id,
+                platform='tiktok',
+                platform_video_id=video_id,
+                views=0, likes=0, comments=0, shares=0,
+                watch_time_seconds=0, engagement_rate=0.0,
+                title=title,
+                published_at=now,
             )
         except Exception:
             pass  # non-critical, don't fail the publish

@@ -141,6 +141,10 @@ def sync_all_analytics(db_path: Path = analytics_store.DB_PATH) -> dict:
 
     Returns {"synced": int, "skipped": int, "errors": list[str], "skipped_details": list[str]}.
     """
+    # Clean up data from deleted accounts to prevent duplicate entries
+    analytics_store.cleanup_orphaned_snapshots(db_path)
+    analytics_store.cleanup_orphaned_videos(db_path)
+
     accounts = list_accounts(enabled=True, db_path=db_path)
     synced = 0
     skipped = 0

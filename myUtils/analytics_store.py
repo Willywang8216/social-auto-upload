@@ -102,6 +102,7 @@ def upsert_video(
                 thumbnail_url, published_at, duration_seconds, file_record_id, last_synced_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(platform_video_id) DO UPDATE SET
+                account_id = excluded.account_id,
                 title = excluded.title,
                 description = excluded.description,
                 thumbnail_url = excluded.thumbnail_url,
@@ -135,7 +136,7 @@ def record_snapshot(
 ) -> int:
     with _connect(db_path) as conn:
         cursor = conn.execute(
-            """INSERT INTO video_analytics_snapshots
+            """INSERT OR IGNORE INTO video_analytics_snapshots
                (account_id, platform, platform_video_id, views, likes, comments, shares,
                 watch_time_seconds, engagement_rate, title, thumbnail_url, published_at,
                 file_record_id, raw_metrics_json)
@@ -145,6 +146,26 @@ def record_snapshot(
              file_record_id, json.dumps(raw_metrics or {})),
         )
         return cursor.lastrowid
+
+
+def cleanup_orphaned_snapshots(db_path: Path = DB_PATH) -> int:
+    """Remove snapshots whose account no longer exists. Returns count deleted."""
+    with _connect(db_path) as conn:
+        result = conn.execute(
+            """DELETE FROM video_analytics_snapshots
+               WHERE account_id NOT IN (SELECT id FROM accounts)"""
+        )
+        return result.rowcount
+
+
+def cleanup_orphaned_videos(db_path: Path = DB_PATH) -> int:
+    """Remove video records whose account no longer exists. Returns count deleted."""
+    with _connect(db_path) as conn:
+        result = conn.execute(
+            """DELETE FROM video_analytics_videos
+               WHERE account_id NOT IN (SELECT id FROM accounts)"""
+        )
+        return result.rowcount
 
 
 def get_latest_snapshots(
