@@ -36,7 +36,7 @@ def list_threads_posts(
     posts = []
     url = f"{THREADS_GRAPH_ROOT}/{user_id}/threads"
     params = {
-        "fields": "id,text,timestamp,media_url,permalink,like_count,reply_count,repost_count,media_product_type",
+        "fields": "id,text,timestamp,media_url,permalink,like_count,reply_count,repost_count,media_product_type,thumbnail_url",
         "access_token": access_token,
         "limit": min(max_results, 100),
     }
@@ -92,11 +92,14 @@ def sync_threads_account(
         title = text.split("\n")[0][:100] if text else ""
         description = text[:500]
 
+        # Use thumbnail_url for videos (media_url is the video file), media_url for images
+        thumb = item.get("thumbnail_url") or item.get("media_url") or ""
+
         videos.append({
             "platform_video_id": item["id"],
             "title": title,
             "description": description,
-            "thumbnail_url": item.get("media_url", ""),
+            "thumbnail_url": thumb,
             "published_at": item.get("timestamp"),
             "duration_seconds": 0,
             "views": 0,  # Threads API doesn't expose view count
