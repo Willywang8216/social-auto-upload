@@ -529,6 +529,26 @@ async def _publish_prepared_tiktok(
             auth_type='oauth',
         )
 
+    # Seed analytics so the video appears in the dashboard immediately.
+    # Private-account videos never show up in /v2/video/list/, so without
+    # this the analytics table stays empty for private TikTok accounts.
+    publish_data = (result.get('publish') or {}).get('data') or {}
+    publish_id = str(publish_data.get('publish_id') or '').strip()
+    if publish_id:
+        try:
+            from datetime import datetime, timezone
+            from myUtils import analytics_store
+            title = str((payload.get('title') or payload.get('message') or '')[:200])
+            analytics_store.upsert_video(
+                account_id=account.id,
+                platform='tiktok',
+                platform_video_id=f"pub:{publish_id}",
+                title=title,
+                published_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception:
+            pass  # non-critical, don't fail the publish
+
 
 async def _publish_prepared_facebook(
     platform: str,

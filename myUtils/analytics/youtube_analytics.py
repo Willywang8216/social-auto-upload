@@ -52,6 +52,17 @@ def _refresh_token(config: dict[str, Any], session: requests.Session) -> str:
         },
         timeout=30,
     )
+    if not resp.ok:
+        try:
+            err_body = resp.json()
+            logger.error(
+                "YouTube token refresh failed for %s: %s — %s",
+                config.get("channelId", "?"),
+                err_body.get("error", resp.status_code),
+                err_body.get("error_description", ""),
+            )
+        except Exception:
+            pass
     resp.raise_for_status()
     token_data = resp.json()
     access_token = token_data.get("access_token")
