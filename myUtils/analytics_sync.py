@@ -32,9 +32,21 @@ def _sync_youtube(account: Account, db_path: Path, session: requests.Session) ->
 
 def _sync_tiktok(account: Account, db_path: Path, session: requests.Session) -> int:
     from myUtils.analytics.tiktok_analytics import sync_tiktok_account
+    from myUtils import tiktok_auth
     config = account.config or {}
     videos = sync_tiktok_account(config, session)
-    return _store_videos(account, videos, db_path)
+    # TikTok CDN requires Authorization header — get access token for thumbnail downloads
+    refresh_token = str(config.get("refreshToken") or "").strip()
+    auth_headers = {}
+    if refresh_token:
+        try:
+            data = tiktok_auth.refresh_access_token(refresh_token=refresh_token, session=session)
+            at = str(data.get("access_token") or "").strip()
+            if at:
+                auth_headers = {"Authorization": f"Bearer {at}"}
+        except Exception:
+            pass
+    return _store_videos(account, videos, db_path, auth_headers=auth_headers)
 
 
 def _sync_facebook(account: Account, db_path: Path, session: requests.Session) -> int:
@@ -63,6 +75,7 @@ def _store_thumbnail(
     platform: str,
     video_id: str,
     session: requests.Session,
+    auth_headers: dict | None = None,
 ) -> str:
     """Download a thumbnail from the platform CDN and upload to DO Spaces.
 
@@ -75,7 +88,8 @@ def _store_thumbnail(
         return original_url  # already stored in DO Spaces
 
     try:
-        resp = session.get(original_url, timeout=15, stream=True)
+        headers = dict(auth_headers) if auth_headers else {}
+        resp = session.get(original_url, timeout=15, stream=True, headers=headers)
         resp.raise_for_status()
         content_type = resp.headers.get("content-type", "image/jpeg")
         ext = ".webp" if "webp" in content_type else ".jpg"
@@ -86,7 +100,7 @@ def _store_thumbnail(
         return original_url
 
 
-def _store_videos(account: Account, videos: list[dict], db_path: Path) -> int:
+def _store_videos(account: Account, videos: list[dict], db_path: Path, auth_headers: dict | None = None) -> int:
     """Store fetched video data into analytics tables. Returns count stored."""
     count = 0
     session = requests.Session()
@@ -95,7 +109,8 @@ def _store_videos(account: Account, videos: list[dict], db_path: Path) -> int:
         thumb_url = v.get("thumbnail_url", "")
         if thumb_url:
             thumb_url = _store_thumbnail(
-                thumb_url, account.platform, v["platform_video_id"], session
+                thumb_url, account.platform, v["platform_video_id"], session,
+                auth_headers=auth_headers,
             )
 
         analytics_store.upsert_video(
