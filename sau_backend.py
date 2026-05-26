@@ -1484,14 +1484,14 @@ def _campaign_payload(campaign: campaign_store.Campaign, *, db_path: Path) -> di
 
 def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> list[dict]:
     if platform != profile_registry.PLATFORM_TIKTOK:
-        return [artifact for artifact in artifacts if artifact.get("artifact_kind") != "raw_remote_upload"]
+        return [artifact for artifact in artifacts if artifact.get("artifact_kind") not in {"raw_remote_upload", "raw_local"}]
 
     grouped: dict[tuple[object, object], list[dict]] = {}
     passthrough: list[dict] = []
     for artifact in artifacts:
         kind = artifact.get("artifact_kind") or ""
         source_id = artifact.get("source_file_record_id")
-        if kind in {"remote_upload", "raw_remote_upload"} and source_id is not None:
+        if kind in {"remote_upload", "raw_remote_upload", "local", "raw_local"} and source_id is not None:
             role = ((artifact.get("metadata") or {}).get("role"))
             grouped.setdefault((source_id, role), []).append(artifact)
         elif kind not in {"watermarked_image", "watermarked_video"}:
@@ -1499,7 +1499,7 @@ def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> lis
 
     selected = []
     for items in grouped.values():
-        raw = next((item for item in items if item.get("artifact_kind") == "raw_remote_upload"), None)
+        raw = next((item for item in items if item.get("artifact_kind") in {"raw_remote_upload", "raw_local"}), None)
         selected.append(raw or items[0])
     return [*passthrough, *selected]
 
@@ -2657,6 +2657,23 @@ def _prepare_campaign_media_artifacts(
                 metadata={"role": media_file["role"]},
                 db_path=db_path,
             )
+            # Also store a raw (un-watermarked) artifact for TikTok when
+            # watermarks were applied in a mixed-platform batch.
+            if not tiktok_only and publish_path != source_path and profile_registry.PLATFORM_TIKTOK in selected_platforms:
+                try:
+                    raw_served_filename = Path(source_path).name
+                    raw_public_url = f"{base_url}/getFile?filename={raw_served_filename}"
+                except (RuntimeError, NameError):
+                    raw_public_url = None
+                campaign_store.add_campaign_artifact(
+                    campaign_id,
+                    source_file_record_id=media_file["file_record_id"],
+                    artifact_kind="raw_local",
+                    local_path=str(source_path),
+                    public_url=raw_public_url,
+                    metadata={"role": media_file["role"]},
+                    db_path=db_path,
+                )
 
         if _is_image_file(publish_path):
             artifacts_context["imageLocalPaths"].append(str(publish_path))
@@ -4516,6 +4533,45 @@ def tiktok_admin_status():
     }), 200
 
 
+@app.route('/tiktok/creator-info/<int:account_id>', methods=['GET'])
+def tiktok_creator_info(account_id):
+    """Return TikTok creator info for the given account.
+
+    Fetches the creator's capabilities (nickname, post limits, privacy
+    options, interaction settings) so the frontend can render the
+    per-post TikTok settings panel required by TikTok's audit.
+    """
+    db_path = _current_db_path()
+    try:
+        account = profile_registry.get_account(account_id, db_path=db_path)
+    except (ValueError, KeyError) as exc:
+        return jsonify({'code': 404, 'msg': str(exc), 'data': None}), 404
+
+    if account.platform != profile_registry.PLATFORM_TIKTOK:
+        return jsonify({'code': 400, 'msg': 'Account is not a TikTok account', 'data': None}), 400
+
+    config = dict(account.config or {})
+    try:
+        access_token, updated_config = prepared_publishers._ensure_tiktok_access_token(config)
+    except Exception as exc:
+        return jsonify({'code': 401, 'msg': f'Token refresh failed: {exc}', 'data': None}), 401
+
+    # Persist refreshed token if _ensure_tiktok_access_token rotated it.
+    if updated_config is not None:
+        try:
+            profile_registry.update_account(account_id, config=updated_config, db_path=db_path)
+        except Exception:
+            logging.getLogger(__name__).debug('Could not persist refreshed token for account %s', account_id, exc_info=True)
+        config = updated_config
+
+    try:
+        info = prepared_publishers.query_tiktok_creator_info(config, access_token=access_token)
+    except Exception as exc:
+        return jsonify({'code': 502, 'msg': f'TikTok creator_info API error: {exc}', 'data': None}), 502
+
+    return jsonify({'code': 200, 'msg': 'ok', 'data': info}), 200
+
+
 @app.route("/profiles", methods=["GET"])
 def profiles_list():
     db_path = _current_db_path()
@@ -5677,6 +5733,7 @@ def publish_center_submit():
         options = data.get("options") or {}
         schedule = data.get("schedule") or None
         account_drafts = data.get("accountDrafts") or {}
+        tiktok_post_settings = data.get("tiktokPostSettings") or {}
 
         result = publish_orchestrator.submit_publish(
             profile_ids=profile_ids,
@@ -5686,6 +5743,7 @@ def publish_center_submit():
             options=options,
             schedule=schedule,
             account_drafts=account_drafts,
+            tiktok_post_settings=tiktok_post_settings,
             db_path=db_path,
             prepare_artifacts=_prepare_campaign_media_artifacts,
             generate_account_draft=_generate_account_draft,

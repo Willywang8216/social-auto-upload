@@ -180,6 +180,7 @@ def submit_publish(
     options: dict,
     schedule: dict | None,
     account_drafts: dict[int, dict] | None,
+    tiktok_post_settings: dict[int, dict] | None = None,
     db_path: Path,
     prepare_artifacts: Callable,
     generate_account_draft: Callable,
@@ -194,6 +195,7 @@ def submit_publish(
         raise ValueError("At least one media file is required")
 
     account_drafts = account_drafts or {}
+    tiktok_post_settings = tiktok_post_settings or {}
     base_time = _resolve_base_time(schedule, now_fn=now_fn)
 
     # 1. Materialise file_records + a single media group shared by every profile.
@@ -340,10 +342,12 @@ def submit_publish(
                         status=campaign_store.CAMPAIGN_POST_READY,
                         db_path=db_path,
                     )
+                    account_tt_settings = tiktok_post_settings.get(str(account.id)) or tiktok_post_settings.get(account.id)
                     payload = _build_payload(
                         campaign, post, draft, artifacts, platform,
                         artifact_payloads_for_platform,
                         tiktok_direct_post=tiktok_direct_post,
+                        tiktok_post_settings=account_tt_settings if isinstance(account_tt_settings, dict) else None,
                     )
                     targets = [
                         (
@@ -370,10 +374,12 @@ def submit_publish(
                             status=campaign_store.CAMPAIGN_POST_READY,
                             db_path=db_path,
                         )
+                        account_tt_settings = tiktok_post_settings.get(str(account.id)) or tiktok_post_settings.get(account.id)
                         payload = _build_payload(
                             campaign, post, draft, artifacts, platform,
                             artifact_payloads_for_platform,
                             tiktok_direct_post=tiktok_direct_post,
+                            tiktok_post_settings=account_tt_settings if isinstance(account_tt_settings, dict) else None,
                         )
                         payload["fileRecordIds"] = [single_id]
                         targets = [
@@ -411,7 +417,9 @@ def _compute_schedule_at(base_time: datetime | None, offset_index: int) -> datet
 
 def _build_payload(
     campaign, post, draft, artifacts, platform, artifact_payloads_for_platform,
-    *, tiktok_direct_post: bool = False,
+    *,
+    tiktok_direct_post: bool = False,
+    tiktok_post_settings: dict | None = None,
 ):
     payload = {
         "campaignId": campaign.id,
@@ -427,6 +435,10 @@ def _build_payload(
         # falls back to account.config.publishMode. The explicit per-publish
         # toggle (with confirmation modal) is what TikTok review requires.
         payload["tiktokDirectPost"] = tiktok_direct_post
+        # Per-post TikTok settings from the frontend (privacy, interactions,
+        # content disclosure). These override account-level defaults.
+        if tiktok_post_settings:
+            payload["tiktokPostSettings"] = tiktok_post_settings
     return payload
 
 

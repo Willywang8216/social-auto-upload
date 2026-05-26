@@ -1010,7 +1010,15 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     else:
         publish_mode = str(config.get("publishMode") or "direct").strip().lower()
     post_mode = "DIRECT_POST" if publish_mode == "direct" else "MEDIA_UPLOAD"
-    privacy_level = str(config.get("privacyLevel") or "SELF_ONLY").strip().upper()
+    # Per-post TikTok settings from the frontend override account-level config.
+    # This is required for TikTok audit compliance: privacy, interactions, and
+    # content disclosure must be chosen per-post by the user.
+    tt_settings = payload.get("tiktokPostSettings") or {}
+    privacy_level = str(
+        tt_settings.get("privacyLevel")
+        or config.get("privacyLevel")
+        or "SELF_ONLY"
+    ).strip().upper()
 
     # Sandbox/development apps (client_key starts with "sb") can ONLY use SELF_ONLY
     client_key = os.environ.get("TIKTOK_CLIENT_KEY", "")
@@ -1026,12 +1034,21 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         post_info = {
             "title": message[:TIKTOK_MAX_CAPTION_CHARS],
             "privacy_level": privacy_level,
-            "disable_duet": bool(config.get("disableDuet", False)),
-            "disable_comment": bool(config.get("disableComment", False)),
-            "disable_stitch": bool(config.get("disableStitch", False)),
+            "disable_duet": bool(tt_settings.get("disableDuet", config.get("disableDuet", False))),
+            "disable_comment": bool(tt_settings.get("disableComment", config.get("disableComment", False))),
+            "disable_stitch": bool(tt_settings.get("disableStitch", config.get("disableStitch", False))),
         }
         if config.get("videoCoverTimestampMs") not in (None, ""):
             post_info["video_cover_timestamp_ms"] = int(config["videoCoverTimestampMs"])
+
+        # Commercial content disclosure (TikTok audit compliance).
+        # "Branded Content" takes precedence when both are selected.
+        content_disclosure = tt_settings.get("contentDisclosure")
+        if isinstance(content_disclosure, dict) and content_disclosure.get("enabled"):
+            if content_disclosure.get("brandedContent"):
+                post_info["brand_content_toggle"] = "BRANDED_CONTENT"
+            elif content_disclosure.get("yourBrand"):
+                post_info["brand_content_toggle"] = "BRAND_ORGANIC"
 
         # Use FILE_UPLOAD when we have a local file (TikTok requires domain
         # ownership verification for PULL_FROM_URL, which is impractical).
@@ -1108,14 +1125,22 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         if not all(public_urls):
             raise PreparedPublishError("TikTok photo publish requires public image URLs")
         _validate_tiktok_photo_payload(public_urls, message=message)
+        photo_post_info = {
+            "title": _message_title(payload),
+            "description": message[:TIKTOK_MAX_CAPTION_CHARS],
+            "privacy_level": privacy_level,
+            "disable_comment": bool(tt_settings.get("disableComment", config.get("disableComment", False))),
+            "auto_add_music": bool(config.get("autoAddMusic", True)),
+        }
+        # Commercial content disclosure for photo posts (TikTok audit compliance).
+        content_disclosure = tt_settings.get("contentDisclosure")
+        if isinstance(content_disclosure, dict) and content_disclosure.get("enabled"):
+            if content_disclosure.get("brandedContent"):
+                photo_post_info["brand_content_toggle"] = "BRANDED_CONTENT"
+            elif content_disclosure.get("yourBrand"):
+                photo_post_info["brand_content_toggle"] = "BRAND_ORGANIC"
         request_body = {
-            "post_info": {
-                "title": _message_title(payload),
-                "description": message[:TIKTOK_MAX_CAPTION_CHARS],
-                "privacy_level": privacy_level,
-                "disable_comment": bool(config.get("disableComment", False)),
-                "auto_add_music": bool(config.get("autoAddMusic", True)),
-            },
+            "post_info": photo_post_info,
             "source_info": {
                 "source": "PULL_FROM_URL",
                 "photo_images": public_urls,

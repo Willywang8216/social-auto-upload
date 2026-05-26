@@ -9,6 +9,10 @@ export const tiktokApi = {
     return http.get('/admin/tiktok/status', accountId ? { accountId } : undefined)
   },
 
+  getCreatorInfo(accountId) {
+    return http.get(`/tiktok/creator-info/${accountId}`)
+  },
+
   refreshStaleTokens(payload = {}) {
     return http.post('/accounts/tiktok/refresh-stale', payload)
   }

@@ -122,6 +122,14 @@
           :closable="false"
           style="margin-top: 8px;"
         />
+        <el-alert
+          v-if="hasTiktokSelected && options.watermark"
+          title="TikTok 不允許促銷浮水印，發佈到 TikTok 的內容將不會套用浮水印。"
+          type="warning"
+          show-icon
+          :closable="false"
+          style="margin-top: 8px;"
+        />
       </div>
       <el-divider />
       <div class="pc-screenshots">
@@ -222,6 +230,16 @@
               <span class="pc-subtle">第一則留言：</span>
               <el-input v-model="account.draft.firstComment" placeholder="貼文連結等資訊" />
             </div>
+            <!-- TikTok per-post settings (audit compliance) -->
+            <TikTokPostSettings
+              v-if="account.platform === 'tiktok'"
+              :model-value="tiktokPostSettings[account.accountId] || {}"
+              :creator-info="tiktokCreatorInfo[account.accountId] || null"
+              :is-photo-post="!mediaFiles.some(f => isVideo(f.path))"
+              :media-files="mediaFiles"
+              @update:model-value="tiktokPostSettings[account.accountId] = $event"
+              @validity-change="tiktokSettingsValidity[account.accountId] = $event"
+            />
           </div>
         </el-collapse-item>
       </el-collapse>
@@ -267,6 +285,14 @@
           :type="submitResult.type"
           :closable="false"
           show-icon
+        />
+        <el-alert
+          v-if="hasTiktokSelected && submitResult.jobs?.length"
+          title="TikTok 內容可能需要幾分鐘的處理時間才會在平台上顯示。"
+          type="info"
+          show-icon
+          :closable="false"
+          style="margin-top: 8px;"
         />
         <div v-if="submitResult.jobs?.length" class="pc-jobs-list">
           <div v-for="job in submitResult.jobs" :key="job.id">
@@ -321,7 +347,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 
@@ -331,6 +357,8 @@ import { getToken } from '@/utils/auth'
 import { buildApiUrl } from '@/utils/api-url'
 import { publishCenterApi } from '@/api/publish-center'
 import { materialApi } from '@/api/material'
+import { tiktokApi } from '@/api/tiktok'
+import TikTokPostSettings from '@/components/TikTokPostSettings.vue'
 
 const STAGGER_MINUTES = 5
 
@@ -414,6 +442,25 @@ const materialLibraryVisible = ref(false)
 const materialsList = ref([])
 const selectedMaterials = ref([])
 
+// TikTok per-post settings and creator info
+const tiktokCreatorInfo = reactive({}) // accountId -> creator info response
+const tiktokPostSettings = reactive({}) // accountId -> per-post settings
+const tiktokSettingsValidity = reactive({}) // accountId -> boolean
+
+function ensureTiktokSettings(accountId) {
+  if (!tiktokPostSettings[accountId]) {
+    tiktokPostSettings[accountId] = {
+      privacyLevel: null,
+      allowComment: false,
+      allowDuet: false,
+      allowStitch: false,
+      contentDisclosureEnabled: false,
+      yourBrand: false,
+      brandedContent: false,
+    }
+  }
+}
+
 onMounted(async () => {
   try {
     await profilesStore.refreshProfiles()
@@ -457,6 +504,28 @@ async function onProfileSelectionChanged() {
         }
       } catch (err) {
         profileAccountCache[profileId] = []
+      }
+    }
+  }
+  // Fetch TikTok creator info for newly selected accounts
+  await fetchTiktokCreatorInfo()
+}
+
+async function fetchTiktokCreatorInfo() {
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    for (const account of accounts) {
+      if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
+        const accountId = account.id
+        ensureTiktokSettings(accountId)
+        if (!tiktokCreatorInfo[accountId]) {
+          try {
+            const resp = await tiktokApi.getCreatorInfo(accountId)
+            tiktokCreatorInfo[accountId] = resp?.data || resp || {}
+          } catch (err) {
+            tiktokCreatorInfo[accountId] = { _error: err?.message || 'Failed to fetch creator info' }
+          }
+        }
       }
     }
   }
@@ -520,9 +589,37 @@ const canGeneratePreviews = computed(
   () => selectedProfileIds.value.length > 0 && selectedAccountIds.value.length > 0
 )
 
+// Check if all TikTok accounts have valid settings (privacy selected, disclosure valid)
+const tiktokSettingsAllValid = computed(() => {
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    for (const account of accounts) {
+      if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
+        const valid = tiktokSettingsValidity[account.id]
+        if (valid === false) return false
+      }
+    }
+  }
+  return true
+})
+
 const canSubmit = computed(
-  () => canGeneratePreviews.value && mediaFiles.value.length > 0 && previews.value.length > 0
+  () => canGeneratePreviews.value && mediaFiles.value.length > 0 && previews.value.length > 0 && tiktokSettingsAllValid.value
 )
+
+// Re-fetch creator info when account selection changes
+watch(selectedAccountIds, async (newIds, oldIds) => {
+  // Initialize settings for newly selected TikTok accounts
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    for (const account of accounts) {
+      if (account.platform === 'tiktok' && newIds.includes(account.id)) {
+        ensureTiktokSettings(account.id)
+      }
+    }
+  }
+  await fetchTiktokCreatorInfo()
+}, { deep: true })
 
 function buildOptionsPayload() {
   const screenshots = options.screenshots
@@ -548,6 +645,17 @@ function buildOptionsPayload() {
 async function generatePreviews() {
   generating.value = true
   previews.value = []
+  // Ensure TikTok settings are initialized for all selected TikTok accounts
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    for (const account of accounts) {
+      if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
+        ensureTiktokSettings(account.id)
+      }
+    }
+  }
+  // Fetch creator info if not already loaded
+  await fetchTiktokCreatorInfo()
   try {
     const response = await publishCenterApi.preview({
       profileIds: selectedProfileIds.value,
@@ -600,19 +708,66 @@ function buildAccountDraftsPayload() {
   return out
 }
 
+function buildTiktokPostSettingsPayload() {
+  const out = {}
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    for (const account of accounts) {
+      if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
+        const settings = tiktokPostSettings[account.id]
+        if (settings) {
+          out[account.id] = {
+            privacyLevel: settings.privacyLevel,
+            disableComment: !settings.allowComment,
+            disableDuet: !settings.allowDuet,
+            disableStitch: !settings.allowStitch,
+            contentDisclosure: settings.contentDisclosureEnabled ? {
+              enabled: true,
+              yourBrand: settings.yourBrand,
+              brandedContent: settings.brandedContent,
+            } : null,
+          }
+        }
+      }
+    }
+  }
+  return out
+}
+
 async function submit() {
   // TikTok's app review requires explicit user confirmation before
   // video.publish (direct-post) fires. The toggle only flips the
   // behaviour for TikTok accounts in this batch — gate it behind a
   // modal so the consent moment is visible in the demo recording.
-  if (hasTiktokSelected.value && options.tiktokDirectPost) {
+  if (hasTiktokSelected.value) {
+    // Build compliance declaration based on commercial content settings
+    let hasBrandedContent = false
+    for (const profileId of selectedProfileIds.value) {
+      const accounts = profileAccountCache[profileId] || []
+      for (const account of accounts) {
+        if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
+          const settings = tiktokPostSettings[account.id]
+          if (settings?.contentDisclosureEnabled && settings?.brandedContent) {
+            hasBrandedContent = true
+          }
+        }
+      }
+    }
+    const declaration = hasBrandedContent
+      ? '發佈即表示您同意 TikTok 的品牌合作內容政策和音樂使用確認。'
+      : '發佈即表示您同意 TikTok 的音樂使用確認。'
+
+    const confirmBody = options.tiktokDirectPost
+      ? `即將直接發佈到 TikTok 個人檔案（跳過草稿，無法在 TikTok App 內二次編輯）。\n\n${declaration}\n\n確認要繼續嗎？`
+      : `${declaration}\n\n確認要繼續嗎？`
+
     try {
       await ElMessageBox.confirm(
-        '即將直接發佈到 TikTok 個人檔案（跳過草稿，無法在 TikTok App 內二次編輯）。確認要繼續嗎？',
-        '確認直接發佈到 TikTok',
+        confirmBody,
+        '確認發佈到 TikTok',
         {
           type: 'warning',
-          confirmButtonText: '是，直接發佈',
+          confirmButtonText: '是，發佈',
           cancelButtonText: '取消',
         },
       )
@@ -631,6 +786,7 @@ async function submit() {
       options: buildOptionsPayload(),
       schedule: buildSchedulePayload(),
       accountDrafts: buildAccountDraftsPayload(),
+      tiktokPostSettings: buildTiktokPostSettingsPayload(),
     })
     const data = response?.data || {}
     submitResult.value = {
@@ -731,6 +887,10 @@ function resetForm() {
   submitResult.value = null
   selectedTemplateId.value = null
   loadedTemplateName.value = ''
+  // Clear TikTok state
+  Object.keys(tiktokCreatorInfo).forEach(k => delete tiktokCreatorInfo[k])
+  Object.keys(tiktokPostSettings).forEach(k => delete tiktokPostSettings[k])
+  Object.keys(tiktokSettingsValidity).forEach(k => delete tiktokSettingsValidity[k])
 }
 </script>
 
