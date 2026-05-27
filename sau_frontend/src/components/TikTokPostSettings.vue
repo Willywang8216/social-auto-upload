@@ -156,8 +156,9 @@
 </template>
 
 <script setup>
-import { computed, watch } from 'vue'
+import { computed, watch, ref } from 'vue'
 import { InfoFilled } from '@element-plus/icons-vue'
+import { tiktokApi } from '@/api/tiktok'
 
 const props = defineProps({
   modelValue: {
@@ -179,6 +180,33 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['update:modelValue', 'validity-change'])
+
+// --- Video duration fetching ---
+
+const videoDurations = ref({}) // { filePath: durationSec }
+
+watch(() => props.mediaFiles, async (files) => {
+  if (!files || files.length === 0) {
+    videoDurations.value = {}
+    return
+  }
+  const next = {}
+  for (const f of files) {
+    const path = f.filePath || f.file_path || f.name
+    if (!path || videoDurations.value[path] !== undefined) {
+      next[path] = videoDurations.value[path]
+      continue
+    }
+    try {
+      const res = await tiktokApi.getVideoInfo(path)
+      const data = res?.data?.data || res?.data || {}
+      next[path] = data.duration_sec ?? null
+    } catch {
+      next[path] = null
+    }
+  }
+  videoDurations.value = next
+}, { immediate: true })
 
 // --- Creator info derived data ---
 
@@ -285,9 +313,14 @@ const brandedContentDisabledReason = '品牌合作內容的隱私設定不能設
 
 const videoDurationError = computed(() => {
   if (!maxVideoDurationSec.value || !props.mediaFiles?.length) return ''
-  // Check if any video exceeds the max duration
-  // We can only check if the media file has duration metadata
-  // The actual validation happens at backend publish time too
+  const maxSec = maxVideoDurationSec.value
+  for (const f of props.mediaFiles) {
+    const path = f.filePath || f.file_path || f.name
+    const dur = videoDurations.value[path]
+    if (dur !== undefined && dur !== null && dur > maxSec) {
+      return `影片時長 ${Math.round(dur)} 秒，超過 TikTok 限制的 ${maxSec} 秒`
+    }
+  }
   return ''
 })
 
@@ -309,6 +342,7 @@ const isValid = computed(() => {
   if (postLimitReached.value) return false
   if (!props.modelValue.privacyLevel) return false
   if (props.modelValue.contentDisclosureEnabled && !props.modelValue.yourBrand && !props.modelValue.brandedContent) return false
+  if (videoDurationError.value) return false
   return true
 })
 

@@ -402,6 +402,22 @@ CREATE TABLE IF NOT EXISTS storage_backends (
 )
 """
 
+TIKTOK_PUBLISH_STATUS = """
+CREATE TABLE IF NOT EXISTS tiktok_publish_status (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    publish_id TEXT NOT NULL UNIQUE,
+    job_id TEXT,
+    account_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'processing',
+    fail_reason TEXT,
+    post_id TEXT,
+    platform_url TEXT,
+    polled_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)
+"""
+
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_accounts_profile ON accounts(profile_id)",
     "CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform)",
@@ -452,6 +468,9 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_asl_account ON analytics_sync_log(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_asl_status ON analytics_sync_log(status)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_sb_default ON storage_backends(is_default) WHERE is_default = 1",
+    "CREATE INDEX IF NOT EXISTS idx_tps_job ON tiktok_publish_status(job_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tps_account ON tiktok_publish_status(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tps_status ON tiktok_publish_status(status)",
     "CREATE INDEX IF NOT EXISTS idx_fr_storage_key ON file_records(storage_key)",
     "CREATE INDEX IF NOT EXISTS idx_fr_storage_backend ON file_records(storage_backend_id)",
 ]
@@ -574,6 +593,7 @@ def bootstrap(db_path: Path = DB_PATH) -> None:
         cursor.execute(VIDEO_ANALYTICS_SNAPSHOTS)
         cursor.execute(ANALYTICS_SYNC_LOG)
         cursor.execute(STORAGE_BACKENDS)
+        cursor.execute(TIKTOK_PUBLISH_STATUS)
         _ensure_required_columns(conn)
         for statement in INDEXES:
             cursor.execute(statement)

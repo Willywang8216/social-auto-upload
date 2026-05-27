@@ -52,11 +52,35 @@
         </span>
       </div>
     </div>
+
+    <div v-if="tiktokStatuses.length" class="tiktok-statuses">
+      <div class="tiktok-statuses-title">TikTok 發佈狀態</div>
+      <div
+        v-for="ts in tiktokStatuses"
+        :key="ts.publish_id"
+        :class="['tiktok-status-row', `tiktok-${ts.status}`]"
+      >
+        <el-tag :type="tiktokStatusTag(ts.status)" size="small" effect="plain">
+          {{ tiktokStatusLabel(ts.status) }}
+        </el-tag>
+        <span v-if="ts.post_id" class="tiktok-post-id">Post: {{ ts.post_id }}</span>
+        <a
+          v-if="ts.platform_url"
+          :href="ts.platform_url"
+          target="_blank"
+          class="tiktok-link"
+        >
+          查看貼文
+        </a>
+        <span v-if="ts.fail_reason" class="tiktok-fail">{{ ts.fail_reason }}</span>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { tiktokApi } from '@/api/tiktok'
 
 const props = defineProps({
   job: {
@@ -66,6 +90,21 @@ const props = defineProps({
 })
 
 defineEmits(['cancel'])
+
+const tiktokStatuses = ref([])
+
+watch(() => props.job, async (job) => {
+  if (!job || job.platform !== 'tiktok' || !job.id) {
+    tiktokStatuses.value = []
+    return
+  }
+  try {
+    const res = await tiktokApi.getPublishStatus(job.id)
+    tiktokStatuses.value = res?.data?.data || res?.data || []
+  } catch {
+    tiktokStatuses.value = []
+  }
+}, { immediate: true })
 
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled'])
 
@@ -133,6 +172,23 @@ function shortRef(value) {
   if (!value) return ''
   if (value.length <= 32) return value
   return `${value.slice(0, 12)}…${value.slice(-12)}`
+}
+
+function tiktokStatusTag(status) {
+  switch (status) {
+    case 'publish_complete': return 'success'
+    case 'failed': return 'danger'
+    default: return 'warning'
+  }
+}
+
+function tiktokStatusLabel(status) {
+  switch (status) {
+    case 'processing': return '處理中'
+    case 'publish_complete': return '已發佈'
+    case 'failed': return '發佈失敗'
+    default: return status
+  }
 }
 </script>
 
@@ -209,6 +265,51 @@ function shortRef(value) {
 
       &.target-succeeded {
         background-color: #f0f9eb;
+      }
+    }
+  }
+
+  .tiktok-statuses {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #e4e7ed;
+
+    .tiktok-statuses-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: #303133;
+      margin-bottom: 8px;
+    }
+
+    .tiktok-status-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 10px;
+      background-color: #fff;
+      border-radius: 4px;
+      font-size: 13px;
+      color: #606266;
+      margin-bottom: 4px;
+
+      &.tiktok-publish_complete {
+        background-color: #f0f9eb;
+      }
+
+      &.tiktok-failed {
+        background-color: #fef0f0;
+      }
+
+      .tiktok-link {
+        color: #409eff;
+        text-decoration: none;
+        font-size: 12px;
+        &:hover { text-decoration: underline; }
+      }
+
+      .tiktok-fail {
+        color: #f56c6c;
+        font-size: 12px;
       }
     }
   }

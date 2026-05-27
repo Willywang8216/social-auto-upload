@@ -4572,6 +4572,17 @@ def tiktok_creator_info(account_id):
     return jsonify({'code': 200, 'msg': 'ok', 'data': info}), 200
 
 
+@app.route('/tiktok/publish-status/<job_id>', methods=['GET'])
+def tiktok_publish_status(job_id):
+    """Return TikTok publish status rows for a given job."""
+    db_path = _current_db_path()
+    try:
+        statuses = job_runtime.list_tiktok_publish_statuses(job_id, db_path=db_path)
+    except Exception as exc:
+        return jsonify({'code': 500, 'msg': str(exc), 'data': None}), 500
+    return jsonify({'code': 200, 'msg': 'ok', 'data': statuses}), 200
+
+
 @app.route("/profiles", methods=["GET"])
 def profiles_list():
     db_path = _current_db_path()
@@ -5011,6 +5022,50 @@ def accounts_patch(account_id):
     except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     return jsonify({"code": 200, "msg": "updated", "data": _account_payload(account)}), 200
+
+
+@app.route("/media/video-info", methods=["POST"])
+def media_video_info():
+    """Return video duration and dimensions for a file stored under videoFile/."""
+    try:
+        data = _read_json_body()
+        rel_path = str(data.get("file_path", "")).strip()
+        if not rel_path:
+            raise ValueError("file_path is required")
+        resolved = (BASE_DIR / "videoFile" / rel_path).resolve()
+        # Security: ensure resolved path is under BASE_DIR
+        if not str(resolved).startswith(str(BASE_DIR.resolve())):
+            raise ValueError("invalid file_path")
+        if not resolved.exists():
+            return jsonify({"code": 404, "msg": "File not found", "data": None}), 404
+        duration = media_pipeline.probe_video_duration(str(resolved))
+        # Probe dimensions via ffprobe
+        import subprocess as _sp
+        probe = _sp.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "json",
+                str(resolved),
+            ],
+            capture_output=True, text=True,
+        )
+        streams = json.loads(probe.stdout or "{}").get("streams", [{}])
+        stream = streams[0] if streams else {}
+        return jsonify({
+            "code": 200,
+            "msg": "ok",
+            "data": {
+                "duration_sec": round(duration, 2),
+                "width": stream.get("width"),
+                "height": stream.get("height"),
+            },
+        })
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    except Exception as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
 
 
 @app.route("/media-groups", methods=["POST"])

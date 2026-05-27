@@ -42,6 +42,7 @@ TIKTOK_API_ROOT = "https://open.tiktokapis.com"
 TIKTOK_CREATOR_INFO_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/creator_info/query/"
 TIKTOK_VIDEO_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/video/init/"
 TIKTOK_CONTENT_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/content/init/"
+TIKTOK_STATUS_FETCH_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/status/fetch/"
 TIKTOK_MAX_PULL_FROM_URL_BYTES = 1 * 1024 * 1024 * 1024
 TIKTOK_MIN_VIDEO_SECONDS = 3.0
 TIKTOK_MAX_VIDEO_SECONDS = 600.0
@@ -1092,6 +1093,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
                 "publish": resp_data,
                 "request": request_body,
                 "updated_config": updated_config,
+                "access_token": access_token,
             }
         else:
             # Fallback to PULL_FROM_URL when we only have a public URL
@@ -1118,6 +1120,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
                 "publish": _response_payload(response),
                 "request": request_body,
                 "updated_config": updated_config,
+                "access_token": access_token,
             }
 
     if media["images"]:
@@ -1164,9 +1167,31 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             "publish": _response_payload(response),
             "request": request_body,
             "updated_config": updated_config,
+            "access_token": access_token,
         }
 
     raise PreparedPublishError("TikTok publish requires at least one video or image")
+
+
+def fetch_tiktok_publish_status(access_token: str, publish_id: str, *, session=None) -> dict:
+    """Poll TikTok publish status for a given publish_id.
+
+    Returns the parsed JSON response from TikTok's status/fetch endpoint.
+    Typical response fields: status, fail_reason, publicaly_available_post_id,
+    platform_url, etc.
+    """
+    http = _get_session(session)
+    resp = http.post(
+        TIKTOK_STATUS_FETCH_URL,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        json={"publish_id": publish_id},
+        timeout=60,
+    )
+    _raise_for_status(resp)
+    return resp.json()
 
 
 def refresh_reddit_access_token(config: dict[str, Any], *, session=None) -> dict:

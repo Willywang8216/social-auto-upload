@@ -597,3 +597,65 @@ def _maybe_finalise_job(conn: sqlite3.Connection, job_id: int) -> None:
         (final, _now_iso(), job_id,
          JOB_SUCCEEDED, JOB_FAILED, JOB_CANCELLED),
     )
+
+
+# ---------------------------------------------------------------------------
+# TikTok publish status tracking
+# ---------------------------------------------------------------------------
+
+def upsert_tiktok_publish_status(
+    publish_id: str,
+    *,
+    job_id: str | None = None,
+    account_id: str,
+    status: str = "processing",
+    fail_reason: str | None = None,
+    post_id: str | None = None,
+    platform_url: str | None = None,
+    db_path: Path | None = None,
+) -> None:
+    """Insert or update a TikTok publish status row."""
+    now = _now_iso()
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO tiktok_publish_status
+                (publish_id, job_id, account_id, status, fail_reason,
+                 post_id, platform_url, polled_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(publish_id) DO UPDATE SET
+                status = excluded.status,
+                fail_reason = excluded.fail_reason,
+                post_id = excluded.post_id,
+                platform_url = excluded.platform_url,
+                polled_at = excluded.polled_at,
+                updated_at = excluded.updated_at
+            """,
+            (publish_id, job_id, account_id, status, fail_reason,
+             post_id, platform_url, now, now, now),
+        )
+        conn.commit()
+
+
+def get_tiktok_publish_status(
+    publish_id: str, *, db_path: Path | None = None
+) -> dict | None:
+    """Return a single TikTok publish status row as a dict, or None."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM tiktok_publish_status WHERE publish_id = ?",
+            (publish_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def list_tiktok_publish_statuses(
+    job_id: str, *, db_path: Path | None = None
+) -> list[dict]:
+    """Return all TikTok publish status rows for a given job_id."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM tiktok_publish_status WHERE job_id = ? ORDER BY created_at",
+            (job_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]

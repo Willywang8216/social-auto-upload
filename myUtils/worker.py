@@ -635,6 +635,50 @@ async def _publish_prepared_tiktok(
         except Exception:
             pass  # non-critical, don't fail the publish
 
+    # Poll TikTok publish status until terminal or timeout.
+    access_token = result.get('access_token') if isinstance(result, dict) else None
+    if publish_id and access_token:
+        _TIKTOK_TERMINAL = {'publish_complete', 'failed'}
+        _TIKTOK_POLL_INTERVAL = 15  # seconds
+        _TIKTOK_POLL_ATTEMPTS = 20  # 20 × 15s = 5 min max
+        try:
+            jobs.upsert_tiktok_publish_status(
+                publish_id,
+                job_id=str(target.job_id),
+                account_id=str(account.id),
+                status='processing',
+            )
+            for _ in range(_TIKTOK_POLL_ATTEMPTS):
+                await asyncio.sleep(_TIKTOK_POLL_INTERVAL)
+                try:
+                    status_resp = await asyncio.to_thread(
+                        prepared_publishers.fetch_tiktok_publish_status,
+                        access_token, publish_id,
+                    )
+                except Exception:
+                    continue  # transient network error, keep polling
+                status_data = (status_resp.get('data') or {})
+                status_val = str(status_data.get('status') or 'processing').lower()
+                fail_reason = str(status_data.get('fail_reason') or '').strip() or None
+                post_id = str(
+                    status_data.get('publicaly_available_post_id')
+                    or status_data.get('post_id') or ''
+                ).strip() or None
+                platform_url = str(status_data.get('platform_url') or '').strip() or None
+                jobs.upsert_tiktok_publish_status(
+                    publish_id,
+                    job_id=str(target.job_id),
+                    account_id=str(account.id),
+                    status=status_val,
+                    fail_reason=fail_reason,
+                    post_id=post_id,
+                    platform_url=platform_url,
+                )
+                if status_val in _TIKTOK_TERMINAL:
+                    break
+        except Exception:
+            pass  # non-critical, don't fail the publish
+
 
 async def _publish_prepared_facebook(
     platform: str,

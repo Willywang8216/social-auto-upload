@@ -15,5 +15,13 @@ export const tiktokApi = {
 
   refreshStaleTokens(payload = {}) {
     return http.post('/accounts/tiktok/refresh-stale', payload)
+  },
+
+  getVideoInfo(filePath) {
+    return http.post('/media/video-info', { file_path: filePath })
+  },
+
+  getPublishStatus(jobId) {
+    return http.get(`/tiktok/publish-status/${jobId}`)
   }
 }
