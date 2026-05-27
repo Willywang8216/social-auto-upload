@@ -1046,10 +1046,8 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         # "Branded Content" takes precedence when both are selected.
         content_disclosure = tt_settings.get("contentDisclosure")
         if isinstance(content_disclosure, dict) and content_disclosure.get("enabled"):
-            if content_disclosure.get("brandedContent"):
-                post_info["brand_content_toggle"] = "BRANDED_CONTENT"
-            elif content_disclosure.get("yourBrand"):
-                post_info["brand_content_toggle"] = "BRAND_ORGANIC"
+            post_info["brand_content_toggle"] = bool(content_disclosure.get("brandedContent"))
+            post_info["brand_organic_toggle"] = bool(content_disclosure.get("yourBrand"))
 
         # Use FILE_UPLOAD when we have a local file (TikTok requires domain
         # ownership verification for PULL_FROM_URL, which is impractical).
@@ -1138,10 +1136,8 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         # Commercial content disclosure for photo posts (TikTok audit compliance).
         content_disclosure = tt_settings.get("contentDisclosure")
         if isinstance(content_disclosure, dict) and content_disclosure.get("enabled"):
-            if content_disclosure.get("brandedContent"):
-                photo_post_info["brand_content_toggle"] = "BRANDED_CONTENT"
-            elif content_disclosure.get("yourBrand"):
-                photo_post_info["brand_content_toggle"] = "BRAND_ORGANIC"
+            photo_post_info["brand_content_toggle"] = bool(content_disclosure.get("brandedContent"))
+            photo_post_info["brand_organic_toggle"] = bool(content_disclosure.get("yourBrand"))
         request_body = {
             "post_info": photo_post_info,
             "source_info": {
