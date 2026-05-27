@@ -124,12 +124,16 @@
         />
         <el-alert
           v-if="hasTiktokSelected && options.watermark"
-          title="TikTok 不允許促銷浮水印，發佈到 TikTok 的內容將不會套用浮水印。"
           type="warning"
           show-icon
           :closable="false"
           style="margin-top: 8px;"
-        />
+        >
+          TikTok 不允許促銷浮水印，發佈到 TikTok 的內容將不會套用浮水印。
+          <a href="https://developers.tiktok.com/doc/content-sharing-guidelines" target="_blank" rel="noopener" style="color: #409eff; margin-left: 4px;">
+            查看規範
+          </a>
+        </el-alert>
       </div>
       <el-divider />
       <div class="pc-screenshots">
