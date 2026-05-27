@@ -137,10 +137,11 @@
         <el-table-column label="縮圖" width="80">
           <template #default="{ row }">
             <img
-              v-if="row.thumbnail_url || row.platform === 'tiktok'"
+              v-if="(row.thumbnail_url || row.platform === 'tiktok') && !failedThumbnails.has(row.platform_video_id)"
               :src="thumbnailSrc(row)"
               class="video-thumbnail"
               alt=""
+              @error="failedThumbnails.add(row.platform_video_id)"
             />
             <span v-else class="no-thumbnail">-</span>
           </template>
@@ -179,10 +180,11 @@
         <el-table-column label="縮圖" width="80">
           <template #default="{ row }">
             <img
-              v-if="row.thumbnail_url || row.platform === 'tiktok'"
+              v-if="(row.thumbnail_url || row.platform === 'tiktok') && !failedThumbnails.has(row.platform_video_id)"
               :src="thumbnailSrc(row)"
               class="video-thumbnail"
               alt=""
+              @error="failedThumbnails.add(row.platform_video_id)"
             />
             <span v-else class="no-thumbnail">-</span>
           </template>
@@ -224,7 +226,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, View, Star, TrendCharts, VideoCamera } from '@element-plus/icons-vue'
 import { useAnalyticsStore } from '@/stores/analytics'
@@ -240,6 +242,7 @@ const profilesStore = useProfilesStore()
 
 const dateRange = ref(null)
 const engagementTrends = ref([])
+const failedThumbnails = reactive(new Set())
 
 const SUPPORTED_ANALYTICS_PLATFORMS = ['youtube', 'tiktok', 'facebook', 'instagram', 'threads']
 

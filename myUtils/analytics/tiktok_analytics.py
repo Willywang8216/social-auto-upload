@@ -40,11 +40,16 @@ def list_videos(
     """List videos for the authenticated user."""
     videos = []
     cursor = None
+    page = 0
 
     while len(videos) < max_results:
-        json_body: dict[str, Any] = {"max_count": min(max_results - len(videos), 20)}
+        page += 1
+        max_count = min(max_results - len(videos), 20)
+        json_body: dict[str, Any] = {"max_count": max_count}
         if cursor:
             json_body["cursor"] = cursor
+
+        logger.info("TikTok list_videos page %d: requesting %d videos (cursor=%s)", page, max_count, cursor)
 
         resp = session.post(
             TIKTok_VIDEO_LIST_URL,
@@ -56,6 +61,8 @@ def list_videos(
             params={"fields": "id,title,create_time,cover_image_url,view_count,like_count,comment_count,share_count,duration"},
             timeout=30,
         )
+
+        logger.info("TikTok list_videos page %d: HTTP %d", page, resp.status_code)
 
         # Check for scope/auth errors BEFORE raise_for_status, because
         # TikTok returns 401 for insufficient scopes instead of a JSON body.
@@ -89,13 +96,20 @@ def list_videos(
             raise ValueError(f"TikTok API error: {body.get('error', {}).get('message', error_code)}")
 
         data = body.get("data", {})
-        for item in data.get("videos", []):
+        page_videos = data.get("videos", [])
+        for item in page_videos:
             videos.append(item)
 
+        logger.info("TikTok list_videos page %d: got %d videos (total=%d)", page, len(page_videos), len(videos))
+
         cursor = data.get("cursor")
-        if not cursor or not data.get("has_more", False):
+        has_more = data.get("has_more", False)
+        if not cursor or not has_more:
+            logger.info("TikTok list_videos: pagination ended (has_more=%s)", has_more)
             break
 
+    video_ids = [str(v.get("id", "")) for v in videos]
+    logger.info("TikTok list_videos: returning %d videos, IDs: %s", len(videos), video_ids)
     return videos
 
 
@@ -110,6 +124,8 @@ def fetch_video_metrics(
     # TikTok query API accepts up to 20 IDs at a time
     for i in range(0, len(video_ids), 20):
         batch = video_ids[i:i + 20]
+        batch_num = i // 20 + 1
+        logger.info("TikTok fetch_video_metrics batch %d: querying %d IDs", batch_num, len(batch))
         resp = session.post(
             TIKTok_VIDEO_QUERY_URL,
             headers={
@@ -140,6 +156,9 @@ def fetch_video_metrics(
                 published_at = datetime.fromtimestamp(create_time, tz=timezone.utc).isoformat()
 
             video_id = str(item.get("id", ""))
+            cover_url = item.get("cover_image_url", "")
+            if not cover_url:
+                logger.warning("TikTok fetch_video_metrics: empty cover_image_url for video %s", video_id)
             results.append({
                 "platform_video_id": video_id,
                 "title": item.get("title", ""),
@@ -171,13 +190,18 @@ def sync_tiktok_account(
     raw_videos = list_videos(access_token, session, max_results=max_videos)
 
     if not raw_videos:
-        logger.info("TikTok: no videos found")
+        logger.warning(
+            "TikTok: no videos found. This is expected for production apps — "
+            "the v2/video/list/ endpoint only returns videos posted through this specific app. "
+            "Pre-existing videos uploaded via the TikTok website or mobile app are not visible."
+        )
         return []
 
     video_ids = [str(v.get("id", "")) for v in raw_videos if v.get("id")]
     if not video_ids:
         return []
 
+    logger.info("TikTok: fetching metrics for %d videos", len(video_ids))
     videos = fetch_video_metrics(video_ids, access_token, session)
 
     for v in videos:

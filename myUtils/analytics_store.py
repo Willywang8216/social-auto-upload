@@ -168,6 +168,22 @@ def cleanup_orphaned_videos(db_path: Path = DB_PATH) -> int:
         return result.rowcount
 
 
+def get_video_thumbnail(platform_video_id: str, db_path: Path = DB_PATH) -> str | None:
+    """Return the stored thumbnail_url for a video, or None."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT thumbnail_url FROM video_analytics_videos WHERE platform_video_id = ?",
+            (platform_video_id,),
+        ).fetchone()
+        if row and row["thumbnail_url"]:
+            return row["thumbnail_url"]
+        row = conn.execute(
+            "SELECT thumbnail_url FROM video_analytics_snapshots WHERE platform_video_id = ? ORDER BY snapshot_at DESC LIMIT 1",
+            (platform_video_id,),
+        ).fetchone()
+        return row["thumbnail_url"] if row and row["thumbnail_url"] else None
+
+
 def get_latest_snapshots(
     *,
     platform: str | None = None,
@@ -182,7 +198,7 @@ def get_latest_snapshots(
         conditions.append("s.platform = ?")
         params.append(platform)
     if account_id:
-        conditions.append("s.account_id = ?")
+        conditions.append("v.account_id = ?")
         params.append(account_id)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -199,7 +215,6 @@ def get_latest_snapshots(
                 {conjunction} s.id = (
                     SELECT s2.id FROM video_analytics_snapshots s2
                     WHERE s2.platform_video_id = s.platform_video_id
-                    AND s2.account_id = s.account_id
                     ORDER BY s2.snapshot_at DESC LIMIT 1
                 )
                 ORDER BY s.snapshot_at DESC
@@ -324,7 +339,7 @@ def get_top_videos(
         conditions.append("s.platform = ?")
         params.append(platform)
     if account_id:
-        conditions.append("s.account_id = ?")
+        conditions.append("v.account_id = ?")
         params.append(account_id)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -343,7 +358,6 @@ def get_top_videos(
                 {conjunction} s.id = (
                     SELECT s2.id FROM video_analytics_snapshots s2
                     WHERE s2.platform_video_id = s.platform_video_id
-                    AND s2.account_id = s.account_id
                     ORDER BY s2.snapshot_at DESC LIMIT 1
                 )
                 ORDER BY s.{metric} DESC

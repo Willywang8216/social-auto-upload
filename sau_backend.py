@@ -6270,35 +6270,54 @@ def analytics_thumbnail_proxy(platform_video_id):
 
     TikTok CDN blocks server-side requests. The browser can potentially load
     the image after following the redirect since it has a real browser fingerprint.
-    Also checks DO Spaces cache first for previously stored thumbnails.
+    Also checks DO Spaces cache and DB for previously stored thumbnails.
     """
     db_path = _current_db_path()
     try:
         import requests as _requests
         from myUtils import tiktok_auth
         from myUtils import do_spaces
+        from myUtils import analytics_store
 
-        # Check DO Spaces cache first
+        # 1. Check DO Spaces cache first
         for ext in ('.webp', '.jpg'):
             key = f"thumbnails/tiktok/{platform_video_id}{ext}"
             if do_spaces.exists(key):
+                logging.getLogger(__name__).info("Thumbnail cache hit in DO Spaces for %s", platform_video_id)
                 return redirect(do_spaces.cdn_url(key))
 
+        # 2. Check DB for stored thumbnail URL from prior sync
+        stored_url = analytics_store.get_video_thumbnail(platform_video_id, db_path=db_path)
+        if stored_url:
+            if do_spaces.DO_SPACES_CDN_URL and stored_url.startswith(do_spaces.DO_SPACES_CDN_URL):
+                logging.getLogger(__name__).info("Thumbnail found in DB (DO Spaces CDN) for %s", platform_video_id)
+                return redirect(stored_url)
+            # Stored URL is an external TikTok CDN URL — use as fallback below
+
+        # 3. Try fetching a fresh URL from TikTok API
         from myUtils.profiles import list_accounts
         accounts = list_accounts(enabled=True, db_path=db_path)
         tiktok_accounts = [a for a in accounts if a.platform == 'tiktok']
         if not tiktok_accounts:
-            return '', 404
+            logging.getLogger(__name__).warning("Thumbnail proxy: no TikTok accounts found")
+            return redirect(stored_url) if stored_url else ('', 404)
 
         config = dict(tiktok_accounts[0].config or {})
         refresh_token = str(config.get('refreshToken') or '').strip()
         if not refresh_token:
-            return '', 404
+            logging.getLogger(__name__).warning("Thumbnail proxy: no refresh token for TikTok account")
+            return redirect(stored_url) if stored_url else ('', 404)
 
-        data = tiktok_auth.refresh_access_token(refresh_token=refresh_token)
+        try:
+            data = tiktok_auth.refresh_access_token(refresh_token=refresh_token)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Thumbnail proxy: token refresh failed: %s", exc)
+            return redirect(stored_url) if stored_url else ('', 502)
+
         access_token = str(data.get('access_token') or '').strip()
         if not access_token:
-            return '', 404
+            logging.getLogger(__name__).warning("Thumbnail proxy: token refresh returned empty access_token")
+            return redirect(stored_url) if stored_url else ('', 502)
 
         resp = _requests.post(
             'https://open.tiktokapis.com/v2/video/query/',
@@ -6311,16 +6330,21 @@ def analytics_thumbnail_proxy(platform_video_id):
             timeout=15,
         )
         if not resp.ok:
-            return '', 502
+            logging.getLogger(__name__).warning("Thumbnail proxy: TikTok API returned %d for %s", resp.status_code, platform_video_id)
+            return redirect(stored_url) if stored_url else ('', 502)
+
         body = resp.json()
         videos = body.get('data', {}).get('videos', [])
         if not videos:
-            return '', 404
+            logging.getLogger(__name__).warning("Thumbnail proxy: TikTok API returned no videos for %s", platform_video_id)
+            return redirect(stored_url) if stored_url else ('', 404)
+
         fresh_url = videos[0].get('cover_image_url', '')
         if not fresh_url:
-            return '', 404
+            logging.getLogger(__name__).warning("Thumbnail proxy: empty cover_image_url for %s", platform_video_id)
+            return redirect(stored_url) if stored_url else ('', 404)
 
-        # Try to download with auth header and cache in DO Spaces
+        # 4. Try to download with auth header and cache in DO Spaces
         try:
             img_resp = _requests.get(
                 fresh_url,
@@ -6332,13 +6356,18 @@ def analytics_thumbnail_proxy(platform_video_id):
                 ext = '.webp' if 'webp' in content_type else '.jpg'
                 key = f"thumbnails/tiktok/{platform_video_id}{ext}"
                 cdn_url = do_spaces.upload_bytes(img_resp.content, key, content_type)
+                logging.getLogger(__name__).info("Thumbnail cached to DO Spaces for %s", platform_video_id)
                 return redirect(cdn_url)
-        except Exception:
-            pass
+            else:
+                logging.getLogger(__name__).warning("Thumbnail proxy: image download failed (status=%d, size=%d) for %s",
+                    img_resp.status_code, len(img_resp.content), platform_video_id)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Thumbnail proxy: image download error for %s: %s", platform_video_id, exc)
 
-        # Fallback: redirect to TikTok CDN (browser may be able to load it)
+        # 5. Fallback: redirect to fresh TikTok CDN URL
         return redirect(fresh_url)
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Thumbnail proxy: unexpected error for %s: %s", platform_video_id, exc)
         return '', 502
 
 

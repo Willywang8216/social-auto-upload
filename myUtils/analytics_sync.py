@@ -96,7 +96,7 @@ def _store_thumbnail(
         key = f"thumbnails/{platform}/{video_id}{ext}"
         return do_spaces.upload_bytes(resp.content, key, content_type)
     except Exception:
-        logger.debug("Thumbnail download failed for %s/%s, using original URL", platform, video_id)
+        logger.warning("Thumbnail download failed for %s/%s, using original URL", platform, video_id)
         return original_url
 
 
