@@ -899,7 +899,7 @@ def query_tiktok_creator_info(config: dict[str, Any], *, access_token: str | Non
     response = http.post(
         TIKTOK_CREATOR_INFO_URL,
         headers={
-            "Authorization": f"Bearer {access_token}",
+            "Authorization": f"Bearer {resolved_access_token}",
             "Content-Type": "application/json; charset=UTF-8",
         },
         json={},
@@ -934,8 +934,14 @@ def _validate_tiktok_video_artifact(item: dict[str, Any], *, message: str, confi
             raise PreparedPublishError("TikTok video uploads currently support up to 1 GB")
 
         duration_seconds = media_pipeline.probe_video_duration(source)
-        if duration_seconds < TIKTOK_MIN_VIDEO_SECONDS or duration_seconds > TIKTOK_MAX_VIDEO_SECONDS:
-            raise PreparedPublishError("TikTok videos must be between 3 seconds and 10 minutes for the current direct publishing flow")
+        if duration_seconds < TIKTOK_MIN_VIDEO_SECONDS:
+            raise PreparedPublishError(f"TikTok videos must be at least {TIKTOK_MIN_VIDEO_SECONDS} seconds")
+        # Check against creator_info's max_video_post_duration_sec if available,
+        # otherwise fall back to the hardcoded maximum.
+        creator_max = config.get("_tiktok_max_video_duration_sec")
+        max_sec = creator_max if creator_max and creator_max > 0 else TIKTOK_MAX_VIDEO_SECONDS
+        if duration_seconds > max_sec:
+            raise PreparedPublishError(f"TikTok video duration ({duration_seconds:.0f}s) exceeds the limit ({max_sec:.0f}s)")
 
         cover_timestamp_raw = config.get("videoCoverTimestampMs")
         if cover_timestamp_raw not in (None, ""):
@@ -995,6 +1001,11 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     http = _get_session(session)
     access_token, updated_config = _ensure_tiktok_access_token(config, session=http)
     creator_info = query_tiktok_creator_info(config, access_token=access_token, session=http)
+    # Store creator_info's max duration for video validation
+    ci_data = creator_info.get("data") or creator_info
+    max_dur = ci_data.get("max_video_post_duration_sec")
+    if max_dur:
+        config["_tiktok_max_video_duration_sec"] = int(max_dur)
     if updated_config is not None:
         updated_config = _apply_tiktok_token_payload(updated_config, {'access_token': access_token}, creator_info)
     media = _extract_media(payload)
@@ -1131,6 +1142,8 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             "description": message[:TIKTOK_MAX_CAPTION_CHARS],
             "privacy_level": privacy_level,
             "disable_comment": bool(tt_settings.get("disableComment", config.get("disableComment", False))),
+            "disable_duet": bool(tt_settings.get("disableDuet", config.get("disableDuet", False))),
+            "disable_stitch": bool(tt_settings.get("disableStitch", config.get("disableStitch", False))),
             "auto_add_music": bool(config.get("autoAddMusic", True)),
         }
         # Commercial content disclosure for photo posts (TikTok audit compliance).

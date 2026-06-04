@@ -79,7 +79,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onUnmounted } from 'vue'
 import { tiktokApi } from '@/api/tiktok'
 
 const props = defineProps({
@@ -92,19 +92,47 @@ const props = defineProps({
 defineEmits(['cancel'])
 
 const tiktokStatuses = ref([])
+let pollTimer = null
 
-watch(() => props.job, async (job) => {
-  if (!job || job.platform !== 'tiktok' || !job.id) {
-    tiktokStatuses.value = []
-    return
+function clearPoll() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
   }
+}
+
+async function fetchTiktokStatus(jobId) {
   try {
-    const res = await tiktokApi.getPublishStatus(job.id)
+    const res = await tiktokApi.getPublishStatus(jobId)
     tiktokStatuses.value = res?.data?.data || res?.data || []
   } catch {
     tiktokStatuses.value = []
   }
+}
+
+function isTiktokProcessing() {
+  return tiktokStatuses.value.some(s => s.status === 'processing')
+}
+
+watch(() => props.job, async (job) => {
+  clearPoll()
+  if (!job || job.platform !== 'tiktok' || !job.id) {
+    tiktokStatuses.value = []
+    return
+  }
+  await fetchTiktokStatus(job.id)
+  // Poll every 10 seconds while any TikTok status is still processing
+  if (isTiktokProcessing()) {
+    pollTimer = setInterval(async () => {
+      await fetchTiktokStatus(job.id)
+      if (!isTiktokProcessing()) {
+        clearPoll()
+      }
+    }, 10000)
+  }
 }, { immediate: true })
+
+onUnmounted(clearPoll)
 
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled'])
 

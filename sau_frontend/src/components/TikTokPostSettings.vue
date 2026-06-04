@@ -298,12 +298,9 @@ const PRIVACY_LABELS = {
 const privacyOptions = computed(() => {
   const options = privacyLevelOptions.value
   if (!options || options.length === 0) {
-    // Fallback if creator_info didn't return options
-    return [
-      { value: 'PUBLIC_TO_EVERYONE', label: '公開', disabled: false, disabledReason: '' },
-      { value: 'MUTUAL_FOLLOW_FRIENDS', label: '朋友', disabled: false, disabledReason: '' },
-      { value: 'SELF_ONLY', label: '僅自己', disabled: false, disabledReason: '' },
-    ]
+    // No fallback — creator_info must provide the options.
+    // Return empty list so the dropdown shows "no options available".
+    return []
   }
   return options.map(val => {
     const isSelfOnly = val === 'SELF_ONLY'
