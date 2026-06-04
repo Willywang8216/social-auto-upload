@@ -147,9 +147,24 @@
         />
       </div>
 
-      <!-- Compliance declaration -->
+      <!-- Combined prompt when both options selected -->
+      <el-alert
+        v-if="modelValue.contentDisclosureEnabled && modelValue.yourBrand && modelValue.brandedContent"
+        title="你的影片/照片將被標記為「付費合作」"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-top: 8px;"
+      />
+
+      <!-- Compliance declaration with consent checkbox -->
       <div class="tks-declaration">
-        <el-text type="info" size="small">{{ declarationText }}</el-text>
+        <el-checkbox
+          :model-value="modelValue.consentChecked"
+          @update:model-value="updateField('consentChecked', $event)"
+        >
+          <el-text type="info" size="small">{{ declarationText }}</el-text>
+        </el-checkbox>
       </div>
     </div>
   </div>
@@ -344,6 +359,7 @@ const isValid = computed(() => {
   if (!props.modelValue.privacyLevel) return false
   if (props.modelValue.contentDisclosureEnabled && !props.modelValue.yourBrand && !props.modelValue.brandedContent) return false
   if (videoDurationError.value) return false
+  if (!props.modelValue.consentChecked) return false
   return true
 })
 

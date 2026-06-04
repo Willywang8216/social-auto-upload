@@ -59,9 +59,26 @@
       <el-button class="pc-mb-8" link @click="openMaterialLibrary">從素材庫挑選</el-button>
       <div v-if="mediaFiles.length > 0" class="pc-media-list">
         <div v-for="(file, idx) in mediaFiles" :key="file.path + idx" class="pc-media-item">
-          <el-tag :type="isVideo(file.path) ? 'success' : 'primary'">{{ isVideo(file.path) ? '影片' : '圖片' }}</el-tag>
-          <span class="pc-media-name">{{ file.name }}</span>
-          <el-button text type="danger" @click="removeMedia(idx)">移除</el-button>
+          <div class="pc-media-preview">
+            <video
+              v-if="isVideo(file.path)"
+              :src="'/media/file?path=' + encodeURIComponent(file.path)"
+              preload="metadata"
+              muted
+              class="pc-media-thumb"
+            />
+            <img
+              v-else
+              :src="'/media/file?path=' + encodeURIComponent(file.path)"
+              class="pc-media-thumb"
+              alt=""
+            />
+          </div>
+          <div class="pc-media-info">
+            <el-tag :type="isVideo(file.path) ? 'success' : 'primary'" size="small">{{ isVideo(file.path) ? '影片' : '圖片' }}</el-tag>
+            <span class="pc-media-name">{{ file.name }}</span>
+          </div>
+          <el-button text type="danger" size="small" @click="removeMedia(idx)">移除</el-button>
         </div>
       </div>
     </el-card>
@@ -278,9 +295,15 @@
     <!-- 7. Publish -->
     <el-card class="pc-card pc-card--footer" shadow="never">
       <div class="pc-footer-row">
-        <el-button :loading="submitting" type="success" size="large" :disabled="!canSubmit" @click="submit">
-          {{ schedule.mode === 'now' ? '立即發佈' : '送出排程' }}
-        </el-button>
+        <el-tooltip
+          :disabled="canSubmit || !hasDisclosureIncomplete"
+          content="您需要說明您的內容是推廣自己、第三方，或兩者皆是。"
+          placement="top"
+        >
+          <el-button :loading="submitting" type="success" size="large" :disabled="!canSubmit" @click="submit">
+            {{ schedule.mode === 'now' ? '立即發佈' : '送出排程' }}
+          </el-button>
+        </el-tooltip>
         <el-button size="large" @click="resetForm">取消</el-button>
       </div>
       <div v-if="submitResult" class="pc-submit-result">
@@ -461,6 +484,7 @@ function ensureTiktokSettings(accountId) {
       contentDisclosureEnabled: false,
       yourBrand: false,
       brandedContent: false,
+      consentChecked: false,
     }
   }
 }
@@ -592,6 +616,22 @@ function addMaterialsFromLibrary() {
 const canGeneratePreviews = computed(
   () => selectedProfileIds.value.length > 0 && selectedAccountIds.value.length > 0
 )
+
+// Check if any TikTok account has disclosure enabled but no option selected
+const hasDisclosureIncomplete = computed(() => {
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    for (const account of accounts) {
+      if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
+        const settings = tiktokPostSettings[account.id]
+        if (settings?.contentDisclosureEnabled && !settings.yourBrand && !settings.brandedContent) {
+          return true
+        }
+      }
+    }
+  }
+  return false
+})
 
 // Check if all TikTok accounts have valid settings (privacy selected, disclosure valid)
 const tiktokSettingsAllValid = computed(() => {
@@ -969,8 +1009,28 @@ function resetForm() {
   background: #f7f7f7;
   border-radius: 6px;
 }
+.pc-media-preview {
+  flex-shrink: 0;
+}
+.pc-media-thumb {
+  width: 80px;
+  height: 45px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #000;
+}
+.pc-media-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
 .pc-media-name {
   flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .pc-profile-accounts {
   margin-top: 12px;
