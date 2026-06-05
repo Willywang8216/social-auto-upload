@@ -11,6 +11,9 @@
       />
       <el-tag type="success" size="small">TikTok</el-tag>
       <span v-if="creatorNickname" class="tks-creator-name">{{ creatorNickname }}</span>
+      <el-tag v-if="remainingPostCount !== null" :type="postLimitReached ? 'danger' : 'success'" size="small">
+        剩餘發佈次數：{{ remainingPostCount }}
+      </el-tag>
       <el-tag v-if="postLimitReached" type="danger" size="small">
         已達發佈上限
       </el-tag>
@@ -254,6 +257,14 @@ const creatorNickname = computed(() => {
   if (!info) return ''
   // TikTok API v2 returns data nested under "data" or directly
   return info?.creator_nickname || info?.data?.creator_nickname || ''
+})
+
+const remainingPostCount = computed(() => {
+  const info = props.creatorInfo
+  if (!info) return null
+  const remaining = info?.remaining_post_count ?? info?.data?.remaining_post_count
+  if (remaining === undefined || remaining === null) return null
+  return remaining
 })
 
 const maxVideoDurationSec = computed(() => {
