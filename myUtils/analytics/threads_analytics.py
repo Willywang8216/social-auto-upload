@@ -43,15 +43,19 @@ def list_threads_posts(
 
     while len(posts) < max_results:
         resp = session.get(url, params=params, timeout=30)
-        if resp.status_code == 400:
-            error = resp.json().get("error", {})
+        if not resp.ok:
+            error = {}
+            try:
+                error = resp.json().get("error", {})
+            except Exception:
+                pass
             code = error.get("code", 0)
-            msg = error.get("message", "")
-            if code == 190 or "permission" in msg.lower():
-                logger.warning("Threads user %s: missing permissions (%s). Re-authorize with required scopes.", user_id, msg[:200])
+            msg = error.get("message", resp.text[:200])
+            # Permission/auth errors or API access blocked — skip gracefully
+            if code == 190 or "permission" in msg.lower() or "blocked" in msg.lower() or resp.status_code in (400, 401, 403):
+                logger.warning("Threads user %s: API error %d (%s). Re-authorize or check API access.", user_id, resp.status_code, msg[:200])
                 return []
-            raise requests.HTTPError(f"Threads API error: {msg}", response=resp)
-        resp.raise_for_status()
+            resp.raise_for_status()
         data = resp.json()
 
         items = data.get("data", [])
