@@ -671,122 +671,173 @@ function removeMedia(index) {
   mediaFiles.value.splice(index, 1)
 }
 
+const MULTIPART_THRESHOLD = 50 * 1024 * 1024 // 50MB
+
 async function handleFileSelect(uploadFile) {
   const file = uploadFile.raw
   if (!file) return
 
-  // Add to uploading list
   uploadingFiles.push({ name: file.name, percent: 0 })
 
   try {
     const token = getToken()
     const apiBase = buildApiUrl('')
+    const authHeaders = token ? { Authorization: `Bearer ${token}` } : {}
 
-    // Step 1: Get presigned upload URL from backend
-    const presignResp = await fetch(`${apiBase}/upload/direct`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({
-        filename: file.name,
-        content_type: file.type || 'application/octet-stream',
-      }),
-    })
-    const presignData = await presignResp.json()
-    if (presignData.code !== 200) {
-      throw new Error(presignData.msg || 'Failed to get upload URL')
-    }
-    const { upload_url, public_url, key } = presignData.data
+    let key, public_url
 
-    // Step 2: Try direct upload to DO Spaces, fall back to proxy on failure
-    let uploadSuccess = false
-    try {
-      await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest()
-        xhr.open('PUT', upload_url, true)
-
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            const uf = uploadingFiles.find(f => f.name === file.name)
-            if (uf) uf.percent = Math.round((e.loaded / e.total) * 100)
-          }
-        }
-
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve()
-          } else {
-            reject(new Error(`Upload failed: ${xhr.status}`))
-          }
-        }
-
-        xhr.onerror = () => reject(new Error('Direct upload failed'))
-        xhr.ontimeout = () => reject(new Error('Upload timed out'))
-        xhr.timeout = 600000 // 10 minutes
-
-        xhr.send(file)
+    if (file.size >= MULTIPART_THRESHOLD) {
+      // ── Large file: multipart upload with per-part presigned URLs ──
+      const initResp = await fetch(`${apiBase}/upload/multipart/init`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({
+          filename: file.name,
+          content_type: file.type || 'application/octet-stream',
+          size: file.size,
+        }),
       })
-      uploadSuccess = true
-    } catch (directErr) {
-      console.warn('Direct upload failed, falling back to proxy:', directErr.message)
-    }
+      const initData = await initResp.json()
+      if (initData.code !== 200) throw new Error(initData.msg || 'Multipart init failed')
 
-    // Step 3: If direct upload failed, use backend proxy
-    if (!uploadSuccess) {
-      const formData = new FormData()
-      formData.append('file', file)
+      const { upload_id, key: k, part_size, part_count, public_url: pu } = initData.data
+      key = k
+      public_url = pu
 
-      await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest()
-        xhr.open('POST', `${apiBase}/upload/file`, true)
+      // Split file into parts and get presigned URLs
+      const partNumbers = Array.from({ length: part_count }, (_, i) => i + 1)
+      const presignResp = await fetch(`${apiBase}/upload/multipart/presign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({ key, upload_id, part_numbers: partNumbers }),
+      })
+      const presignData = await presignResp.json()
+      if (presignData.code !== 200) throw new Error(presignData.msg || 'Presign failed')
+      const partUrls = presignData.data.urls
 
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            const uf = uploadingFiles.find(f => f.name === file.name)
-            if (uf) uf.percent = Math.round((e.loaded / e.total) * 100)
-          }
-        }
+      // Upload each part with progress tracking
+      const completedParts = []
+      let bytesUploaded = 0
 
-        xhr.onload = () => {
-          try {
-            const data = JSON.parse(xhr.responseText)
-            if (xhr.status >= 200 && xhr.status < 300 && data.code === 200) {
-              resolve(data)
-            } else {
-              reject(new Error(data.msg || `Upload failed: ${xhr.status}`))
+      for (let i = 0; i < part_count; i++) {
+        const partNum = i + 1
+        const start = i * part_size
+        const end = Math.min(start + part_size, file.size)
+        const blob = file.slice(start, end)
+
+        const etag = await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest()
+          xhr.open('PUT', partUrls[partNum], true)
+          xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              const uf = uploadingFiles.find(f => f.name === file.name)
+              if (uf) uf.percent = Math.round(((bytesUploaded + e.loaded) / file.size) * 100)
             }
-          } catch {
-            reject(new Error(`Upload failed: ${xhr.status}`))
           }
-        }
 
-        xhr.onerror = () => reject(new Error('Network error during upload'))
-        xhr.ontimeout = () => reject(new Error('Upload timed out'))
-        xhr.timeout = 600000
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              const et = xhr.getResponseHeader('ETag')
+              resolve(et)
+            } else {
+              reject(new Error(`Part ${partNum} failed: ${xhr.status}`))
+            }
+          }
 
-        if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-        xhr.send(formData)
+          xhr.onerror = () => reject(new Error(`Part ${partNum} network error`))
+          xhr.timeout = 300000
+          xhr.send(blob)
+        })
+
+        completedParts.push({ PartNumber: partNum, ETag: etag })
+        bytesUploaded += end - start
+      }
+
+      // Complete multipart upload
+      const completeResp = await fetch(`${apiBase}/upload/multipart/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({ key, upload_id, parts: completedParts }),
       })
+      const completeData = await completeResp.json()
+      if (completeData.code !== 200) throw new Error(completeData.msg || 'Complete failed')
+
+    } else {
+      // ── Small file: try direct upload, fall back to proxy ──
+      const presignResp = await fetch(`${apiBase}/upload/direct`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({
+          filename: file.name,
+          content_type: file.type || 'application/octet-stream',
+        }),
+      })
+      const presignData = await presignResp.json()
+      if (presignData.code !== 200) throw new Error(presignData.msg || 'Failed to get upload URL')
+      const { upload_url, public_url: pu, key: k, content_type: signedContentType } = presignData.data
+      key = k
+      public_url = pu
+
+      // Try direct upload
+      let uploadSuccess = false
+      try {
+        await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest()
+          xhr.open('PUT', upload_url, true)
+          if (signedContentType) xhr.setRequestHeader('Content-Type', signedContentType)
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              const uf = uploadingFiles.find(f => f.name === file.name)
+              if (uf) uf.percent = Math.round((e.loaded / e.total) * 100)
+            }
+          }
+          xhr.onload = () => (xhr.status >= 200 && xhr.status < 300) ? resolve() : reject(new Error(`Upload failed: ${xhr.status}`))
+          xhr.onerror = () => reject(new Error('Direct upload failed'))
+          xhr.timeout = 600000
+          xhr.send(file)
+        })
+        uploadSuccess = true
+      } catch (directErr) {
+        console.warn('Direct upload failed, falling back to proxy:', directErr.message)
+      }
+
+      // Fallback: proxy upload
+      if (!uploadSuccess) {
+        const formData = new FormData()
+        formData.append('file', file)
+        await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest()
+          xhr.open('POST', `${apiBase}/upload/file`, true)
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              const uf = uploadingFiles.find(f => f.name === file.name)
+              if (uf) uf.percent = Math.round((e.loaded / e.total) * 100)
+            }
+          }
+          xhr.onload = () => {
+            try {
+              const data = JSON.parse(xhr.responseText)
+              if (xhr.status >= 200 && xhr.status < 300 && data.code === 200) resolve(data)
+              else reject(new Error(data.msg || `Upload failed: ${xhr.status}`))
+            } catch { reject(new Error(`Upload failed: ${xhr.status}`)) }
+          }
+          xhr.onerror = () => reject(new Error('Network error during upload'))
+          xhr.timeout = 600000
+          if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+          xhr.send(formData)
+        })
+      }
     }
 
-    // Step 4: Add to media files list
-    mediaFiles.value.push({
-      path: key,       // DO Spaces key (used for /getFile or direct CDN)
-      name: file.name,
-      size: file.size,
-      publicUrl: public_url,  // CDN URL for direct access
-    })
+    // Add to media files list
+    mediaFiles.value.push({ path: key, name: file.name, size: file.size, publicUrl: public_url })
 
-    // Remove from uploading list
     const idx = uploadingFiles.findIndex(f => f.name === file.name)
     if (idx !== -1) uploadingFiles.splice(idx, 1)
 
-    // Fetch video duration for display
-    if (isVideo(file.name)) {
-      fetchVideoDuration(key)
-    }
+    if (isVideo(file.name)) fetchVideoDuration(key)
 
   } catch (err) {
     ElMessage.error(`上傳失敗: ${err.message}`)

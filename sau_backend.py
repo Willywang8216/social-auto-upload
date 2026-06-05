@@ -491,6 +491,106 @@ def upload_file_to_spaces():
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
 
 
+@app.route('/upload/multipart/init', methods=['POST'])
+def multipart_upload_init():
+    """Initiate a multipart upload to DO Spaces.
+
+    POST {filename, content_type, size}
+    Returns {upload_id, key, part_size, part_count}
+    """
+    try:
+        data = _read_json_body()
+        filename = str(data.get("filename", "")).strip()
+        content_type = str(data.get("content_type", "video/mp4")).strip()
+        size = int(data.get("size", 0))
+        if not filename:
+            return jsonify({"code": 400, "msg": "filename is required", "data": None}), 400
+
+        import uuid as _uuid
+        safe_name = filename.replace('/', '_').replace('\\', '_')
+        key = f"uploads/{_uuid.uuid4()}_{safe_name}"
+
+        from myUtils import do_spaces
+        client = do_spaces._default_client()
+        result = client.create_multipart_upload(key, content_type)
+
+        # Calculate part size: 10MB per part, minimum 5MB (S3 requirement)
+        part_size = max(10 * 1024 * 1024, 5 * 1024 * 1024)
+        # For very large files, use larger parts to keep part count reasonable
+        if size > 500 * 1024 * 1024:
+            part_size = 25 * 1024 * 1024
+        elif size > 100 * 1024 * 1024:
+            part_size = 15 * 1024 * 1024
+        part_count = (size + part_size - 1) // part_size if size > 0 else 1
+
+        return jsonify({
+            "code": 200,
+            "msg": "ok",
+            "data": {
+                "upload_id": result["upload_id"],
+                "key": key,
+                "part_size": part_size,
+                "part_count": part_count,
+                "public_url": client.cdn_url_for(key),
+            },
+        }), 200
+    except Exception as exc:
+        logging.getLogger(__name__).exception("multipart_upload_init failed")
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
+@app.route('/upload/multipart/presign', methods=['POST'])
+def multipart_upload_presign():
+    """Generate presigned URLs for one or more parts.
+
+    POST {key, upload_id, part_numbers: [1, 2, 3, ...]}
+    Returns {urls: {1: "https://...", 2: "https://...", ...}}
+    """
+    try:
+        data = _read_json_body()
+        key = str(data.get("key", "")).strip()
+        upload_id = str(data.get("upload_id", "")).strip()
+        part_numbers = data.get("part_numbers", [])
+        if not key or not upload_id or not part_numbers:
+            return jsonify({"code": 400, "msg": "key, upload_id, part_numbers required", "data": None}), 400
+
+        from myUtils import do_spaces
+        client = do_spaces._default_client()
+        urls = {}
+        for pn in part_numbers:
+            urls[pn] = client.generate_presigned_part_url(key, upload_id, int(pn))
+
+        return jsonify({"code": 200, "msg": "ok", "data": {"urls": urls}}), 200
+    except Exception as exc:
+        logging.getLogger(__name__).exception("multipart_upload_presign failed")
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
+@app.route('/upload/multipart/complete', methods=['POST'])
+def multipart_upload_complete():
+    """Complete a multipart upload.
+
+    POST {key, upload_id, parts: [{PartNumber: 1, ETag: "..."}, ...]}
+    Returns {public_url}
+    """
+    try:
+        data = _read_json_body()
+        key = str(data.get("key", "")).strip()
+        upload_id = str(data.get("upload_id", "")).strip()
+        parts = data.get("parts", [])
+        if not key or not upload_id or not parts:
+            return jsonify({"code": 400, "msg": "key, upload_id, parts required", "data": None}), 400
+
+        from myUtils import do_spaces
+        client = do_spaces._default_client()
+        public_url = client.complete_multipart_upload(key, upload_id, parts)
+
+        return jsonify({"code": 200, "msg": "ok", "data": {"public_url": public_url}}), 200
+    except Exception as exc:
+        logging.getLogger(__name__).exception("multipart_upload_complete failed")
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
 @app.route('/getFile', methods=['GET'])
 def get_file():
     filename = request.args.get('filename')

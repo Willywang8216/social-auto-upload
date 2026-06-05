@@ -121,23 +121,69 @@ class SpacesClient:
     def generate_presigned_upload_url(self, key: str, content_type: str = "", expires_in: int = 3600) -> dict:
         """Generate a presigned PUT URL for direct client upload.
 
-        Returns {"upload_url": str, "public_url": str, "key": str}.
-        The client can PUT the file directly to upload_url with the given content_type header.
-        Bucket policy handles public-read access, so no ACL header needed.
-        Content-Type is NOT signed so the browser can send any content type.
+        Returns {"upload_url": str, "public_url": str, "key": str, "content_type": str}.
+        The client MUST PUT the file with the exact Content-Type returned here.
+        Content-Type IS signed to prevent S3 SignatureDoesNotMatch errors.
         """
         client = self._get_client()
+        ct = content_type or "application/octet-stream"
+        params = {"Bucket": self.bucket, "Key": key, "ContentType": ct}
         upload_url = client.generate_presigned_url(
             "put_object",
-            Params={"Bucket": self.bucket, "Key": key},
+            Params=params,
             ExpiresIn=expires_in,
         )
         public_url = f"{self.cdn_url}/{key}"
-        return {"upload_url": upload_url, "public_url": public_url, "key": key}
+        return {"upload_url": upload_url, "public_url": public_url, "key": key, "content_type": ct}
 
     def cdn_url_for(self, key: str) -> str:
         """Return the public CDN URL for a given key."""
         return f"{self.cdn_url}/{key}"
+
+    # ------------------------------------------------------------------
+    # Multipart upload support
+    # ------------------------------------------------------------------
+
+    def create_multipart_upload(self, key: str, content_type: str = "") -> dict:
+        """Initiate a multipart upload. Returns {upload_id, key}."""
+        client = self._get_client()
+        params = {"Bucket": self.bucket, "Key": key}
+        if content_type:
+            params["ContentType"] = content_type
+        resp = client.create_multipart_upload(**params)
+        return {"upload_id": resp["UploadId"], "key": key}
+
+    def generate_presigned_part_url(self, key: str, upload_id: str, part_number: int, expires_in: int = 3600) -> str:
+        """Generate a presigned URL for uploading a single part."""
+        client = self._get_client()
+        return client.generate_presigned_url(
+            "upload_part",
+            Params={
+                "Bucket": self.bucket,
+                "Key": key,
+                "UploadId": upload_id,
+                "PartNumber": part_number,
+            },
+            ExpiresIn=expires_in,
+        )
+
+    def complete_multipart_upload(self, key: str, upload_id: str, parts: list[dict]) -> str:
+        """Complete a multipart upload. parts = [{PartNumber, ETag}, ...]. Returns CDN URL."""
+        client = self._get_client()
+        # Sort by part number to ensure correct order
+        sorted_parts = sorted(parts, key=lambda p: p["PartNumber"])
+        client.complete_multipart_upload(
+            Bucket=self.bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": sorted_parts},
+        )
+        return f"{self.cdn_url}/{key}"
+
+    def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        """Abort a multipart upload to clean up."""
+        client = self._get_client()
+        client.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
 
 
 # ---------------------------------------------------------------------------
