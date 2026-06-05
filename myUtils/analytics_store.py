@@ -6,12 +6,15 @@ Follows the same sqlite3 + dataclass pattern as myUtils/profiles.py.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from utils.conf_defaults import BASE_DIR
 
