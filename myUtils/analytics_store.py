@@ -178,8 +178,6 @@ def remove_stale_videos(account_id: int, platform: str, current_video_ids: set[s
     Videos in the DB for this account that are NOT in current_video_ids will be deleted
     along with their snapshots.
     """
-    if not current_video_ids:
-        return 0
     with _connect(db_path) as conn:
         # Get existing video IDs for this account+platform
         rows = conn.execute(
