@@ -679,48 +679,99 @@ async function handleFileSelect(uploadFile) {
   uploadingFiles.push({ name: file.name, percent: 0 })
 
   try {
-    // Upload to backend which proxies to DO Spaces (avoids CORS issues)
     const token = getToken()
     const apiBase = buildApiUrl('')
 
-    const formData = new FormData()
-    formData.append('file', file)
-
-    const resp = await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest()
-      xhr.open('POST', `${apiBase}/upload/file`, true)
-
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          const uf = uploadingFiles.find(f => f.name === file.name)
-          if (uf) uf.percent = Math.round((e.loaded / e.total) * 100)
-        }
-      }
-
-      xhr.onload = () => {
-        try {
-          const data = JSON.parse(xhr.responseText)
-          if (xhr.status >= 200 && xhr.status < 300 && data.code === 200) {
-            resolve(data)
-          } else {
-            reject(new Error(data.msg || `Upload failed: ${xhr.status}`))
-          }
-        } catch {
-          reject(new Error(`Upload failed: ${xhr.status}`))
-        }
-      }
-
-      xhr.onerror = () => reject(new Error('Network error during upload'))
-      xhr.ontimeout = () => reject(new Error('Upload timed out'))
-      xhr.timeout = 600000 // 10 minutes
-
-      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-      xhr.send(formData)
+    // Step 1: Get presigned upload URL from backend
+    const presignResp = await fetch(`${apiBase}/upload/direct`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        filename: file.name,
+        content_type: file.type || 'application/octet-stream',
+      }),
     })
+    const presignData = await presignResp.json()
+    if (presignData.code !== 200) {
+      throw new Error(presignData.msg || 'Failed to get upload URL')
+    }
+    const { upload_url, public_url, key } = presignData.data
 
-    const { key, public_url } = resp.data
+    // Step 2: Try direct upload to DO Spaces, fall back to proxy on failure
+    let uploadSuccess = false
+    try {
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('PUT', upload_url, true)
 
-    // Add to media files list
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const uf = uploadingFiles.find(f => f.name === file.name)
+            if (uf) uf.percent = Math.round((e.loaded / e.total) * 100)
+          }
+        }
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve()
+          } else {
+            reject(new Error(`Upload failed: ${xhr.status}`))
+          }
+        }
+
+        xhr.onerror = () => reject(new Error('Direct upload failed'))
+        xhr.ontimeout = () => reject(new Error('Upload timed out'))
+        xhr.timeout = 600000 // 10 minutes
+
+        xhr.send(file)
+      })
+      uploadSuccess = true
+    } catch (directErr) {
+      console.warn('Direct upload failed, falling back to proxy:', directErr.message)
+    }
+
+    // Step 3: If direct upload failed, use backend proxy
+    if (!uploadSuccess) {
+      const formData = new FormData()
+      formData.append('file', file)
+
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', `${apiBase}/upload/file`, true)
+
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const uf = uploadingFiles.find(f => f.name === file.name)
+            if (uf) uf.percent = Math.round((e.loaded / e.total) * 100)
+          }
+        }
+
+        xhr.onload = () => {
+          try {
+            const data = JSON.parse(xhr.responseText)
+            if (xhr.status >= 200 && xhr.status < 300 && data.code === 200) {
+              resolve(data)
+            } else {
+              reject(new Error(data.msg || `Upload failed: ${xhr.status}`))
+            }
+          } catch {
+            reject(new Error(`Upload failed: ${xhr.status}`))
+          }
+        }
+
+        xhr.onerror = () => reject(new Error('Network error during upload'))
+        xhr.ontimeout = () => reject(new Error('Upload timed out'))
+        xhr.timeout = 600000
+
+        if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+        xhr.send(formData)
+      })
+    }
+
+    // Step 4: Add to media files list
     mediaFiles.value.push({
       path: key,       // DO Spaces key (used for /getFile or direct CDN)
       name: file.name,
