@@ -199,11 +199,13 @@ def sync_all_analytics(db_path: Path = analytics_store.DB_PATH) -> dict:
 
     Returns {"synced": int, "skipped": int, "errors": list[str], "skipped_details": list[str]}.
     """
+    logger.info("Analytics sync_all_analytics starting")
     # Clean up data from deleted accounts to prevent duplicate entries
     analytics_store.cleanup_orphaned_snapshots(db_path)
     analytics_store.cleanup_orphaned_videos(db_path)
 
     accounts = list_accounts(enabled=True, db_path=db_path)
+    logger.info("Analytics sync: found %d enabled accounts", len(accounts))
     synced = 0
     skipped = 0
     errors = []
@@ -213,16 +215,22 @@ def sync_all_analytics(db_path: Path = analytics_store.DB_PATH) -> dict:
         if account.platform not in SUPPORTED_PLATFORMS:
             skipped += 1
             skipped_details.append(f"{account.platform}/{account.account_name}: platform not supported")
+            logger.info("Analytics sync: skipping %s/%s — platform not supported", account.platform, account.account_name)
             continue
         if account.auth_type != "oauth":
             skipped += 1
             skipped_details.append(f"{account.platform}/{account.account_name}: auth_type is '{account.auth_type}', not 'oauth'")
+            logger.info("Analytics sync: skipping %s/%s — auth_type is %s", account.platform, account.account_name, account.auth_type)
             continue
 
+        logger.info("Analytics sync: syncing %s/%s (id=%d)", account.platform, account.account_name, account.id)
         result = sync_account_analytics(account.id, db_path=db_path)
         if result["status"] == "completed":
             synced += 1
+            logger.info("Analytics sync: %s/%s completed — %d videos", account.platform, account.account_name, result["videos_synced"])
         elif result["status"] == "error":
             errors.append(f"{account.platform}/{account.account_name}: {result['error']}")
+            logger.error("Analytics sync: %s/%s failed — %s", account.platform, account.account_name, result['error'])
 
+    logger.info("Analytics sync_all_analytics done: synced=%d skipped=%d errors=%d", synced, skipped, len(errors))
     return {"synced": synced, "skipped": skipped, "errors": errors, "skipped_details": skipped_details}
