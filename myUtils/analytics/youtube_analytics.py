@@ -102,6 +102,11 @@ def list_channel_videos(
             params=params,
             timeout=30,
         )
+        if resp.status_code in (400, 401, 403):
+            error = resp.json().get("error", {})
+            msg = error.get("message", "")
+            logger.warning("YouTube channel %s: API error %d (%s). Re-authorize if needed.", channel_id, resp.status_code, msg[:200])
+            return []
         resp.raise_for_status()
         data = resp.json()
 

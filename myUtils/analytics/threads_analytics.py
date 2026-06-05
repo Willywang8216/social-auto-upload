@@ -43,6 +43,14 @@ def list_threads_posts(
 
     while len(posts) < max_results:
         resp = session.get(url, params=params, timeout=30)
+        if resp.status_code == 400:
+            error = resp.json().get("error", {})
+            code = error.get("code", 0)
+            msg = error.get("message", "")
+            if code == 190 or "permission" in msg.lower():
+                logger.warning("Threads user %s: missing permissions (%s). Re-authorize with required scopes.", user_id, msg[:200])
+                return []
+            raise requests.HTTPError(f"Threads API error: {msg}", response=resp)
         resp.raise_for_status()
         data = resp.json()
 
