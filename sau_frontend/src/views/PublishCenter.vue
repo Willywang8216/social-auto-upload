@@ -322,8 +322,8 @@
     <el-card class="pc-card pc-card--footer" shadow="never">
       <div class="pc-footer-row">
         <el-tooltip
-          :disabled="canSubmit || !hasDisclosureIncomplete"
-          content="您需要說明您的內容是推廣自己、第三方，或兩者皆是。"
+          :disabled="canSubmit"
+          :content="disabledReason"
           placement="top"
         >
           <el-button :loading="submitting" type="success" size="large" :disabled="!canSubmit" @click="submit">
@@ -712,6 +712,24 @@ const canGeneratePreviews = computed(
   () => selectedProfileIds.value.length > 0 && selectedAccountIds.value.length > 0
 )
 
+// Check if any selected TikTok account has reached its post limit
+const hasPostLimitReached = computed(() => {
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    for (const account of accounts) {
+      if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
+        const info = tiktokCreatorInfo[account.id]
+        if (!info) continue
+        const remaining = info?.remaining_post_count ?? info?.data?.remaining_post_count
+        if (remaining !== undefined && remaining !== null && remaining <= 0) {
+          return true
+        }
+      }
+    }
+  }
+  return false
+})
+
 // Check if any TikTok account has disclosure enabled but no option selected
 const hasDisclosureIncomplete = computed(() => {
   for (const profileId of selectedProfileIds.value) {
@@ -745,6 +763,16 @@ const tiktokSettingsAllValid = computed(() => {
 const canSubmit = computed(
   () => canGeneratePreviews.value && mediaFiles.value.length > 0 && previews.value.length > 0 && tiktokSettingsAllValid.value
 )
+
+// Dynamic tooltip message explaining why the publish button is disabled
+const disabledReason = computed(() => {
+  if (hasPostLimitReached.value) return '此 TikTok 帳號已達發佈上限，請稍後再試'
+  if (hasDisclosureIncomplete.value) return '您需要說明您的內容是推廣自己、第三方，或兩者皆是。'
+  if (!canGeneratePreviews.value) return '請先選擇至少一個 profile 與帳號'
+  if (mediaFiles.value.length === 0) return '請先上傳至少一個媒體檔案'
+  if (previews.value.length === 0) return '請先生成各帳號草稿'
+  return '請檢查所有必填欄位'
+})
 
 // Re-fetch creator info when account selection changes
 watch(selectedAccountIds, async (newIds, oldIds) => {
