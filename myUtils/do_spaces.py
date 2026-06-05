@@ -124,14 +124,12 @@ class SpacesClient:
         Returns {"upload_url": str, "public_url": str, "key": str}.
         The client can PUT the file directly to upload_url with the given content_type header.
         Bucket policy handles public-read access, so no ACL header needed.
+        Content-Type is NOT signed so the browser can send any content type.
         """
         client = self._get_client()
-        params: dict = {"Bucket": self.bucket, "Key": key}
-        if content_type:
-            params["ContentType"] = content_type
         upload_url = client.generate_presigned_url(
             "put_object",
-            Params=params,
+            Params={"Bucket": self.bucket, "Key": key},
             ExpiresIn=expires_in,
         )
         public_url = f"{self.cdn_url}/{key}"
