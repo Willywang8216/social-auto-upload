@@ -104,7 +104,9 @@ def _store_videos(account: Account, videos: list[dict], db_path: Path, auth_head
     """Store fetched video data into analytics tables. Returns count stored."""
     count = 0
     session = requests.Session()
+    current_video_ids = set()
     for v in videos:
+        current_video_ids.add(v["platform_video_id"])
         # Upload thumbnail to DO Spaces for permanent storage
         thumb_url = v.get("thumbnail_url", "")
         if thumb_url:
@@ -141,6 +143,8 @@ def _store_videos(account: Account, videos: list[dict], db_path: Path, auth_head
             db_path=db_path,
         )
         count += 1
+    # Remove videos that no longer exist on the platform
+    analytics_store.remove_stale_videos(account.id, account.platform, current_video_ids, db_path=db_path)
     return count
 
 

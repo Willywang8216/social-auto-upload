@@ -168,6 +168,38 @@ def cleanup_orphaned_videos(db_path: Path = DB_PATH) -> int:
         return result.rowcount
 
 
+def remove_stale_videos(account_id: int, platform: str, current_video_ids: set[str], db_path: Path = DB_PATH) -> int:
+    """Remove videos for an account that are no longer in the current API response.
+
+    After syncing, call this with the set of video IDs returned by the platform API.
+    Videos in the DB for this account that are NOT in current_video_ids will be deleted
+    along with their snapshots.
+    """
+    if not current_video_ids:
+        return 0
+    with _connect(db_path) as conn:
+        # Get existing video IDs for this account+platform
+        rows = conn.execute(
+            "SELECT platform_video_id FROM video_analytics_videos WHERE account_id = ? AND platform = ?",
+            (account_id, platform),
+        ).fetchall()
+        existing_ids = {r["platform_video_id"] for r in rows}
+        stale_ids = existing_ids - current_video_ids
+        if not stale_ids:
+            return 0
+        placeholders = ",".join("?" * len(stale_ids))
+        conn.execute(
+            f"DELETE FROM video_analytics_snapshots WHERE platform_video_id IN ({placeholders}) AND account_id = ?",
+            (*stale_ids, account_id),
+        )
+        conn.execute(
+            f"DELETE FROM video_analytics_videos WHERE platform_video_id IN ({placeholders}) AND account_id = ?",
+            (*stale_ids, account_id),
+        )
+        logger.info("Removed %d stale %s videos for account %d", len(stale_ids), platform, account_id)
+        return len(stale_ids)
+
+
 def get_video_thumbnail(platform_video_id: str, db_path: Path = DB_PATH) -> str | None:
     """Return the stored thumbnail_url for a video, or None."""
     with _connect(db_path) as conn:
