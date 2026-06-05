@@ -58,6 +58,9 @@
           {{ store.loading.sync ? '同步中...' : '立即同步' }}
         </el-button>
       </div>
+      <div class="pc-subtle" style="margin-top: 6px; font-size: 12px;">
+        TikTok 僅顯示「粉絲可見」以上的影片，不包含「僅自己」和「朋友」隱私的影片。
+      </div>
     </el-card>
 
     <!-- Summary Cards -->
