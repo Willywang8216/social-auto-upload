@@ -423,6 +423,31 @@ def upload_file():
     except Exception as e:
         return jsonify({"code": 500, "msg": str(e), "data": None}), 500
 
+
+@app.route('/upload/direct', methods=['POST'])
+def upload_direct():
+    """Generate a presigned upload URL for direct client-to-DO-Spaces upload.
+
+    The client POSTs {filename, content_type} and receives {upload_url, public_url, key}.
+    The client then PUTs the file directly to upload_url, bypassing the Flask server.
+    """
+    try:
+        data = _read_json_body()
+        filename = str(data.get("filename", "")).strip()
+        content_type = str(data.get("content_type", "video/mp4")).strip()
+        if not filename:
+            return jsonify({"code": 400, "msg": "filename is required", "data": None}), 400
+
+        import uuid as _uuid
+        key = f"uploads/{_uuid.uuid4()}_{filename}"
+        from myUtils import do_spaces
+        result = do_spaces.generate_presigned_upload_url(key, content_type)
+        return jsonify({"code": 200, "msg": "ok", "data": result}), 200
+    except Exception as exc:
+        logging.getLogger(__name__).exception("upload_direct failed")
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
 @app.route('/getFile', methods=['GET'])
 def get_file():
     filename = request.args.get('filename')

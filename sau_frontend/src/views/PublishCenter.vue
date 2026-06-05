@@ -42,13 +42,9 @@
       <el-upload
         drag
         multiple
-        :auto-upload="true"
-        :action="uploadAction"
-        :headers="authHeaders"
+        :auto-upload="false"
         :show-file-list="false"
-        :on-success="onUploadSuccess"
-        :on-error="onUploadError"
-        :on-progress="onUploadProgress"
+        :on-change="handleFileSelect"
         accept="image/*,video/*"
       >
         <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
@@ -75,14 +71,14 @@
           <div class="pc-media-preview">
             <video
               v-if="isVideo(file.path)"
-              :src="'/getFile?filename=' + encodeURIComponent(file.path)"
+              :src="file.publicUrl || ('/getFile?filename=' + encodeURIComponent(file.path))"
               preload="metadata"
               muted
               class="pc-media-thumb"
             />
             <img
               v-else
-              :src="'/getFile?filename=' + encodeURIComponent(file.path)"
+              :src="file.publicUrl || ('/getFile?filename=' + encodeURIComponent(file.path))"
               class="pc-media-thumb"
               alt=""
             />
@@ -675,11 +671,86 @@ function removeMedia(index) {
   mediaFiles.value.splice(index, 1)
 }
 
+async function handleFileSelect(uploadFile) {
+  const file = uploadFile.raw
+  if (!file) return
+
+  // Add to uploading list
+  uploadingFiles.push({ name: file.name, percent: 0 })
+
+  try {
+    // Step 1: Get presigned upload URL from backend
+    const token = getToken()
+    const apiBase = buildApiUrl('')
+    const presignResp = await fetch(`${apiBase}/upload/direct`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        filename: file.name,
+        content_type: file.type || 'application/octet-stream',
+      }),
+    })
+    const presignData = await presignResp.json()
+    if (presignData.code !== 200) {
+      throw new Error(presignData.msg || 'Failed to get upload URL')
+    }
+    const { upload_url, public_url, key } = presignData.data
+
+    // Step 2: Upload directly to DO Spaces with progress tracking
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('PUT', upload_url)
+      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
+      xhr.setRequestHeader('x-amz-acl', 'public-read')
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const uf = uploadingFiles.find(f => f.name === file.name)
+          if (uf) uf.percent = Math.round((e.loaded / e.total) * 100)
+        }
+      }
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve()
+        } else {
+          reject(new Error(`Upload failed: ${xhr.status}`))
+        }
+      }
+
+      xhr.onerror = () => reject(new Error('Network error during upload'))
+      xhr.send(file)
+    })
+
+    // Step 3: Add to media files list
+    mediaFiles.value.push({
+      path: key,       // DO Spaces key (used for /getFile or direct CDN)
+      name: file.name,
+      size: file.size,
+      publicUrl: public_url,  // CDN URL for direct access
+    })
+
+    // Remove from uploading list
+    const idx = uploadingFiles.findIndex(f => f.name === file.name)
+    if (idx !== -1) uploadingFiles.splice(idx, 1)
+
+    // Fetch video duration for display
+    if (isVideo(file.name)) {
+      fetchVideoDuration(key)
+    }
+
+  } catch (err) {
+    ElMessage.error(`上傳失敗: ${err.message}`)
+    const idx = uploadingFiles.findIndex(f => f.name === file.name)
+    if (idx !== -1) uploadingFiles.splice(idx, 1)
+  }
+}
+
 function onUploadSuccess(response, file) {
-  // /upload returns { code: 200, msg, data: '<uuid>_<filename>' } — the
-  // axios body's `data` field is the *string* filename relative to
-  // videoFile/. el-upload hands us that raw body, not the file object,
-  // so we cannot reuse file.name (which would drop the uuid prefix).
+  // Legacy handler — kept for backward compatibility
   let path = null
   if (typeof response?.data === 'string') {
     path = response.data
@@ -693,10 +764,6 @@ function onUploadSuccess(response, file) {
     return
   }
   mediaFiles.value.push({ path, name: file.name, size: file.size })
-  // Remove from uploading list
-  const idx = uploadingFiles.findIndex(f => f.name === file.name)
-  if (idx !== -1) uploadingFiles.splice(idx, 1)
-  // Fetch video duration for display
   if (isVideo(path)) {
     fetchVideoDuration(path)
   }

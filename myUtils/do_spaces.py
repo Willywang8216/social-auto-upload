@@ -118,6 +118,24 @@ class SpacesClient:
         except Exception:
             return False
 
+    def generate_presigned_upload_url(self, key: str, content_type: str = "", expires_in: int = 3600) -> dict:
+        """Generate a presigned PUT URL for direct client upload.
+
+        Returns {"upload_url": str, "public_url": str, "key": str}.
+        The client can PUT the file directly to upload_url with the given content_type header.
+        """
+        client = self._get_client()
+        extra: dict = {"ACL": "public-read"}
+        if content_type:
+            extra["ContentType"] = content_type
+        upload_url = client.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": self.bucket, "Key": key, **extra},
+            ExpiresIn=expires_in,
+        )
+        public_url = f"{self.cdn_url}/{key}"
+        return {"upload_url": upload_url, "public_url": public_url, "key": key}
+
     def cdn_url_for(self, key: str) -> str:
         """Return the public CDN URL for a given key."""
         return f"{self.cdn_url}/{key}"
@@ -187,6 +205,10 @@ def exists(key: str) -> bool:
 
 def cdn_url(key: str) -> str:
     return _default_client().cdn_url_for(key)
+
+
+def generate_presigned_upload_url(key: str, content_type: str = "", expires_in: int = 3600) -> dict:
+    return _default_client().generate_presigned_upload_url(key, content_type, expires_in)
 
 
 # Module-level constants for backward compatibility (analytics_sync.py)

@@ -30,6 +30,11 @@ services:
       - SAU_ACCOUNT_MAINTENANCE_INTERVAL_SECONDS=600
       - SAU_ACCOUNT_MAINTENANCE_EXPIRING_WITHIN_SECONDS=3600
       - BROWSERLESS_URL=http://browserless:3000
+      - DO_SPACES_KEY=DO00J94X7NCURCCZKZVA
+      - DO_SPACES_SECRET=Bufd9BjdmMgVUBM4mnbOCfXNGZ7QA2kntTKjYOhEMnA
+      - DO_SPACES_BUCKET=sau-media
+      - DO_SPACES_REGION=sgp1
+      - DO_SPACES_CDN_URL=https://sau-media.sgp1.digitaloceanspaces.com
 
 networks:
   1panel-network:
