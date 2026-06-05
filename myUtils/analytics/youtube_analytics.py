@@ -206,7 +206,11 @@ def sync_youtube_account(
     if not channel_id:
         raise ValueError("YouTube account config missing channelId")
 
-    access_token = _refresh_token(config, session)
+    try:
+        access_token = _refresh_token(config, session)
+    except ValueError as exc:
+        logger.warning("YouTube channel %s: token refresh failed (%s). Re-authorize the account.", channel_id, exc)
+        return []
     video_ids = list_channel_videos(channel_id, access_token, session, max_results=max_videos)
 
     if not video_ids:
