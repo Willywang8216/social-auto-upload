@@ -5056,42 +5056,81 @@ def accounts_patch(account_id):
 
 @app.route("/media/video-info", methods=["POST"])
 def media_video_info():
-    """Return video duration and dimensions for a file stored under videoFile/."""
+    """Return video duration and dimensions for a file.
+
+    Supports both local files (under videoFile/) and DO Spaces keys
+    (uploaded via presigned URL, e.g. ``uploads/<uuid>_<name>.mp4``).
+    """
     try:
         data = _read_json_body()
         rel_path = str(data.get("file_path", "")).strip()
         if not rel_path:
             raise ValueError("file_path is required")
-        resolved = (BASE_DIR / "videoFile" / rel_path).resolve()
-        # Security: ensure resolved path is under BASE_DIR
-        if not str(resolved).startswith(str(BASE_DIR.resolve())):
-            raise ValueError("invalid file_path")
-        if not resolved.exists():
-            return jsonify({"code": 404, "msg": "File not found", "data": None}), 404
-        duration = media_pipeline.probe_video_duration(str(resolved))
-        # Probe dimensions via ffprobe
+
         import subprocess as _sp
-        probe = _sp.run(
-            [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
-                "-of", "json",
-                str(resolved),
-            ],
-            capture_output=True, text=True,
-        )
-        streams = json.loads(probe.stdout or "{}").get("streams", [{}])
-        stream = streams[0] if streams else {}
-        return jsonify({
-            "code": 200,
-            "msg": "ok",
-            "data": {
-                "duration_sec": round(duration, 2),
-                "width": stream.get("width"),
-                "height": stream.get("height"),
-            },
-        })
+
+        # Try local file first
+        resolved = (BASE_DIR / "videoFile" / rel_path).resolve()
+        if str(resolved).startswith(str(BASE_DIR.resolve())) and resolved.exists():
+            local_path = str(resolved)
+            duration = media_pipeline.probe_video_duration(local_path)
+            probe = _sp.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=width,height",
+                    "-of", "json",
+                    local_path,
+                ],
+                capture_output=True, text=True,
+            )
+            streams = json.loads(probe.stdout or "{}").get("streams", [{}])
+            stream = streams[0] if streams else {}
+            return jsonify({
+                "code": 200,
+                "msg": "ok",
+                "data": {
+                    "duration_sec": round(duration, 2),
+                    "width": stream.get("width"),
+                    "height": stream.get("height"),
+                },
+            })
+
+        # Not found locally — try DO Spaces
+        from myUtils import do_spaces
+        if not do_spaces.exists(rel_path):
+            return jsonify({"code": 404, "msg": "File not found", "data": None}), 404
+
+        # Download to temp file and probe locally (most reliable)
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            do_spaces.download_file(rel_path, tmp_path)
+            duration = media_pipeline.probe_video_duration(tmp_path)
+            probe = _sp.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=width,height",
+                    "-of", "json",
+                    tmp_path,
+                ],
+                capture_output=True, text=True,
+            )
+            streams = json.loads(probe.stdout or "{}").get("streams", [{}])
+            stream = streams[0] if streams else {}
+            return jsonify({
+                "code": 200,
+                "msg": "ok",
+                "data": {
+                    "duration_sec": round(duration, 2) if duration else None,
+                    "width": stream.get("width"),
+                    "height": stream.get("height"),
+                },
+            })
+        finally:
+            os.unlink(tmp_path)
     except ValueError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     except Exception as exc:

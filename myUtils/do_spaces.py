@@ -202,6 +202,10 @@ def exists(key: str) -> bool:
     return _default_client().exists(key)
 
 
+def download_file(key: str, local_path: str | Path) -> Path:
+    return _default_client().download_file(key, local_path)
+
+
 def cdn_url(key: str) -> str:
     return _default_client().cdn_url_for(key)
 
