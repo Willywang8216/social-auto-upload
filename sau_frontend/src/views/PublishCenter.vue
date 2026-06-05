@@ -48,6 +48,7 @@
         :show-file-list="false"
         :on-success="onUploadSuccess"
         :on-error="onUploadError"
+        :on-progress="onUploadProgress"
         accept="image/*,video/*"
       >
         <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
@@ -56,6 +57,18 @@
           <div class="el-upload__tip">支援多檔上傳。單媒體平台 (Tencent / TikTok / YouTube …) 若上傳多個檔案，會自動拆成多則貼文、每 {{ STAGGER_MINUTES }} 分鐘間隔發佈。</div>
         </template>
       </el-upload>
+      <!-- Upload progress -->
+      <div v-if="uploadingFiles.length > 0" class="pc-upload-progress-list">
+        <div v-for="uf in uploadingFiles" :key="uf.name" class="pc-upload-progress-item">
+          <span class="pc-upload-filename">{{ uf.name }}</span>
+          <el-progress
+            :percentage="uf.percent"
+            :stroke-width="8"
+            :status="uf.percent >= 100 ? 'success' : ''"
+            style="flex: 1;"
+          />
+        </div>
+      </div>
       <el-button class="pc-mb-8" link @click="openMaterialLibrary">從素材庫挑選</el-button>
       <div v-if="mediaFiles.length > 0" class="pc-media-list">
         <div v-for="(file, idx) in mediaFiles" :key="file.path + idx" class="pc-media-item">
@@ -266,7 +279,7 @@
               placeholder="Post title"
               style="margin-bottom: 8px;"
             />
-            <div v-if="account.platform === 'tiktok'" class="pc-tiktok-title-hint">
+            <div class="pc-tiktok-title-hint">
               <el-text size="small" type="info">標題 / 說明文字（可編輯）：</el-text>
             </div>
             <el-input
@@ -429,6 +442,7 @@ const authHeaders = computed(() => {
 
 const mediaFiles = ref([]) // [{path, name, size}]
 const videoDurations = reactive({}) // path -> durationSec (null while loading)
+const uploadingFiles = reactive([]) // [{name, percent}]
 const selectedProfileIds = ref([])
 const selectedAccountIds = ref([])
 const profileAccountCache = reactive({}) // profileId -> [account]
@@ -675,6 +689,9 @@ function onUploadSuccess(response, file) {
     return
   }
   mediaFiles.value.push({ path, name: file.name, size: file.size })
+  // Remove from uploading list
+  const idx = uploadingFiles.findIndex(f => f.name === file.name)
+  if (idx !== -1) uploadingFiles.splice(idx, 1)
   // Fetch video duration for display
   if (isVideo(path)) {
     fetchVideoDuration(path)
@@ -683,6 +700,16 @@ function onUploadSuccess(response, file) {
 
 function onUploadError() {
   ElMessage.error('檔案上傳失敗')
+  uploadingFiles.length = 0
+}
+
+function onUploadProgress(event, file) {
+  const existing = uploadingFiles.find(f => f.name === file.name)
+  if (existing) {
+    existing.percent = Math.round(event.percent)
+  } else {
+    uploadingFiles.push({ name: file.name, percent: Math.round(event.percent) || 0 })
+  }
 }
 
 async function openMaterialLibrary() {
@@ -1168,6 +1195,25 @@ function resetForm() {
   margin-top: 6px;
   font-size: 12px;
   color: #909399;
+}
+.pc-upload-progress-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pc-upload-progress-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pc-upload-filename {
+  font-size: 13px;
+  color: #606266;
+  min-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .pc-profile-accounts {
   margin-top: 12px;
