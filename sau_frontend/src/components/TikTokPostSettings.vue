@@ -196,6 +196,12 @@ const props = defineProps({
 
 const emit = defineEmits(['update:modelValue', 'validity-change'])
 
+// --- Video file check ---
+
+function isVideoFile(path) {
+  return /\.(mp4|mov|avi|mkv|webm|m4v)$/i.test(path || '')
+}
+
 // --- Video duration fetching ---
 
 const videoDurations = ref({}) // { filePath: durationSec }
@@ -207,9 +213,16 @@ watch(() => props.mediaFiles, async (files) => {
   }
   const next = {}
   for (const f of files) {
-    const path = f.filePath || f.file_path || f.name
+    // Prefer f.path (uploaded server path like uuid_filename.ext) over
+    // f.name (original client filename) — the video-info endpoint needs
+    // the server-side path under videoFile/.
+    const path = f.path || f.filePath || f.file_path || f.name
     if (!path || videoDurations.value[path] !== undefined) {
       next[path] = videoDurations.value[path]
+      continue
+    }
+    if (!isVideoFile(path)) {
+      next[path] = null
       continue
     }
     try {

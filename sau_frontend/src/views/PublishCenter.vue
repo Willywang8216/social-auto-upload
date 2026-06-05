@@ -62,14 +62,14 @@
           <div class="pc-media-preview">
             <video
               v-if="isVideo(file.path)"
-              :src="'/media/file?path=' + encodeURIComponent(file.path)"
+              :src="'/getFile?filename=' + encodeURIComponent(file.path)"
               preload="metadata"
               muted
               class="pc-media-thumb"
             />
             <img
               v-else
-              :src="'/media/file?path=' + encodeURIComponent(file.path)"
+              :src="'/getFile?filename=' + encodeURIComponent(file.path)"
               class="pc-media-thumb"
               alt=""
             />
