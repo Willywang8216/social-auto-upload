@@ -77,8 +77,24 @@
           <div class="pc-media-info">
             <el-tag :type="isVideo(file.path) ? 'success' : 'primary'" size="small">{{ isVideo(file.path) ? '影片' : '圖片' }}</el-tag>
             <span class="pc-media-name">{{ file.name }}</span>
+            <span v-if="isVideo(file.path) && videoDurations[file.path] !== undefined" class="pc-media-duration">
+              <template v-if="videoDurations[file.path] !== null">{{ formatDuration(videoDurations[file.path]) }}</template>
+              <template v-else>...</template>
+            </span>
           </div>
           <el-button text type="danger" size="small" @click="removeMedia(idx)">移除</el-button>
+        </div>
+        <!-- TikTok duration limit warning -->
+        <el-alert
+          v-if="tiktokMaxDuration && videoDurationWarnings.length > 0"
+          :title="`以下影片超過 TikTok 限制的 ${tiktokMaxDuration} 秒：` + videoDurationWarnings.map(w => `${w.name} (${Math.round(w.duration)}s)`).join('、')"
+          type="error"
+          :closable="false"
+          show-icon
+          style="margin-top: 8px;"
+        />
+        <div v-if="tiktokMaxDuration" class="pc-duration-hint">
+          TikTok 影片長度限制：{{ tiktokMaxDuration }} 秒
         </div>
       </div>
     </el-card>
@@ -409,6 +425,7 @@ const authHeaders = computed(() => {
 })
 
 const mediaFiles = ref([]) // [{path, name, size}]
+const videoDurations = reactive({}) // path -> durationSec (null while loading)
 const selectedProfileIds = ref([])
 const selectedAccountIds = ref([])
 const profileAccountCache = reactive({}) // profileId -> [account]
@@ -516,6 +533,55 @@ function countChars(text) {
   return (text || '').length
 }
 
+async function fetchVideoDuration(path) {
+  if (videoDurations[path] !== undefined) return
+  videoDurations[path] = null // loading
+  try {
+    const res = await tiktokApi.getVideoInfo(path)
+    const data = res?.data?.data || res?.data || {}
+    videoDurations[path] = data.duration_sec ?? null
+  } catch {
+    videoDurations[path] = null
+  }
+}
+
+function formatDuration(sec) {
+  if (sec === null || sec === undefined) return ''
+  const m = Math.floor(sec / 60)
+  const s = Math.round(sec % 60)
+  return m > 0 ? `${m}:${String(s).padStart(2, '0')}` : `${s}s`
+}
+
+// TikTok max duration from creator_info (computed from all selected TikTok accounts)
+const tiktokMaxDuration = computed(() => {
+  let min = Infinity
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    for (const account of accounts) {
+      if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
+        const info = tiktokCreatorInfo[account.id]
+        const max = info?.max_video_post_duration_sec || info?.data?.max_video_post_duration_sec
+        if (max && max < min) min = max
+      }
+    }
+  }
+  return min === Infinity ? null : min
+})
+
+const videoDurationWarnings = computed(() => {
+  const max = tiktokMaxDuration.value
+  if (!max) return []
+  const warnings = []
+  for (const f of mediaFiles.value) {
+    if (!isVideo(f.path)) continue
+    const dur = videoDurations[f.path]
+    if (dur !== null && dur !== undefined && dur > max) {
+      warnings.push({ name: f.name, duration: dur, max })
+    }
+  }
+  return warnings
+})
+
 function isBlogPlatform(platform) {
   return ['teaching_blog', 'nw_sw_blog'].includes(platform)
 }
@@ -606,6 +672,10 @@ function onUploadSuccess(response, file) {
     return
   }
   mediaFiles.value.push({ path, name: file.name, size: file.size })
+  // Fetch video duration for display
+  if (isVideo(path)) {
+    fetchVideoDuration(path)
+  }
 }
 
 function onUploadError() {
@@ -1056,6 +1126,17 @@ function resetForm() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.pc-media-duration {
+  color: #606266;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.pc-duration-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #909399;
 }
 .pc-profile-accounts {
   margin-top: 12px;
