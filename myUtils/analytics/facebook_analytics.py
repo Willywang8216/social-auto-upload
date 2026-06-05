@@ -36,7 +36,7 @@ def list_page_videos(
     videos = []
     url = f"{META_GRAPH_ROOT}/{page_id}/videos"
     params = {
-        "fields": "id,title,description,created_time,thumbnails,permalink,length",
+        "fields": "id,name,description,created_time,picture,permalink",
         "access_token": access_token,
         "limit": min(max_results, 100),
     }
@@ -141,12 +141,11 @@ def sync_facebook_account(
     videos = []
     for m in metrics:
         raw = raw_lookup.get(m["platform_video_id"], {})
-        title = raw.get("title") or raw.get("description", "")[:100] or ""
+        title = raw.get("name") or raw.get("description", "")[:100] or ""
         description = (raw.get("description") or "")[:500]
 
-        # Extract thumbnail from thumbnails array
-        thumbnails = raw.get("thumbnails", {}).get("data", [])
-        thumbnail_url = thumbnails[-1].get("uri", "") if thumbnails else ""
+        # Thumbnail is the "picture" field (a URL string)
+        thumbnail_url = raw.get("picture", "")
 
         videos.append({
             "platform_video_id": m["platform_video_id"],
@@ -154,7 +153,7 @@ def sync_facebook_account(
             "description": description,
             "thumbnail_url": thumbnail_url,
             "published_at": raw.get("created_time"),
-            "duration_seconds": _parse_fb_duration(raw.get("length")),
+            "duration_seconds": 0,  # Facebook API v25+ doesn't expose video length
             "views": m["views"],
             "likes": m["likes"],
             "comments": m["comments"],
