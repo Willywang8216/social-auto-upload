@@ -273,18 +273,18 @@
                 {{ mediaFiles.length }} 則貼文，每 {{ STAGGER_MINUTES }} 分鐘
               </el-tag>
             </div>
-            <div class="pc-draft-field">
+            <div v-if="account.platform !== 'tiktok'" class="pc-draft-field">
               <el-text size="small" type="info">標題：</el-text>
               <el-input
                 v-model="account.draft.title"
-                placeholder="輸入影片/貼文標題"
+                placeholder="輸入標題"
                 :maxlength="150"
                 show-word-limit
                 size="small"
               />
             </div>
             <div class="pc-draft-field">
-              <el-text size="small" type="info">說明文字：</el-text>
+              <el-text size="small" type="info">{{ account.platform === 'tiktok' ? '標題 / 說明文字：' : '說明文字：' }}</el-text>
               <el-input
                 v-model="account.draft.message"
                 type="textarea"
