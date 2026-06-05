@@ -702,8 +702,7 @@ async function handleFileSelect(uploadFile) {
     // Step 2: Upload directly to DO Spaces with progress tracking
     await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
-      xhr.open('PUT', upload_url)
-      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
+      xhr.open('PUT', upload_url, true)
 
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
@@ -716,11 +715,21 @@ async function handleFileSelect(uploadFile) {
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve()
         } else {
-          reject(new Error(`Upload failed: ${xhr.status}`))
+          console.error('DO Spaces upload failed:', xhr.status, xhr.responseText)
+          reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`))
         }
       }
 
-      xhr.onerror = () => reject(new Error('Network error during upload'))
+      xhr.onerror = (e) => {
+        console.error('DO Spaces upload network error:', e, 'readyState:', xhr.readyState, 'status:', xhr.status)
+        reject(new Error(`Network error during upload (readyState=${xhr.readyState}, status=${xhr.status})`))
+      }
+
+      xhr.ontimeout = () => reject(new Error('Upload timed out'))
+      xhr.timeout = 600000 // 10 minutes
+
+      // Don't set Content-Type — let the browser send it naturally
+      // The presigned URL doesn't sign Content-Type so any value works
       xhr.send(file)
     })
 
