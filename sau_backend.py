@@ -13,6 +13,11 @@ from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Queue
+
+# Install browserless patch BEFORE any playwright/patchright imports
+from myUtils.browser_helper import install_browserless_patch
+install_browserless_patch()
+
 from flask_cors import CORS
 from myUtils.auth import check_cookie
 from myUtils import account_validation

@@ -14,7 +14,7 @@ ENV PATH=/app/node_modules/.bin:$PATH
 RUN npm run build
 
 
-FROM ghcr.io/willywang8216/sau-base:latest
+FROM ghcr.io/willywang8216/sau-base:slim
 
 WORKDIR /app
 
