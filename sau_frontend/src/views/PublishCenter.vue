@@ -273,21 +273,25 @@
                 {{ mediaFiles.length }} 則貼文，每 {{ STAGGER_MINUTES }} 分鐘
               </el-tag>
             </div>
-            <el-input
-              v-if="isBlogPlatform(account.platform)"
-              v-model="account.draft.title"
-              placeholder="Post title"
-              style="margin-bottom: 8px;"
-            />
-            <div class="pc-tiktok-title-hint">
-              <el-text size="small" type="info">標題 / 說明文字（可編輯）：</el-text>
+            <div class="pc-draft-field">
+              <el-text size="small" type="info">標題：</el-text>
+              <el-input
+                v-model="account.draft.title"
+                placeholder="輸入影片/貼文標題"
+                :maxlength="150"
+                show-word-limit
+                size="small"
+              />
             </div>
-            <el-input
-              v-model="account.draft.message"
-              type="textarea"
-              :rows="4"
-              :maxlength="account.maxChars || undefined"
-            />
+            <div class="pc-draft-field">
+              <el-text size="small" type="info">說明文字：</el-text>
+              <el-input
+                v-model="account.draft.message"
+                type="textarea"
+                :rows="4"
+                :maxlength="account.maxChars || undefined"
+              />
+            </div>
             <div v-if="account.supportsFirstComment && options.linkInFirstComment" class="pc-first-comment">
               <span class="pc-subtle">第一則留言：</span>
               <el-input v-model="account.draft.firstComment" placeholder="貼文連結等資訊" />
@@ -1281,6 +1285,13 @@ function resetForm() {
 }
 .pc-tiktok-title-hint {
   margin-bottom: 4px;
+}
+.pc-draft-field {
+  margin-bottom: 8px;
+}
+.pc-draft-field .el-text {
+  display: block;
+  margin-bottom: 2px;
 }
 .pc-footer-row {
   display: flex;
