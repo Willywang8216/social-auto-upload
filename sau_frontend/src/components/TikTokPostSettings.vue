@@ -2,6 +2,13 @@
   <div class="tiktok-post-settings">
     <!-- Creator info header -->
     <div v-if="creatorInfo" class="tks-creator">
+      <img
+        v-if="accountAvatar"
+        :src="accountAvatar"
+        class="tks-creator-avatar"
+        alt=""
+        @error="(e) => e.target.style.display = 'none'"
+      />
       <el-tag type="success" size="small">TikTok</el-tag>
       <span v-if="creatorNickname" class="tks-creator-name">{{ creatorNickname }}</span>
       <el-tag v-if="postLimitReached" type="danger" size="small">
@@ -183,6 +190,10 @@ const props = defineProps({
   creatorInfo: {
     type: Object,
     default: null,
+  },
+  accountAvatar: {
+    type: String,
+    default: '',
   },
   isPhotoPost: {
     type: Boolean,
@@ -413,6 +424,14 @@ function onDisclosureToggle(value) {
 .tks-creator-name {
   font-weight: 600;
   font-size: 14px;
+}
+
+.tks-creator-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
 }
 
 .tks-fields {

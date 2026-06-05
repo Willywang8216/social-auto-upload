@@ -109,7 +109,16 @@
             :key="account.id"
             :label="account.id"
           >
-            {{ account.account_name }} ({{ account.platform }})
+            <div class="pc-account-option">
+              <img
+                v-if="accountAvatar(account)"
+                :src="accountAvatar(account)"
+                class="pc-account-avatar"
+                alt=""
+                @error="(e) => e.target.style.display = 'none'"
+              />
+              <span>{{ account.account_name }} ({{ account.platform }})</span>
+            </div>
           </el-checkbox>
         </el-checkbox-group>
         <span v-if="accountsForProfile(profileId).length === 0" class="pc-help">尚未取得此 profile 的帳號</span>
@@ -256,6 +265,7 @@
               v-if="account.platform === 'tiktok'"
               :model-value="tiktokPostSettings[account.accountId] || {}"
               :creator-info="tiktokCreatorInfo[account.accountId] || null"
+              :account-avatar="getAccountAvatar(account.accountId)"
               :is-photo-post="!mediaFiles.some(f => isVideo(f.path))"
               :media-files="mediaFiles"
               @update:model-value="tiktokPostSettings[account.accountId] = $event"
@@ -516,6 +526,21 @@ function findProfile(profileId) {
 
 function accountsForProfile(profileId) {
   return profileAccountCache[profileId] || []
+}
+
+function accountAvatar(account) {
+  // Extract avatar URL from account config (stored during OAuth)
+  const cfg = account.config || account.accountConfig || {}
+  return cfg.avatarUrl || cfg.avatar_url || cfg.profileImageUrl || ''
+}
+
+function getAccountAvatar(accountId) {
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    const found = accounts.find(a => a.id === accountId)
+    if (found) return accountAvatar(found)
+  }
+  return ''
 }
 
 async function onProfileSelectionChanged() {
@@ -1041,6 +1066,18 @@ function resetForm() {
 .pc-profile-title {
   font-weight: 500;
   margin-bottom: 4px;
+}
+.pc-account-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.pc-account-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
 }
 .pc-options-grid {
   display: grid;
