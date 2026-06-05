@@ -679,30 +679,16 @@ async function handleFileSelect(uploadFile) {
   uploadingFiles.push({ name: file.name, percent: 0 })
 
   try {
-    // Step 1: Get presigned upload URL from backend
+    // Upload to backend which proxies to DO Spaces (avoids CORS issues)
     const token = getToken()
     const apiBase = buildApiUrl('')
-    const presignResp = await fetch(`${apiBase}/upload/direct`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({
-        filename: file.name,
-        content_type: file.type || 'application/octet-stream',
-      }),
-    })
-    const presignData = await presignResp.json()
-    if (presignData.code !== 200) {
-      throw new Error(presignData.msg || 'Failed to get upload URL')
-    }
-    const { upload_url, public_url, key } = presignData.data
 
-    // Step 2: Upload directly to DO Spaces with progress tracking
-    await new Promise((resolve, reject) => {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const resp = await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
-      xhr.open('PUT', upload_url, true)
+      xhr.open('POST', `${apiBase}/upload/file`, true)
 
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
@@ -712,28 +698,29 @@ async function handleFileSelect(uploadFile) {
       }
 
       xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve()
-        } else {
-          console.error('DO Spaces upload failed:', xhr.status, xhr.responseText)
-          reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`))
+        try {
+          const data = JSON.parse(xhr.responseText)
+          if (xhr.status >= 200 && xhr.status < 300 && data.code === 200) {
+            resolve(data)
+          } else {
+            reject(new Error(data.msg || `Upload failed: ${xhr.status}`))
+          }
+        } catch {
+          reject(new Error(`Upload failed: ${xhr.status}`))
         }
       }
 
-      xhr.onerror = (e) => {
-        console.error('DO Spaces upload network error:', e, 'readyState:', xhr.readyState, 'status:', xhr.status)
-        reject(new Error(`Network error during upload (readyState=${xhr.readyState}, status=${xhr.status})`))
-      }
-
+      xhr.onerror = () => reject(new Error('Network error during upload'))
       xhr.ontimeout = () => reject(new Error('Upload timed out'))
       xhr.timeout = 600000 // 10 minutes
 
-      // Don't set Content-Type — let the browser send it naturally
-      // The presigned URL doesn't sign Content-Type so any value works
-      xhr.send(file)
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+      xhr.send(formData)
     })
 
-    // Step 3: Add to media files list
+    const { key, public_url } = resp.data
+
+    // Add to media files list
     mediaFiles.value.push({
       path: key,       // DO Spaces key (used for /getFile or direct CDN)
       name: file.name,

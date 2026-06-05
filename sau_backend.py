@@ -448,6 +448,49 @@ def upload_direct():
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
 
 
+@app.route('/upload/file', methods=['POST'])
+def upload_file_to_spaces():
+    """Upload a file to DO Spaces via the backend (proxied upload).
+
+    Accepts multipart/form-data with a 'file' field.
+    Returns {key, public_url} on success.
+    This avoids CORS issues with direct browser-to-Spaces uploads.
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({"code": 400, "msg": "No file provided", "data": None}), 400
+
+        f = request.files['file']
+        if not f.filename:
+            return jsonify({"code": 400, "msg": "Empty filename", "data": None}), 400
+
+        import uuid as _uuid
+        import tempfile
+        safe_name = f.filename.replace('/', '_').replace('\\', '_')
+        key = f"uploads/{_uuid.uuid4()}_{safe_name}"
+
+        # Save to temp file, then upload to Spaces
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.upload') as tmp:
+            tmp_path = tmp.name
+            f.save(tmp_path)
+
+        try:
+            from myUtils import do_spaces
+            content_type = f.content_type or 'application/octet-stream'
+            public_url = do_spaces.upload_file(tmp_path, key, content_type)
+            return jsonify({
+                "code": 200,
+                "msg": "ok",
+                "data": {"key": key, "public_url": public_url},
+            }), 200
+        finally:
+            import os
+            os.unlink(tmp_path)
+    except Exception as exc:
+        logging.getLogger(__name__).exception("upload_file_to_spaces failed")
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
 @app.route('/getFile', methods=['GET'])
 def get_file():
     filename = request.args.get('filename')
