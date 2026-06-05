@@ -266,6 +266,9 @@
               placeholder="Post title"
               style="margin-bottom: 8px;"
             />
+            <div v-if="account.platform === 'tiktok'" class="pc-tiktok-title-hint">
+              <el-text size="small" type="info">標題 / 說明文字（可編輯）：</el-text>
+            </div>
             <el-input
               v-model="account.draft.message"
               type="textarea"
@@ -1229,6 +1232,9 @@ function resetForm() {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.pc-tiktok-title-hint {
+  margin-bottom: 4px;
 }
 .pc-footer-row {
   display: flex;
