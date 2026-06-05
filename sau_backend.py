@@ -591,6 +591,56 @@ def multipart_upload_complete():
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
 
 
+@app.route('/upload/multipart/part-proxy', methods=['POST'])
+def multipart_upload_part_proxy():
+    """Proxy a single multipart part upload through the backend.
+
+    Accepts multipart/form-data with 'file' field plus query params:
+      key, upload_id, part_number
+    Returns {etag, part_number}
+    Used as fallback when direct presigned PUT to DO Spaces fails (CORS).
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({"code": 400, "msg": "No file provided", "data": None}), 400
+
+        key = request.form.get('key', '').strip()
+        upload_id = request.form.get('upload_id', '').strip()
+        part_number = int(request.form.get('part_number', 0))
+        if not key or not upload_id or not part_number:
+            return jsonify({"code": 400, "msg": "key, upload_id, part_number required", "data": None}), 400
+
+        import tempfile, os
+        f = request.files['file']
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.part') as tmp:
+            tmp_path = tmp.name
+            f.save(tmp_path)
+
+        try:
+            from myUtils import do_spaces
+            client = do_spaces._default_client()
+            s3 = client._get_client()
+            with open(tmp_path, 'rb') as fp:
+                resp = s3.upload_part(
+                    Bucket=client.bucket,
+                    Key=key,
+                    PartNumber=part_number,
+                    UploadId=upload_id,
+                    Body=fp,
+                )
+            etag = resp["ETag"]
+            return jsonify({
+                "code": 200,
+                "msg": "ok",
+                "data": {"etag": etag, "part_number": part_number},
+            }), 200
+        finally:
+            os.unlink(tmp_path)
+    except Exception as exc:
+        logging.getLogger(__name__).exception("multipart_upload_part_proxy failed")
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
 @app.route('/getFile', methods=['GET'])
 def get_file():
     filename = request.args.get('filename')
