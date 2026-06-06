@@ -466,7 +466,8 @@ def upload_file_to_spaces():
 
         import uuid as _uuid
         import tempfile
-        safe_name = f.filename.replace('/', '_').replace('\\', '_')
+        from werkzeug.utils import secure_filename
+        safe_name = secure_filename(f.filename) or "file"
         key = f"uploads/{_uuid.uuid4()}_{safe_name}"
 
         # Save to temp file, then upload to Spaces
@@ -581,6 +582,11 @@ def multipart_upload_complete():
         if not key or not upload_id or not parts:
             return jsonify({"code": 400, "msg": "key, upload_id, parts required", "data": None}), 400
 
+        # Validate key pattern
+        import re as _re
+        if not _re.match(r'^uploads/[0-9a-f-]{36}_', key):
+            return jsonify({"code": 400, "msg": "Invalid key format", "data": None}), 400
+
         from myUtils import do_spaces
         client = do_spaces._default_client()
         public_url = client.complete_multipart_upload(key, upload_id, parts)
@@ -609,6 +615,14 @@ def multipart_upload_part_proxy():
         part_number = int(request.form.get('part_number', 0))
         if not key or not upload_id or not part_number:
             return jsonify({"code": 400, "msg": "key, upload_id, part_number required", "data": None}), 400
+
+        # Validate key pattern (must start with uploads/ and contain a UUID)
+        import re as _re
+        if not _re.match(r'^uploads/[0-9a-f-]{36}_', key):
+            return jsonify({"code": 400, "msg": "Invalid key format", "data": None}), 400
+        # Validate part_number range (S3 allows 1-10000)
+        if not (1 <= part_number <= 10000):
+            return jsonify({"code": 400, "msg": "part_number must be 1-10000", "data": None}), 400
 
         import tempfile, os
         f = request.files['file']
