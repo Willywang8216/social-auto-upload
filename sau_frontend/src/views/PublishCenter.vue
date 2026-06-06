@@ -824,7 +824,7 @@ async function handleFileSelect(uploadFile) {
       const completeResp = await fetch(`${apiBase}/upload/multipart/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders },
-        body: JSON.stringify({ key, upload_id, parts: completedParts }),
+        body: JSON.stringify({ key, upload_id, parts: completedParts, size: file.size }),
       })
       const completeData = await completeResp.json()
       if (completeData.code !== 200) throw new Error(completeData.msg || 'Complete failed')
@@ -864,6 +864,13 @@ async function handleFileSelect(uploadFile) {
           xhr.send(file)
         })
         uploadSuccess = true
+
+        // Register the file in file_records so it appears in 素材庫
+        fetch(`${apiBase}/upload/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify({ filename: file.name, key, public_url, size: file.size }),
+        }).catch(() => {}) // fire-and-forget
       } catch (directErr) {
         console.warn('Direct upload failed, falling back to proxy:', directErr.message)
       }

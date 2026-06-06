@@ -131,12 +131,12 @@
       <div class="preview-container" v-if="currentMaterial">
         <div v-if="isVideoFile(currentMaterial.filename)" class="video-preview">
           <video controls style="max-width: 100%; max-height: 60vh;">
-            <source :src="getPreviewUrl(currentMaterial.file_path)" type="video/mp4">
+            <source :src="getPreviewUrl(currentMaterial)" type="video/mp4">
             您的瀏覽器不支援影片播放
           </video>
         </div>
         <div v-else-if="isImageFile(currentMaterial.filename)" class="image-preview">
-          <img :src="getPreviewUrl(currentMaterial.file_path)" style="max-width: 100%; max-height: 60vh;" />
+          <img :src="getPreviewUrl(currentMaterial)" style="max-width: 100%; max-height: 60vh;" />
         </div>
         <div v-else class="file-info">
           <p>檔案名稱：{{ currentMaterial.filename }}</p>
@@ -423,7 +423,11 @@ const handleBatchDelete = () => {
 }
 
 // 获取預覽URL
-const getPreviewUrl = (filePath) => {
+const getPreviewUrl = (material) => {
+  // If the file has a CDN URL (DO Spaces), use it directly
+  if (material.storage_cdn_url) return material.storage_cdn_url
+  // Otherwise, use the local file path
+  const filePath = material.file_path || material.filename
   const filename = filePath.split('/').pop()
   return materialApi.getMaterialPreviewUrl(filename)
 }

@@ -466,6 +466,7 @@ def upload_file_to_spaces():
 
         import uuid as _uuid
         import tempfile
+        import os as _os
         from werkzeug.utils import secure_filename
         safe_name = secure_filename(f.filename) or "file"
         key = f"uploads/{_uuid.uuid4()}_{safe_name}"
@@ -479,16 +480,59 @@ def upload_file_to_spaces():
             from myUtils import do_spaces
             content_type = f.content_type or 'application/octet-stream'
             public_url = do_spaces.upload_file(tmp_path, key, content_type)
+            filesize_mb = round(_os.path.getsize(tmp_path) / (1024 * 1024), 2)
+
+            # Save record to file_records so it appears in 素材庫
+            try:
+                db_path = _ensure_legacy_db_ready()
+                with sqlite3.connect(db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_cdn_url) VALUES (?, ?, ?, ?, ?)",
+                        (safe_name, filesize_mb, key, key, public_url),
+                    )
+            except Exception:
+                logging.getLogger(__name__).warning("Failed to save file_records entry for %s", key)
+
             return jsonify({
                 "code": 200,
                 "msg": "ok",
                 "data": {"key": key, "public_url": public_url},
             }), 200
         finally:
-            import os
-            os.unlink(tmp_path)
+            _os.unlink(tmp_path)
     except Exception as exc:
         logging.getLogger(__name__).exception("upload_file_to_spaces failed")
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+
+
+@app.route('/upload/register', methods=['POST'])
+def upload_register():
+    """Register a file uploaded directly to DO Spaces in file_records.
+
+    Called after a direct presigned PUT succeeds, so the file appears in 素材庫.
+    POST {filename, key, public_url, size}
+    """
+    try:
+        data = _read_json_body()
+        filename = str(data.get("filename", "")).strip()
+        key = str(data.get("key", "")).strip()
+        public_url = str(data.get("public_url", "")).strip()
+        size = data.get("size", 0)
+        if not key or not filename:
+            return jsonify({"code": 400, "msg": "filename and key required", "data": None}), 400
+
+        filesize_mb = round(size / (1024 * 1024), 2)
+        db_path = _ensure_legacy_db_ready()
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_cdn_url) VALUES (?, ?, ?, ?, ?)",
+                (filename, filesize_mb, key, key, public_url),
+            )
+        return jsonify({"code": 200, "msg": "ok", "data": None}), 200
+    except Exception as exc:
+        logging.getLogger(__name__).exception("upload_register failed")
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
 
 
@@ -591,6 +635,21 @@ def multipart_upload_complete():
         client = do_spaces._default_client()
         public_url = client.complete_multipart_upload(key, upload_id, parts)
 
+        # Save record to file_records so it appears in 素材庫
+        try:
+            filename = key.split('_', 1)[1] if '_' in key else key.split('/')[-1]
+            size = data.get("size", 0)
+            filesize_mb = round(size / (1024 * 1024), 2) if size else 0
+            db_path = _ensure_legacy_db_ready()
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_cdn_url) VALUES (?, ?, ?, ?, ?)",
+                    (filename, filesize_mb, key, key, public_url),
+                )
+        except Exception:
+            logging.getLogger(__name__).warning("Failed to save file_records entry for multipart %s", key)
+
         return jsonify({"code": 200, "msg": "ok", "data": {"public_url": public_url}}), 200
     except Exception as exc:
         logging.getLogger(__name__).exception("multipart_upload_complete failed")
@@ -677,6 +736,9 @@ def get_file():
     if not target.is_file():
         # Try redirecting to remote storage CDN
         cdn = _get_cdn_url_for_file(filename)
+        if not cdn and '/' not in filename:
+            # Also try matching by storage_key (full path like uploads/uuid_name.mp4)
+            cdn = _get_cdn_url_for_file_by_key(filename)
         if cdn:
             return redirect(cdn, code=302)
         return jsonify({"code": 404, "msg": "File not found", "data": None}), 404
@@ -2427,6 +2489,23 @@ def _get_cdn_url_for_file(filename: str) -> str | None:
                 from myUtils.do_spaces import client_from_row
                 client = client_from_row(backend)
                 return client.cdn_url_for(row["storage_key"])
+    except Exception:
+        pass
+    return None
+
+
+def _get_cdn_url_for_file_by_key(filename: str) -> str | None:
+    """Look up a file's CDN URL by matching storage_key ending with filename."""
+    try:
+        db_path = _ensure_legacy_db_ready()
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT storage_cdn_url, storage_key FROM file_records WHERE storage_key LIKE ?",
+                (f"%/{filename}",),
+            ).fetchone()
+        if row and row["storage_cdn_url"]:
+            return row["storage_cdn_url"]
     except Exception:
         pass
     return None
