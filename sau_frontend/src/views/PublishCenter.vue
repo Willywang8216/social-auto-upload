@@ -676,6 +676,10 @@ const MULTIPART_THRESHOLD = 50 * 1024 * 1024 // 50MB
 async function handleFileSelect(uploadFile) {
   const file = uploadFile.raw
   if (!file) return
+  if (file.size === 0) {
+    ElMessage.error('不能上傳空檔案')
+    return
+  }
 
   uploadingFiles.push({ name: file.name, percent: 0 })
 
@@ -715,9 +719,37 @@ async function handleFileSelect(uploadFile) {
       if (presignData.code !== 200) throw new Error(presignData.msg || 'Presign failed')
       const partUrls = presignData.data.urls
 
-      // Upload each part with progress tracking and proxy fallback
+      // Upload each part with retry logic, progress tracking, and proxy fallback
       const completedParts = []
       let bytesUploaded = 0
+      const MAX_RETRIES = 3
+
+      // Helper: upload a single blob via XHR with progress
+      function uploadPartXhr(url, blob, method, extraHeaders, onProgress) {
+        return new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest()
+          xhr.open(method, url, true)
+          xhr.timeout = 300000
+          for (const [k, v] of Object.entries(extraHeaders || {})) xhr.setRequestHeader(k, v)
+          xhr.upload.onprogress = onProgress
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              // For PUT, ETag is in response header; for POST proxy, it's in JSON body
+              const etagHeader = xhr.getResponseHeader('ETag')
+              if (etagHeader) return resolve(etagHeader)
+              try {
+                const data = JSON.parse(xhr.responseText)
+                if (data.code === 200 && data.data?.etag) return resolve(data.data.etag)
+                reject(new Error(data.msg || `Upload failed: ${xhr.status}`))
+              } catch { reject(new Error(`Upload failed: ${xhr.status}`)) }
+            } else {
+              reject(new Error(`Upload failed: ${xhr.status}`))
+            }
+          }
+          xhr.onerror = () => reject(new Error('Network error'))
+          xhr.send(blob)
+        })
+      }
 
       for (let i = 0; i < part_count; i++) {
         const partNum = i + 1
@@ -726,74 +758,49 @@ async function handleFileSelect(uploadFile) {
         const blob = file.slice(start, end)
         const partSize = end - start
 
-        // Try direct upload to DO Spaces first
-        let etag = null
-        try {
-          etag = await new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest()
-            xhr.open('PUT', partUrls[partNum], true)
-            xhr.setRequestHeader('Content-Type', 'application/octet-stream')
-
-            xhr.upload.onprogress = (e) => {
-              if (e.lengthComputable) {
-                const uf = uploadingFiles.find(f => f.name === file.name)
-                if (uf) uf.percent = Math.round(((bytesUploaded + e.loaded) / file.size) * 100)
-              }
-            }
-
-            xhr.onload = () => {
-              if (xhr.status >= 200 && xhr.status < 300) {
-                resolve(xhr.getResponseHeader('ETag'))
-              } else {
-                reject(new Error(`Part ${partNum} failed: ${xhr.status}`))
-              }
-            }
-
-            xhr.onerror = () => reject(new Error('Direct part upload failed'))
-            xhr.timeout = 300000
-            xhr.send(blob)
-          })
-        } catch (directErr) {
-          console.warn(`Part ${partNum} direct upload failed, using proxy:`, directErr.message)
+        const onProgress = (e) => {
+          if (e.lengthComputable) {
+            const uf = uploadingFiles.find(f => f.name === file.name)
+            if (uf) uf.percent = Math.round(((bytesUploaded + e.loaded) / file.size) * 100)
+          }
         }
 
-        // Fallback: upload part through backend proxy
-        if (!etag) {
+        let etag = null
+        let lastError = null
+
+        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+          if (attempt > 0) {
+            // Exponential backoff: 1s, 2s, 4s
+            await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)))
+          }
+
+          // Try direct upload to DO Spaces first
+          try {
+            etag = await uploadPartXhr(partUrls[partNum], blob, 'PUT', { 'Content-Type': 'application/octet-stream' }, onProgress)
+            break
+          } catch (directErr) {
+            lastError = directErr
+            console.warn(`Part ${partNum} attempt ${attempt + 1} direct failed:`, directErr.message)
+          }
+
+          // Fallback: upload part through backend proxy
           const formData = new FormData()
           formData.append('file', blob, `part-${partNum}`)
           formData.append('key', key)
           formData.append('upload_id', upload_id)
           formData.append('part_number', String(partNum))
 
-          etag = await new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest()
-            xhr.open('POST', `${apiBase}/upload/multipart/part-proxy`, true)
+          try {
+            etag = await uploadPartXhr(`${apiBase}/upload/multipart/part-proxy`, formData, 'POST', token ? { Authorization: `Bearer ${token}` } : {}, onProgress)
+            break
+          } catch (proxyErr) {
+            lastError = proxyErr
+            console.warn(`Part ${partNum} attempt ${attempt + 1} proxy failed:`, proxyErr.message)
+          }
+        }
 
-            xhr.upload.onprogress = (e) => {
-              if (e.lengthComputable) {
-                const uf = uploadingFiles.find(f => f.name === file.name)
-                if (uf) uf.percent = Math.round(((bytesUploaded + e.loaded) / file.size) * 100)
-              }
-            }
-
-            xhr.onload = () => {
-              try {
-                const data = JSON.parse(xhr.responseText)
-                if (xhr.status >= 200 && xhr.status < 300 && data.code === 200) {
-                  resolve(data.data.etag)
-                } else {
-                  reject(new Error(data.msg || `Part ${partNum} proxy failed: ${xhr.status}`))
-                }
-              } catch {
-                reject(new Error(`Part ${partNum} proxy failed: ${xhr.status}`))
-              }
-            }
-
-            xhr.onerror = () => reject(new Error(`Part ${partNum} proxy network error`))
-            xhr.timeout = 300000
-            if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-            xhr.send(formData)
-          })
+        if (!etag) {
+          throw new Error(`Part ${partNum} failed after ${MAX_RETRIES} attempts: ${lastError?.message}`)
         }
 
         completedParts.push({ PartNumber: partNum, ETag: etag })
