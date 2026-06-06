@@ -239,10 +239,21 @@ const handleUploadDialogClose = () => {
 }
 
 // 文件选择变更
+const MAX_FILE_SIZE = 500 * 1024 * 1024 // 500MB
+
 const handleFileChange = (file, uploadFileList) => {
-  fileList.value = uploadFileList;
+  // Validate file size
+  const oversizedFiles = uploadFileList.filter(f => f.size > MAX_FILE_SIZE)
+  if (oversizedFiles.length > 0) {
+    const names = oversizedFiles.map(f => `${f.name} (${(f.size / 1024 / 1024).toFixed(1)}MB)`).join(', ')
+    ElMessage.error(`檔案超過 500MB 限制: ${names}`)
+    // Remove oversized files from the list
+    fileList.value = uploadFileList.filter(f => f.size <= MAX_FILE_SIZE)
+  } else {
+    fileList.value = uploadFileList;
+  }
   const newProgress = {};
-  for (const f of uploadFileList) {
+  for (const f of fileList.value) {
     newProgress[f.uid] = { percentage: 0, speed: '' };
   }
   uploadProgress.value = newProgress;

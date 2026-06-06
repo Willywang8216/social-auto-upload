@@ -11,11 +11,14 @@
       />
       <el-tag type="success" size="small">TikTok</el-tag>
       <span v-if="creatorNickname" class="tks-creator-name">{{ creatorNickname }}</span>
-      <el-tag v-if="remainingPostCount !== null" :type="postLimitReached ? 'danger' : 'success'" size="small">
+      <el-tag v-if="remainingPostCount !== null" :type="postLimitReached ? 'danger' : remainingPostCount <= 2 ? 'warning' : 'success'" size="small">
         剩餘發佈次數：{{ remainingPostCount }}
       </el-tag>
       <el-tag v-if="postLimitReached" type="danger" size="small">
         已達發佈上限
+      </el-tag>
+      <el-tag v-else-if="remainingPostCount !== null && remainingPostCount <= 2" type="warning" size="small">
+        即將達上限
       </el-tag>
     </div>
 

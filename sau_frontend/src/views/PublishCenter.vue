@@ -336,6 +336,14 @@
 
     <!-- 7. Publish -->
     <el-card class="pc-card pc-card--footer" shadow="never">
+      <el-alert
+        v-if="hasPostLimitWarning"
+        title="TikTok 帳號即將達到每日發佈上限，建議儘快發佈"
+        type="warning"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 12px;"
+      />
       <div class="pc-footer-row">
         <el-tooltip
           :disabled="canSubmit"
@@ -672,12 +680,17 @@ function removeMedia(index) {
 }
 
 const MULTIPART_THRESHOLD = 50 * 1024 * 1024 // 50MB
+const MAX_FILE_SIZE = 500 * 1024 * 1024 // 500MB
 
 async function handleFileSelect(uploadFile) {
   const file = uploadFile.raw
   if (!file) return
   if (file.size === 0) {
     ElMessage.error('不能上傳空檔案')
+    return
+  }
+  if (file.size > MAX_FILE_SIZE) {
+    ElMessage.error(`檔案 ${file.name} 超過 500MB 限制 (${(file.size / 1024 / 1024).toFixed(1)}MB)`)
     return
   }
 
@@ -972,6 +985,24 @@ const hasPostLimitReached = computed(() => {
         if (!info) continue
         const remaining = info?.remaining_post_count ?? info?.data?.remaining_post_count
         if (remaining !== undefined && remaining !== null && remaining <= 0) {
+          return true
+        }
+      }
+    }
+  }
+  return false
+})
+
+// Check if any selected TikTok account is approaching its post limit (<=2 remaining)
+const hasPostLimitWarning = computed(() => {
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    for (const account of accounts) {
+      if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
+        const info = tiktokCreatorInfo[account.id]
+        if (!info) continue
+        const remaining = info?.remaining_post_count ?? info?.data?.remaining_post_count
+        if (remaining !== undefined && remaining !== null && remaining > 0 && remaining <= 2) {
           return true
         }
       }

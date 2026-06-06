@@ -314,7 +314,7 @@ def whoami():
 
 
 # 限制上传文件大小为160MB
-app.config['MAX_CONTENT_LENGTH'] = 160 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB
 
 # Frontend static asset resolution.
 #
