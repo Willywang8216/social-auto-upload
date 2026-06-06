@@ -2502,7 +2502,7 @@ def _get_cdn_url_for_file_by_key(filename: str) -> str | None:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT storage_cdn_url, storage_key FROM file_records WHERE storage_key LIKE ?",
-                (f"%/{filename}",),
+                (f"%{filename}",),
             ).fetchone()
         if row and row["storage_cdn_url"]:
             return row["storage_cdn_url"]
