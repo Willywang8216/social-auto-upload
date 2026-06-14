@@ -1,0 +1,50 @@
+- generic [active] [ref=e1]:
+  - alert [ref=e38]: TeamTime — Group Scheduling Made Easy
+  - generic [ref=e39]:
+    - banner [ref=e40]:
+      - link "TeamTime" [ref=e41] [cursor=pointer]:
+        - /url: /
+      - navigation [ref=e42]:
+        - link "Browse" [ref=e43] [cursor=pointer]:
+          - /url: /browse
+        - link "Login" [ref=e44] [cursor=pointer]:
+          - /url: /login
+        - link "Sign Up" [ref=e45] [cursor=pointer]:
+          - /url: /register
+        - generic [ref=e46]:
+          - link "EN" [ref=e47] [cursor=pointer]:
+            - /url: /
+          - link "中文" [ref=e48] [cursor=pointer]:
+            - /url: /zh
+    - main [ref=e49]:
+      - heading "Coordinate group meetups with ease" [level=1] [ref=e50]:
+        - text: Coordinate group meetups
+        - text: with ease
+      - paragraph [ref=e51]: Create teams, set availability, find the best time for everyone. Build your reputation as an organizer and discover public events.
+      - generic [ref=e52]:
+        - link "Get Started" [ref=e53] [cursor=pointer]:
+          - /url: /register
+        - link "Browse Public Teams" [ref=e54] [cursor=pointer]:
+          - /url: /browse
+      - generic [ref=e55]:
+        - heading "How it works" [level=2] [ref=e56]
+        - generic [ref=e57]:
+          - generic [ref=e58]:
+            - generic [ref=e59]: "1"
+            - generic [ref=e60]: Create account
+          - generic [ref=e61]:
+            - generic [ref=e62]: "2"
+            - generic [ref=e63]: Create or join team
+          - generic [ref=e64]:
+            - generic [ref=e65]: "3"
+            - generic [ref=e66]: Set availability
+          - generic [ref=e67]:
+            - generic [ref=e68]: "4"
+            - generic [ref=e69]: Find best time
+          - generic [ref=e70]:
+            - generic [ref=e71]: "5"
+            - generic [ref=e72]: Meet up!
+    - contentinfo [ref=e73]:
+      - text: TeamTime by
+      - link "sexualwill.com" [ref=e74] [cursor=pointer]:
+        - /url: https://sexualwill.com

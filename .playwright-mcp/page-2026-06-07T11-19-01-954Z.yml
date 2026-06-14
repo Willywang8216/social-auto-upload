@@ -1,0 +1,36 @@
+- generic [active] [ref=e1]:
+  - alert [ref=e30]: TeamTime — 團體排程變得簡單
+  - generic [ref=e79]:
+    - banner [ref=e80]:
+      - link "TeamTime" [ref=e81] [cursor=pointer]:
+        - /url: /zh
+      - navigation [ref=e82]:
+        - link "儀表板" [ref=e83] [cursor=pointer]:
+          - /url: /dashboard
+        - generic [ref=e84]:
+          - link "EN" [ref=e85] [cursor=pointer]:
+            - /url: /settings
+          - link "中文" [ref=e86] [cursor=pointer]:
+            - /url: /zh/settings
+    - main [ref=e87]:
+      - heading "編輯個人資料" [level=1] [ref=e88]
+      - generic [ref=e89]:
+        - generic [ref=e90]:
+          - generic [ref=e91]: 暱稱
+          - textbox [ref=e92]: TestUser
+        - generic [ref=e93]:
+          - generic [ref=e94]: 個人簡介
+          - textbox "介紹一下自己..." [ref=e95]
+        - generic [ref=e96]:
+          - generic [ref=e97]: 頭像網址
+          - textbox "https://example.com/avatar.jpg" [ref=e98]
+        - generic [ref=e99]:
+          - generic [ref=e100]: Twitter/X 網址
+          - textbox "https://x.com/yourhandle" [ref=e101]: https://x.com/testuser123
+        - generic [ref=e102]:
+          - generic [ref=e103]: Bluesky 網址
+          - textbox "https://bsky.app/profile/yourhandle" [ref=e104]
+        - button "儲存變更" [ref=e105]
+      - generic [ref=e106]:
+        - heading "封鎖的使用者" [level=2] [ref=e107]
+        - paragraph [ref=e108]: 您尚未封鎖任何人。

@@ -1,0 +1,36 @@
+- generic [active] [ref=e1]:
+  - alert [ref=e30]
+  - generic [ref=e49]:
+    - banner [ref=e50]:
+      - link "TeamTime" [ref=e51] [cursor=pointer]:
+        - /url: /
+      - navigation [ref=e52]:
+        - link "Dashboard" [ref=e53] [cursor=pointer]:
+          - /url: /dashboard
+        - generic [ref=e54]:
+          - link "EN" [ref=e55] [cursor=pointer]:
+            - /url: /settings
+          - link "中文" [ref=e56] [cursor=pointer]:
+            - /url: /zh/settings
+    - main [ref=e57]:
+      - heading "Edit Profile" [level=1] [ref=e58]
+      - generic [ref=e59]:
+        - generic [ref=e60]:
+          - generic [ref=e61]: Nickname
+          - textbox [ref=e62]: TestUser
+        - generic [ref=e63]:
+          - generic [ref=e64]: Bio
+          - textbox "Tell others about yourself..." [ref=e65]
+        - generic [ref=e66]:
+          - generic [ref=e67]: Avatar URL
+          - textbox "https://example.com/avatar.jpg" [ref=e68]
+        - generic [ref=e69]:
+          - generic [ref=e70]: Twitter/X URL
+          - textbox "https://x.com/yourhandle" [ref=e71]: https://x.com/testuser123
+        - generic [ref=e72]:
+          - generic [ref=e73]: Bluesky URL
+          - textbox "https://bsky.app/profile/yourhandle" [ref=e74]
+        - button "Save Changes" [ref=e75]
+      - generic [ref=e76]:
+        - heading "Blocked Users" [level=2] [ref=e77]
+        - paragraph [ref=e78]: You haven't blocked anyone.

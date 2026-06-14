@@ -1,0 +1,454 @@
+- generic [ref=e360]:
+  - complementary [ref=e361]:
+    - generic [ref=e362]:
+      - heading "Socialupload" [level=2] [ref=e364]
+      - menubar [ref=e365]:
+        - menuitem "儀表板" [ref=e366] [cursor=pointer]:
+          - img [ref=e368]
+          - generic [ref=e370]: 儀表板
+        - menuitem "帳號管理" [ref=e371] [cursor=pointer]:
+          - img [ref=e373]
+          - generic [ref=e375]: 帳號管理
+        - menuitem "Profile 管理" [ref=e376] [cursor=pointer]:
+          - img [ref=e378]
+          - generic [ref=e380]: Profile 管理
+        - menuitem "素材庫" [ref=e381] [cursor=pointer]:
+          - img [ref=e383]
+          - generic [ref=e386]: 素材庫
+        - menuitem "發佈中心" [ref=e387] [cursor=pointer]:
+          - img [ref=e389]
+          - generic [ref=e391]: 發佈中心
+        - menuitem "範本管理" [ref=e392] [cursor=pointer]:
+          - img [ref=e394]
+          - generic [ref=e396]: 範本管理
+        - menuitem "任務中心" [ref=e397] [cursor=pointer]:
+          - img [ref=e399]
+          - generic [ref=e401]: 任務中心
+        - menuitem "影片分析" [ref=e402] [cursor=pointer]:
+          - img [ref=e404]
+          - generic [ref=e406]: 影片分析
+        - menuitem "OAuth 狀態" [ref=e407] [cursor=pointer]:
+          - img [ref=e409]
+          - generic [ref=e412]: OAuth 狀態
+        - menuitem "說明" [ref=e413] [cursor=pointer]:
+          - img [ref=e415]
+          - generic [ref=e417]: 說明
+  - generic [ref=e418]:
+    - generic [ref=e420]:
+      - img [ref=e423] [cursor=pointer]
+      - generic [ref=e426]:
+        - link "Socialupload" [ref=e427] [cursor=pointer]:
+          - /url: "#/"
+        - generic [ref=e428]: ·
+        - link "Privacy" [ref=e429] [cursor=pointer]:
+          - /url: "#/privacy"
+        - generic [ref=e430]: ·
+        - link "Terms" [ref=e431] [cursor=pointer]:
+          - /url: "#/terms"
+    - main [ref=e432]:
+      - generic [ref=e946]:
+        - generic [ref=e947]:
+          - heading "任務中心" [level=1] [ref=e948]
+          - generic [ref=e949]:
+            - generic [ref=e951] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e953]
+                - generic: 全部狀態
+              - img [ref=e956]
+            - generic [ref=e959] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e961]
+                - generic: 全部平台
+              - img [ref=e964]
+            - button "重新整理" [ref=e1003] [cursor=pointer]:
+              - generic [ref=e1004]:
+                - img [ref=e1006]
+                - text: 重新整理
+            - button "立即排空佇列" [ref=e966] [cursor=pointer]:
+              - generic [ref=e967]: 立即排空佇列
+        - generic [ref=e970]:
+          - table [ref=e972]:
+            - rowgroup [ref=e981]:
+              - row "ID 平台 標題 進度 狀態 建立時間 操作" [ref=e982]:
+                - columnheader "ID" [ref=e983]:
+                  - generic [ref=e984]: ID
+                - columnheader "平台" [ref=e985]:
+                  - generic [ref=e986]: 平台
+                - columnheader "標題" [ref=e987]:
+                  - generic [ref=e988]: 標題
+                - columnheader "進度" [ref=e989]:
+                  - generic [ref=e990]: 進度
+                - columnheader "狀態" [ref=e991]:
+                  - generic [ref=e992]: 狀態
+                - columnheader "建立時間" [ref=e993]:
+                  - generic [ref=e994]: 建立時間
+                - columnheader "操作" [ref=e995]:
+                  - generic [ref=e996]: 操作
+          - table [ref=e1008]:
+            - rowgroup [ref=e1017]:
+              - row "26 TikTok — 100 1/1 已完成 2026-05-23 17:25:46 詳情" [ref=e1018]:
+                - cell "26" [ref=e1019]:
+                  - generic [ref=e1020]: "26"
+                - cell "TikTok" [ref=e1021]:
+                  - generic [ref=e1024]: TikTok
+                - cell "—" [ref=e1025]:
+                  - generic [ref=e1026]: —
+                - cell "100 1/1" [ref=e1027]:
+                  - generic [ref=e1029]:
+                    - progressbar [ref=e1030]:
+                      - img [ref=e1036]
+                    - generic [ref=e1039]: 1/1
+                - cell "已完成" [ref=e1040]:
+                  - generic [ref=e1043]: 已完成
+                - cell "2026-05-23 17:25:46" [ref=e1044]:
+                  - generic [ref=e1045]: 2026-05-23 17:25:46
+                - cell "詳情" [ref=e1046]:
+                  - button "詳情" [ref=e1048] [cursor=pointer]:
+                    - generic [ref=e1049]: 詳情
+              - row "25 TikTok — 100 1/1 已完成 2026-05-23 16:55:31 詳情" [ref=e1050]:
+                - cell "25" [ref=e1051]:
+                  - generic [ref=e1052]: "25"
+                - cell "TikTok" [ref=e1053]:
+                  - generic [ref=e1056]: TikTok
+                - cell "—" [ref=e1057]:
+                  - generic [ref=e1058]: —
+                - cell "100 1/1" [ref=e1059]:
+                  - generic [ref=e1061]:
+                    - progressbar [ref=e1062]:
+                      - img [ref=e1068]
+                    - generic [ref=e1071]: 1/1
+                - cell "已完成" [ref=e1072]:
+                  - generic [ref=e1075]: 已完成
+                - cell "2026-05-23 16:55:31" [ref=e1076]:
+                  - generic [ref=e1077]: 2026-05-23 16:55:31
+                - cell "詳情" [ref=e1078]:
+                  - button "詳情" [ref=e1080] [cursor=pointer]:
+                    - generic [ref=e1081]: 詳情
+              - row "24 TikTok — 100 1/1 已完成 2026-05-23 15:52:11 詳情" [ref=e1082]:
+                - cell "24" [ref=e1083]:
+                  - generic [ref=e1084]: "24"
+                - cell "TikTok" [ref=e1085]:
+                  - generic [ref=e1088]: TikTok
+                - cell "—" [ref=e1089]:
+                  - generic [ref=e1090]: —
+                - cell "100 1/1" [ref=e1091]:
+                  - generic [ref=e1093]:
+                    - progressbar [ref=e1094]:
+                      - img [ref=e1100]
+                    - generic [ref=e1103]: 1/1
+                - cell "已完成" [ref=e1104]:
+                  - generic [ref=e1107]: 已完成
+                - cell "2026-05-23 15:52:11" [ref=e1108]:
+                  - generic [ref=e1109]: 2026-05-23 15:52:11
+                - cell "詳情" [ref=e1110]:
+                  - button "詳情" [ref=e1112] [cursor=pointer]:
+                    - generic [ref=e1113]: 詳情
+              - row "23 TikTok — 100 1/1 已完成 2026-05-23 08:06:40 詳情" [ref=e1114]:
+                - cell "23" [ref=e1115]:
+                  - generic [ref=e1116]: "23"
+                - cell "TikTok" [ref=e1117]:
+                  - generic [ref=e1120]: TikTok
+                - cell "—" [ref=e1121]:
+                  - generic [ref=e1122]: —
+                - cell "100 1/1" [ref=e1123]:
+                  - generic [ref=e1125]:
+                    - progressbar [ref=e1126]:
+                      - img [ref=e1132]
+                    - generic [ref=e1135]: 1/1
+                - cell "已完成" [ref=e1136]:
+                  - generic [ref=e1139]: 已完成
+                - cell "2026-05-23 08:06:40" [ref=e1140]:
+                  - generic [ref=e1141]: 2026-05-23 08:06:40
+                - cell "詳情" [ref=e1142]:
+                  - button "詳情" [ref=e1144] [cursor=pointer]:
+                    - generic [ref=e1145]: 詳情
+              - row "22 TikTok — 100 1/1 已完成 2026-05-22 16:01:37 詳情" [ref=e1146]:
+                - cell "22" [ref=e1147]:
+                  - generic [ref=e1148]: "22"
+                - cell "TikTok" [ref=e1149]:
+                  - generic [ref=e1152]: TikTok
+                - cell "—" [ref=e1153]:
+                  - generic [ref=e1154]: —
+                - cell "100 1/1" [ref=e1155]:
+                  - generic [ref=e1157]:
+                    - progressbar [ref=e1158]:
+                      - img [ref=e1164]
+                    - generic [ref=e1167]: 1/1
+                - cell "已完成" [ref=e1168]:
+                  - generic [ref=e1171]: 已完成
+                - cell "2026-05-22 16:01:37" [ref=e1172]:
+                  - generic [ref=e1173]: 2026-05-22 16:01:37
+                - cell "詳情" [ref=e1174]:
+                  - button "詳情" [ref=e1176] [cursor=pointer]:
+                    - generic [ref=e1177]: 詳情
+              - row "21 TikTok — 100 0/1 · 1 失敗 部分失敗 2026-05-22 13:20:48 詳情" [ref=e1178]:
+                - cell "21" [ref=e1179]:
+                  - generic [ref=e1180]: "21"
+                - cell "TikTok" [ref=e1181]:
+                  - generic [ref=e1184]: TikTok
+                - cell "—" [ref=e1185]:
+                  - generic [ref=e1186]: —
+                - cell "100 0/1 · 1 失敗" [ref=e1187]:
+                  - generic [ref=e1189]:
+                    - progressbar [ref=e1190]:
+                      - img [ref=e1196]
+                    - generic [ref=e1199]: 0/1 · 1 失敗
+                - cell "部分失敗" [ref=e1200]:
+                  - generic [ref=e1203]: 部分失敗
+                - cell "2026-05-22 13:20:48" [ref=e1204]:
+                  - generic [ref=e1205]: 2026-05-22 13:20:48
+                - cell "詳情" [ref=e1206]:
+                  - button "詳情" [ref=e1208] [cursor=pointer]:
+                    - generic [ref=e1209]: 詳情
+              - row "20 TikTok — 100 0/1 · 1 失敗 部分失敗 2026-05-22 13:07:40 詳情" [ref=e1210]:
+                - cell "20" [ref=e1211]:
+                  - generic [ref=e1212]: "20"
+                - cell "TikTok" [ref=e1213]:
+                  - generic [ref=e1216]: TikTok
+                - cell "—" [ref=e1217]:
+                  - generic [ref=e1218]: —
+                - cell "100 0/1 · 1 失敗" [ref=e1219]:
+                  - generic [ref=e1221]:
+                    - progressbar [ref=e1222]:
+                      - img [ref=e1228]
+                    - generic [ref=e1231]: 0/1 · 1 失敗
+                - cell "部分失敗" [ref=e1232]:
+                  - generic [ref=e1235]: 部分失敗
+                - cell "2026-05-22 13:07:40" [ref=e1236]:
+                  - generic [ref=e1237]: 2026-05-22 13:07:40
+                - cell "詳情" [ref=e1238]:
+                  - button "詳情" [ref=e1240] [cursor=pointer]:
+                    - generic [ref=e1241]: 詳情
+              - row "19 TikTok — 100 0/1 · 1 失敗 部分失敗 2026-05-22 13:02:17 詳情" [ref=e1242]:
+                - cell "19" [ref=e1243]:
+                  - generic [ref=e1244]: "19"
+                - cell "TikTok" [ref=e1245]:
+                  - generic [ref=e1248]: TikTok
+                - cell "—" [ref=e1249]:
+                  - generic [ref=e1250]: —
+                - cell "100 0/1 · 1 失敗" [ref=e1251]:
+                  - generic [ref=e1253]:
+                    - progressbar [ref=e1254]:
+                      - img [ref=e1260]
+                    - generic [ref=e1263]: 0/1 · 1 失敗
+                - cell "部分失敗" [ref=e1264]:
+                  - generic [ref=e1267]: 部分失敗
+                - cell "2026-05-22 13:02:17" [ref=e1268]:
+                  - generic [ref=e1269]: 2026-05-22 13:02:17
+                - cell "詳情" [ref=e1270]:
+                  - button "詳情" [ref=e1272] [cursor=pointer]:
+                    - generic [ref=e1273]: 詳情
+              - row "18 TikTok — 100 0/1 · 1 失敗 部分失敗 2026-05-22 12:58:43 詳情" [ref=e1274]:
+                - cell "18" [ref=e1275]:
+                  - generic [ref=e1276]: "18"
+                - cell "TikTok" [ref=e1277]:
+                  - generic [ref=e1280]: TikTok
+                - cell "—" [ref=e1281]:
+                  - generic [ref=e1282]: —
+                - cell "100 0/1 · 1 失敗" [ref=e1283]:
+                  - generic [ref=e1285]:
+                    - progressbar [ref=e1286]:
+                      - img [ref=e1292]
+                    - generic [ref=e1295]: 0/1 · 1 失敗
+                - cell "部分失敗" [ref=e1296]:
+                  - generic [ref=e1299]: 部分失敗
+                - cell "2026-05-22 12:58:43" [ref=e1300]:
+                  - generic [ref=e1301]: 2026-05-22 12:58:43
+                - cell "詳情" [ref=e1302]:
+                  - button "詳情" [ref=e1304] [cursor=pointer]:
+                    - generic [ref=e1305]: 詳情
+              - row "17 TikTok — 100 0/1 · 1 失敗 部分失敗 2026-05-22 12:52:52 詳情" [ref=e1306]:
+                - cell "17" [ref=e1307]:
+                  - generic [ref=e1308]: "17"
+                - cell "TikTok" [ref=e1309]:
+                  - generic [ref=e1312]: TikTok
+                - cell "—" [ref=e1313]:
+                  - generic [ref=e1314]: —
+                - cell "100 0/1 · 1 失敗" [ref=e1315]:
+                  - generic [ref=e1317]:
+                    - progressbar [ref=e1318]:
+                      - img [ref=e1324]
+                    - generic [ref=e1327]: 0/1 · 1 失敗
+                - cell "部分失敗" [ref=e1328]:
+                  - generic [ref=e1331]: 部分失敗
+                - cell "2026-05-22 12:52:52" [ref=e1332]:
+                  - generic [ref=e1333]: 2026-05-22 12:52:52
+                - cell "詳情" [ref=e1334]:
+                  - button "詳情" [ref=e1336] [cursor=pointer]:
+                    - generic [ref=e1337]: 詳情
+              - row "16 TikTok — 100 0/1 · 1 失敗 部分失敗 2026-05-22 12:29:09 詳情" [ref=e1338]:
+                - cell "16" [ref=e1339]:
+                  - generic [ref=e1340]: "16"
+                - cell "TikTok" [ref=e1341]:
+                  - generic [ref=e1344]: TikTok
+                - cell "—" [ref=e1345]:
+                  - generic [ref=e1346]: —
+                - cell "100 0/1 · 1 失敗" [ref=e1347]:
+                  - generic [ref=e1349]:
+                    - progressbar [ref=e1350]:
+                      - img [ref=e1356]
+                    - generic [ref=e1359]: 0/1 · 1 失敗
+                - cell "部分失敗" [ref=e1360]:
+                  - generic [ref=e1363]: 部分失敗
+                - cell "2026-05-22 12:29:09" [ref=e1364]:
+                  - generic [ref=e1365]: 2026-05-22 12:29:09
+                - cell "詳情" [ref=e1366]:
+                  - button "詳情" [ref=e1368] [cursor=pointer]:
+                    - generic [ref=e1369]: 詳情
+              - row "15 TikTok — 100 0/1 · 1 失敗 部分失敗 2026-05-22 12:27:30 詳情" [ref=e1370]:
+                - cell "15" [ref=e1371]:
+                  - generic [ref=e1372]: "15"
+                - cell "TikTok" [ref=e1373]:
+                  - generic [ref=e1376]: TikTok
+                - cell "—" [ref=e1377]:
+                  - generic [ref=e1378]: —
+                - cell "100 0/1 · 1 失敗" [ref=e1379]:
+                  - generic [ref=e1381]:
+                    - progressbar [ref=e1382]:
+                      - img [ref=e1388]
+                    - generic [ref=e1391]: 0/1 · 1 失敗
+                - cell "部分失敗" [ref=e1392]:
+                  - generic [ref=e1395]: 部分失敗
+                - cell "2026-05-22 12:27:30" [ref=e1396]:
+                  - generic [ref=e1397]: 2026-05-22 12:27:30
+                - cell "詳情" [ref=e1398]:
+                  - button "詳情" [ref=e1400] [cursor=pointer]:
+                    - generic [ref=e1401]: 詳情
+              - row "14 TikTok — 100 0/1 · 1 失敗 部分失敗 2026-05-22 12:25:04 詳情" [ref=e1402]:
+                - cell "14" [ref=e1403]:
+                  - generic [ref=e1404]: "14"
+                - cell "TikTok" [ref=e1405]:
+                  - generic [ref=e1408]: TikTok
+                - cell "—" [ref=e1409]:
+                  - generic [ref=e1410]: —
+                - cell "100 0/1 · 1 失敗" [ref=e1411]:
+                  - generic [ref=e1413]:
+                    - progressbar [ref=e1414]:
+                      - img [ref=e1420]
+                    - generic [ref=e1423]: 0/1 · 1 失敗
+                - cell "部分失敗" [ref=e1424]:
+                  - generic [ref=e1427]: 部分失敗
+                - cell "2026-05-22 12:25:04" [ref=e1428]:
+                  - generic [ref=e1429]: 2026-05-22 12:25:04
+                - cell "詳情" [ref=e1430]:
+                  - button "詳情" [ref=e1432] [cursor=pointer]:
+                    - generic [ref=e1433]: 詳情
+              - row "13 TikTok — 100 0/1 · 1 失敗 部分失敗 2026-05-22 11:46:16 詳情" [ref=e1434]:
+                - cell "13" [ref=e1435]:
+                  - generic [ref=e1436]: "13"
+                - cell "TikTok" [ref=e1437]:
+                  - generic [ref=e1440]: TikTok
+                - cell "—" [ref=e1441]:
+                  - generic [ref=e1442]: —
+                - cell "100 0/1 · 1 失敗" [ref=e1443]:
+                  - generic [ref=e1445]:
+                    - progressbar [ref=e1446]:
+                      - img [ref=e1452]
+                    - generic [ref=e1455]: 0/1 · 1 失敗
+                - cell "部分失敗" [ref=e1456]:
+                  - generic [ref=e1459]: 部分失敗
+                - cell "2026-05-22 11:46:16" [ref=e1460]:
+                  - generic [ref=e1461]: 2026-05-22 11:46:16
+                - cell "詳情" [ref=e1462]:
+                  - button "詳情" [ref=e1464] [cursor=pointer]:
+                    - generic [ref=e1465]: 詳情
+              - row "12 TikTok — 100 0/1 · 1 失敗 部分失敗 2026-05-22 11:45:03 詳情" [ref=e1466]:
+                - cell "12" [ref=e1467]:
+                  - generic [ref=e1468]: "12"
+                - cell "TikTok" [ref=e1469]:
+                  - generic [ref=e1472]: TikTok
+                - cell "—" [ref=e1473]:
+                  - generic [ref=e1474]: —
+                - cell "100 0/1 · 1 失敗" [ref=e1475]:
+                  - generic [ref=e1477]:
+                    - progressbar [ref=e1478]:
+                      - img [ref=e1484]
+                    - generic [ref=e1487]: 0/1 · 1 失敗
+                - cell "部分失敗" [ref=e1488]:
+                  - generic [ref=e1491]: 部分失敗
+                - cell "2026-05-22 11:45:03" [ref=e1492]:
+                  - generic [ref=e1493]: 2026-05-22 11:45:03
+                - cell "詳情" [ref=e1494]:
+                  - button "詳情" [ref=e1496] [cursor=pointer]:
+                    - generic [ref=e1497]: 詳情
+              - row "11 TikTok — 100 0/1 · 1 失敗 部分失敗 2026-05-22 11:21:21 詳情" [ref=e1498]:
+                - cell "11" [ref=e1499]:
+                  - generic [ref=e1500]: "11"
+                - cell "TikTok" [ref=e1501]:
+                  - generic [ref=e1504]: TikTok
+                - cell "—" [ref=e1505]:
+                  - generic [ref=e1506]: —
+                - cell "100 0/1 · 1 失敗" [ref=e1507]:
+                  - generic [ref=e1509]:
+                    - progressbar [ref=e1510]:
+                      - img [ref=e1516]
+                    - generic [ref=e1519]: 0/1 · 1 失敗
+                - cell "部分失敗" [ref=e1520]:
+                  - generic [ref=e1523]: 部分失敗
+                - cell "2026-05-22 11:21:21" [ref=e1524]:
+                  - generic [ref=e1525]: 2026-05-22 11:21:21
+                - cell "詳情" [ref=e1526]:
+                  - button "詳情" [ref=e1528] [cursor=pointer]:
+                    - generic [ref=e1529]: 詳情
+              - row "10 TikTok — 100 0/1 · 1 失敗 部分失敗 2026-05-22 09:00:05 詳情" [ref=e1530]:
+                - cell "10" [ref=e1531]:
+                  - generic [ref=e1532]: "10"
+                - cell "TikTok" [ref=e1533]:
+                  - generic [ref=e1536]: TikTok
+                - cell "—" [ref=e1537]:
+                  - generic [ref=e1538]: —
+                - cell "100 0/1 · 1 失敗" [ref=e1539]:
+                  - generic [ref=e1541]:
+                    - progressbar [ref=e1542]:
+                      - img [ref=e1548]
+                    - generic [ref=e1551]: 0/1 · 1 失敗
+                - cell "部分失敗" [ref=e1552]:
+                  - generic [ref=e1555]: 部分失敗
+                - cell "2026-05-22 09:00:05" [ref=e1556]:
+                  - generic [ref=e1557]: 2026-05-22 09:00:05
+                - cell "詳情" [ref=e1558]:
+                  - button "詳情" [ref=e1560] [cursor=pointer]:
+                    - generic [ref=e1561]: 詳情
+              - row "9 TikTok — 0 0/1 已取消 2026-05-22 07:19:00 詳情" [ref=e1562]:
+                - cell "9" [ref=e1563]:
+                  - generic [ref=e1564]: "9"
+                - cell "TikTok" [ref=e1565]:
+                  - generic [ref=e1568]: TikTok
+                - cell "—" [ref=e1569]:
+                  - generic [ref=e1570]: —
+                - cell "0 0/1" [ref=e1571]:
+                  - generic [ref=e1573]:
+                    - progressbar [ref=e1574]:
+                      - img [ref=e1579]
+                    - generic [ref=e1581]: 0/1
+                - cell "已取消" [ref=e1582]:
+                  - generic [ref=e1585]: 已取消
+                - cell "2026-05-22 07:19:00" [ref=e1586]:
+                  - generic [ref=e1587]: 2026-05-22 07:19:00
+                - cell "詳情" [ref=e1588]:
+                  - button "詳情" [ref=e1590] [cursor=pointer]:
+                    - generic [ref=e1591]: 詳情
+        - dialog "任務詳情" [ref=e1593]:
+          - generic [ref=e1594]:
+            - heading "任務詳情" [level=2] [ref=e1595]
+            - button "Close this dialog" [ref=e1596] [cursor=pointer]:
+              - img [ref=e1598]
+          - generic [ref=e1601]:
+            - generic [ref=e1602]:
+              - generic [ref=e1603]: "任務 #26"
+              - generic [ref=e1605]: 已完成
+              - generic [ref=e1606]: 1 / 1 完成
+            - progressbar [ref=e1607]:
+              - img [ref=e1613]
+            - generic [ref=e1617]:
+              - generic [ref=e1619]: 成功
+              - generic "account:99" [ref=e1620]
+              - generic "campaign_post:26" [ref=e1621]
+    - generic [ref=e935]:
+      - generic [ref=e936]: Socialupload
+      - generic [ref=e937]:
+        - link "Privacy Policy" [ref=e938] [cursor=pointer]:
+          - /url: "#/privacy"
+        - generic [ref=e939]: ·
+        - link "Terms of Service" [ref=e940] [cursor=pointer]:
+          - /url: "#/terms"

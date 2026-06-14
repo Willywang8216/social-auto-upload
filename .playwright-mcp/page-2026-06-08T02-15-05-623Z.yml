@@ -1,0 +1,50 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - link "TeamTime" [ref=e4] [cursor=pointer]:
+        - /url: /
+      - navigation [ref=e5]:
+        - link "Browse" [ref=e6] [cursor=pointer]:
+          - /url: /browse
+        - link "Login" [ref=e7] [cursor=pointer]:
+          - /url: /login
+        - link "Sign Up" [ref=e8] [cursor=pointer]:
+          - /url: /register
+        - generic [ref=e9]:
+          - link "EN" [ref=e10] [cursor=pointer]:
+            - /url: /
+          - link "中文" [ref=e11] [cursor=pointer]:
+            - /url: /zh
+    - main [ref=e12]:
+      - heading "Coordinate group meetups with ease" [level=1] [ref=e13]:
+        - text: Coordinate group meetups
+        - text: with ease
+      - paragraph [ref=e14]: Create teams, set availability, find the best time for everyone. Build your reputation as an organizer and discover public events.
+      - generic [ref=e15]:
+        - link "Get Started" [ref=e16] [cursor=pointer]:
+          - /url: /register
+        - link "Browse Public Teams" [ref=e17] [cursor=pointer]:
+          - /url: /browse
+      - generic [ref=e18]:
+        - heading "How it works" [level=2] [ref=e19]
+        - generic [ref=e20]:
+          - generic [ref=e21]:
+            - generic [ref=e22]: "1"
+            - generic [ref=e23]: Create account
+          - generic [ref=e24]:
+            - generic [ref=e25]: "2"
+            - generic [ref=e26]: Create or join team
+          - generic [ref=e27]:
+            - generic [ref=e28]: "3"
+            - generic [ref=e29]: Set availability
+          - generic [ref=e30]:
+            - generic [ref=e31]: "4"
+            - generic [ref=e32]: Find best time
+          - generic [ref=e33]:
+            - generic [ref=e34]: "5"
+            - generic [ref=e35]: Meet up!
+    - contentinfo [ref=e36]:
+      - text: TeamTime by
+      - link "sexualwill.com" [ref=e37] [cursor=pointer]:
+        - /url: https://sexualwill.com
+  - alert [ref=e38]

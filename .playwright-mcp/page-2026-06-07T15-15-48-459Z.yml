@@ -1,0 +1,23 @@
+- generic [active] [ref=e1]:
+  - alert [ref=e21]
+  - generic [ref=e22]:
+    - banner [ref=e23]:
+      - link "TeamTime" [ref=e24] [cursor=pointer]:
+        - /url: /
+      - generic [ref=e25]:
+        - link "Browse" [ref=e26] [cursor=pointer]:
+          - /url: /browse
+        - link "Profile" [ref=e27] [cursor=pointer]:
+          - /url: /settings
+        - generic [ref=e28]: Will
+        - button "Logout" [ref=e29]
+    - main [ref=e30]:
+      - heading "Welcome, Will" [level=1] [ref=e31]
+      - generic [ref=e32]:
+        - link "Create Team" [ref=e33] [cursor=pointer]:
+          - /url: /dashboard/create
+        - generic [ref=e34]:
+          - textbox "Enter team code" [ref=e35]
+          - button "Join" [ref=e36]
+      - heading "My Teams" [level=2] [ref=e37]
+      - paragraph [ref=e38]: You haven't joined any teams yet.

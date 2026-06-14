@@ -1,0 +1,73 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - link "TeamTime Admin" [ref=e4] [cursor=pointer]:
+        - /url: /
+      - navigation [ref=e5]:
+        - link "Dashboard" [ref=e6] [cursor=pointer]:
+          - /url: /admin
+        - link "Users" [ref=e7] [cursor=pointer]:
+          - /url: /admin/users
+        - link "Teams" [ref=e8] [cursor=pointer]:
+          - /url: /admin/teams
+        - link "Reports" [ref=e9] [cursor=pointer]:
+          - /url: /admin/reports
+        - link "Feedback" [ref=e10] [cursor=pointer]:
+          - /url: /admin/feedback
+        - link "Back to App" [ref=e11] [cursor=pointer]:
+          - /url: /dashboard
+    - main [ref=e12]:
+      - generic [ref=e55]:
+        - generic [ref=e56]:
+          - generic [ref=e57]:
+            - heading "Manage Invites" [level=1] [ref=e58]
+            - paragraph [ref=e59]: Create invite links for registration. Site-wide invites allow anyone to register. Team-specific invites auto-join users to a team.
+          - button "Create Invite" [ref=e111]
+        - table [ref=e62]:
+          - rowgroup [ref=e63]:
+            - row "Code Uses Team Note Status Created Actions" [ref=e64]:
+              - columnheader "Code" [ref=e65]
+              - columnheader "Uses" [ref=e66]
+              - columnheader "Team" [ref=e67]
+              - columnheader "Note" [ref=e68]
+              - columnheader "Status" [ref=e69]
+              - columnheader "Created" [ref=e70]
+              - columnheader "Actions" [ref=e71]
+          - rowgroup [ref=e72]:
+            - row "630A0553 0 / 10 Site-wide Twitter giveaway Active 6/7/2026 Copy Link Disable Delete" [ref=e112]:
+              - cell "630A0553" [ref=e113]
+              - cell "0 / 10" [ref=e114]
+              - cell "Site-wide" [ref=e115]
+              - cell "Twitter giveaway" [ref=e116]
+              - cell "Active" [ref=e117]
+              - cell "6/7/2026" [ref=e118]
+              - cell "Copy Link Disable Delete" [ref=e119]:
+                - generic [ref=e120]:
+                  - button "Copy Link" [ref=e121]
+                  - button "Disable" [ref=e122]
+                  - button "Delete" [ref=e123]
+            - row "TESTINVITE 1 / 5 Site-wide Test invite Active 6/7/2026 Copy Link Disable Delete" [ref=e73]:
+              - cell "TESTINVITE" [ref=e74]
+              - cell "1 / 5" [ref=e75]
+              - cell "Site-wide" [ref=e76]
+              - cell "Test invite" [ref=e77]
+              - cell "Active" [ref=e78]
+              - cell "6/7/2026" [ref=e79]
+              - cell "Copy Link Disable Delete" [ref=e80]:
+                - generic [ref=e81]:
+                  - button "Copy Link" [ref=e82]
+                  - button "Disable" [ref=e83]
+                  - button "Delete" [ref=e84]
+            - 'row "J0WAEDU5 0 / 50 Test Team Team: Test Team Active 6/6/2026 Copy Link Disable Delete" [ref=e85]':
+              - cell "J0WAEDU5" [ref=e86]
+              - cell "0 / 50" [ref=e87]
+              - cell "Test Team" [ref=e88]
+              - 'cell "Team: Test Team" [ref=e89]'
+              - cell "Active" [ref=e90]
+              - cell "6/6/2026" [ref=e91]
+              - cell "Copy Link Disable Delete" [ref=e92]:
+                - generic [ref=e93]:
+                  - button "Copy Link" [ref=e94]
+                  - button "Disable" [ref=e95]
+                  - button "Delete" [ref=e96]
+  - alert [ref=e14]

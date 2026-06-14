@@ -1,0 +1,56 @@
+- generic [ref=e355]:
+  - complementary [ref=e356]:
+    - generic [ref=e357]:
+      - heading "Socialupload" [level=2] [ref=e359]
+      - menubar [ref=e360]:
+        - menuitem "儀表板" [ref=e361] [cursor=pointer]:
+          - img [ref=e363]
+          - generic [ref=e365]: 儀表板
+        - menuitem "帳號管理" [ref=e366] [cursor=pointer]:
+          - img [ref=e368]
+          - generic [ref=e370]: 帳號管理
+        - menuitem "Profile 管理" [ref=e371] [cursor=pointer]:
+          - img [ref=e373]
+          - generic [ref=e375]: Profile 管理
+        - menuitem "素材庫" [ref=e376] [cursor=pointer]:
+          - img [ref=e378]
+          - generic [ref=e381]: 素材庫
+        - menuitem "發佈中心" [ref=e382] [cursor=pointer]:
+          - img [ref=e384]
+          - generic [ref=e386]: 發佈中心
+        - menuitem "範本管理" [ref=e387] [cursor=pointer]:
+          - img [ref=e389]
+          - generic [ref=e391]: 範本管理
+        - menuitem "任務中心" [ref=e392] [cursor=pointer]:
+          - img [ref=e394]
+          - generic [ref=e396]: 任務中心
+        - menuitem "影片分析" [ref=e397] [cursor=pointer]:
+          - img [ref=e399]
+          - generic [ref=e401]: 影片分析
+        - menuitem "OAuth 狀態" [ref=e402] [cursor=pointer]:
+          - img [ref=e404]
+          - generic [ref=e407]: OAuth 狀態
+        - menuitem "說明" [ref=e408] [cursor=pointer]:
+          - img [ref=e410]
+          - generic [ref=e412]: 說明
+  - generic [ref=e413]:
+    - generic [ref=e415]:
+      - img [ref=e418] [cursor=pointer]
+      - generic [ref=e421]:
+        - link "Socialupload" [ref=e422] [cursor=pointer]:
+          - /url: "#/"
+        - generic [ref=e423]: ·
+        - link "Privacy" [ref=e424] [cursor=pointer]:
+          - /url: "#/privacy"
+        - generic [ref=e425]: ·
+        - link "Terms" [ref=e426] [cursor=pointer]:
+          - /url: "#/terms"
+    - main [ref=e427]
+    - generic [ref=e942]:
+      - generic [ref=e943]: Socialupload
+      - generic [ref=e944]:
+        - link "Privacy Policy" [ref=e945] [cursor=pointer]:
+          - /url: "#/privacy"
+        - generic [ref=e946]: ·
+        - link "Terms of Service" [ref=e947] [cursor=pointer]:
+          - /url: "#/terms"

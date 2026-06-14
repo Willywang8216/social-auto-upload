@@ -205,12 +205,13 @@ def client_from_row(row: dict) -> SpacesClient:
 def client_from_env() -> SpacesClient:
     """Build from env vars (backward compat with analytics thumbnails)."""
     region = os.environ.get("DO_SPACES_REGION", "sgp1")
+    endpoint = os.environ.get("DO_SPACES_ENDPOINT", f"https://{region}.digitaloceanspaces.com")
     return SpacesClient(
         access_key=os.environ.get("DO_SPACES_KEY", ""),
         secret_key=os.environ.get("DO_SPACES_SECRET", ""),
         bucket=os.environ.get("DO_SPACES_BUCKET", "sau-media"),
         region=region,
-        endpoint=f"https://{region}.digitaloceanspaces.com",
+        endpoint=endpoint,
         cdn_url=os.environ.get("DO_SPACES_CDN_URL", ""),
     )
 
@@ -265,6 +266,6 @@ DO_SPACES_KEY = os.environ.get("DO_SPACES_KEY", "")
 DO_SPACES_SECRET = os.environ.get("DO_SPACES_SECRET", "")
 DO_SPACES_BUCKET = os.environ.get("DO_SPACES_BUCKET", "sau-media")
 DO_SPACES_REGION = os.environ.get("DO_SPACES_REGION", "sgp1")
-DO_SPACES_ENDPOINT = f"https://{DO_SPACES_REGION}.digitaloceanspaces.com"
-DO_SPACES_BASE_URL = f"https://{DO_SPACES_BUCKET}.{DO_SPACES_REGION}.digitaloceanspaces.com"
-DO_SPACES_CDN_URL = os.environ.get("DO_SPACES_CDN_URL", "") or DO_SPACES_BASE_URL
+DO_SPACES_ENDPOINT = os.environ.get("DO_SPACES_ENDPOINT", f"https://{DO_SPACES_REGION}.digitaloceanspaces.com")
+DO_SPACES_BASE_URL = os.environ.get("DO_SPACES_CDN_URL", "") or f"https://{DO_SPACES_BUCKET}.{DO_SPACES_REGION}.digitaloceanspaces.com"
+DO_SPACES_CDN_URL = DO_SPACES_BASE_URL

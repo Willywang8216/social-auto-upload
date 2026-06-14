@@ -1,0 +1,77 @@
+- generic [ref=e1]:
+  - generic [ref=e4]:
+    - complementary [ref=e5]:
+      - generic [ref=e6]:
+        - heading "Socialupload" [level=2] [ref=e8]
+        - menubar [ref=e9]:
+          - menuitem "儀表板" [ref=e10] [cursor=pointer]:
+            - img [ref=e12]
+            - generic [ref=e14]: 儀表板
+          - menuitem "帳號管理" [ref=e15] [cursor=pointer]:
+            - img [ref=e17]
+            - generic [ref=e19]: 帳號管理
+          - menuitem "Profile 管理" [ref=e20] [cursor=pointer]:
+            - img [ref=e22]
+            - generic [ref=e24]: Profile 管理
+          - menuitem "素材庫" [active] [ref=e25] [cursor=pointer]:
+            - img [ref=e27]
+            - generic [ref=e30]: 素材庫
+          - menuitem "發佈中心" [ref=e31] [cursor=pointer]:
+            - img [ref=e33]
+            - generic [ref=e35]: 發佈中心
+          - menuitem "範本管理" [ref=e36] [cursor=pointer]:
+            - img [ref=e38]
+            - generic [ref=e40]: 範本管理
+          - menuitem "任務中心" [ref=e41] [cursor=pointer]:
+            - img [ref=e43]
+            - generic [ref=e45]: 任務中心
+          - menuitem "影片分析" [ref=e46] [cursor=pointer]:
+            - img [ref=e48]
+            - generic [ref=e50]: 影片分析
+          - menuitem "OAuth 狀態" [ref=e51] [cursor=pointer]:
+            - img [ref=e53]
+            - generic [ref=e56]: OAuth 狀態
+          - menuitem "說明" [ref=e57] [cursor=pointer]:
+            - img [ref=e59]
+            - generic [ref=e61]: 說明
+    - generic [ref=e62]:
+      - generic [ref=e64]:
+        - img [ref=e67] [cursor=pointer]
+        - generic [ref=e70]:
+          - link "Socialupload" [ref=e71] [cursor=pointer]:
+            - /url: "#/"
+          - generic [ref=e72]: ·
+          - link "Privacy" [ref=e73] [cursor=pointer]:
+            - /url: "#/privacy"
+          - generic [ref=e74]: ·
+          - link "Terms" [ref=e75] [cursor=pointer]:
+            - /url: "#/terms"
+      - main [ref=e76]:
+        - generic [ref=e283]:
+          - heading "素材庫" [level=1] [ref=e285]
+          - generic [ref=e286]:
+            - generic [ref=e287]:
+              - generic [ref=e289]:
+                - img [ref=e292]
+                - textbox "輸入檔案名稱搜尋" [ref=e294]
+              - generic [ref=e296]:
+                - button "上傳素材" [ref=e297] [cursor=pointer]:
+                  - generic [ref=e298]: 上傳素材
+                - button "重新整理" [ref=e299] [cursor=pointer]:
+                  - generic [ref=e300]:
+                    - img [ref=e302]
+                    - generic [ref=e304]: 重新整理
+            - generic [ref=e306]:
+              - img [ref=e308]
+              - paragraph [ref=e325]: 目前沒有素材資料
+      - generic [ref=e203]:
+        - generic [ref=e204]: Socialupload
+        - generic [ref=e205]:
+          - link "Privacy Policy" [ref=e206] [cursor=pointer]:
+            - /url: "#/privacy"
+          - generic [ref=e207]: ·
+          - link "Terms of Service" [ref=e208] [cursor=pointer]:
+            - /url: "#/terms"
+  - alert [ref=e326]:
+    - img [ref=e328]
+    - paragraph [ref=e330]: 重新整理成功

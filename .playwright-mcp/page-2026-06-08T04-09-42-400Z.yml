@@ -1,0 +1,25 @@
+- generic [active] [ref=e1]:
+  - alert [ref=e16]: TeamTime — 團體排程變得簡單
+  - generic [ref=e24]:
+    - banner [ref=e25]:
+      - link "TeamTime" [ref=e26] [cursor=pointer]:
+        - /url: /zh
+      - navigation [ref=e27]:
+        - link "登入" [ref=e28] [cursor=pointer]:
+          - /url: /zh/login
+        - link "註冊" [ref=e29] [cursor=pointer]:
+          - /url: /zh/register
+        - generic [ref=e30]:
+          - link "EN" [ref=e31] [cursor=pointer]:
+            - /url: /browse
+          - link "中文" [ref=e32] [cursor=pointer]:
+            - /url: /zh/browse
+    - main [ref=e33]:
+      - heading "瀏覽公開團隊" [level=1] [ref=e34]
+      - textbox "搜尋團隊..." [ref=e36]
+      - link "Test Meeting Test team for E2E testing 1/20 位成員 主辦者：Will" [ref=e38] [cursor=pointer]:
+        - /url: /browse/03FK0R
+        - heading "Test Meeting" [level=3] [ref=e39]
+        - paragraph [ref=e40]: Test team for E2E testing
+        - generic [ref=e42]: 1/20 位成員
+        - generic [ref=e43]: 主辦者：Will

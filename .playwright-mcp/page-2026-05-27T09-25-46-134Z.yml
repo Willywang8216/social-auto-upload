@@ -1,0 +1,20 @@
+- generic [ref=e1623]:
+  - generic [ref=e1625]:
+    - heading "Socialupload" [level=2] [ref=e1626]
+    - paragraph [ref=e1627]: 請輸入存取權杖以登入
+  - generic [ref=e1629]:
+    - generic [ref=e1630]:
+      - generic [ref=e1631]: 存取權杖（API Token）
+      - generic [ref=e1634]:
+        - textbox "存取權杖（API Token）" [ref=e1635]:
+          - /placeholder: 留空表示後端處於開放模式
+          - text: sdkjauashuaiuhHOHEIUFhfaphgeiusdiu545gfdgd
+        - img [ref=e1638] [cursor=pointer]
+    - button "登入" [ref=e1643] [cursor=pointer]:
+      - generic [ref=e1644]: 登入
+    - generic [ref=e1645]:
+      - link "Privacy Policy" [ref=e1646] [cursor=pointer]:
+        - /url: "#/privacy"
+      - text: ·
+      - link "Terms of Service" [ref=e1647] [cursor=pointer]:
+        - /url: "#/terms"

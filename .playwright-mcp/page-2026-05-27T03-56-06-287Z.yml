@@ -1,0 +1,101 @@
+- generic [ref=e360]:
+  - complementary [ref=e361]:
+    - generic [ref=e362]:
+      - heading "Socialupload" [level=2] [ref=e364]
+      - menubar [ref=e365]:
+        - menuitem "儀表板" [ref=e366] [cursor=pointer]:
+          - img [ref=e368]
+          - generic [ref=e370]: 儀表板
+        - menuitem "帳號管理" [ref=e371] [cursor=pointer]:
+          - img [ref=e373]
+          - generic [ref=e375]: 帳號管理
+        - menuitem "Profile 管理" [ref=e376] [cursor=pointer]:
+          - img [ref=e378]
+          - generic [ref=e380]: Profile 管理
+        - menuitem "素材庫" [ref=e381] [cursor=pointer]:
+          - img [ref=e383]
+          - generic [ref=e386]: 素材庫
+        - menuitem "發佈中心" [ref=e387] [cursor=pointer]:
+          - img [ref=e389]
+          - generic [ref=e391]: 發佈中心
+        - menuitem "範本管理" [ref=e392] [cursor=pointer]:
+          - img [ref=e394]
+          - generic [ref=e396]: 範本管理
+        - menuitem "任務中心" [ref=e397] [cursor=pointer]:
+          - img [ref=e399]
+          - generic [ref=e401]: 任務中心
+        - menuitem "影片分析" [ref=e402] [cursor=pointer]:
+          - img [ref=e404]
+          - generic [ref=e406]: 影片分析
+        - menuitem "OAuth 狀態" [ref=e407] [cursor=pointer]:
+          - img [ref=e409]
+          - generic [ref=e412]: OAuth 狀態
+        - menuitem "說明" [ref=e413] [cursor=pointer]:
+          - img [ref=e415]
+          - generic [ref=e417]: 說明
+  - generic [ref=e418]:
+    - generic [ref=e420]:
+      - img [ref=e423] [cursor=pointer]
+      - generic [ref=e426]:
+        - link "Socialupload" [ref=e427] [cursor=pointer]:
+          - /url: "#/"
+        - generic [ref=e428]: ·
+        - link "Privacy" [ref=e429] [cursor=pointer]:
+          - /url: "#/privacy"
+        - generic [ref=e430]: ·
+        - link "Terms" [ref=e431] [cursor=pointer]:
+          - /url: "#/terms"
+    - main [ref=e432]:
+      - generic [ref=e946]:
+        - generic [ref=e947]:
+          - heading "任務中心" [level=1] [ref=e948]
+          - generic [ref=e949]:
+            - generic [ref=e951] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e953]
+                - generic: 全部狀態
+              - img [ref=e956]
+            - generic [ref=e959] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e961]
+                - generic: 全部平台
+              - img [ref=e964]
+            - button "重新整理" [disabled]:
+              - generic:
+                - img
+              - generic:
+                - generic:
+                  - img
+                - text: 重新整理
+            - button "立即排空佇列" [ref=e966] [cursor=pointer]:
+              - generic [ref=e967]: 立即排空佇列
+        - generic [ref=e970]:
+          - table [ref=e972]:
+            - rowgroup [ref=e981]:
+              - row "ID 平台 標題 進度 狀態 建立時間 操作" [ref=e982]:
+                - columnheader "ID" [ref=e983]:
+                  - generic [ref=e984]: ID
+                - columnheader "平台" [ref=e985]:
+                  - generic [ref=e986]: 平台
+                - columnheader "標題" [ref=e987]:
+                  - generic [ref=e988]: 標題
+                - columnheader "進度" [ref=e989]:
+                  - generic [ref=e990]: 進度
+                - columnheader "狀態" [ref=e991]:
+                  - generic [ref=e992]: 狀態
+                - columnheader "建立時間" [ref=e993]:
+                  - generic [ref=e994]: 建立時間
+                - columnheader "操作" [ref=e995]:
+                  - generic [ref=e996]: 操作
+          - generic [ref=e1000]:
+            - table:
+              - rowgroup
+            - generic [ref=e1002]: No Data
+    - generic [ref=e935]:
+      - generic [ref=e936]: Socialupload
+      - generic [ref=e937]:
+        - link "Privacy Policy" [ref=e938] [cursor=pointer]:
+          - /url: "#/privacy"
+        - generic [ref=e939]: ·
+        - link "Terms of Service" [ref=e940] [cursor=pointer]:
+          - /url: "#/terms"
