@@ -76,23 +76,23 @@ def upgrade() -> None:
     # Seed default backend from env vars if credentials are present
     key = os.environ.get("DO_SPACES_KEY", "")
     if key:
+        from sqlalchemy import text
         op.execute(
-            """
+            text("""
             INSERT OR IGNORE INTO storage_backends
             (slug, label, provider, bucket, region, endpoint, access_key, secret_key, cdn_url, is_default)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            """,
-            (
-                "default",
-                "Default DO Spaces",
-                "do_spaces",
-                os.environ.get("DO_SPACES_BUCKET", "sau-media"),
-                os.environ.get("DO_SPACES_REGION", "sgp1"),
-                f"https://{os.environ.get('DO_SPACES_REGION', 'sgp1')}.digitaloceanspaces.com",
-                key,
-                os.environ.get("DO_SPACES_SECRET", ""),
-                os.environ.get("DO_SPACES_CDN_URL", ""),
-            ),
+            VALUES (:slug, :label, :provider, :bucket, :region, :endpoint, :access_key, :secret_key, :cdn_url, 1)
+            """).bindparams(
+                slug="default",
+                label="Default DO Spaces",
+                provider="do_spaces",
+                bucket=os.environ.get("DO_SPACES_BUCKET", "sau-media"),
+                region=os.environ.get("DO_SPACES_REGION", "sgp1"),
+                endpoint=f"https://{os.environ.get('DO_SPACES_REGION', 'sgp1')}.digitaloceanspaces.com",
+                access_key=key,
+                secret_key=os.environ.get("DO_SPACES_SECRET", ""),
+                cdn_url=os.environ.get("DO_SPACES_CDN_URL", ""),
+            )
         )
 
 

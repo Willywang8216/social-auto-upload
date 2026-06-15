@@ -418,6 +418,38 @@ CREATE TABLE IF NOT EXISTS tiktok_publish_status (
 )
 """
 
+TWITTER_OAUTH_REQUESTS = """
+CREATE TABLE IF NOT EXISTS twitter_oauth_requests (
+    state_token TEXT PRIMARY KEY,
+    profile_id INTEGER,
+    account_id INTEGER,
+    account_name TEXT,
+    redirect_uri TEXT NOT NULL,
+    code_verifier TEXT NOT NULL,
+    scopes_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'started',
+    requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at DATETIME,
+    error_text TEXT,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE SET NULL
+)
+"""
+
+PUBLISH_TEMPLATES = """
+CREATE TABLE IF NOT EXISTS publish_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    description TEXT DEFAULT '',
+    config_json TEXT NOT NULL DEFAULT '{}',
+    included_settings_json TEXT NOT NULL DEFAULT '[]',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 WATERMARK_CONFIGS = """
 CREATE TABLE IF NOT EXISTS watermark_configs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -588,6 +620,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_tps_job ON tiktok_publish_status(job_id)",
     "CREATE INDEX IF NOT EXISTS idx_tps_account ON tiktok_publish_status(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_tps_status ON tiktok_publish_status(status)",
+    "CREATE INDEX IF NOT EXISTS idx_twitter_oauth_requests_account ON twitter_oauth_requests(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_twitter_oauth_requests_status ON twitter_oauth_requests(status)",
     "CREATE INDEX IF NOT EXISTS idx_fr_storage_key ON file_records(storage_key)",
     "CREATE INDEX IF NOT EXISTS idx_fr_storage_backend ON file_records(storage_backend_id)",
     "CREATE INDEX IF NOT EXISTS idx_watermark_configs_profile ON watermark_configs(profile_id)",
@@ -753,6 +787,8 @@ def bootstrap(db_path: Path = DB_PATH) -> None:
         cursor.execute(ANALYTICS_SYNC_LOG)
         cursor.execute(STORAGE_BACKENDS)
         cursor.execute(TIKTOK_PUBLISH_STATUS)
+        cursor.execute(TWITTER_OAUTH_REQUESTS)
+        cursor.execute(PUBLISH_TEMPLATES)
         cursor.execute(WATERMARK_CONFIGS)
         cursor.execute(MEDIA_ASSETS)
         cursor.execute(SHEET_EXPORTS)

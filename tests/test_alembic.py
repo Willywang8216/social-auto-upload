@@ -66,6 +66,15 @@ class AlembicBaselineTests(unittest.TestCase):
             "threads_oauth_requests",
             "tiktok_review_events",
             "account_events",
+            "video_analytics_videos",
+            "video_analytics_snapshots",
+            "analytics_sync_log",
+            "storage_backends",
+            "tiktok_publish_status",
+            "watermark_configs",
+            "media_assets",
+            "sheet_exports",
+            "prepared_posts",
         ):
             self.assertIn(expected, tables)
 
