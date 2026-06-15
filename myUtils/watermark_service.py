@@ -8,16 +8,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import random
 import sqlite3
 import subprocess
-import tempfile
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -472,6 +470,7 @@ def apply_video_watermark(
 
     # Build image overlay filter if needed
     image_vf = ""
+    use_filter_complex = False
     if has_image:
         wm_path = Path(config.image_path)
         if not wm_path.exists():
@@ -485,17 +484,15 @@ def apply_video_watermark(
                 max_window=config.video_position_change_max_seconds,
                 seed=seed + 1,
             )
-            # Use enable expressions for dynamic image overlay
-            position = "bottom_right"
-            if config.randomize_position and config.allowed_positions:
-                position = random.Random(seed).choice(config.allowed_positions)
-            x_expr, y_expr = _position_to_ffmpeg_expr(position, config.margin, text_var="overlay")
-            enable_parts = [f"between(t,{seg['start']},{seg['end']})" for seg in timeline]
-            enable_expr = "+".join(enable_parts)
-            image_vf = (
-                f"[1:v]format=rgba,colorchannelmixer=aa={config.opacity:.2f}[wm];"
-                f"[0:v][wm]overlay={x_expr}:{y_expr}:enable='{enable_expr}'"
-            )
+            # Build per-segment overlay filters with different positions
+            img_parts = []
+            for seg in timeline:
+                x_expr, y_expr = _position_to_ffmpeg_expr(seg["position"], config.margin, text_var="overlay")
+                img_parts.append(
+                    f"[1:v]format=rgba,colorchannelmixer=aa={config.opacity:.2f}[wm{seg['start']}];"
+                    f"[0:v][wm{seg['start']}]overlay={x_expr}:{y_expr}:enable='between(t,{seg['start']},{seg['end']})'"
+                )
+            image_vf = ";".join(img_parts)
         else:
             position = "bottom_right"
             if config.randomize_position and config.allowed_positions:
@@ -506,9 +503,68 @@ def apply_video_watermark(
                 f"[0:v][wm]overlay={x_expr}:{y_expr}"
             )
 
-    # Combine filters
+    # Combine filters - use filter_complex when combining text + image
     if has_text and has_image:
-        vf = f"{text_vf},{image_vf}"
+        # Need filter_complex to properly chain drawtext and overlay
+        use_filter_complex = True
+        fc_parts = []
+        # Image overlay first (outputs to [vout1])
+        fc_parts.append(image_vf.replace("[0:v]", "[vout0]").replace("[0:v]", "[vout0]"))
+        # Text drawtext on the overlay result (outputs to [vout1])
+        # Rewrite text_vf to use labeled streams
+        if config.video_dynamic_position:
+            timeline_text = build_dynamic_overlay_timeline(
+                duration_seconds,
+                allowed_positions=config.allowed_positions or ["top_left", "top_right", "bottom_left", "bottom_right"],
+                min_window=config.video_position_change_min_seconds,
+                max_window=config.video_position_change_max_seconds,
+                seed=seed,
+            )
+            for i, seg in enumerate(timeline_text):
+                x_expr, y_expr = _position_to_ffmpeg_expr(seg["position"], config.margin)
+                input_label = "[vout0]" if i == 0 else f"[vout{i}]"
+                output_label = f"[vout{i+1}]"
+                escaped = _escape_drawtext(config.text)
+                fontsize = config.font_size if config.font_size > 0 else 24
+                color = config.font_color or "white"
+                opacity = config.opacity
+                fc_parts.append(
+                    f"{input_label}drawtext=text='{escaped}':"
+                    f"fontcolor={color}@{opacity:.2f}:"
+                    f"fontsize={fontsize}:"
+                    f"x={x_expr}:y={y_expr}:"
+                    f"enable='between(t,{seg['start']},{seg['end']})'"
+                    f"{output_label}"
+                )
+            final_label = f"[vout{len(timeline_text)}]"
+        else:
+            # Static text on top of image overlay
+            position = "bottom_right"
+            if config.randomize_position and config.allowed_positions:
+                position = random.Random(seed).choice(config.allowed_positions)
+            x_expr, y_expr = _position_to_ffmpeg_expr(position, config.margin)
+            escaped = _escape_drawtext(config.text)
+            fontsize = config.font_size if config.font_size > 0 else 24
+            color = config.font_color or "white"
+            opacity = config.opacity
+            fc_parts.append(
+                f"[vout0]drawtext=text='{escaped}':"
+                f"fontcolor={color}@{opacity:.2f}:"
+                f"fontsize={fontsize}:"
+                f"x={x_expr}:y={y_expr}[vout1]"
+            )
+            final_label = "[vout1]"
+        fc = ";".join(fc_parts)
+        cmd = [FFMPEG_COMMAND, "-y", "-i", str(source), "-i", str(Path(config.image_path))]
+        cmd.extend([
+            "-filter_complex", fc,
+            "-map", final_label,
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            str(output),
+        ])
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return output
     elif has_text:
         vf = text_vf
     else:

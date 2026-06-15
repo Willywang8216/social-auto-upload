@@ -242,7 +242,12 @@ def update_media_asset(
     with _connect(db_path) as conn:
         conn.execute(f"UPDATE media_assets SET {set_clause} WHERE id = ?", values)
         conn.commit()
-    return get_media_asset(asset_id, db_path=db_path)
+        row = conn.execute(
+            "SELECT * FROM media_assets WHERE id = ?", (asset_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"MediaAsset {asset_id} not found")
+        return _row_to_asset(row)
 
 
 def delete_media_asset(asset_id: int, *, db_path: Path | None = None) -> None:

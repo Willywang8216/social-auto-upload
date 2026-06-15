@@ -7,7 +7,6 @@ profile settings, media analysis, and platform constraints.
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -189,7 +188,10 @@ def create_prepared_post(
             ),
         )
         conn.commit()
-        return get_prepared_post(cur.lastrowid, db_path=db_path)
+        row = conn.execute(
+            "SELECT * FROM prepared_posts WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+        return _row_to_post(row)
 
 
 def get_prepared_post(post_id: int, *, db_path: Path | None = None) -> PreparedPost:
@@ -259,7 +261,12 @@ def update_prepared_post(
     with _connect(db_path) as conn:
         conn.execute(f"UPDATE prepared_posts SET {set_clause} WHERE id = ?", values)
         conn.commit()
-    return get_prepared_post(post_id, db_path=db_path)
+        row = conn.execute(
+            "SELECT * FROM prepared_posts WHERE id = ?", (post_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"PreparedPost {post_id} not found")
+        return _row_to_post(row)
 
 
 def delete_prepared_post(post_id: int, *, db_path: Path | None = None) -> None:

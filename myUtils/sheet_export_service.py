@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
