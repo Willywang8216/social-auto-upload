@@ -108,6 +108,17 @@ class Profile:
     settings: dict | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    # SocialUpload extended fields
+    default_language: str = "en"
+    timezone: str = "UTC"
+    system_prompt: str = ""
+    writing_style_prompt: str = ""
+    contact_details: str = ""
+    default_cta: str = ""
+    default_hashtags: str = ""
+    default_link: str = ""
+    watermark_config_id: int | None = None
+    google_sheet_folder_id: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -298,28 +309,34 @@ def update_profile(
     description: str | None = None,
     settings: dict | None = None,
     db_path: Path = DB_PATH,
+    **extra_fields,
 ) -> Profile:
+    """Update a profile. Supports name, description, settings, and any extended column."""
+    _EXTENDED_FIELDS = {
+        "default_language", "timezone", "system_prompt", "writing_style_prompt",
+        "contact_details", "default_cta", "default_hashtags", "default_link",
+        "watermark_config_id", "google_sheet_folder_id",
+    }
     current = get_profile(profile_id, db_path=db_path)
     next_name = current.name if name is None else name.strip()
     next_description = current.description if description is None else description.strip()
     next_settings = current.settings if settings is None else settings
     next_slug = current.slug if name is None else slugify(next_name)
     now = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+
+    # Build SET clause with extended fields
+    set_parts = ["name = ?", "slug = ?", "description = ?", "settings_json = ?", "updated_at = ?"]
+    values = [next_name, next_slug, next_description, json.dumps(next_settings or {}, ensure_ascii=False), now]
+    for field, value in extra_fields.items():
+        if field in _EXTENDED_FIELDS:
+            set_parts.append(f"{field} = ?")
+            values.append(value)
+    values.append(profile_id)
+
     with _connect(db_path) as conn:
         conn.execute(
-            """
-            UPDATE profiles
-            SET name = ?, slug = ?, description = ?, settings_json = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                next_name,
-                next_slug,
-                next_description,
-                json.dumps(next_settings or {}, ensure_ascii=False),
-                now,
-                profile_id,
-            ),
+            f"UPDATE profiles SET {', '.join(set_parts)} WHERE id = ?",
+            values,
         )
         conn.commit()
     return get_profile(profile_id, db_path=db_path)

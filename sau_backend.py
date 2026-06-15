@@ -54,6 +54,10 @@ from myUtils import tiktok_auth
 from myUtils import tiktok_review
 from myUtils import do_spaces
 from myUtils import patreon_auth
+from myUtils import watermark_service
+from myUtils import media_asset_service
+from myUtils import content_generator
+from myUtils import sheet_export_service
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.login import reddit_cookie_gen, twitter_cookie_gen, twitter_cookie_gen_legacy
 from uploader.patreon_uploader.main import patreon_cookie_gen
@@ -6724,6 +6728,497 @@ def analytics_thumbnail_proxy(platform_video_id):
     except Exception as exc:
         logging.getLogger(__name__).exception("Thumbnail proxy: unexpected error for %s: %s", platform_video_id, exc)
         return '', 502
+
+
+# ===================== WATERMARK CONFIG ENDPOINTS =====================
+
+@app.route("/api/watermark-configs", methods=["GET"])
+def api_list_watermark_configs():
+    profile_id = request.args.get("profile_id", type=int)
+    configs = watermark_service.list_watermark_configs(profile_id=profile_id)
+    return jsonify([c.to_dict() for c in configs])
+
+
+@app.route("/api/watermark-configs", methods=["POST"])
+def api_create_watermark_config():
+    data = request.get_json(force=True)
+    try:
+        config = watermark_service.create_watermark_config(**data)
+        return jsonify(config.to_dict()), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/watermark-configs/<int:config_id>", methods=["GET"])
+def api_get_watermark_config(config_id):
+    try:
+        config = watermark_service.get_watermark_config(config_id)
+        return jsonify(config.to_dict())
+    except ValueError:
+        return jsonify({"error": "Not found"}), 404
+
+
+@app.route("/api/watermark-configs/<int:config_id>", methods=["PATCH"])
+def api_update_watermark_config(config_id):
+    data = request.get_json(force=True)
+    try:
+        config = watermark_service.update_watermark_config(config_id, **data)
+        return jsonify(config.to_dict())
+    except ValueError:
+        return jsonify({"error": "Not found"}), 404
+
+
+@app.route("/api/watermark-configs/<int:config_id>", methods=["DELETE"])
+def api_delete_watermark_config(config_id):
+    watermark_service.delete_watermark_config(config_id)
+    return jsonify({"ok": True})
+
+
+# ===================== MEDIA ASSET ENDPOINTS =====================
+
+@app.route("/api/media/assets", methods=["GET"])
+def api_list_media_assets():
+    media_type = request.args.get("media_type")
+    upload_status = request.args.get("upload_status")
+    processing_status = request.args.get("processing_status")
+    limit = request.args.get("limit", 200, type=int)
+    offset = request.args.get("offset", 0, type=int)
+    assets = media_asset_service.list_media_assets(
+        media_type=media_type,
+        upload_status=upload_status,
+        processing_status=processing_status,
+        limit=limit,
+        offset=offset,
+    )
+    return jsonify([a.to_dict() for a in assets])
+
+
+@app.route("/api/media/assets/<int:asset_id>", methods=["GET"])
+def api_get_media_asset(asset_id):
+    try:
+        asset = media_asset_service.get_media_asset(asset_id)
+        return jsonify(asset.to_dict())
+    except ValueError:
+        return jsonify({"error": "Not found"}), 404
+
+
+@app.route("/api/media/assets/<int:asset_id>", methods=["DELETE"])
+def api_delete_media_asset(asset_id):
+    media_asset_service.delete_media_asset(asset_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/media/upload/batch", methods=["POST"])
+def api_batch_upload():
+    """Upload multiple files and create MediaAsset records."""
+    uploaded_files = request.files.getlist("files")
+    if not uploaded_files:
+        return jsonify({"error": "No files provided"}), 400
+
+    upload_dir = Path(BASE_DIR) / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    assets = []
+
+    for f in uploaded_files:
+        filename = f.filename or "unnamed"
+        safe_name = f"{int(time.time())}_{filename}"
+        local_path = upload_dir / safe_name
+        f.save(str(local_path))
+
+        asset = media_asset_service.create_media_asset(
+            original_filename=filename,
+            local_original_path=str(local_path),
+            file_size=local_path.stat().st_size,
+        )
+        media_asset_service.update_media_asset(
+            asset.id,
+            upload_status=media_asset_service.UPLOAD_STATUS_UPLOADED,
+        )
+        assets.append(media_asset_service.get_media_asset(asset.id))
+
+    return jsonify([a.to_dict() for a in assets]), 201
+
+
+@app.route("/api/media/assets/<int:asset_id>/process", methods=["POST"])
+def api_process_media_asset(asset_id):
+    """Process a media asset: watermark, thumbnail, audio extraction."""
+    data = request.get_json(force=True) if request.is_json else {}
+    watermark_config_id = data.get("watermark_config_id")
+
+    try:
+        asset = media_asset_service.get_media_asset(asset_id)
+    except ValueError:
+        return jsonify({"error": "Asset not found"}), 404
+
+    if not asset.local_original_path or not Path(asset.local_original_path).exists():
+        return jsonify({"error": "Local file not found"}), 400
+
+    media_asset_service.update_media_asset(
+        asset_id, processing_status=media_asset_service.PROCESSING_STATUS_PROCESSING
+    )
+
+    try:
+        source = Path(asset.local_original_path)
+        processed_dir = Path(BASE_DIR) / "processed"
+        processed_dir.mkdir(parents=True, exist_ok=True)
+
+        wm_config = None
+        if watermark_config_id:
+            wm_config = watermark_service.get_watermark_config(watermark_config_id)
+        else:
+            configs = watermark_service.list_watermark_configs()
+            if configs:
+                wm_config = configs[0]
+
+        if asset.media_type == media_asset_service.MEDIA_TYPE_VIDEO:
+            if wm_config and wm_config.enabled:
+                output_path = processed_dir / f"{source.stem}_watermarked{source.suffix}"
+                watermark_service.apply_video_watermark(source, output_path, wm_config)
+                media_asset_service.update_media_asset(
+                    asset_id, local_processed_path=str(output_path)
+                )
+            thumb_path = processed_dir / f"{source.stem}_thumb.jpg"
+            watermark_service.generate_thumbnail(source, thumb_path)
+            media_asset_service.update_media_asset(
+                asset_id, thumbnail_public_url=str(thumb_path)
+            )
+            audio_path = processed_dir / f"{source.stem}_audio.wav"
+            try:
+                watermark_service.extract_audio(source, audio_path)
+            except Exception:
+                pass
+
+        elif asset.media_type == media_asset_service.MEDIA_TYPE_IMAGE:
+            if wm_config and wm_config.enabled:
+                output_path = processed_dir / f"{source.stem}_watermarked{source.suffix}"
+                watermark_service.apply_image_watermark(source, output_path, wm_config)
+                media_asset_service.update_media_asset(
+                    asset_id, local_processed_path=str(output_path)
+                )
+
+        media_asset_service.update_media_asset(
+            asset_id, processing_status=media_asset_service.PROCESSING_STATUS_PROCESSED
+        )
+        return jsonify(media_asset_service.get_media_asset(asset_id).to_dict())
+
+    except Exception as e:
+        media_asset_service.update_media_asset(
+            asset_id, processing_status=media_asset_service.PROCESSING_STATUS_FAILED
+        )
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/media/assets/<int:asset_id>/upload-rclone", methods=["POST"])
+def api_upload_asset_rclone(asset_id):
+    data = request.get_json(force=True) if request.is_json else {}
+    profile_slug = data.get("profile_slug", "default")
+
+    try:
+        asset = media_asset_service.get_media_asset(asset_id)
+    except ValueError:
+        return jsonify({"error": "Asset not found"}), 404
+
+    try:
+        remote_path = media_asset_service.upload_asset_to_rclone(asset, profile_slug)
+        public_url = media_asset_service.resolve_public_url(asset)
+        media_asset_service.update_media_asset(asset_id, public_url=public_url)
+        return jsonify({"remote_path": remote_path, "public_url": public_url})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ===================== MEDIA GROUP ENDPOINTS (EXTENDED) =====================
+
+@app.route("/api/media-groups/<int:group_id>", methods=["PATCH"])
+def api_update_media_group(group_id):
+    data = request.get_json(force=True)
+    allowed = {"name", "notes", "profile_id", "group_type", "content_theme", "user_notes", "status"}
+    updates = {k: v for k, v in data.items() if k in allowed}
+    if not updates:
+        return jsonify({"error": "No valid fields"}), 400
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [group_id]
+    db_path = Path(BASE_DIR) / "db" / "database.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(f"UPDATE media_groups SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", values)
+        conn.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/media-groups/<int:group_id>/items/reorder", methods=["PATCH"])
+def api_reorder_media_group_items(group_id):
+    data = request.get_json(force=True)
+    items = data.get("items", [])
+    if not items:
+        return jsonify({"error": "No items provided"}), 400
+    db_path = Path(BASE_DIR) / "db" / "database.db"
+    with sqlite3.connect(db_path) as conn:
+        for item in items:
+            conn.execute(
+                "UPDATE media_group_items SET sort_order = ? WHERE id = ? AND media_group_id = ?",
+                (item.get("sort_order", 0), item.get("id"), group_id),
+            )
+        conn.commit()
+    return jsonify({"ok": True})
+
+
+# ===================== CAMPAIGN EXTENDED ENDPOINTS =====================
+
+@app.route("/api/campaigns/<int:campaign_id>/generate", methods=["POST"])
+def api_campaign_generate(campaign_id):
+    """Generate platform-specific content for a campaign using LLM."""
+    data = request.get_json(force=True) if request.is_json else {}
+    platforms = data.get("platforms")
+
+    db_path = Path(BASE_DIR) / "db" / "database.db"
+
+    try:
+        campaign = campaign_store.get_campaign(campaign_id)
+    except (ValueError, Exception):
+        return jsonify({"error": "Campaign not found"}), 404
+
+    try:
+        profile = profile_registry.get_profile(campaign.profile_id)
+    except (ValueError, Exception):
+        return jsonify({"error": "Profile not found"}), 404
+
+    profile_dict = profile.to_dict()
+    profile_settings = profile_dict.get("settings") or {}
+    profile_dict.update(profile_settings)
+
+    try:
+        mg = media_group_store.get_media_group(campaign.media_group_id)
+        mg_dict = mg.to_dict()
+    except (ValueError, Exception):
+        mg_dict = {"name": "unknown", "notes": ""}
+
+    media_info = {
+        "topic": mg_dict.get("content_theme", "") or mg_dict.get("name", ""),
+        "key_points": "",
+        "transcript": "",
+        "mood": "",
+    }
+    try:
+        items = media_group_store.list_items(campaign.media_group_id)
+        for item in items:
+            assets = media_asset_service.list_media_assets(limit=1)
+            if assets:
+                analysis = assets[0].content_analysis
+                if analysis:
+                    media_info.update(analysis)
+                if assets[0].transcript_text:
+                    media_info["transcript"] = assets[0].transcript_text
+                break
+    except Exception:
+        pass
+
+    account_ids = campaign.selected_account_ids or []
+    if not account_ids:
+        account_ids = [a.id for a in profile_registry.list_accounts(campaign.profile_id)]
+
+    accounts = []
+    for aid in account_ids:
+        try:
+            acc = profile_registry.get_account(aid)
+            if platforms and acc.platform not in platforms:
+                continue
+            accounts.append(acc)
+        except (ValueError, Exception):
+            continue
+
+    if not accounts:
+        return jsonify({"error": "No accounts found for generation"}), 400
+
+    generated_posts = []
+    for acc in accounts:
+        context = {
+            "user_notes": mg_dict.get("notes", "") or mg_dict.get("user_notes", ""),
+            "subreddit": acc.config.get("subreddits", [""])[0] if acc.platform == "reddit" else "",
+        }
+
+        system_prompt, user_prompt = content_generator.build_generation_context(
+            profile_dict, media_info, acc.platform, context
+        )
+
+        try:
+            result = llm_client.generate_chat_completion(
+                system_prompt, user_prompt, temperature=0.7
+            )
+            raw_content = result.content
+            parsed = content_generator.parse_llm_response(raw_content, acc.platform)
+            errors = content_generator.validate_post(acc.platform, parsed)
+
+            post = content_generator.create_prepared_post(
+                campaign_id=campaign_id,
+                media_group_id=campaign.media_group_id,
+                profile_id=campaign.profile_id,
+                platform=acc.platform,
+                account_id=acc.id,
+                target_name=acc.account_name,
+                message=parsed.get("message", ""),
+                title=parsed.get("title", ""),
+                description=parsed.get("description", ""),
+                first_comment=parsed.get("first_comment", ""),
+                hashtags=json.dumps(parsed.get("hashtags", [])),
+                link=profile_dict.get("default_link", ""),
+                image_urls=",".join(parsed.get("image_urls", [])),
+                video_url=parsed.get("video_url", ""),
+                alt_text=parsed.get("alt_text", ""),
+                status="needs_review" if errors else "generated",
+                validation_errors=errors,
+                llm_raw_output={"raw": raw_content, "parsed": parsed},
+                char_count=len(parsed.get("message", "")),
+            )
+            generated_posts.append(post.to_dict())
+        except Exception as e:
+            generated_posts.append({
+                "platform": acc.platform,
+                "account_id": acc.id,
+                "error": str(e),
+                "status": "failed",
+            })
+
+    return jsonify({"posts": generated_posts, "count": len(generated_posts)})
+
+
+@app.route("/api/campaigns/<int:campaign_id>/validate", methods=["POST"])
+def api_campaign_validate(campaign_id):
+    posts = content_generator.list_prepared_posts(campaign_id=campaign_id)
+    results = []
+    for post in posts:
+        post_data = post.to_dict()
+        errors = content_generator.validate_post(post.platform, post_data)
+        if errors:
+            content_generator.update_prepared_post(post.id, validation_errors=errors, status="needs_review")
+        results.append({"id": post.id, "platform": post.platform, "errors": errors, "valid": not errors})
+    return jsonify({"results": results, "total": len(results), "valid": sum(1 for r in results if r["valid"])})
+
+
+@app.route("/api/campaigns/<int:campaign_id>/approve", methods=["POST"])
+def api_campaign_approve(campaign_id):
+    data = request.get_json(force=True) if request.is_json else {}
+    post_ids = data.get("post_ids")
+
+    posts = content_generator.list_prepared_posts(campaign_id=campaign_id)
+    approved = 0
+    for post in posts:
+        if post_ids and post.id not in post_ids:
+            continue
+        if post.validation_errors:
+            continue
+        content_generator.update_prepared_post(post.id, status="approved")
+        approved += 1
+
+    return jsonify({"approved": approved, "total": len(posts)})
+
+
+@app.route("/api/campaigns/<int:campaign_id>/posts", methods=["GET"])
+def api_campaign_posts(campaign_id):
+    platform = request.args.get("platform")
+    status = request.args.get("status")
+    posts = content_generator.list_prepared_posts(
+        campaign_id=campaign_id, platform=platform, status=status
+    )
+    return jsonify([p.to_dict() for p in posts])
+
+
+@app.route("/api/campaigns/<int:campaign_id>/posts/<int:post_id>", methods=["PATCH"])
+def api_update_prepared_post(campaign_id, post_id):
+    data = request.get_json(force=True)
+    try:
+        post = content_generator.update_prepared_post(post_id, **data)
+        return jsonify(post.to_dict())
+    except ValueError:
+        return jsonify({"error": "Post not found"}), 404
+
+
+@app.route("/api/campaigns/<int:campaign_id>/export/google-sheet", methods=["POST"])
+def api_campaign_export_sheet(campaign_id):
+    data = request.get_json(force=True) if request.is_json else {}
+    profile_slug = data.get("profile_slug", "default")
+    spreadsheet_id = data.get("spreadsheet_id")
+
+    try:
+        campaign = campaign_store.get_campaign(campaign_id)
+    except (ValueError, Exception):
+        return jsonify({"error": "Campaign not found"}), 404
+
+    posts = content_generator.list_prepared_posts(campaign_id=campaign_id, status="approved")
+    if not posts:
+        return jsonify({"error": "No approved posts to export"}), 400
+
+    rows = sheet_export_service.build_sheet_rows(posts)
+
+    all_errors = []
+    for i, row in enumerate(rows):
+        errors = sheet_export_service.validate_sheet_row(row)
+        if errors:
+            all_errors.append({"row": i, "errors": errors})
+
+    if all_errors:
+        return jsonify({"errors": all_errors, "message": "Validation failed"}), 400
+
+    sheet_name = sheet_export_service.generate_sheet_name(profile_slug)
+
+    try:
+        result = sheet_export_service.export_to_google_sheet(
+            rows, sheet_name, spreadsheet_id=spreadsheet_id,
+            folder_id=data.get("folder_id"),
+        )
+        export = sheet_export_service.create_sheet_export(
+            campaign_id=campaign_id,
+            profile_id=campaign.profile_id,
+            sheet_name=sheet_name,
+            spreadsheet_id=result.get("spreadsheet_id", ""),
+            spreadsheet_url=result.get("spreadsheet_url", ""),
+            row_count=result.get("row_count", len(rows)),
+            status="completed",
+        )
+        return jsonify(export.to_dict())
+    except Exception as e:
+        export = sheet_export_service.create_sheet_export(
+            campaign_id=campaign_id,
+            profile_id=campaign.profile_id,
+            sheet_name=sheet_name,
+            status="failed",
+            error_message=str(e),
+        )
+        return jsonify({"error": str(e), "export": export.to_dict()}), 500
+
+
+@app.route("/api/campaigns/<int:campaign_id>/export/csv", methods=["GET"])
+def api_campaign_export_csv(campaign_id):
+    posts = content_generator.list_prepared_posts(campaign_id=campaign_id, status="approved")
+    if not posts:
+        return jsonify({"error": "No approved posts to export"}), 400
+
+    rows = sheet_export_service.build_sheet_rows(posts)
+    csv_bytes = sheet_export_service.generate_csv_bytes(rows)
+
+    try:
+        campaign = campaign_store.get_campaign(campaign_id)
+        profile = profile_registry.get_profile(campaign.profile_id)
+        filename = f"{sheet_export_service.generate_sheet_name(profile.slug)}.csv"
+    except Exception:
+        filename = f"campaign-{campaign_id}.csv"
+
+    return Response(
+        csv_bytes,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+# ===================== SHEET EXPORT HISTORY =====================
+
+@app.route("/api/sheet-exports", methods=["GET"])
+def api_list_sheet_exports():
+    campaign_id = request.args.get("campaign_id", type=int)
+    profile_id = request.args.get("profile_id", type=int)
+    exports = sheet_export_service.list_sheet_exports(
+        campaign_id=campaign_id, profile_id=profile_id
+    )
+    return jsonify([e.to_dict() for e in exports])
 
 
 _maybe_start_account_maintenance_scheduler()

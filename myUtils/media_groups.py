@@ -44,6 +44,12 @@ class MediaGroup:
     primary_video_file_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    # SocialUpload extended fields
+    profile_id: int | None = None
+    group_type: str = "mixed"
+    content_theme: str = ""
+    user_notes: str = ""
+    status: str = "draft"
 
     def to_dict(self) -> dict:
         return asdict(self)

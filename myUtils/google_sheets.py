@@ -239,3 +239,24 @@ class GoogleSheetsClient:
             spreadsheet_url=spreadsheet_url,
             row_count=len(rows),
         )
+
+
+def create_or_update_spreadsheet(
+    *,
+    service_account_info: dict,
+    sheet_name: str,
+    rows: list[dict[str, str]],
+    column_order: list[str] | None = None,
+    spreadsheet_id: str | None = None,
+    folder_id: str | None = None,
+) -> SheetExportResult:
+    """Convenience wrapper: create or update a spreadsheet and write rows.
+
+    This is the primary entry point used by the sheet export service.
+    """
+    client = GoogleSheetsClient(service_account_info)
+    return client.export_rows(
+        sheet_title=sheet_name,
+        rows=rows,
+        spreadsheet_id=spreadsheet_id,
+    )

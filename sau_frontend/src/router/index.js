@@ -14,6 +14,9 @@ import OAuthReviewStatus from '../views/OAuthReviewStatus.vue'
 import ProfileManagement from '../views/ProfileManagement.vue'
 import TemplateManagement from '../views/TemplateManagement.vue'
 import VideoAnalytics from '../views/VideoAnalytics.vue'
+import BatchUpload from '../views/BatchUpload.vue'
+import CampaignBuilder from '../views/CampaignBuilder.vue'
+import SheetExports from '../views/SheetExports.vue'
 
 import { getToken } from '@/utils/auth'
 
@@ -83,6 +86,24 @@ const routes = [
     name: 'About',
     component: About,
     meta: { title: 'Socialupload' }
+  },
+  {
+    path: '/batch-upload',
+    name: 'BatchUpload',
+    component: BatchUpload,
+    meta: { title: 'Socialupload - Batch Upload' }
+  },
+  {
+    path: '/campaign-builder',
+    name: 'CampaignBuilder',
+    component: CampaignBuilder,
+    meta: { title: 'Socialupload - Campaign Builder' }
+  },
+  {
+    path: '/sheet-exports',
+    name: 'SheetExports',
+    component: SheetExports,
+    meta: { title: 'Socialupload - Sheet Exports' }
   },
   {
     path: '/tiktok-review',
