@@ -7,16 +7,19 @@ video watermarking (ffmpeg), dynamic position changes, and thumbnail generation.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import sqlite3
 import subprocess
 import tempfile
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
+
+logger = logging.getLogger(__name__)
 
 from utils.conf_defaults import BASE_DIR
 
@@ -57,6 +60,13 @@ class WatermarkConfig:
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        # Keep booleans as booleans for API responses
+        d["allowed_positions"] = self.allowed_positions
+        return d
+
+    def to_db_dict(self) -> dict:
+        """Serialize for database INSERT (booleans as ints, positions as JSON)."""
+        d = asdict(self)
         d["randomize_position"] = int(self.randomize_position)
         d["video_dynamic_position"] = int(self.video_dynamic_position)
         d["enabled"] = int(self.enabled)
@@ -82,7 +92,7 @@ def _connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _row_to_config(row: sqlite3.Row) -> WatermarkConfig:
@@ -92,7 +102,13 @@ def _row_to_config(row: sqlite3.Row) -> WatermarkConfig:
     data["enabled"] = bool(data.get("enabled", 1))
     positions = data.get("allowed_positions", "[]")
     if isinstance(positions, str):
-        data["allowed_positions"] = json.loads(positions)
+        try:
+            data["allowed_positions"] = json.loads(positions)
+        except (json.JSONDecodeError, TypeError):
+            data["allowed_positions"] = []
+    # Filter to only valid dataclass fields (protects against schema evolution)
+    valid = {f.name for f in fields(WatermarkConfig)}
+    data = {k: v for k, v in data.items() if k in valid}
     return WatermarkConfig(**data)
 
 
@@ -140,7 +156,10 @@ def create_watermark_config(
             ),
         )
         conn.commit()
-        return get_watermark_config(cur.lastrowid, db_path=db_path)
+        row = conn.execute(
+            "SELECT * FROM watermark_configs WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+        return _row_to_config(row)
 
 
 def get_watermark_config(config_id: int, *, db_path: Path | None = None) -> WatermarkConfig:
@@ -197,7 +216,12 @@ def update_watermark_config(
             f"UPDATE watermark_configs SET {set_clause} WHERE id = ?", values
         )
         conn.commit()
-    return get_watermark_config(config_id, db_path=db_path)
+        row = conn.execute(
+            "SELECT * FROM watermark_configs WHERE id = ?", (config_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"WatermarkConfig {config_id} not found")
+        return _row_to_config(row)
 
 
 def delete_watermark_config(config_id: int, *, db_path: Path | None = None) -> None:
@@ -212,23 +236,16 @@ def _resolve_position(
     position: str, img_width: int, img_height: int, wm_width: int, wm_height: int, margin: int
 ) -> tuple[int, int]:
     """Resolve named position to (x, y) coordinates."""
-    if position == "top_left":
-        return margin, margin
-    elif position == "top_right":
-        return img_width - wm_width - margin, margin
-    elif position == "bottom_left":
-        return margin, img_height - wm_height - margin
-    elif position == "bottom_right":
-        return img_width - wm_width - margin, img_height - wm_height - margin
-    elif position == "center":
-        return (img_width - wm_width) // 2, (img_height - wm_height) // 2
-    elif position == "random_safe_area":
-        # Place in a random corner-safe area (not center)
-        safe_positions = ["top_left", "top_right", "bottom_left", "bottom_right"]
-        return _resolve_position(
-            random.choice(safe_positions), img_width, img_height, wm_width, wm_height, margin
-        )
-    return margin, margin
+    positions = {
+        "top_left": (margin, margin),
+        "top_right": (img_width - wm_width - margin, margin),
+        "bottom_left": (margin, img_height - wm_height - margin),
+        "bottom_right": (img_width - wm_width - margin, img_height - wm_height - margin),
+        "center": ((img_width - wm_width) // 2, (img_height - wm_height) // 2),
+    }
+    if position == "random_safe_area":
+        position = random.choice(["top_left", "top_right", "bottom_left", "bottom_right"])
+    return positions.get(position, positions["bottom_right"])
 
 
 def apply_image_watermark(
@@ -239,13 +256,14 @@ def apply_image_watermark(
     position: str | None = None,
 ) -> Path:
     """Apply watermark to an image using Pillow. Returns output_path."""
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageColor, ImageDraw, ImageFont
 
     source = Path(source_path).expanduser().resolve()
     output = Path(output_path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    img = Image.open(source).convert("RGBA")
+    with Image.open(source) as raw:
+        img = raw.convert("RGBA")
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
 
     wm_width, wm_height = 0, 0
@@ -266,9 +284,14 @@ def apply_image_watermark(
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
 
-        # Parse font color
+        # Use RGBA fill directly (no putalpha to avoid corrupting combined watermarks)
         color = config.font_color or "white"
         alpha = int(config.opacity * 255)
+        try:
+            rgb = ImageColor.getrgb(color)
+        except (ValueError, AttributeError):
+            rgb = (255, 255, 255)
+        fill_rgba = (*rgb, alpha)
 
         if position is None:
             if config.randomize_position and config.allowed_positions:
@@ -277,16 +300,18 @@ def apply_image_watermark(
                 position = "bottom_right"
 
         x, y = _resolve_position(position, img.width, img.height, text_w, text_h, config.margin)
-        draw.text((x, y), config.text, fill=color, font=font)
-        # Apply alpha via the overlay
-        overlay.putalpha(Image.new("L", overlay.size, alpha))
+        # Clamp to image bounds
+        x = max(0, min(x, img.width - text_w))
+        y = max(0, min(y, img.height - text_h))
+        draw.text((x, y), config.text, fill=fill_rgba, font=font)
         wm_width, wm_height = text_w, text_h
 
     # Apply image watermark
     if config.watermark_type in (WATERMARK_TYPE_IMAGE, WATERMARK_TYPE_COMBINED) and config.image_path:
         wm_img_path = Path(config.image_path)
         if wm_img_path.exists():
-            wm_img = Image.open(wm_img_path).convert("RGBA")
+            with Image.open(wm_img_path) as raw_wm:
+                wm_img = raw_wm.convert("RGBA")
             # Scale watermark
             target_w = int(img.width * config.scale)
             target_h = int(wm_img.height * (target_w / wm_img.width))
@@ -306,11 +331,15 @@ def apply_image_watermark(
                     wm_pos = "bottom_right"
 
             x, y = _resolve_position(wm_pos, img.width, img.height, target_w, target_h, config.margin)
+            # Clamp to image bounds
+            x = max(0, min(x, img.width - target_w))
+            y = max(0, min(y, img.height - target_h))
             overlay.paste(wm_img, (x, y), wm_img)
             wm_width, wm_height = target_w, target_h
 
     result = Image.alpha_composite(img, overlay)
     result.convert("RGB").save(str(output), quality=95)
+    img.close()
     return output
 
 
@@ -353,6 +382,10 @@ def build_dynamic_overlay_timeline(
     """Build a timeline of position changes for dynamic watermarking."""
     if duration_seconds <= 0:
         return []
+    if min_window <= 0 or max_window <= 0:
+        raise ValueError("min_window and max_window must be positive")
+    if max_window < min_window:
+        raise ValueError("max_window must be >= min_window")
     rng = random.Random(seed)
     current = 0.0
     timeline = []
@@ -381,6 +414,8 @@ def apply_video_watermark(
     seed: int = 0,
 ) -> Path:
     """Apply watermark to a video using ffmpeg. Returns output_path."""
+    import shutil
+
     source = Path(source_path).expanduser().resolve()
     output = Path(output_path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -388,7 +423,17 @@ def apply_video_watermark(
     if duration_seconds is None:
         duration_seconds = _probe_duration(source)
 
-    if config.watermark_type == WATERMARK_TYPE_TEXT and config.text:
+    has_text = config.watermark_type in (WATERMARK_TYPE_TEXT, WATERMARK_TYPE_COMBINED) and config.text
+    has_image = config.watermark_type in (WATERMARK_TYPE_IMAGE, WATERMARK_TYPE_COMBINED) and config.image_path
+
+    if not has_text and not has_image:
+        # No watermark to apply, just copy
+        shutil.copy2(str(source), str(output))
+        return output
+
+    # Build text filter if needed
+    text_vf = ""
+    if has_text:
         escaped = _escape_drawtext(config.text)
         fontsize = config.font_size if config.font_size > 0 else 24
         color = config.font_color or "white"
@@ -402,35 +447,35 @@ def apply_video_watermark(
                 max_window=config.video_position_change_max_seconds,
                 seed=seed,
             )
-            filter_parts = []
+            text_parts = []
             for seg in timeline:
                 x_expr, y_expr = _position_to_ffmpeg_expr(seg["position"], config.margin)
-                filter_parts.append(
+                text_parts.append(
                     f"drawtext=text='{escaped}':"
                     f"fontcolor={color}@{opacity:.2f}:"
                     f"fontsize={fontsize}:"
                     f"x={x_expr}:y={y_expr}:"
                     f"enable='between(t,{seg['start']},{seg['end']})'"
                 )
-            vf = ",".join(filter_parts)
+            text_vf = ",".join(text_parts)
         else:
             position = "bottom_right"
             if config.randomize_position and config.allowed_positions:
                 position = random.Random(seed).choice(config.allowed_positions)
             x_expr, y_expr = _position_to_ffmpeg_expr(position, config.margin)
-            vf = (
+            text_vf = (
                 f"drawtext=text='{escaped}':"
                 f"fontcolor={color}@{opacity:.2f}:"
                 f"fontsize={fontsize}:"
                 f"x={x_expr}:y={y_expr}"
             )
-    elif config.watermark_type == WATERMARK_TYPE_IMAGE and config.image_path:
+
+    # Build image overlay filter if needed
+    image_vf = ""
+    if has_image:
         wm_path = Path(config.image_path)
         if not wm_path.exists():
             raise FileNotFoundError(f"Watermark image not found: {wm_path}")
-        position = "bottom_right"
-        if config.randomize_position and config.allowed_positions:
-            position = random.Random(seed).choice(config.allowed_positions)
 
         if config.video_dynamic_position:
             timeline = build_dynamic_overlay_timeline(
@@ -438,31 +483,39 @@ def apply_video_watermark(
                 allowed_positions=config.allowed_positions or ["top_left", "top_right", "bottom_left", "bottom_right"],
                 min_window=config.video_position_change_min_seconds,
                 max_window=config.video_position_change_max_seconds,
-                seed=seed,
+                seed=seed + 1,
             )
-            filter_parts = []
-            for seg in timeline:
-                x_expr, y_expr = _position_to_ffmpeg_expr(seg["position"], config.margin, text_var="overlay")
-                filter_parts.append(
-                    f"[1:v]format=rgba,colorchannelmixer=aa={config.opacity:.2f}[wm];"
-                    f"[0:v][wm]overlay={x_expr}:{y_expr}:enable='between(t,{seg['start']},{seg['end']})'"
-                )
-            # For image overlay with dynamic position, use a simpler approach
-            vf = f"overlay={_position_to_ffmpeg_expr(position, config.margin, 'overlay')[0]}:{_position_to_ffmpeg_expr(position, config.margin, 'overlay')[1]}"
-        else:
+            # Use enable expressions for dynamic image overlay
+            position = "bottom_right"
+            if config.randomize_position and config.allowed_positions:
+                position = random.Random(seed).choice(config.allowed_positions)
             x_expr, y_expr = _position_to_ffmpeg_expr(position, config.margin, text_var="overlay")
-            vf = f"[1:v]format=rgba,colorchannelmixer=aa={config.opacity:.2f}[wm];[0:v][wm]overlay={x_expr}:{y_expr}"
-    else:
-        # No watermark to apply, just copy
-        import shutil
-        shutil.copy2(str(source), str(output))
-        return output
+            enable_parts = [f"between(t,{seg['start']},{seg['end']})" for seg in timeline]
+            enable_expr = "+".join(enable_parts)
+            image_vf = (
+                f"[1:v]format=rgba,colorchannelmixer=aa={config.opacity:.2f}[wm];"
+                f"[0:v][wm]overlay={x_expr}:{y_expr}:enable='{enable_expr}'"
+            )
+        else:
+            position = "bottom_right"
+            if config.randomize_position and config.allowed_positions:
+                position = random.Random(seed).choice(config.allowed_positions)
+            x_expr, y_expr = _position_to_ffmpeg_expr(position, config.margin, text_var="overlay")
+            image_vf = (
+                f"[1:v]format=rgba,colorchannelmixer=aa={config.opacity:.2f}[wm];"
+                f"[0:v][wm]overlay={x_expr}:{y_expr}"
+            )
 
-    cmd = [
-        FFMPEG_COMMAND, "-y",
-        "-i", str(source),
-    ]
-    if config.watermark_type == WATERMARK_TYPE_IMAGE and config.image_path:
+    # Combine filters
+    if has_text and has_image:
+        vf = f"{text_vf},{image_vf}"
+    elif has_text:
+        vf = text_vf
+    else:
+        vf = image_vf
+
+    cmd = [FFMPEG_COMMAND, "-y", "-i", str(source)]
+    if has_image:
         cmd.extend(["-i", str(Path(config.image_path))])
     cmd.extend([
         "-vf", vf,
@@ -482,8 +535,7 @@ def _probe_duration(file_path: Path) -> float:
          "-of", "json", str(file_path)],
         capture_output=True, text=True, check=True,
     )
-    import json as _json
-    data = _json.loads(result.stdout or "{}")
+    data = json.loads(result.stdout or "{}")
     dur = data.get("format", {}).get("duration")
     if dur is None:
         raise ValueError(f"Cannot probe duration of {file_path}")

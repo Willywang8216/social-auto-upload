@@ -6742,11 +6742,17 @@ def api_list_watermark_configs():
 @app.route("/api/watermark-configs", methods=["POST"])
 def api_create_watermark_config():
     data = request.get_json(force=True)
+    if not data:
+        return jsonify({"error": "Invalid or missing JSON body"}), 400
+    data.pop("db_path", None)  # Never accept from client
     try:
         config = watermark_service.create_watermark_config(**data)
         return jsonify(config.to_dict()), 201
-    except Exception as e:
+    except ValueError as e:
         return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception("Error creating watermark config")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route("/api/watermark-configs/<int:config_id>", methods=["GET"])
@@ -6761,6 +6767,9 @@ def api_get_watermark_config(config_id):
 @app.route("/api/watermark-configs/<int:config_id>", methods=["PATCH"])
 def api_update_watermark_config(config_id):
     data = request.get_json(force=True)
+    if not data:
+        return jsonify({"error": "Invalid or missing JSON body"}), 400
+    data.pop("db_path", None)  # Never accept from client
     try:
         config = watermark_service.update_watermark_config(config_id, **data)
         return jsonify(config.to_dict())
@@ -6770,6 +6779,10 @@ def api_update_watermark_config(config_id):
 
 @app.route("/api/watermark-configs/<int:config_id>", methods=["DELETE"])
 def api_delete_watermark_config(config_id):
+    try:
+        watermark_service.get_watermark_config(config_id)
+    except ValueError:
+        return jsonify({"error": "Not found"}), 404
     watermark_service.delete_watermark_config(config_id)
     return jsonify({"ok": True})
 
@@ -6781,8 +6794,8 @@ def api_list_media_assets():
     media_type = request.args.get("media_type")
     upload_status = request.args.get("upload_status")
     processing_status = request.args.get("processing_status")
-    limit = request.args.get("limit", 200, type=int)
-    offset = request.args.get("offset", 0, type=int)
+    limit = max(1, min(request.args.get("limit", 200, type=int), 1000))
+    offset = max(0, request.args.get("offset", 0, type=int))
     assets = media_asset_service.list_media_assets(
         media_type=media_type,
         upload_status=upload_status,
@@ -6804,6 +6817,10 @@ def api_get_media_asset(asset_id):
 
 @app.route("/api/media/assets/<int:asset_id>", methods=["DELETE"])
 def api_delete_media_asset(asset_id):
+    try:
+        media_asset_service.get_media_asset(asset_id)
+    except ValueError:
+        return jsonify({"error": "Not found"}), 404
     media_asset_service.delete_media_asset(asset_id)
     return jsonify({"ok": True})
 
@@ -6811,6 +6828,12 @@ def api_delete_media_asset(asset_id):
 @app.route("/api/media/upload/batch", methods=["POST"])
 def api_batch_upload():
     """Upload multiple files and create MediaAsset records."""
+    from werkzeug.utils import secure_filename
+
+    ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff',
+                          '.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v',
+                          '.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a'}
+
     uploaded_files = request.files.getlist("files")
     if not uploaded_files:
         return jsonify({"error": "No files provided"}), 400
@@ -6818,12 +6841,22 @@ def api_batch_upload():
     upload_dir = Path(BASE_DIR) / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
     assets = []
+    errors = []
 
     for f in uploaded_files:
         filename = f.filename or "unnamed"
-        safe_name = f"{int(time.time())}_{filename}"
+        ext = Path(filename).suffix.lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            errors.append({"filename": filename, "error": f"Unsupported file type: {ext}"})
+            continue
+        safe_base = secure_filename(filename) or "unnamed"
+        safe_name = f"{uuid.uuid4().hex}_{safe_base}"
         local_path = upload_dir / safe_name
-        f.save(str(local_path))
+        try:
+            f.save(str(local_path))
+        except Exception as e:
+            errors.append({"filename": filename, "error": str(e)})
+            continue
 
         asset = media_asset_service.create_media_asset(
             original_filename=filename,
@@ -6836,7 +6869,10 @@ def api_batch_upload():
         )
         assets.append(media_asset_service.get_media_asset(asset.id))
 
-    return jsonify([a.to_dict() for a in assets]), 201
+    result = {"assets": [a.to_dict() for a in assets], "count": len(assets)}
+    if errors:
+        result["errors"] = errors
+    return jsonify(result), 201 if assets else 400
 
 
 @app.route("/api/media/assets/<int:asset_id>/process", methods=["POST"])
@@ -7125,6 +7161,10 @@ def api_campaign_posts(campaign_id):
 @app.route("/api/campaigns/<int:campaign_id>/posts/<int:post_id>", methods=["PATCH"])
 def api_update_prepared_post(campaign_id, post_id):
     data = request.get_json(force=True)
+    if not data:
+        return jsonify({"error": "Invalid or missing JSON body"}), 400
+    # Prevent clients from directly setting status (must go through validate/approve flow)
+    data.pop("status", None)
     try:
         post = content_generator.update_prepared_post(post_id, **data)
         return jsonify(post.to_dict())
@@ -7202,10 +7242,14 @@ def api_campaign_export_csv(campaign_id):
     except Exception:
         filename = f"campaign-{campaign_id}.csv"
 
+    # Sanitize filename for Content-Disposition header
+    from werkzeug.utils import secure_filename
+    safe_filename = secure_filename(filename) or f"campaign-{campaign_id}.csv"
+
     return Response(
         csv_bytes,
         mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers={"Content-Disposition": f'attachment; filename="{safe_filename}"'},
     )
 
 

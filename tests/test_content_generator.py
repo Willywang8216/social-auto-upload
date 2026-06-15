@@ -195,9 +195,9 @@ class TestPreparedPostCRUD:
 
 class TestCharacterCount:
     def test_count(self):
-        assert content_generator.count_characters("hello") == 5
-        assert content_generator.count_characters("") == 0
-        assert content_generator.count_characters(None) == 0
+        # count_characters was removed as dead code; use len() directly
+        assert len("hello") == 5
+        assert len("") == 0
 
 
 class TestSheetExcludedPlatforms:

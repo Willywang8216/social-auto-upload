@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterator
+
+logger = logging.getLogger(__name__)
 
 from utils.conf_defaults import BASE_DIR
 
@@ -89,7 +93,7 @@ def _connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def detect_media_type(filename: str) -> str:
@@ -117,10 +121,19 @@ def compute_checksum(file_path: str | Path) -> str:
 
 def _row_to_asset(row: sqlite3.Row) -> MediaAsset:
     data = {key: row[key] for key in row.keys()}
-    data["content_analysis"] = json.loads(data.get("content_analysis_json", "{}") or "{}")
-    data["metadata"] = json.loads(data.get("metadata_json", "{}") or "{}")
+    try:
+        data["content_analysis"] = json.loads(data.get("content_analysis_json", "{}") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        data["content_analysis"] = {}
+    try:
+        data["metadata"] = json.loads(data.get("metadata_json", "{}") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        data["metadata"] = {}
     data.pop("content_analysis_json", None)
     data.pop("metadata_json", None)
+    # Filter to only valid dataclass fields (protects against schema evolution)
+    valid = {f.name for f in fields(MediaAsset)}
+    data = {k: v for k, v in data.items() if k in valid}
     return MediaAsset(**data)
 
 
@@ -157,7 +170,10 @@ def create_media_asset(
             ),
         )
         conn.commit()
-        return get_media_asset(cur.lastrowid, db_path=db_path)
+        row = conn.execute(
+            "SELECT * FROM media_assets WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+        return _row_to_asset(row)
 
 
 def get_media_asset(asset_id: int, *, db_path: Path | None = None) -> MediaAsset:
@@ -248,8 +264,8 @@ def build_rclone_path(
     Format: {remote_root}/{profile_slug}/{YYYY-MM-DD}/{asset_id}_{safe_filename}
     """
     root = (remote_root or os.environ.get("SAU_DEFAULT_RCLONE_PATH", "")).strip("/")
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    safe_name = asset.original_filename.replace(" ", "_").replace("/", "_")
+    date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    safe_name = re.sub(r'[^\w.\-]', '_', asset.original_filename)
     parts = [p for p in [root, profile_slug, date_str] if p]
     return str(PurePosixPath(*parts) / f"{asset.id}_{safe_name}")
 
@@ -275,11 +291,13 @@ def upload_asset_to_rclone(
         raise FileNotFoundError(f"Local file not found: {local_path}")
 
     remote_spec = f"{remote}:{remote_path}"
-    subprocess.run(
-        ["rclone", "copy", str(local_path), str(PurePosixPath(remote).parent / PurePosixPath(remote_path).parent),
-         "--no-traverse"],
-        check=True, capture_output=True, text=True,
-    )
+    try:
+        subprocess.run(
+            ["rclone", "copyto", str(local_path), remote_spec],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"rclone copyto failed: {e.stderr}") from e
 
     update_media_asset(
         asset.id,

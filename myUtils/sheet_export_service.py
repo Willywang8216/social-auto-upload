@@ -11,7 +11,7 @@ import io
 import json
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
@@ -99,11 +99,15 @@ def _connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _row_to_export(row: sqlite3.Row) -> SheetExport:
-    return SheetExport(**{key: row[key] for key in row.keys()})
+    data = {key: row[key] for key in row.keys()}
+    # Filter to only valid dataclass fields (protects against schema evolution)
+    valid = {f.name for f in fields(SheetExport)}
+    data = {k: v for k, v in data.items() if k in valid}
+    return SheetExport(**data)
 
 
 # --------------- CRUD ---------------
@@ -117,6 +121,7 @@ def create_sheet_export(
     spreadsheet_url: str = "",
     row_count: int = 0,
     status: str = "pending",
+    error_message: str = "",
     db_path: Path | None = None,
 ) -> SheetExport:
     now = _now_iso()
@@ -124,10 +129,10 @@ def create_sheet_export(
         cur = conn.execute(
             """INSERT INTO sheet_exports
             (campaign_id, profile_id, sheet_name, spreadsheet_id, spreadsheet_url,
-             exported_at, row_count, status, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?)""",
+             exported_at, row_count, status, error_message, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (campaign_id, profile_id, sheet_name, spreadsheet_id, spreadsheet_url,
-             now, row_count, status, now),
+             now, row_count, status, error_message, now),
         )
         conn.commit()
         return get_sheet_export(cur.lastrowid, db_path=db_path)
@@ -212,7 +217,7 @@ def validate_sheet_row(row: dict, platform: str | None = None) -> list[str]:
 
     # Scheduling fields: all or none
     schedule_fields = ["Month(1-12)", "Day(1-31)", "Year", "Hour", "Minute(0-59)"]
-    filled = [row.get(f, "").strip() for f in schedule_fields]
+    filled = [(row.get(f) or "").strip() for f in schedule_fields]
     any_filled = any(filled)
     all_filled = all(filled)
     if any_filled and not all_filled:
@@ -254,7 +259,7 @@ def build_sheet_row_from_post(post) -> dict:
         "VideoThumbnailURL": post.get("video_thumbnail_url", ""),
         "CTAGroup": post.get("cta_group", ""),
         "FirstComment": post.get("first_comment", ""),
-        "Story(YorN)": "Y" if post.get("story_flag") else "",
+        "Story(YorN)": "Y" if post.get("story_flag") else "N",
         "PinterestBoard": post.get("pinterest_board", ""),
         "AltText": post.get("alt_text", ""),
         "PostPreset": post.get("post_preset", ""),
@@ -288,7 +293,7 @@ def build_sheet_rows(
 def generate_csv(rows: list[dict]) -> str:
     """Generate CSV string with exact 20 columns in order."""
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=SHEET_COLUMN_ORDER, extrasaction="ignore")
+    writer = csv.DictWriter(output, fieldnames=SHEET_COLUMN_ORDER, extrasaction="ignore", restval="")
     writer.writeheader()
     for row in rows:
         writer.writerow(row)
@@ -298,7 +303,7 @@ def generate_csv(rows: list[dict]) -> str:
 def generate_csv_bytes(rows: list[dict]) -> bytes:
     """Generate CSV bytes with UTF-8 BOM for Excel compatibility."""
     csv_str = generate_csv(rows)
-    return ("﻿" + csv_str).encode("utf-8")
+    return csv_str.encode("utf-8-sig")
 
 
 # --------------- Google Sheet export ---------------
@@ -331,5 +336,5 @@ def export_to_google_sheet(
 
 def generate_sheet_name(profile_slug: str, *, date: datetime | None = None) -> str:
     """Generate sheet name in format YYYY-MM-DD_PROFILE-SLUG."""
-    dt = date or datetime.now()
+    dt = date or datetime.now(tz=timezone.utc)
     return f"{dt.strftime('%Y-%m-%d')}_{profile_slug}"

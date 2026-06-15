@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
@@ -102,16 +103,25 @@ def _connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _row_to_post(row: sqlite3.Row) -> PreparedPost:
     data = {key: row[key] for key in row.keys()}
-    data["validation_errors"] = json.loads(data.get("validation_errors_json", "[]") or "[]")
-    data["llm_raw_output"] = json.loads(data.get("llm_raw_output_json", "{}") or "{}")
+    try:
+        data["validation_errors"] = json.loads(data.get("validation_errors_json", "[]") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        data["validation_errors"] = []
+    try:
+        data["llm_raw_output"] = json.loads(data.get("llm_raw_output_json", "{}") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        data["llm_raw_output"] = {}
     data["story_flag"] = bool(data.get("story_flag", 0))
     data.pop("validation_errors_json", None)
     data.pop("llm_raw_output_json", None)
+    # Filter to only valid dataclass fields (protects against schema evolution)
+    valid = {f.name for f in fields(PreparedPost)}
+    data = {k: v for k, v in data.items() if k in valid}
     return PreparedPost(**data)
 
 
@@ -520,10 +530,9 @@ def parse_llm_response(raw_content: str, platform: str) -> dict:
     """Parse the LLM JSON response into a structured dict."""
     # Try to extract JSON from the response
     content = raw_content.strip()
-    if content.startswith("```"):
-        # Strip markdown code fence
-        lines = content.split("\n")
-        content = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    # Strip markdown code fence (handles ```json, ```python, etc.)
+    content = re.sub(r"^```\w*\s*\n?", "", content)
+    content = re.sub(r"\n?```\w*\s*$", "", content)
 
     try:
         parsed = json.loads(content)
@@ -546,28 +555,37 @@ def parse_llm_response(raw_content: str, platform: str) -> dict:
     return parsed
 
 
-def count_characters(text: str) -> int:
-    """Count characters for platform validation."""
-    return len(text or "")
-
-
 def validate_post(platform: str, post_data: dict) -> list[str]:
     """Validate a generated post against platform constraints. Returns list of errors."""
     errors = []
     limit = PLATFORM_CHAR_LIMITS.get(platform)
     message = post_data.get("message", "")
 
-    if limit and len(message) > limit:
+    if not message.strip():
+        errors.append("Message is empty")
+
+    if limit is not None and len(message) > limit:
         errors.append(f"Message exceeds {platform} limit of {limit} chars (got {len(message)})")
 
     if platform == "twitter":
         hashtags = post_data.get("hashtags", [])
+        # Handle hashtags stored as JSON string
+        if isinstance(hashtags, str):
+            try:
+                hashtags = json.loads(hashtags)
+            except (json.JSONDecodeError, TypeError):
+                hashtags = [h.strip() for h in hashtags.split(",") if h.strip()]
         if len(hashtags) != 3:
             errors.append(f"Twitter requires exactly 3 hashtags (got {len(hashtags)})")
-        if not any(ord(c) > 10000 for c in message[:2]):
+        # Check for emoji in first few characters (use broader scan for multi-codepoint emojis)
+        emoji_found = False
+        for char in message[:4]:
+            cp = ord(char)
+            # Common emoji ranges (not exhaustive but covers most cases)
+            if cp > 0x2600 and cp not in range(0x4e00, 0xa000):
+                emoji_found = True
+                break
+        if not emoji_found and message:
             errors.append("Twitter post should start with an emoji")
-
-    if platform == "tiktok" and len(message) > 150:
-        errors.append(f"TikTok description exceeds 150 char limit (got {len(message)})")
 
     return errors
