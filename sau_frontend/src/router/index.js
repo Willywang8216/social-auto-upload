@@ -17,6 +17,7 @@ import VideoAnalytics from '../views/VideoAnalytics.vue'
 import BatchUpload from '../views/BatchUpload.vue'
 import CampaignBuilder from '../views/CampaignBuilder.vue'
 import SheetExports from '../views/SheetExports.vue'
+import ApiDocs from '../views/ApiDocs.vue'
 
 import { getToken } from '@/utils/auth'
 
@@ -104,6 +105,12 @@ const routes = [
     name: 'SheetExports',
     component: SheetExports,
     meta: { title: 'Socialupload - Sheet Exports' }
+  },
+  {
+    path: '/api-docs',
+    name: 'ApiDocs',
+    component: ApiDocs,
+    meta: { title: 'Socialupload - API Documentation' }
   },
   {
     path: '/tiktok-review',

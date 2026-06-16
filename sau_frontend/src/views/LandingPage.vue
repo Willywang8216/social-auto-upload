@@ -11,6 +11,8 @@
           <a href="#" @click.prevent="scrollTo('features')">Features</a>
           <a href="#" @click.prevent="scrollTo('platforms')">Platforms</a>
           <a href="#" @click.prevent="scrollTo('how-it-works')">How It Works</a>
+          <a href="#" @click.prevent="scrollTo('quick-start')">Quick Start</a>
+          <a href="#" @click.prevent="scrollTo('api')">API</a>
           <router-link to="/privacy">Privacy</router-link>
           <router-link to="/terms">Terms</router-link>
           <router-link class="nav-cta" to="/login">Sign In</router-link>
@@ -295,6 +297,90 @@
       </div>
     </section>
 
+    <!-- Quick Start -->
+    <section id="quick-start" class="quick-start">
+      <div class="section-inner">
+        <h2 class="section-title">Quick Start</h2>
+        <div class="quick-start-grid">
+          <div class="qs-card">
+            <h3>1. Create a Profile</h3>
+            <pre class="code-block">curl -X POST /profiles \
+  -H "Authorization: Bearer TOKEN" \
+  -d '{"name":"My Brand",
+       "system_prompt":"You are a social media manager.",
+       "default_cta":"Follow us!"}'</pre>
+          </div>
+          <div class="qs-card">
+            <h3>2. Upload Media</h3>
+            <pre class="code-block">curl -X POST /api/media/upload/batch \
+  -H "Authorization: Bearer TOKEN" \
+  -F "files=@video.mp4" \
+  -F "files=@photo.jpg"</pre>
+          </div>
+          <div class="qs-card">
+            <h3>3. Generate Content</h3>
+            <pre class="code-block">curl -X POST /api/campaigns/1/generate \
+  -H "Authorization: Bearer TOKEN" \
+  -d '{"platforms":["twitter",
+       "instagram","facebook"]}'</pre>
+          </div>
+          <div class="qs-card">
+            <h3>4. Export or Publish</h3>
+            <pre class="code-block"># Export to Google Sheet
+curl -X POST /api/campaigns/1/export/google-sheet \
+  -d '{"profile_slug":"my-brand"}'
+
+# Or download CSV
+curl /api/campaigns/1/export/csv -o export.csv</pre>
+          </div>
+        </div>
+        <div class="qs-actions">
+          <router-link class="btn btn-primary" to="/api-docs">View Full API Docs</router-link>
+          <a class="btn btn-secondary" href="https://github.com/Willywang8216/social-auto-upload" target="_blank">GitHub</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- API Reference -->
+    <section id="api" class="api-section">
+      <div class="section-inner">
+        <h2 class="section-title">API Reference</h2>
+        <p class="section-desc">Full REST API for automation and integration. All endpoints support JSON request/response.</p>
+        <div class="api-grid">
+          <div class="api-card">
+            <h3>📋 Profiles</h3>
+            <p>CRUD for brand profiles with system prompts, writing styles, and default settings.</p>
+            <code>GET/POST /profiles</code>
+          </div>
+          <div class="api-card">
+            <h3>🎬 Media Assets</h3>
+            <p>Batch upload, process (watermark/thumbnail), and manage media files.</p>
+            <code>POST /api/media/upload/batch</code>
+          </div>
+          <div class="api-card">
+            <h3>💧 Watermarks</h3>
+            <p>Configure text/image watermarks with dynamic positioning for videos.</p>
+            <code>POST /api/watermark-configs</code>
+          </div>
+          <div class="api-card">
+            <h3>📢 Campaigns</h3>
+            <p>Generate, validate, approve, and export platform-specific content.</p>
+            <code>POST /api/campaigns/:id/generate</code>
+          </div>
+          <div class="api-card">
+            <h3>📊 Sheet Export</h3>
+            <p>Export to Google Sheets (20-column format) or download as CSV.</p>
+            <code>POST /api/campaigns/:id/export/google-sheet</code>
+          </div>
+          <div class="api-card">
+            <h3>⚙️ Jobs</h3>
+            <p>Async job queue with progress tracking, retry, and cancellation.</p>
+            <code>GET /jobs</code>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- CTA -->
     <section class="cta-section">
       <div class="section-inner">
@@ -322,6 +408,8 @@
             <a href="#features">Features</a>
             <a href="#platforms">Platforms</a>
             <a href="#how-it-works">How It Works</a>
+            <a href="#quick-start">Quick Start</a>
+            <a href="#api">API</a>
             <router-link to="/login">Sign In</router-link>
           </div>
           <div class="footer-col">
@@ -830,6 +918,102 @@ $max-width: 1120px;
     color: $text-secondary;
     line-height: 1.7;
     margin: 0;
+  }
+}
+
+// Quick Start
+.quick-start {
+  padding: 80px 24px;
+  background: $bg;
+
+  .quick-start-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 32px;
+  }
+
+  .qs-card {
+    background: white;
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+
+    h3 {
+      font-size: 16px;
+      font-weight: 600;
+      margin: 0 0 12px;
+    }
+  }
+
+  .code-block {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 16px;
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+    overflow-x: auto;
+    white-space: pre;
+    margin: 0;
+  }
+
+  .qs-actions {
+    text-align: center;
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+  }
+}
+
+// API Reference
+.api-section {
+  padding: 80px 24px;
+
+  .section-desc {
+    text-align: center;
+    color: $text-secondary;
+    margin: 0 0 40px;
+    font-size: 16px;
+  }
+
+  .api-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+  }
+
+  .api-card {
+    background: $bg;
+    border-radius: 12px;
+    padding: 24px;
+    transition: transform 0.2s, box-shadow 0.2s;
+
+    &:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    }
+
+    h3 {
+      font-size: 18px;
+      font-weight: 600;
+      margin: 0 0 8px;
+    }
+
+    p {
+      font-size: 14px;
+      color: $text-secondary;
+      margin: 0 0 12px;
+      line-height: 1.5;
+    }
+
+    code {
+      background: #e8e8e8;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: #333;
+    }
   }
 }
 

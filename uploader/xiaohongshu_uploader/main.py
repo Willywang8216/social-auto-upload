@@ -395,18 +395,38 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         if not getattr(self, "tags", None):
             return
 
+        # 小红书标签上限为 10 个，超过会导致死循环卡住发布
+        max_tags = 10
+        if len(self.tags) > max_tags:
+            xhs_logger.warning(
+                _msg("🏷️", f"标签数量 {len(self.tags)} 超过小红书上限 {max_tags}，只取前 {max_tags} 个: {self.tags[:max_tags]}")
+            )
+            self.tags = self.tags[:max_tags]
+
         if not getattr(self, "desc", ""):
             desc = page.locator('p[data-placeholder*="输入正文描述"]')
             await desc.click()
 
-        await page.keyboard.type("#" + self.tags[0], delay=30)
-        await page.locator('#creator-editor-topic-container').wait_for(
-            state="visible",
-            timeout=3000
-        )
-        first_item = page.locator('#creator-editor-topic-container .item').first
-        await first_item.wait_for(state="visible", timeout=2000)
-        await first_item.click()
+        for tag in self.tags:
+            # 话题候选下拉框依赖小红书联想接口实时返回，网络抖动/无匹配时会等不到。
+            # 标签是可选增强项：等不到候选框就跳过该标签继续，不让整条发布因此失败。
+            try:
+                await page.keyboard.type("#" + tag, delay=30)
+                await page.locator('#creator-editor-topic-container').wait_for(
+                    state="visible",
+                    timeout=6000
+                )
+                first_item = page.locator('#creator-editor-topic-container .item').first
+                await first_item.wait_for(state="visible", timeout=4000)
+                await first_item.click()
+            except Exception as exc:
+                xhs_logger.warning(
+                    _msg("🏷️", f"话题『{tag}』未出现候选，跳过该标签继续发布: {exc}")
+                )
+                # 清掉已键入但未成词的 "#tag" 文本，避免它残留进正文
+                for _ in range(len("#" + tag)):
+                    await page.keyboard.press("Backspace")
+                continue
 
     async def fill_meta(self, page: Page) -> None:
         await self.fill_title(page)

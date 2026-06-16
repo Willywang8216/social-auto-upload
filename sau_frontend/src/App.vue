@@ -64,6 +64,10 @@
                 <el-icon><Document /></el-icon>
                 <span>Sheet Exports</span>
               </el-menu-item>
+              <el-menu-item index="/api-docs">
+                <el-icon><Document /></el-icon>
+                <span>API Docs</span>
+              </el-menu-item>
               <el-menu-item index="/oauth-review">
                 <el-icon><Connection /></el-icon>
                 <span>OAuth 狀態</span>
