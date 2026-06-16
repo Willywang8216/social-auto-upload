@@ -13,7 +13,7 @@ except ModuleNotFoundError:  # pragma: no cover - environment-specific
     requests = None
 
 
-DEFAULT_CHAT_MODEL = "gpt-4.1-mini"
+DEFAULT_CHAT_MODEL = os.environ.get("SAU_LLM_MODEL", "gpt-4.1-mini")
 DEFAULT_TRANSCRIPTION_MODEL = "whisper-1"
 DEFAULT_BASE_URL_ENV = "SAU_LLM_API_BASE_URL"
 DEFAULT_API_KEY_ENV = "SAU_LLM_API_KEY"
@@ -78,7 +78,7 @@ def generate_chat_completion(
     *,
     model: str = DEFAULT_CHAT_MODEL,
     temperature: float = 0.3,
-    response_json: bool = True,
+    response_json: bool = False,
     api_base_url: str | None = None,
     api_key: str | None = None,
     session=None,
