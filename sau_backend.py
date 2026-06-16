@@ -4910,7 +4910,7 @@ def tiktok_publish():
     Required fields per TikTok Content Posting API:
     - title
     - privacy_level (from creator_info options)
-    - allow_comment, allow_duet, allow_stitch
+    - allow_comment, allow_duet, allow_stitch (inverted to disable_* for API)
     - brand_content_toggle, brand_organics, branded_content
     - video_url or image_url
     """
@@ -4933,33 +4933,48 @@ def tiktok_publish():
     # Get account
     try:
         account = profile_registry.get_account(account_id, db_path=db_path)
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, LookupError) as exc:
         return jsonify({'code': 404, 'msg': str(exc), 'data': None}), 404
 
     if account.platform != profile_registry.PLATFORM_TIKTOK:
         return jsonify({'code': 400, 'msg': 'Account is not a TikTok account', 'data': None}), 400
 
-    # Build publish payload with all TikTok-required fields
-    publish_payload = {
-        'title': title,
-        'privacy_level': privacy_level,
-        'allow_comment': bool(data.get('allow_comment', False)),
-        'allow_duet': bool(data.get('allow_duet', False)),
-        'allow_stitch': bool(data.get('allow_stitch', False)),
-        'brand_content_toggle': bool(data.get('brand_content_toggle', False)),
-        'brand_organics': bool(data.get('brand_organics', False)),
-        'branded_content': bool(data.get('branded_content', False)),
-    }
-
-    # Add media URL
+    # Build media payload
     video_url = data.get('video_url', '')
     image_url = data.get('image_url', '')
-    if video_url:
-        publish_payload['video_url'] = video_url
-    elif image_url:
-        publish_payload['image_url'] = image_url
-    else:
+    if not video_url and not image_url:
         return jsonify({'code': 400, 'msg': 'video_url or image_url is required', 'data': None}), 400
+
+    # Build TikTok settings in the format expected by publish_tiktok_sync
+    # Note: TikTok API uses "disable_*" (inverted from "allow_*")
+    tiktok_settings = {
+        'privacyLevel': privacy_level,
+        'disableComment': not bool(data.get('allow_comment', False)),
+        'disableDuet': not bool(data.get('allow_duet', False)),
+        'disableStitch': not bool(data.get('allow_stitch', False)),
+    }
+
+    # Commercial content disclosure
+    brand_content_toggle = bool(data.get('brand_content_toggle', False))
+    if brand_content_toggle:
+        tiktok_settings['contentDisclosure'] = {
+            'enabled': True,
+            'yourBrand': bool(data.get('brand_organics', False)),
+            'brandedContent': bool(data.get('branded_content', False)),
+        }
+
+    # Build the full payload for publish_tiktok_sync
+    publish_payload = {
+        'message': title,
+        'tiktokPostSettings': tiktok_settings,
+        'tiktokDirectPost': True,  # Direct post (skip draft)
+    }
+
+    # Add media
+    if video_url:
+        publish_payload['videos'] = [{'public_url': video_url}]
+    else:
+        publish_payload['images'] = [{'public_url': image_url}]
 
     # Create job and enqueue
     try:
