@@ -10,6 +10,27 @@
         </div>
       </template>
 
+      <!-- Account Selector -->
+      <el-form-item label="Select TikTok Account" required>
+        <el-select
+          v-model="selectedAccountId"
+          placeholder="Choose a TikTok account"
+          style="width: 100%"
+          @change="onAccountChange"
+        >
+          <el-option
+            v-for="acc in tiktokAccounts"
+            :key="acc.id"
+            :label="acc.account_name + ' (' + acc.display_name + ')'"
+            :value="acc.id"
+          />
+        </el-select>
+      </el-form-item>
+
+      <el-alert v-if="tiktokAccounts.length === 0 && !loadingAccounts" type="warning" :closable="false">
+        No TikTok accounts found. Please add a TikTok account in Account Management first.
+      </el-alert>
+
       <!-- Creator Info Display -->
       <el-alert v-if="!creatorInfo && !loading" type="warning" :closable="false">
         Loading creator info...
@@ -188,9 +209,12 @@ const emit = defineEmits(['published', 'error'])
 
 const creatorInfo = ref(null)
 const loading = ref(true)
+const loadingAccounts = ref(true)
 const publishing = ref(false)
 const consentGiven = ref(false)
 const publishStatus = ref(null)
+const tiktokAccounts = ref([])
+const selectedAccountId = ref(null)
 
 const form = ref({
   title: '',
@@ -268,14 +292,44 @@ watch(() => form.value.branded_content, (val) => {
 })
 
 onMounted(async () => {
-  await fetchCreatorInfo()
+  await loadTikTokAccounts()
 })
 
+async function loadTikTokAccounts() {
+  loadingAccounts.value = true
+  try {
+    const { http } = await import('@/utils/request')
+    const res = await http.get('/getAccounts')
+    const accounts = res.data || res
+    tiktokAccounts.value = (Array.isArray(accounts) ? accounts : []).filter(
+      a => a.platform === 'tiktok'
+    )
+    // Auto-select if only one account
+    if (tiktokAccounts.value.length === 1) {
+      selectedAccountId.value = tiktokAccounts.value[0].id
+      await fetchCreatorInfo()
+    }
+  } catch (e) {
+    console.error('Failed to load accounts:', e)
+  } finally {
+    loadingAccounts.value = false
+  }
+}
+
+async function onAccountChange(accountId) {
+  if (accountId) {
+    await fetchCreatorInfo()
+  } else {
+    creatorInfo.value = null
+  }
+}
+
 async function fetchCreatorInfo() {
+  if (!selectedAccountId.value) return
   loading.value = true
   try {
     const { http } = await import('@/utils/request')
-    const res = await http.get(`/tiktok/creator-info/${props.accountId}`)
+    const res = await http.get(`/tiktok/creator-info/${selectedAccountId.value}`)
     const data = res.data || res
     creatorInfo.value = data
 
@@ -285,6 +339,7 @@ async function fetchCreatorInfo() {
     }
   } catch (e) {
     ElMessage.error('Failed to load creator info: ' + (e.message || e))
+    creatorInfo.value = null
   } finally {
     loading.value = false
   }
@@ -304,7 +359,7 @@ async function handlePublish() {
   try {
     const { http } = await import('@/utils/request')
     const payload = {
-      account_id: props.accountId,
+      account_id: selectedAccountId.value,
       title: form.value.title,
       privacy_level: form.value.privacy_level,
       allow_comment: form.value.allow_comment,
