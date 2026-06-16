@@ -18,6 +18,7 @@ import BatchUpload from '../views/BatchUpload.vue'
 import CampaignBuilder from '../views/CampaignBuilder.vue'
 import SheetExports from '../views/SheetExports.vue'
 import ApiDocs from '../views/ApiDocs.vue'
+import TikTokPublish from '../views/TikTokPublish.vue'
 
 import { getToken } from '@/utils/auth'
 
@@ -111,6 +112,12 @@ const routes = [
     name: 'ApiDocs',
     component: ApiDocs,
     meta: { title: 'Socialupload - API Documentation' }
+  },
+  {
+    path: '/tiktok-publish',
+    name: 'TikTokPublish',
+    component: TikTokPublish,
+    meta: { title: 'Socialupload - Post to TikTok' }
   },
   {
     path: '/tiktok-review',

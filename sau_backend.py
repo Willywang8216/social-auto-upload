@@ -4903,6 +4903,102 @@ def tiktok_publish_status(job_id):
     return jsonify({'code': 200, 'msg': 'ok', 'data': statuses}), 200
 
 
+@app.route('/tiktok/publish', methods=['POST'])
+def tiktok_publish():
+    """Publish content to TikTok with full UX compliance.
+
+    Required fields per TikTok Content Posting API:
+    - title
+    - privacy_level (from creator_info options)
+    - allow_comment, allow_duet, allow_stitch
+    - brand_content_toggle, brand_organics, branded_content
+    - video_url or image_url
+    """
+    db_path = _current_db_path()
+    data = _read_json_body()
+
+    # Validate required fields
+    account_id = data.get('account_id')
+    if not account_id:
+        return jsonify({'code': 400, 'msg': 'account_id is required', 'data': None}), 400
+
+    title = str(data.get('title', '')).strip()
+    if not title:
+        return jsonify({'code': 400, 'msg': 'title is required', 'data': None}), 400
+
+    privacy_level = str(data.get('privacy_level', '')).strip()
+    if not privacy_level:
+        return jsonify({'code': 400, 'msg': 'privacy_level is required', 'data': None}), 400
+
+    # Get account
+    try:
+        account = profile_registry.get_account(account_id, db_path=db_path)
+    except (ValueError, KeyError) as exc:
+        return jsonify({'code': 404, 'msg': str(exc), 'data': None}), 404
+
+    if account.platform != profile_registry.PLATFORM_TIKTOK:
+        return jsonify({'code': 400, 'msg': 'Account is not a TikTok account', 'data': None}), 400
+
+    # Build publish payload with all TikTok-required fields
+    publish_payload = {
+        'title': title,
+        'privacy_level': privacy_level,
+        'allow_comment': bool(data.get('allow_comment', False)),
+        'allow_duet': bool(data.get('allow_duet', False)),
+        'allow_stitch': bool(data.get('allow_stitch', False)),
+        'brand_content_toggle': bool(data.get('brand_content_toggle', False)),
+        'brand_organics': bool(data.get('brand_organics', False)),
+        'branded_content': bool(data.get('branded_content', False)),
+    }
+
+    # Add media URL
+    video_url = data.get('video_url', '')
+    image_url = data.get('image_url', '')
+    if video_url:
+        publish_payload['video_url'] = video_url
+    elif image_url:
+        publish_payload['image_url'] = image_url
+    else:
+        return jsonify({'code': 400, 'msg': 'video_url or image_url is required', 'data': None}), 400
+
+    # Create job and enqueue
+    try:
+        import uuid as _uuid
+        idempotency_key = _uuid.uuid4().hex
+        job = job_runtime.create_job(
+            idempotency_key=idempotency_key,
+            platform=profile_registry.PLATFORM_TIKTOK,
+            profile_id=account.profile_id,
+            payload_json=json.dumps(publish_payload),
+            db_path=db_path,
+        )
+
+        # Create target for this specific account
+        job_runtime.create_job_target(
+            job_id=job.id,
+            account_ref=f"{account.platform}:{account.account_name}",
+            file_ref=video_url or image_url,
+            db_path=db_path,
+        )
+
+        # Start the worker drain
+        _start_worker_drain_thread()
+
+        return jsonify({
+            'code': 200,
+            'msg': 'Publish job created',
+            'data': {
+                'job_id': job.id,
+                'publish_id': str(job.id),
+                'status': 'PROCESSING',
+            }
+        }), 200
+
+    except Exception as exc:
+        logging.getLogger(__name__).exception('TikTok publish failed')
+        return jsonify({'code': 500, 'msg': str(exc), 'data': None}), 500
+
+
 @app.route("/profiles", methods=["GET"])
 def profiles_list():
     db_path = _current_db_path()
