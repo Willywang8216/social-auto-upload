@@ -14,29 +14,17 @@ services:
       - ./db:/app/db
     networks:
       1panel-network:
-        ipv4_address: 172.18.0.46  # 這是你原本清單中這個容器用的 IP
+        ipv4_address: 172.18.0.46
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
       - .env
     environment:
-      - SAU_API_TOKENS=sdkjauashuaiuhHOHEIUFhfaphgeiusdiu545gfdgd
-      - META_APP_ID=1541229970910006
-      - META_APP_SECRET=48b42e3e140869cd7180cac751295d19
-      - SAU_META_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/meta/callback
-      - SAU_YOUTUBE_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/youtube/callback
-      - SAU_REDDIT_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/reddit/callback
-      - SAU_TWITTER_CALLBACK_URL=https://socialupload.iamwillywang.com/oauth/twitter/callback
+      # All secrets are loaded from .env file above.
+      # Only non-secret overrides here:
       - SAU_ACCOUNT_MAINTENANCE_INTERVAL_SECONDS=600
       - SAU_ACCOUNT_MAINTENANCE_EXPIRING_WITHIN_SECONDS=3600
       - BROWSERLESS_URL=http://browserless:3000
-      # Cloudflare R2 (primary storage)
-      - DO_SPACES_KEY=f0633aa8be5389061f215a3d31c1e0a5
-      - DO_SPACES_SECRET=1469b4368413fcb69fd5788f2d36f170dbd8677426b1869f2c37b3a0db4f187b
-      - DO_SPACES_BUCKET=nw-assetsoffload
-      - DO_SPACES_REGION=auto
-      - DO_SPACES_ENDPOINT=https://7842e2cb0ee6be522f6b62c11a666042.r2.cloudflarestorage.com
-      - DO_SPACES_CDN_URL=https://pub-9915b1494003455c9ab872fd7094e64e.r2.dev
 
 networks:
   1panel-network:

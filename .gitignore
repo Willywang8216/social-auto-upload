@@ -201,3 +201,9 @@ data/
 
 # secrets directory
 secrets/
+
+# Conversation logs (may contain sensitive data)
+convo.txt
+
+# Playwright MCP data
+.playwright-mcp/
