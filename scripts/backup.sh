@@ -27,8 +27,11 @@ BACKUP_ITEMS=(
     "conf.py"
     ".env"
     "db/database.db"
+    "cookies"
     "cookiesFile"
+    "secrets"
     "sau_frontend/dist"
+    "docker-compose.yml"
 )
 
 # ---------------------------------------------------------------------------

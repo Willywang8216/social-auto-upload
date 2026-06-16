@@ -20,8 +20,7 @@ services:
     env_file:
       - .env
     environment:
-      # All secrets are loaded from .env file above.
-      # Only non-secret overrides here:
+      # Non-secret overrides only. All secrets come from .env
       - SAU_ACCOUNT_MAINTENANCE_INTERVAL_SECONDS=600
       - SAU_ACCOUNT_MAINTENANCE_EXPIRING_WITHIN_SECONDS=3600
       - BROWSERLESS_URL=http://browserless:3000
