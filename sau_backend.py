@@ -4864,7 +4864,7 @@ def tiktok_creator_info(account_id):
     db_path = _current_db_path()
     try:
         account = profile_registry.get_account(account_id, db_path=db_path)
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, LookupError) as exc:
         return jsonify({'code': 404, 'msg': str(exc), 'data': None}), 404
 
     if account.platform != profile_registry.PLATFORM_TIKTOK:
