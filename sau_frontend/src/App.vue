@@ -68,10 +68,6 @@
                 <el-icon><Document /></el-icon>
                 <span>API Docs</span>
               </el-menu-item>
-              <el-menu-item index="/tiktok-publish">
-                <el-icon><VideoCamera /></el-icon>
-                <span>TikTok Publish</span>
-              </el-menu-item>
               <el-menu-item index="/oauth-review">
                 <el-icon><Connection /></el-icon>
                 <span>OAuth 狀態</span>
@@ -124,7 +120,7 @@ import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   HomeFilled, User, DataAnalysis,
-  Fold, Picture, Upload, List, Connection, Folder, Files, TrendCharts, Edit, Document, VideoCamera
+  Fold, Picture, Upload, List, Connection, Folder, Files, TrendCharts, Edit, Document
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
