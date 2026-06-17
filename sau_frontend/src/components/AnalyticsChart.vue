@@ -43,8 +43,6 @@ defineProps({
 </script>
 
 <style scoped lang="scss">
-@use '@/styles/variables.scss' as *;
-
 .analytics-chart {
   width: 100%;
 }

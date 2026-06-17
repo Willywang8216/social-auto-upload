@@ -502,8 +502,6 @@ const activeSections = ref([])
 </script>
 
 <style lang="scss" scoped>
-@use '@/styles/variables.scss' as *;
-
 .about {
   max-width: 900px;
   margin: 0 auto;
@@ -515,13 +513,13 @@ const activeSections = ref([])
       text-align: center;
 
       h1 {
-        color: $text-primary;
+        color: var(--color-text);
         margin: 0 0 8px 0;
         font-size: 24px;
       }
 
       .version {
-        color: $text-secondary;
+        color: var(--color-text-secondary);
         font-size: 14px;
         margin: 0;
       }
@@ -532,12 +530,12 @@ const activeSections = ref([])
 
       h3 {
         font-size: 16px;
-        color: $text-primary;
+        color: var(--color-text);
         margin: 0 0 12px 0;
       }
 
       p {
-        color: $text-secondary;
+        color: var(--color-text-secondary);
         line-height: 1.8;
         margin: 0;
       }
@@ -552,7 +550,7 @@ const activeSections = ref([])
       .feature-list {
         margin: 0;
         padding-left: 20px;
-        color: $text-secondary;
+        color: var(--color-text-secondary);
         line-height: 2;
       }
     }
@@ -563,12 +561,12 @@ const activeSections = ref([])
       h2 {
         margin: 0 0 4px 0;
         font-size: 20px;
-        color: $text-primary;
+        color: var(--color-text);
       }
       .api-subtitle {
         margin: 0;
         font-size: 13px;
-        color: $text-secondary;
+        color: var(--color-text-secondary);
       }
     }
 
@@ -577,7 +575,7 @@ const activeSections = ref([])
       p {
         margin: 0 0 6px 0;
         font-size: 13px;
-        color: $text-secondary;
+        color: var(--color-text-secondary);
         line-height: 1.6;
       }
       code {
@@ -634,7 +632,7 @@ const activeSections = ref([])
 
         .desc {
           font-size: 13px;
-          color: $text-secondary;
+          color: var(--color-text-secondary);
           margin-left: auto;
         }
       }

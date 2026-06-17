@@ -130,6 +130,7 @@ class AuthGateTests(unittest.TestCase):
 class UploadCookieValidationTests(unittest.TestCase):
     def setUp(self) -> None:
         from myUtils import jobs as job_runtime
+        from myUtils.security import SecurityPolicy
         from sau_backend import app
 
         self._tmp = tempfile.TemporaryDirectory()
@@ -153,11 +154,16 @@ class UploadCookieValidationTests(unittest.TestCase):
         if self.cookie_target.exists():
             self.cookie_target.unlink()
 
+        self._previous_policy = app.config["SECURITY_POLICY"]
+        app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
         app.config["TESTING"] = True
         self.client = app.test_client()
 
     def tearDown(self) -> None:
         self._patch.stop()
+        if hasattr(self, "_previous_policy"):
+            from sau_backend import app
+            app.config["SECURITY_POLICY"] = self._previous_policy
         if self.cookie_target.exists():
             self.cookie_target.unlink()
         # Clean up the seeded row.

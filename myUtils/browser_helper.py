@@ -39,18 +39,4 @@ def install_browserless_patch():
     except Exception as e:
         print(f"[browser_helper] Failed to patch patchright: {e}")
 
-    # Patch playwright (if used)
-    try:
-        from playwright.async_api._generated import BrowserType as PlaywrightBrowserType
-
-        async def _patched_playwright_launch(self, **kwargs):
-            kwargs.pop("executable_path", None)
-            kwargs.pop("channel", None)
-            kwargs.pop("args", None)
-            kwargs.pop("headless", None)
-            return await self.connect_over_cdp(ws_url)
-
-        PlaywrightBrowserType.launch = _patched_playwright_launch
-        print(f"[browser_helper] Patched playwright chromium.launch -> connect_over_cdp({ws_url})")
-    except Exception as e:
-        print(f"[browser_helper] Failed to patch playwright: {e}")
+    # playwright is no longer patched — the project uses patchright exclusively.

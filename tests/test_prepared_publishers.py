@@ -21,9 +21,10 @@ from myUtils import prepared_publishers
 
 
 class _FakeResponse:
-    def __init__(self, payload=None, *, headers=None):
+    def __init__(self, payload=None, *, headers=None, status_code=200):
         self._payload = payload or {}
         self.headers = headers or {}
+        self.status_code = status_code
 
     def raise_for_status(self):
         return None
@@ -183,7 +184,7 @@ class PreparedPublisherTests(unittest.TestCase):
             _FakeResponse({"id": "threads-container"}),
             _FakeResponse({"id": "threads-post"}),
         ])
-        account = SimpleNamespace(config={"threadUserId": "42", "accessToken": "threads-token"})
+        account = SimpleNamespace(config={"threadUserId": "42", "accessToken": "threads-token", "accessTokenExpiresAt": "2099-01-01T00:00:00"})
         result = prepared_publishers.publish_threads_sync(
             account,
             {"message": "Threads launch"},
@@ -345,12 +346,12 @@ class PreparedPublisherTests(unittest.TestCase):
                 )
         self.assertIn('1 GB', str(ctx.exception))
 
-    def test_tiktok_video_rejects_duration_over_ten_minutes(self):
+    def test_tiktok_video_rejects_duration_over_sixty_minutes(self):
         session = _RecordingSession([
             _FakeResponse({'data': {'creator_avatar_url': 'x'}}),
         ])
         account = SimpleNamespace(config={'accessToken': 'tt-token'})
-        with tempfile.TemporaryDirectory() as tmp, patch.object(prepared_publishers.media_pipeline, 'probe_video_duration', return_value=601.0):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(prepared_publishers.media_pipeline, 'probe_video_duration', return_value=3601.0):
             video = Path(tmp) / 'clip.mp4'
             video.write_bytes(b'video')
             with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
@@ -362,7 +363,7 @@ class PreparedPublisherTests(unittest.TestCase):
                     },
                     session=session,
                 )
-        self.assertIn('10 minutes', str(ctx.exception))
+        self.assertIn('exceeds the limit', str(ctx.exception))
 
     def test_tiktok_video_rejects_caption_over_2200_chars(self):
         session = _RecordingSession([

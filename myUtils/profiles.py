@@ -186,7 +186,6 @@ DIRECT_PUBLISH_PLATFORMS: frozenset[str] = frozenset(
         PLATFORM_YOUTUBE,
         PLATFORM_THREADS,
         PLATFORM_DISCORD,
-        PLATFORM_PATREON,
         PLATFORM_TEACHING_BLOG,
         PLATFORM_NW_SW_BLOG,
     }

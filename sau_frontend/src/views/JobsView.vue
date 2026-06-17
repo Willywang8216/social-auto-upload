@@ -268,8 +268,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style lang="scss" scoped>
-@use '@/styles/variables.scss' as *;
-
 .jobs-view {
   .page-header {
     display: flex;
@@ -279,7 +277,7 @@ onBeforeUnmount(() => {
 
     h1 {
       font-size: 24px;
-      color: $text-primary;
+      color: var(--color-text);
       margin: 0;
     }
 
@@ -292,7 +290,7 @@ onBeforeUnmount(() => {
   .jobs-list {
     background-color: #fff;
     border-radius: 4px;
-    box-shadow: $box-shadow-light;
+    box-shadow: var(--shadow-lg);
     padding: 20px;
   }
 
@@ -303,7 +301,7 @@ onBeforeUnmount(() => {
 
     .counters {
       font-size: 12px;
-      color: $text-secondary;
+      color: var(--color-text-secondary);
     }
   }
 }

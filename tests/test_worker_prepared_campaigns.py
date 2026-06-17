@@ -110,17 +110,17 @@ class PreparedWorkerDispatchTests(unittest.TestCase):
             status=jobs.TARGET_RUNNING,
             attempts=1,
         )
-        with self.assertRaises(NotImplementedError) as ctx:
+        with self.assertRaises(ValueError) as ctx:
             asyncio.run(
                 worker._run_prepared_campaign_upload(
-                    "patreon",
+                    "nonexistent_platform",
                     {"campaignId": 1, "campaignPostId": 2},
                     target,
                     account=None,
                     account_file=None,
                 )
             )
-        self.assertIn("publisher not implemented", str(ctx.exception))
+        self.assertIn("Unsupported prepared publish platform", str(ctx.exception))
 
 
 if __name__ == "__main__":

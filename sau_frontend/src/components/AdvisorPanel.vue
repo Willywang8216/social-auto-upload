@@ -77,8 +77,6 @@ defineEmits(['request-advice'])
 </script>
 
 <style scoped lang="scss">
-@use '@/styles/variables.scss' as *;
-
 .advisor-panel {
   margin-top: 20px;
 }

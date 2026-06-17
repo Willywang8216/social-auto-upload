@@ -1,54 +1,74 @@
 <template>
-  <div class="login-view">
-    <el-card class="login-card">
-      <template #header>
-        <div class="card-header">
-          <h2>Socialupload</h2>
-          <p class="subtitle">請輸入存取權杖以登入</p>
-        </div>
-      </template>
+  <div class="login-page">
+    <!-- Background pattern -->
+    <div class="login-bg"></div>
 
-      <el-form
-        ref="formRef"
-        :model="form"
-        :rules="rules"
-        label-position="top"
-        @submit.prevent="onSubmit"
-      >
-        <el-form-item label="存取權杖（API Token）" prop="token">
-          <el-input
-            v-model="form.token"
-            type="password"
-            show-password
-            placeholder="留空表示後端處於開放模式"
-            autocomplete="current-password"
-            @keyup.enter="onSubmit"
-          />
-        </el-form-item>
-
-        <el-form-item>
-          <el-button
-            type="primary"
-            :loading="loading"
-            class="submit-btn"
-            @click="onSubmit"
-          >
-            登入
-          </el-button>
-        </el-form-item>
-
-        <div v-if="errorMessage" class="login-error">{{ errorMessage }}</div>
-        <div v-else-if="openModeNotice" class="login-hint">
-          後端目前為開放模式，可直接進入。正式部署請設定 <code>SAU_API_TOKENS</code>。
+    <!-- Login card -->
+    <div class="login-wrapper">
+      <div class="login-card">
+        <!-- Brand -->
+        <div class="login-brand">
+          <img src="/socialupload-app-icon.png" alt="Socialupload" class="login-logo" />
+          <h1>Socialupload</h1>
+          <p>Enter your access token to sign in</p>
         </div>
 
-        <div class="legal-links">
-          <router-link to="/privacy">Privacy Policy</router-link>
-          <span>·</span>
-          <router-link to="/terms">Terms of Service</router-link>
+        <!-- Form -->
+        <el-form
+          ref="formRef"
+          :model="form"
+          :rules="rules"
+          label-position="top"
+          @submit.prevent="onSubmit"
+          class="login-form"
+        >
+          <el-form-item label="Access Token" prop="token">
+            <el-input
+              v-model="form.token"
+              type="password"
+              show-password
+              placeholder="Leave empty for open mode"
+              autocomplete="current-password"
+              size="large"
+              @keyup.enter="onSubmit"
+            />
+          </el-form-item>
+
+          <el-form-item>
+            <el-button
+              type="primary"
+              :loading="loading"
+              size="large"
+              class="login-btn"
+              @click="onSubmit"
+            >
+              {{ loading ? 'Signing in...' : 'Sign In' }}
+            </el-button>
+          </el-form-item>
+
+          <!-- Error message -->
+          <div v-if="errorMessage" class="login-alert error">
+            <el-icon><WarningFilled /></el-icon>
+            <span>{{ errorMessage }}</span>
+          </div>
+
+          <!-- Open mode notice -->
+          <div v-else-if="openModeNotice" class="login-alert info">
+            <el-icon><InfoFilled /></el-icon>
+            <span>Backend is in open mode. Set <code>SAU_API_TOKENS</code> for production use.</span>
+          </div>
+        </el-form>
+
+        <!-- Footer links -->
+        <div class="login-footer">
+          <router-link to="/">Home</router-link>
+          <span class="dot">·</span>
+          <router-link to="/privacy">Privacy</router-link>
+          <span class="dot">·</span>
+          <router-link to="/terms">Terms</router-link>
         </div>
-      </el-form>
-    </el-card>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -56,6 +76,7 @@
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { WarningFilled, InfoFilled } from '@element-plus/icons-vue'
 
 import { http } from '@/utils/request'
 import { clearToken, getToken, setToken } from '@/utils/auth'
@@ -64,18 +85,13 @@ const router = useRouter()
 const route = useRoute()
 const formRef = ref(null)
 const form = ref({ token: getToken() })
-const rules = {
-  // 不强制非空，因为后端可能在开放模式。
-}
+const rules = {}
 
 const loading = ref(false)
 const errorMessage = ref('')
 const openModeNotice = ref(false)
 
 onMounted(async () => {
-  // Try the existing token first; if that works, skip the login screen.
-  // If there is no token AND the backend is in open mode, /whoami will
-  // still return 200 with openMode=true and we redirect through.
   const ok = await probeToken(getToken() || '', { silent: true })
   if (ok) {
     if (openModeNotice.value || getToken()) {
@@ -94,9 +110,9 @@ async function probeToken(token, { silent = false } = {}) {
     if (!silent) {
       const status = error?.response?.status
       if (status === 401) {
-        errorMessage.value = '權杖無效。請檢查後端 SAU_API_TOKENS 設定。'
+        errorMessage.value = 'Invalid token. Check your SAU_API_TOKENS configuration.'
       } else {
-        errorMessage.value = error?.message || '無法連線後端，請稍後再試。'
+        errorMessage.value = error?.message || 'Cannot connect to backend. Please try again.'
       }
     }
     clearToken()
@@ -110,7 +126,7 @@ async function onSubmit() {
   try {
     const ok = await probeToken(form.value.token || '')
     if (ok) {
-      ElMessage.success(openModeNotice.value ? '已進入（開放模式）' : '登入成功')
+      ElMessage.success(openModeNotice.value ? 'Entered (open mode)' : 'Signed in successfully')
       router.replace(route.query.redirect || '/dashboard')
     }
   } finally {
@@ -120,71 +136,144 @@ async function onSubmit() {
 </script>
 
 <style lang="scss" scoped>
-.login-view {
+.login-page {
   min-height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: #f2f3f5;
-  padding: 20px;
+  position: relative;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  overflow: hidden;
+}
 
-  .login-card {
+.login-bg {
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(circle at 25% 25%, rgba(255,255,255,0.1) 0%, transparent 50%),
+    radial-gradient(circle at 75% 75%, rgba(255,255,255,0.08) 0%, transparent 50%);
+}
+
+.login-wrapper {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 420px;
+  padding: 24px;
+}
+
+.login-card {
+  background: var(--color-bg);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-xl);
+  padding: 40px 36px 32px;
+  animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.login-brand {
+  text-align: center;
+  margin-bottom: 32px;
+
+  .login-logo {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    margin-bottom: 16px;
+  }
+
+  h1 {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--color-text);
+    margin: 0 0 8px;
+    letter-spacing: -0.025em;
+  }
+
+  p {
+    font-size: 14px;
+    color: var(--color-text-secondary);
+    margin: 0;
+  }
+}
+
+.login-form {
+  .el-form-item {
+    margin-bottom: 20px;
+  }
+
+  .login-btn {
     width: 100%;
-    max-width: 420px;
+    font-weight: 600;
+    height: 44px;
+    font-size: 15px;
+  }
+}
 
-    .card-header {
-      text-align: center;
+.login-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 16px;
 
-      h2 {
-        margin: 0;
-        font-size: 20px;
-        color: #303133;
-      }
+  .el-icon {
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
 
-      .subtitle {
-        margin: 8px 0 0;
-        color: #909399;
-        font-size: 13px;
-      }
+  &.error {
+    background: var(--color-danger-light);
+    color: #b91c1c;
+  }
+
+  &.info {
+    background: var(--color-info-light);
+    color: #4338ca;
+  }
+
+  code {
+    background: rgba(0, 0, 0, 0.06);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+}
+
+.login-footer {
+  text-align: center;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--color-border);
+
+  a {
+    font-size: 13px;
+    color: var(--color-text-muted);
+    text-decoration: none;
+    font-weight: 500;
+    transition: color var(--transition-fast);
+
+    &:hover {
+      color: var(--color-primary);
     }
+  }
 
-    .submit-btn {
-      width: 100%;
-    }
-
-    .login-error {
-      margin-top: 8px;
-      color: #f56c6c;
-      font-size: 13px;
-    }
-
-    .login-hint {
-      margin-top: 8px;
-      color: #909399;
-      font-size: 12px;
-
-      code {
-        background: #f4f4f5;
-        padding: 0 4px;
-        border-radius: 2px;
-      }
-    }
-
-    .legal-links {
-      margin-top: 16px;
-      text-align: center;
-      font-size: 13px;
-      color: #909399;
-
-      a {
-        color: #409eff;
-        text-decoration: none;
-      }
-
-      span {
-        margin: 0 8px;
-      }
-    }
+  .dot {
+    margin: 0 10px;
+    color: var(--color-text-placeholder);
   }
 }
 </style>

@@ -2665,8 +2665,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style lang="scss" scoped>
-@use '@/styles/variables.scss' as *;
-
 @keyframes rotate {
   from {
     transform: rotate(0deg);
@@ -2686,7 +2684,7 @@ onBeforeUnmount(() => {
 
     h1 {
       font-size: 24px;
-      color: $text-primary;
+      color: var(--color-text);
       margin: 0;
     }
 
@@ -2705,11 +2703,11 @@ onBeforeUnmount(() => {
     padding: 10px 12px;
     background: #f5f7fa;
     border-radius: 6px;
-    color: $text-secondary;
+    color: var(--color-text-secondary);
     font-size: 13px;
 
     .maintenance-error {
-      color: $danger-color;
+      color: var(--color-danger);
       word-break: break-word;
     }
   }
@@ -2726,7 +2724,7 @@ onBeforeUnmount(() => {
       h2 {
         margin: 0;
         font-size: 18px;
-        color: $text-primary;
+        color: var(--color-text);
       }
     }
   }
@@ -2734,7 +2732,7 @@ onBeforeUnmount(() => {
   .account-tabs {
     background-color: #fff;
     border-radius: 4px;
-    box-shadow: $box-shadow-light;
+    box-shadow: var(--shadow-lg);
 
     .account-tabs-nav {
       padding: 20px;

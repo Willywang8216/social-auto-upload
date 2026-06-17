@@ -29,11 +29,17 @@ class JobsHttpTests(unittest.TestCase):
         self._patcher.start()
 
         from sau_backend import app
+        from myUtils.security import SecurityPolicy
+        self._orig_policy = app.config["SECURITY_POLICY"]
+        app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
         app.config.update(TESTING=True)
         self.client = app.test_client()
 
     def tearDown(self) -> None:
         self._patcher.stop()
+        if hasattr(self, "_orig_policy"):
+            from sau_backend import app
+            app.config["SECURITY_POLICY"] = self._orig_policy
         self._tmp.cleanup()
 
     def _post_job(self, body: dict):

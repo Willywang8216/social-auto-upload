@@ -459,8 +459,6 @@ onMounted(() => {
 </script>
 
 <style lang="scss" scoped>
-@use '@/styles/variables.scss' as *;
-
 @keyframes rotate {
   from {
     transform: rotate(0deg);
@@ -478,7 +476,7 @@ onMounted(() => {
     h1 {
       font-size: 24px;
       font-weight: 500;
-      color: $text-primary;
+      color: var(--color-text);
       margin: 0;
     }
   }

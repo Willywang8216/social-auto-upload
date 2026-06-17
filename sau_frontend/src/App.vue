@@ -1,116 +1,90 @@
 <template>
   <div id="app">
+    <!-- Public pages — no chrome -->
     <template v-if="usePublicLayout">
-      <router-view />
+      <router-view v-slot="{ Component }">
+        <transition name="fade" mode="out-in">
+          <component :is="Component" />
+        </transition>
+      </router-view>
     </template>
+
+    <!-- Authenticated pages — sidebar + header layout -->
     <template v-else>
-      <el-container>
-        <el-aside :width="isCollapse ? '64px' : '200px'">
-          <div class="sidebar">
-            <div class="logo">
-              <img v-show="isCollapse" src="/socialupload-app-icon.png" alt="Socialupload" class="logo-img">
-              <h2 v-show="!isCollapse">Socialupload</h2>
-            </div>
-            <el-menu
-              :router="true"
-              :default-active="activeMenu"
-              :collapse="isCollapse"
-              class="sidebar-menu"
-              background-color="#001529"
-              text-color="#fff"
-              active-text-color="#409EFF"
-            >
-              <el-menu-item index="/dashboard">
-                <el-icon><HomeFilled /></el-icon>
-                <span>儀表板</span>
-              </el-menu-item>
-              <el-menu-item index="/account-management">
-                <el-icon><User /></el-icon>
-                <span>帳號管理</span>
-              </el-menu-item>
-              <el-menu-item index="/profile-management">
-                <el-icon><Folder /></el-icon>
-                <span>Profile 管理</span>
-              </el-menu-item>
-              <el-menu-item index="/material-management">
-                <el-icon><Picture /></el-icon>
-                <span>素材庫</span>
-              </el-menu-item>
-              <el-menu-item index="/publish-center">
-                <el-icon><Upload /></el-icon>
-                <span>發佈中心</span>
-              </el-menu-item>
-              <el-menu-item index="/template-management">
-                <el-icon><Files /></el-icon>
-                <span>範本管理</span>
-              </el-menu-item>
-              <el-menu-item index="/jobs">
-                <el-icon><List /></el-icon>
-                <span>任務中心</span>
-              </el-menu-item>
-              <el-menu-item index="/video-analytics">
-                <el-icon><TrendCharts /></el-icon>
-                <span>影片分析</span>
-              </el-menu-item>
-              <el-menu-item index="/batch-upload">
-                <el-icon><Upload /></el-icon>
-                <span>Batch Upload</span>
-              </el-menu-item>
-              <el-menu-item index="/campaign-builder">
-                <el-icon><Edit /></el-icon>
-                <span>Campaign Builder</span>
-              </el-menu-item>
-              <el-menu-item index="/sheet-exports">
-                <el-icon><Document /></el-icon>
-                <span>Sheet Exports</span>
-              </el-menu-item>
-              <el-menu-item index="/api-docs">
-                <el-icon><Document /></el-icon>
-                <span>API Docs</span>
-              </el-menu-item>
-              <el-menu-item index="/oauth-review">
-                <el-icon><Connection /></el-icon>
-                <span>OAuth 狀態</span>
-              </el-menu-item>
-              <el-menu-item index="/about">
-                <el-icon><DataAnalysis /></el-icon>
-                <span>說明</span>
-              </el-menu-item>
-            </el-menu>
+      <div class="app-layout">
+        <!-- Sidebar -->
+        <aside class="app-sidebar" :class="{ collapsed: isCollapse }">
+          <!-- Brand -->
+          <div class="sidebar-brand">
+            <img src="/socialupload-app-icon.png" alt="Socialupload" class="sidebar-logo" />
+            <transition name="fade">
+              <span v-show="!isCollapse" class="sidebar-title">Socialupload</span>
+            </transition>
           </div>
-        </el-aside>
-        <el-container>
-          <el-header>
-            <div class="header-content">
-              <div class="header-left">
-                <el-icon class="toggle-sidebar" @click="toggleSidebar"><Fold /></el-icon>
-              </div>
-              <div class="header-right">
-                <div class="header-links">
-                  <router-link class="domain-link" to="/">Socialupload</router-link>
-                  <span>·</span>
-                  <router-link to="/privacy">Privacy</router-link>
-                  <span>·</span>
-                  <router-link to="/terms">Terms</router-link>
-                </div>
-              </div>
+
+          <!-- Navigation -->
+          <nav class="sidebar-nav">
+            <router-link
+              v-for="item in navItems"
+              :key="item.path"
+              :to="item.path"
+              class="nav-item"
+              :class="{ active: isActive(item.path) }"
+            >
+              <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
+              <transition name="fade">
+                <span v-show="!isCollapse" class="nav-label">{{ item.label }}</span>
+              </transition>
+            </router-link>
+          </nav>
+
+          <!-- Collapse toggle -->
+          <div class="sidebar-footer">
+            <button class="collapse-btn" @click="toggleSidebar" :title="isCollapse ? 'Expand' : 'Collapse'">
+              <el-icon>
+                <Fold v-if="!isCollapse" />
+                <Expand v-else />
+              </el-icon>
+            </button>
+          </div>
+        </aside>
+
+        <!-- Main area -->
+        <div class="app-main">
+          <!-- Header -->
+          <header class="app-header">
+            <div class="header-left">
+              <el-breadcrumb separator="/">
+                <el-breadcrumb-item :to="{ path: '/dashboard' }">Home</el-breadcrumb-item>
+                <el-breadcrumb-item v-if="currentNav">{{ currentNav.label }}</el-breadcrumb-item>
+              </el-breadcrumb>
             </div>
-          </el-header>
-          <el-main>
-            <router-view />
-          </el-main>
-          <el-footer>
-            <div class="app-footer">
-              <span>Socialupload</span>
-              <div class="footer-links">
-                <router-link to="/privacy">Privacy Policy</router-link>
-                <span>·</span>
-                <router-link to="/terms">Terms of Service</router-link>
-              </div>
+            <div class="header-right">
+              <router-link class="header-link" to="/">Landing</router-link>
+              <router-link class="header-link" to="/privacy">Privacy</router-link>
+              <router-link class="header-link" to="/terms">Terms</router-link>
             </div>
-          </el-footer>
-        </el-container>
-      </el-container>
+          </header>
+
+          <!-- Content -->
+          <main class="app-content">
+            <router-view v-slot="{ Component }">
+              <transition name="fade" mode="out-in">
+                <component :is="Component" />
+              </transition>
+            </router-view>
+          </main>
+
+          <!-- Footer -->
+          <footer class="app-footer">
+            <span class="footer-brand">Socialupload</span>
+            <div class="footer-links">
+              <router-link to="/privacy">Privacy</router-link>
+              <router-link to="/terms">Terms</router-link>
+            </div>
+          </footer>
+        </div>
+      </div>
     </template>
   </div>
 </template>
@@ -119,169 +93,300 @@
 import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
-  HomeFilled, User, DataAnalysis,
-  Fold, Picture, Upload, List, Connection, Folder, Files, TrendCharts, Edit, Document
+  HomeFilled,
+  User,
+  Folder,
+  Picture,
+  Upload,
+  Files,
+  List,
+  TrendCharts,
+  Edit,
+  Document,
+  Connection,
+  DataAnalysis,
+  Fold,
+  Expand
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
 
-const activeMenu = computed(() => route.path)
 const usePublicLayout = computed(() => Boolean(route.meta?.publicLayout))
 const isCollapse = ref(false)
 
 const toggleSidebar = () => {
   isCollapse.value = !isCollapse.value
 }
+
+/* Navigation items — all English labels */
+const navItems = [
+  { path: '/dashboard',            label: 'Dashboard',       icon: HomeFilled },
+  { path: '/account-management',   label: 'Accounts',        icon: User },
+  { path: '/profile-management',   label: 'Profiles',        icon: Folder },
+  { path: '/material-management',  label: 'Materials',       icon: Picture },
+  { path: '/publish-center',       label: 'Publish Center',  icon: Upload },
+  { path: '/template-management',  label: 'Templates',       icon: Files },
+  { path: '/jobs',                 label: 'Jobs',            icon: List },
+  { path: '/video-analytics',      label: 'Analytics',       icon: TrendCharts },
+  { path: '/batch-upload',         label: 'Batch Upload',    icon: Upload },
+  { path: '/campaign-builder',     label: 'Campaigns',       icon: Edit },
+  { path: '/sheet-exports',        label: 'Sheet Exports',   icon: Document },
+  { path: '/api-docs',             label: 'API Docs',        icon: Document },
+  { path: '/oauth-review',         label: 'OAuth Status',    icon: Connection },
+  { path: '/about',                label: 'About',           icon: DataAnalysis },
+]
+
+const isActive = (path) => route.path === path || route.path.startsWith(path + '/')
+
+const currentNav = computed(() => navItems.find(item => isActive(item.path)))
 </script>
 
 <style lang="scss" scoped>
-@use '@/styles/variables.scss' as *;
+/* ======================================================================
+   Layout Shell
+   ====================================================================== */
 
-#app {
-  min-height: 100vh;
-}
-
-.el-container {
-  height: 100vh;
-}
-
-.el-aside {
-  background-color: #001529;
-  color: #fff;
+.app-layout {
+  display: flex;
   height: 100vh;
   overflow: hidden;
-  transition: width 0.3s;
+}
 
-  .sidebar {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
 
-    .logo {
-      height: 60px;
-      padding: 0 16px;
-      display: flex;
-      align-items: center;
-      background-color: #002140;
-      overflow: hidden;
+/* ======================================================================
+   Sidebar
+   ====================================================================== */
 
-      .logo-img {
-        width: 32px;
-        height: 32px;
-        margin-right: 12px;
-      }
+.app-sidebar {
+  width: var(--sidebar-width);
+  background: var(--sidebar-bg);
+  display: flex;
+  flex-direction: column;
+  transition: width var(--transition-slow);
+  flex-shrink: 0;
+  z-index: 10;
 
-      h2 {
-        color: #fff;
-        font-size: 16px;
-        font-weight: 600;
-        white-space: nowrap;
-        margin: 0;
-      }
-    }
-
-    .sidebar-menu {
-      border-right: none;
-      flex: 1;
-
-      .el-menu-item {
-        display: flex;
-        align-items: center;
-
-        .el-icon {
-          margin-right: 10px;
-          font-size: 18px;
-        }
-      }
-    }
+  &.collapsed {
+    width: var(--sidebar-width-collapsed);
   }
 }
 
-.el-header {
-  background-color: #fff;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
-  padding: 0;
-  height: 60px;
-
-  .header-content {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    height: 100%;
-    padding: 0 16px;
-
-    .header-left {
-      .toggle-sidebar {
-        font-size: 20px;
-        cursor: pointer;
-        color: $text-regular;
-
-        &:hover {
-          color: $primary-color;
-        }
-      }
-    }
-
-    .header-right {
-      .header-links {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-size: 13px;
-
-        a,
-        :deep(a) {
-          color: $text-secondary;
-          text-decoration: none;
-
-          &:hover {
-            color: $primary-color;
-          }
-        }
-
-        .domain-link {
-          font-weight: 500;
-        }
-      }
-    }
-  }
+/* Brand */
+.sidebar-brand {
+  height: var(--header-height);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+  overflow: hidden;
 }
 
-.el-main {
-  background-color: $bg-color-page;
-  padding: 20px;
+.sidebar-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.sidebar-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #fff;
+  white-space: nowrap;
+  letter-spacing: -0.02em;
+}
+
+/* Navigation */
+.sidebar-nav {
+  flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.el-footer {
-  height: 52px;
-  background: #fff;
-  border-top: 1px solid #ebeef5;
-  padding: 0 20px;
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  color: var(--sidebar-text);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+  overflow: hidden;
 
-  .app-footer {
-    height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    color: $text-secondary;
-    font-size: 13px;
+  &:hover {
+    background: var(--sidebar-bg-hover);
+    color: var(--sidebar-text-active);
+  }
 
-    .footer-links {
-      display: flex;
-      align-items: center;
-      gap: 8px;
+  &.active {
+    background: var(--sidebar-bg-active);
+    color: var(--sidebar-text-active);
 
-      a,
-      :deep(a) {
-        color: $text-secondary;
-        text-decoration: none;
-
-        &:hover {
-          color: $primary-color;
-        }
-      }
+    .nav-icon {
+      color: var(--color-primary);
     }
+  }
+}
+
+.nav-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.nav-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Footer */
+.sidebar-footer {
+  padding: 12px 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.collapse-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  border-radius: var(--radius-md);
+  border: none;
+  background: transparent;
+  color: var(--sidebar-text);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+
+  &:hover {
+    background: var(--sidebar-bg-hover);
+    color: var(--sidebar-text-active);
+  }
+
+  .el-icon {
+    font-size: 18px;
+  }
+}
+
+
+/* ======================================================================
+   Main Area
+   ====================================================================== */
+
+.app-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* Header */
+.app-header {
+  height: var(--header-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.header-link {
+  font-size: 13px;
+  color: var(--color-text-muted);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color var(--transition-fast);
+
+  &:hover {
+    color: var(--color-primary);
+  }
+}
+
+/* Content */
+.app-content {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--color-bg-page);
+}
+
+/* Footer */
+.app-footer {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  background: var(--color-bg);
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.footer-brand {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.footer-links {
+  display: flex;
+  gap: 16px;
+
+  a {
+    font-size: 13px;
+    color: var(--color-text-muted);
+    text-decoration: none;
+
+    &:hover {
+      color: var(--color-primary);
+    }
+  }
+}
+
+
+/* ======================================================================
+   Responsive
+   ====================================================================== */
+
+@media (max-width: 768px) {
+  .app-sidebar {
+    width: var(--sidebar-width-collapsed);
+
+    .sidebar-title,
+    .nav-label {
+      display: none;
+    }
+  }
+
+  .app-header {
+    padding: 0 16px;
+  }
+
+  .header-right {
+    display: none;
   }
 }
 </style>

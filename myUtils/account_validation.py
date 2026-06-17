@@ -112,24 +112,18 @@ def validate_structured_account_config(
                 warnings.append("未指定 cookiePath；後端會自動產生預設路徑")
         else:
             if not _present(config.get("subreddits")):
-                if auth_type == 'oauth':
-                    warnings.append("Reddit 尚未設定 subreddits；儲存後可在編輯頁面中新增")
-                else:
-                    errors.append("Reddit 帳號需要至少一個 subreddit")
+                errors.append("Reddit 帳號需要至少一個 subreddit")
             has_client_id = _present(_config_value(config, "clientId"))
             has_client_secret = _present(_config_value(config, "clientSecret"))
             has_refresh_token = _present(_config_value(config, "refreshToken"))
-            if auth_type == 'oauth' and not has_refresh_token:
-                warnings.append("Reddit refreshToken 可在 OAuth Connect 完成後自動回填")
-            elif not has_refresh_token:
-                errors.append("Reddit 帳號缺少 refreshToken 或 refreshTokenEnv")
-            if auth_type == 'oauth' and not has_client_id:
-                warnings.append("Reddit clientId 可在 OAuth Connect 時透過 env 變數自動讀取；若有 clientIdEnv 可忽略")
-            elif not has_client_id:
+            if not has_refresh_token:
+                if auth_type == 'oauth':
+                    warnings.append("Reddit refreshToken 可在 OAuth Connect 完成後自動回填")
+                else:
+                    errors.append("Reddit 帳號缺少 refreshToken 或 refreshTokenEnv")
+            if not has_client_id:
                 errors.append("Reddit 帳號缺少 clientId 或 clientIdEnv")
-            if auth_type == 'oauth' and not has_client_secret:
-                warnings.append("Reddit clientSecret 可在 OAuth Connect 時透過 env 變數自動讀取；若有 clientSecretEnv 可忽略")
-            elif not has_client_secret:
+            if not has_client_secret:
                 errors.append("Reddit 帳號缺少 clientSecret 或 clientSecretEnv")
 
     if platform == profiles.PLATFORM_TELEGRAM:

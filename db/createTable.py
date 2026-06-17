@@ -193,6 +193,7 @@ CREATE TABLE IF NOT EXISTS campaign_posts (
     account_ids_json TEXT NOT NULL DEFAULT '[]',
     draft_json TEXT NOT NULL DEFAULT '{}',
     sheet_row_json TEXT NOT NULL DEFAULT '{}',
+    file_record_ids_json TEXT,
     status TEXT NOT NULL DEFAULT 'draft',
     last_published_job_id INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,

@@ -54,6 +54,7 @@ class LlmClientTests(unittest.TestCase):
                 "system",
                 "user",
                 session=session,
+                response_json=True,
             )
         self.assertEqual(result.parsed_json, {"message": "hello", "hashtags": ["#a", "#b", "#c"]})
         self.assertEqual(session.calls[0]["url"], "https://llm.example.com/v1/chat/completions")

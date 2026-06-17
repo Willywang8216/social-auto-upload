@@ -86,11 +86,17 @@ class LegacyDbBootstrapEndpointTests(unittest.TestCase):
         self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
         self._base_dir_patch.start()
 
+        from myUtils.security import SecurityPolicy
+        self._orig_policy = sau_backend.app.config["SECURITY_POLICY"]
+        sau_backend.app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
         sau_backend.app.config["TESTING"] = True
         self.client = sau_backend.app.test_client()
 
     def tearDown(self) -> None:
         self._base_dir_patch.stop()
+        if hasattr(self, "_orig_policy"):
+            import sau_backend
+            sau_backend.app.config["SECURITY_POLICY"] = self._orig_policy
         self._tmp.cleanup()
 
     def _legacy_db_path(self) -> Path:

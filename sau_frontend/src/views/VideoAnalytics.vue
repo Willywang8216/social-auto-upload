@@ -438,8 +438,6 @@ onMounted(async () => {
 </script>
 
 <style scoped lang="scss">
-@use '@/styles/variables.scss' as *;
-
 .video-analytics {
   padding: 20px;
 }

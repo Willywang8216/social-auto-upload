@@ -1,272 +1,152 @@
 <template>
-  <div class="dashboard">
+  <div class="dashboard page-container">
+    <!-- Page Header -->
     <div class="page-header">
-      <h1>Socialupload</h1>
+      <h1>Dashboard</h1>
+      <p>Overview of your social media accounts, materials, and publishing status.</p>
     </div>
 
-    <div class="dashboard-content">
-      <el-row :gutter="20">
-        <!-- 账号统计卡片 -->
-        <el-col :span="8">
-          <el-card class="stat-card">
-            <div class="stat-card-content">
-              <div class="stat-icon">
-                <el-icon><User /></el-icon>
-              </div>
-              <div class="stat-info">
-                <div class="stat-value">{{ accountStats.total }}</div>
-                <div class="stat-label">帳號總數</div>
-              </div>
-            </div>
-            <div class="stat-footer">
-              <div class="stat-detail">
-                <span>正常：{{ accountStats.normal }}</span>
-                <span>異常：{{ accountStats.abnormal }}</span>
-              </div>
-            </div>
-          </el-card>
-        </el-col>
+    <!-- Stat Cards -->
+    <el-row :gutter="16" class="stat-row">
+      <el-col :xs="24" :sm="12" :lg="6">
+        <div class="stat-card">
+          <div class="stat-icon primary">
+            <el-icon><User /></el-icon>
+          </div>
+          <div>
+            <div class="stat-value">{{ accountStats.total }}</div>
+            <div class="stat-label">Total Accounts</div>
+          </div>
+        </div>
+      </el-col>
+      <el-col :xs="24" :sm="12" :lg="6">
+        <div class="stat-card">
+          <div class="stat-icon success">
+            <el-icon><Connection /></el-icon>
+          </div>
+          <div>
+            <div class="stat-value">{{ healthSummary.ready }}</div>
+            <div class="stat-label">Ready Connections</div>
+          </div>
+        </div>
+      </el-col>
+      <el-col :xs="24" :sm="12" :lg="6">
+        <div class="stat-card">
+          <div class="stat-icon warning">
+            <el-icon><Document /></el-icon>
+          </div>
+          <div>
+            <div class="stat-value">{{ contentStats.total }}</div>
+            <div class="stat-label">Materials</div>
+          </div>
+        </div>
+      </el-col>
+      <el-col :xs="24" :sm="12" :lg="6">
+        <div class="stat-card">
+          <div class="stat-icon" :class="maintenanceStatus.running ? 'success' : (maintenanceStatus.enabled ? 'primary' : 'warning')">
+            <el-icon><Timer /></el-icon>
+          </div>
+          <div>
+            <div class="stat-value">{{ maintenanceStatus.running ? 'Running' : (maintenanceStatus.enabled ? 'Ready' : 'Off') }}</div>
+            <div class="stat-label">Maintenance</div>
+          </div>
+        </div>
+      </el-col>
+    </el-row>
 
-        <!-- 平台统计卡片 -->
-        <el-col :span="8">
-          <el-card class="stat-card">
-            <div class="stat-card-content">
-              <div class="stat-icon platform-icon">
-                <el-icon><Platform /></el-icon>
-              </div>
-              <div class="stat-info">
-                <div class="stat-value">{{ platformStats.total }}</div>
-                <div class="stat-label">已接入平台</div>
-              </div>
-            </div>
-            <div class="stat-footer">
-              <div class="stat-detail">
-                <el-tooltip
-                  v-for="platform in dashboardPlatforms"
-                  :key="platform.key"
-                  :content="`${platform.label}帳號`"
-                  placement="top"
-                >
-                  <el-tag size="small" :type="platform.tagType">
-                    {{ platformStats.counts[platform.key] || 0 }}
-                  </el-tag>
-                </el-tooltip>
-              </div>
-            </div>
-          </el-card>
-        </el-col>
+    <!-- Credential Expiry Alerts -->
+    <div class="section" v-if="hasExpiryAlerts">
+      <div class="data-table-card">
+        <div class="data-table-header">
+          <h2>Credential Expiry Alerts</h2>
+          <el-button text size="small" @click="goToAccountQueue({ sort: 'urgency' })">View All</el-button>
+        </div>
+        <div style="padding: 16px 24px;">
+          <div class="expiry-badges">
+            <el-tag type="danger" v-if="healthSummary.expirySummary?.overdue">Overdue: {{ healthSummary.expirySummary.overdue }}</el-tag>
+            <el-tag type="warning" v-if="healthSummary.expirySummary?.expiringWithin24h">24h: {{ healthSummary.expirySummary.expiringWithin24h }}</el-tag>
+            <el-tag v-if="healthSummary.expirySummary?.expiringWithin7d">7d: {{ healthSummary.expirySummary.expiringWithin7d }}</el-tag>
+            <el-tag type="danger" v-if="healthSummary.expirySummary?.reconnectRequired">Reconnect: {{ healthSummary.expirySummary.reconnectRequired }}</el-tag>
+          </div>
+        </div>
+        <el-table :data="healthSummary.expiringAccounts || []" v-loading="loading" stripe>
+          <el-table-column prop="platform" label="Platform" width="120" />
+          <el-table-column prop="accountName" label="Account" min-width="180" />
+          <el-table-column prop="expiresAt" label="Expires" width="220" />
+          <el-table-column label="Remaining" width="120">
+            <template #default="{ row }">
+              {{ formatRemaining(row.secondsRemaining) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="Action" width="120">
+            <template #default="{ row }">
+              <el-button text size="small" @click="goToAccountQueue({ risk: row.requiresReconnect ? 'reconnect_required' : (row.secondsRemaining <= 24 * 3600 ? 'expiring_24h' : 'expiring_7d'), sort: row.requiresReconnect ? 'urgency' : 'expiry', platform: row.platform })">
+                Go
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+    </div>
 
-        <!-- 素材统计卡片 -->
-        <el-col :span="8">
-          <el-card class="stat-card">
-            <div class="stat-card-content">
-              <div class="stat-icon content-icon">
-                <el-icon><Document /></el-icon>
-              </div>
-              <div class="stat-info">
-                <div class="stat-value">{{ contentStats.total }}</div>
-                <div class="stat-label">素材總數</div>
-              </div>
+    <!-- Quick Actions -->
+    <div class="section">
+      <div class="section-title">Quick Actions</div>
+      <el-row :gutter="16">
+        <el-col :xs="12" :sm="8" :lg="4" v-for="action in quickActions" :key="action.path">
+          <div class="action-card" @click="navigateTo(action.path)">
+            <div class="action-icon">
+              <el-icon><component :is="action.icon" /></el-icon>
             </div>
-            <div class="stat-footer">
-              <div class="stat-detail">
-                <span>影片：{{ contentStats.videos }}</span>
-                <span>圖片：{{ contentStats.images }}</span>
-                <span>其他：{{ contentStats.others }}</span>
-              </div>
-            </div>
-          </el-card>
+            <div class="action-title">{{ action.title }}</div>
+            <div class="action-desc">{{ action.desc }}</div>
+          </div>
         </el-col>
-        <el-col :span="8">
-          <el-card class="stat-card">
-            <div class="stat-card-content">
-              <div class="stat-icon platform-icon">
-                <el-icon><Connection /></el-icon>
-              </div>
-              <div class="stat-info">
-                <div class="stat-value">{{ healthSummary.ready }}</div>
-                <div class="stat-label">已就緒連線</div>
-              </div>
-            </div>
-            <div class="stat-footer">
-              <div class="stat-detail">
-                <span>Configured：{{ healthSummary.configured }}</span>
-                <span>Missing：{{ healthSummary.missing }}</span>
-                <span>Refresh：{{ healthSummary.refreshable }}</span>
-                <span>Check：{{ healthSummary.checkable }}</span>
-              </div>
-            </div>
-          </el-card>
-        </el-col>
-        <el-col :span="8">
-          <el-card class="stat-card">
-            <div class="stat-card-content">
-              <div class="stat-icon platform-icon">
-                <el-icon><Timer /></el-icon>
-              </div>
-              <div class="stat-info">
-                <div class="stat-value">{{ maintenanceStatus.running ? 'Running' : (maintenanceStatus.enabled ? 'Ready' : 'Off') }}</div>
-                <div class="stat-label">維護排程</div>
-              </div>
-            </div>
-            <div class="stat-footer">
-              <div class="stat-detail maintenance-detail">
-                <span>Next：{{ nextMaintenanceRunLabel }}</span>
-                <span>Last：{{ maintenanceStatus.lastFinishedAt || '—' }}</span>
-                <span v-if="maintenanceStatus.lastResult">Refreshed：{{ maintenanceStatus.lastResult.refreshed || 0 }}</span>
-                <span v-if="maintenanceStatus.lastError" class="maintenance-error">Error：{{ maintenanceStatus.lastError }}</span>
-              </div>
-            </div>
-          </el-card>
-        </el-col>
-
       </el-row>
+    </div>
 
-      <div class="recent-tasks">
-        <div class="section-header">
-          <h2>憑證到期風險</h2>
-          <el-button text @click="goToAccountQueue({ sort: 'urgency' })">前往處理</el-button>
+    <!-- Recent Materials -->
+    <div class="section">
+      <div class="data-table-card">
+        <div class="data-table-header">
+          <h2>Recent Materials</h2>
+          <el-button text size="small" @click="navigateTo('/material-management')">View All</el-button>
         </div>
-
-        <div class="expiry-summary">
-          <el-tag type="danger">Overdue: {{ healthSummary.expirySummary?.overdue || 0 }}</el-tag>
-          <el-tag type="warning">24h: {{ healthSummary.expirySummary?.expiringWithin24h || 0 }}</el-tag>
-          <el-tag>7d: {{ healthSummary.expirySummary?.expiringWithin7d || 0 }}</el-tag>
-          <el-tag type="danger">Reconnect: {{ healthSummary.expirySummary?.reconnectRequired || 0 }}</el-tag>
-        </div>
-
-        <div class="expiry-actions">
-          <el-button text @click="goToAccountQueue({ risk: 'expiring_24h', sort: 'expiry' })">查看 24h</el-button>
-          <el-button text @click="goToAccountQueue({ risk: 'expiring_7d', sort: 'expiry' })">查看 7d</el-button>
-          <el-button text @click="goToAccountQueue({ risk: 'overdue', sort: 'urgency' })">查看逾期</el-button>
-          <el-button text @click="goToAccountQueue({ risk: 'reconnect_required', sort: 'urgency' })">查看需重連</el-button>
-        </div>
-
-        <el-table :data="healthSummary.expiringAccounts || []" style="width: 100%" v-loading="loading">
-          <el-table-column prop="platform" label="平台" width="120" />
-          <el-table-column prop="accountName" label="帳號" min-width="180" />
-          <el-table-column prop="expiresAt" label="到期時間" width="220" />
-          <el-table-column label="剩餘" width="140">
-            <template #default="scope">
-              {{ formatRemaining(scope.row.secondsRemaining) }}
-            </template>
+        <el-table :data="recentMaterials" v-loading="loading" stripe>
+          <el-table-column prop="filename" label="Filename" min-width="280" />
+          <el-table-column prop="filesize" label="Size" width="100">
+            <template #default="{ row }">{{ row.filesize }} MB</template>
           </el-table-column>
-          <el-table-column label="建議" width="120">
-            <template #default="scope">
-              <el-tag :type="scope.row.requiresReconnect ? 'danger' : 'warning'" effect="plain">{{ scope.row.recommendedAction }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="120">
-            <template #default="scope">
-              <el-button text @click="goToAccountQueue({ risk: scope.row.requiresReconnect ? 'reconnect_required' : (scope.row.secondsRemaining <= 24 * 3600 ? 'expiring_24h' : 'expiring_7d'), sort: scope.row.requiresReconnect ? 'urgency' : 'expiry', platform: scope.row.platform })">前往</el-button>
+          <el-table-column prop="upload_time" label="Uploaded" width="200" />
+          <el-table-column label="Type" width="100">
+            <template #default="{ row }">
+              <el-tag :type="getFileTypeTag(row.filename)" size="small">{{ getFileType(row.filename) }}</el-tag>
             </template>
           </el-table-column>
         </el-table>
-
-        <el-empty v-if="!loading && (healthSummary.expiringAccounts || []).length === 0" description="目前沒有 7 天內到期的帳號" />
+        <el-empty v-if="!loading && recentMaterials.length === 0" description="No materials yet" />
       </div>
+    </div>
 
-      <div class="recent-tasks">
-        <div class="section-header">
-          <h2>最近帳號操作</h2>
-          <el-button text @click="navigateTo('/account-management')">帳號管理</el-button>
+    <!-- Recent Account Events -->
+    <div class="section">
+      <div class="data-table-card">
+        <div class="data-table-header">
+          <h2>Recent Account Events</h2>
+          <el-button text size="small" @click="navigateTo('/account-management')">Manage</el-button>
         </div>
-
-        <el-table :data="healthSummary.recentEvents || []" style="width: 100%" v-loading="loading">
-          <el-table-column prop="created_at" label="時間" width="180" />
-          <el-table-column prop="platform" label="平台" width="120" />
-          <el-table-column prop="account_name" label="帳號" min-width="180" />
-          <el-table-column prop="action" label="操作" width="140" />
-          <el-table-column label="結果" width="100">
-            <template #default="scope">
-              <el-tag :type="scope.row.status === 'ok' ? 'success' : 'danger'" effect="plain">{{ scope.row.status }}</el-tag>
+        <el-table :data="healthSummary.recentEvents || []" v-loading="loading" stripe>
+          <el-table-column prop="created_at" label="Time" width="180" />
+          <el-table-column prop="platform" label="Platform" width="120" />
+          <el-table-column prop="account_name" label="Account" min-width="180" />
+          <el-table-column prop="action" label="Action" width="140" />
+          <el-table-column label="Status" width="100">
+            <template #default="{ row }">
+              <el-tag :type="row.status === 'ok' ? 'success' : 'danger'" size="small">{{ row.status }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="summary" label="摘要" min-width="240" />
+          <el-table-column prop="summary" label="Summary" min-width="240" />
         </el-table>
-      </div>
-
-      <!-- 快速操作区域 -->
-      <div class="quick-actions">
-        <h2>快速操作</h2>
-        <el-row :gutter="20">
-          <el-col :span="6">
-            <el-card class="action-card" @click="navigateTo('/account-management')">
-              <div class="action-icon">
-                <el-icon><UserFilled /></el-icon>
-              </div>
-              <div class="action-title">帳號管理</div>
-              <div class="action-desc">管理所有平台帳號</div>
-            </el-card>
-          </el-col>
-          <el-col :span="6">
-            <el-card class="action-card" @click="navigateTo('/material-management')">
-              <div class="action-icon">
-                <el-icon><Upload /></el-icon>
-              </div>
-              <div class="action-title">素材庫</div>
-              <div class="action-desc">上傳與管理影片素材</div>
-            </el-card>
-          </el-col>
-          <el-col :span="6">
-            <el-card class="action-card" @click="navigateTo('/publish-center')">
-              <div class="action-icon">
-                <el-icon><Timer /></el-icon>
-              </div>
-              <div class="action-title">發佈中心</div>
-              <div class="action-desc">將內容發佈到各平台</div>
-            </el-card>
-          </el-col>
-          <el-col :span="6">
-            <el-card class="action-card" @click="navigateTo('/oauth-review')">
-              <div class="action-icon">
-                <el-icon><Connection /></el-icon>
-              </div>
-              <div class="action-title">OAuth 狀態</div>
-              <div class="action-desc">查看各平台 OAuth 連線與 token 狀態</div>
-            </el-card>
-          </el-col>
-          <el-col :span="6">
-            <el-card class="action-card" @click="navigateTo('/about')">
-              <div class="action-icon">
-                <el-icon><DataAnalysis /></el-icon>
-              </div>
-              <div class="action-title">關於系統</div>
-              <div class="action-desc">查看系統資訊</div>
-            </el-card>
-          </el-col>
-        </el-row>
-      </div>
-
-      <!-- 素材列表 -->
-      <div class="recent-tasks">
-        <div class="section-header">
-          <h2>最近上傳素材</h2>
-          <el-button text @click="navigateTo('/material-management')">查看全部</el-button>
-        </div>
-
-        <el-table :data="recentMaterials" style="width: 100%" v-loading="loading">
-          <el-table-column prop="filename" label="檔案名稱" width="300" />
-          <el-table-column prop="filesize" label="檔案大小" width="120">
-            <template #default="scope">
-              {{ scope.row.filesize }} MB
-            </template>
-          </el-table-column>
-          <el-table-column prop="upload_time" label="上傳時間" width="200" />
-          <el-table-column label="類型" width="100">
-            <template #default="scope">
-              <el-tag
-                :type="getFileTypeTag(scope.row.filename)"
-                effect="plain"
-                size="small"
-              >
-                {{ getFileType(scope.row.filename) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-        </el-table>
-
-        <el-empty v-if="!loading && recentMaterials.length === 0" description="目前沒有素材資料" />
       </div>
     </div>
   </div>
@@ -276,7 +156,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  User, UserFilled, Platform, Document,
+  User, UserFilled, Document,
   Upload, Timer, DataAnalysis, Connection
 } from '@element-plus/icons-vue'
 import { accountApi } from '@/api/account'
@@ -292,74 +172,57 @@ const accountStore = useAccountStore()
 const appStore = useAppStore()
 const profilesStore = useProfilesStore()
 const loading = ref(false)
-const healthSummary = ref({ total: 0, ready: 0, configured: 0, missing: 0, refreshable: 0, checkable: 0, expirySummary: { overdue: 0, expiringWithin24h: 0, expiringWithin7d: 0, reconnectRequired: 0 }, recentEventTotals: { total: 0, ok: 0, error: 0 }, expiringAccounts: [], recentEvents: [] })
+const healthSummary = ref({
+  total: 0, ready: 0, configured: 0, missing: 0, refreshable: 0, checkable: 0,
+  expirySummary: { overdue: 0, expiringWithin24h: 0, expiringWithin7d: 0, reconnectRequired: 0 },
+  recentEventTotals: { total: 0, ok: 0, error: 0 },
+  expiringAccounts: [], recentEvents: []
+})
 const maintenanceStatus = ref({ enabled: false, running: false, intervalSeconds: 0, lastFinishedAt: '', lastStartedAt: '', lastResult: null, lastError: null })
-const dashboardPlatforms = SUPPORTED_PLATFORM_TAGS.map(({ label, tagType }) => ({
-    key: label,
-    label,
-    tagType
-  }))
 
-// 账号统计数据 - 从真实数据计算
+const hasExpiryAlerts = computed(() => {
+  const s = healthSummary.value.expirySummary
+  return (s?.overdue || s?.expiringWithin24h || s?.expiringWithin7d || s?.reconnectRequired) > 0
+})
+
+const quickActions = [
+  { path: '/account-management', title: 'Accounts', desc: 'Manage accounts', icon: UserFilled },
+  { path: '/material-management', title: 'Materials', desc: 'Upload media', icon: Upload },
+  { path: '/publish-center', title: 'Publish', desc: 'Publish content', icon: Timer },
+  { path: '/campaign-builder', title: 'Campaigns', desc: 'Build campaigns', icon: Document },
+  { path: '/oauth-review', title: 'OAuth', desc: 'Connection status', icon: Connection },
+  { path: '/about', title: 'About', desc: 'System info', icon: DataAnalysis },
+]
+
+const videoExtensions = ['.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv']
+const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
+
 const accountStats = computed(() => {
   const accounts = accountStore.accounts
   const normal = accounts.filter(a => a.status === '正常').length
   const abnormal = accounts.filter(a => a.status !== '正常' && a.status !== '驗證中').length
-  return {
-    total: accounts.length,
-    normal,
-    abnormal
-  }
+  return { total: accounts.length, normal, abnormal }
 })
-
-// 平台统计数据 - 从真实数据计算（包含所有 Legacy + 結構化帳號）
-const platformStats = computed(() => {
-  const accounts = accountStore.accounts
-  const counts = {}
-  for (const platform of SUPPORTED_PLATFORM_TAGS) {
-    counts[platform.label] = accounts.filter(a => a.platform === platform.label).length
-  }
-
-  return {
-    total: SUPPORTED_PLATFORM_TAGS.filter(platform => counts[platform.label] > 0).length,
-    counts
-  }
-})
-
-// 素材统计数据 - 从真实数据计算
-const videoExtensions = ['.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv']
-const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
 
 const contentStats = computed(() => {
   const materials = appStore.materials
   const videos = materials.filter(m => videoExtensions.some(ext => m.filename.toLowerCase().endsWith(ext))).length
   const images = materials.filter(m => imageExtensions.some(ext => m.filename.toLowerCase().endsWith(ext))).length
-  return {
-    total: materials.length,
-    videos,
-    images,
-    others: materials.length - videos - images
-  }
+  return { total: materials.length, videos, images, others: materials.length - videos - images }
 })
 
-// 最近上传的素材（最多显示5条）
 const recentMaterials = computed(() => {
-  return [...appStore.materials]
-    .sort((a, b) => new Date(b.upload_time) - new Date(a.upload_time))
-    .slice(0, 5)
+  return [...appStore.materials].sort((a, b) => new Date(b.upload_time) - new Date(a.upload_time)).slice(0, 5)
 })
 
-// 获取文件類型
 const getFileType = (filename) => {
-  if (videoExtensions.some(ext => filename.toLowerCase().endsWith(ext))) return '影片'
-  if (imageExtensions.some(ext => filename.toLowerCase().endsWith(ext))) return '圖片'
-  return '其他'
+  if (videoExtensions.some(ext => filename.toLowerCase().endsWith(ext))) return 'Video'
+  if (imageExtensions.some(ext => filename.toLowerCase().endsWith(ext))) return 'Image'
+  return 'Other'
 }
 
-// 获取文件類型标签颜色
 const getFileTypeTag = (filename) => {
-  const type = getFileType(filename)
-  return { '影片': 'success', '圖片': 'warning', '其他': 'info' }[type] || 'info'
+  return { Video: 'success', Image: 'warning', Other: 'info' }[getFileType(filename)] || 'info'
 }
 
 const formatRemaining = (seconds) => {
@@ -369,6 +232,17 @@ const formatRemaining = (seconds) => {
   if (hours < 24) return `${hours}h`
   const days = Math.floor(hours / 24)
   return `${days}d`
+}
+
+const navigateTo = (path) => router.push(path)
+
+const platformValueByLabel = computed(() => Object.fromEntries(
+  SUPPORTED_PLATFORM_TAGS.map((p) => [p.label, p.key])
+))
+
+const goToAccountQueue = ({ risk = 'all', platform = 'all', profile = 'all', sort = 'urgency', sortOrder = 'ascending' } = {}) => {
+  const query = buildAccountQueueNavigationQuery({ risk, platform, profile, sort, sortOrder, platformValueByLabel: platformValueByLabel.value })
+  router.push({ path: '/account-management', query })
 }
 
 const nextMaintenanceRunLabel = computed(() => {
@@ -382,30 +256,9 @@ const nextMaintenanceRunLabel = computed(() => {
   return new Date(parsed.getTime() + intervalSeconds * 1000).toISOString()
 })
 
-// 导航到指定路由
-const navigateTo = (path) => {
-  router.push(path)
-}
-
-const platformValueByLabel = computed(() => Object.fromEntries(dashboardPlatforms.map((platform) => [platform.label, platform.key])))
-
-const goToAccountQueue = ({ risk = 'all', platform = 'all', profile = 'all', sort = 'urgency', sortOrder = 'ascending' } = {}) => {
-  const query = buildAccountQueueNavigationQuery({
-    risk,
-    platform,
-    profile,
-    sort,
-    sortOrder,
-    platformValueByLabel: platformValueByLabel.value,
-  })
-  router.push({ path: '/account-management', query })
-}
-
-// 加载数据
 const fetchDashboardData = async () => {
   loading.value = true
   try {
-    // 并行获取账号和素材数据
     const [accountRes, materialRes, healthRes, maintenanceRes, profilesRes] = await Promise.allSettled([
       accountApi.getAccounts(),
       materialApi.getAllMaterials(),
@@ -415,8 +268,7 @@ const fetchDashboardData = async () => {
     ])
 
     const legacyAccounts = accountRes.status === 'fulfilled' && accountRes.value.code === 200
-      ? (accountRes.value.data || [])
-      : []
+      ? (accountRes.value.data || []) : []
     let structuredAccounts = []
     if (profilesRes.status === 'fulfilled') {
       const structuredGroups = await Promise.all(
@@ -428,210 +280,41 @@ const fetchDashboardData = async () => {
       structuredAccounts = structuredGroups.flat()
     }
     accountStore.setAccounts([...legacyAccounts, ...structuredAccounts])
-    if (materialRes.status === 'fulfilled' && materialRes.value.code === 200) {
-      appStore.setMaterials(materialRes.value.data)
-    }
-    if (healthRes.status === 'fulfilled' && healthRes.value.code === 200) {
-      healthSummary.value = healthRes.value.data
-    }
-    if (maintenanceRes.status === 'fulfilled' && maintenanceRes.value.code === 200) {
-      maintenanceStatus.value = maintenanceRes.value.data
-    }
+    if (materialRes.status === 'fulfilled' && materialRes.value.code === 200) appStore.setMaterials(materialRes.value.data)
+    if (healthRes.status === 'fulfilled' && healthRes.value.code === 200) healthSummary.value = healthRes.value.data
+    if (maintenanceRes.status === 'fulfilled' && maintenanceRes.value.code === 200) maintenanceStatus.value = maintenanceRes.value.data
   } catch (error) {
-    console.error('取得儀表板資料失敗:', error)
+    console.error('Dashboard fetch failed:', error)
   } finally {
     loading.value = false
   }
 }
 
-onMounted(() => {
-  fetchDashboardData()
-})
+onMounted(() => fetchDashboardData())
 </script>
 
 <style lang="scss" scoped>
-@use '@/styles/variables.scss' as *;
-
 .dashboard {
-  .page-header {
-    margin-bottom: 20px;
+  .stat-row {
+    margin-bottom: var(--space-8);
 
-    h1 {
-      font-size: 24px;
-      color: $text-primary;
-      margin: 0;
+    .el-col {
+      margin-bottom: var(--space-4);
     }
   }
 
-  .dashboard-content {
-    .stat-card {
-      height: 140px;
-      margin-bottom: 20px;
+  .section {
+    margin-bottom: var(--space-8);
+  }
 
-      .stat-card-content {
-        display: flex;
-        align-items: center;
-        margin-bottom: 15px;
+  .expiry-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
 
-        .stat-icon {
-          width: 60px;
-          height: 60px;
-          border-radius: 50%;
-          background-color: rgba($primary-color, 0.1);
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          margin-right: 15px;
-
-          .el-icon {
-            font-size: 30px;
-            color: $primary-color;
-          }
-
-          &.platform-icon {
-            background-color: rgba($success-color, 0.1);
-
-            .el-icon {
-              color: $success-color;
-            }
-          }
-
-          &.content-icon {
-            background-color: rgba($info-color, 0.1);
-
-            .el-icon {
-              color: $info-color;
-            }
-          }
-        }
-
-        .stat-info {
-          .stat-value {
-            font-size: 24px;
-            font-weight: bold;
-            color: $text-primary;
-            line-height: 1.2;
-          }
-
-          .stat-label {
-            font-size: 14px;
-            color: $text-secondary;
-          }
-        }
-      }
-
-      .stat-footer {
-        border-top: 1px solid $border-lighter;
-        padding-top: 10px;
-
-        .stat-detail {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-          color: $text-secondary;
-          font-size: 13px;
-
-          &.maintenance-detail {
-            span {
-              word-break: break-word;
-            }
-          }
-
-          .maintenance-error {
-            color: $danger-color;
-          }
-
-          .el-tag {
-            margin-right: 5px;
-          }
-        }
-      }
-    }
-
-    .quick-actions {
-      margin: 20px 0 30px;
-
-      h2 {
-        font-size: 18px;
-        margin-bottom: 15px;
-        color: $text-primary;
-      }
-
-      .action-card {
-        height: 160px;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        transition: all 0.3s;
-
-        &:hover {
-          transform: translateY(-5px);
-          box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
-        }
-
-        .action-icon {
-          width: 50px;
-          height: 50px;
-          border-radius: 50%;
-          background-color: rgba($primary-color, 0.1);
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          margin-bottom: 15px;
-
-          .el-icon {
-            font-size: 24px;
-            color: $primary-color;
-          }
-        }
-
-        .action-title {
-          font-size: 16px;
-          font-weight: bold;
-          color: $text-primary;
-          margin-bottom: 5px;
-        }
-
-        .action-desc {
-          font-size: 13px;
-          color: $text-secondary;
-          text-align: center;
-        }
-      }
-    }
-
-    .recent-tasks {
-      margin-top: 30px;
-
-      .expiry-summary {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        margin-bottom: 12px;
-      }
-
-      .expiry-actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        margin-bottom: 12px;
-      }
-
-      .section-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 15px;
-
-        h2 {
-          font-size: 18px;
-          color: $text-primary;
-          margin: 0;
-        }
-      }
-    }
+  .action-card {
+    margin-bottom: var(--space-4);
   }
 }
 </style>
