@@ -1738,7 +1738,7 @@ async function ensureAccountSaved() {
 }
 
 function validateConnectPlatform(expectedPlatform) {
-  if (!['facebook', 'instagram', 'reddit', 'threads', 'youtube', 'tiktok', 'twitter'].includes(expectedPlatform)) {
+  if (!['facebook', 'instagram', 'reddit', 'threads', 'youtube', 'tiktok', 'twitter', 'patreon'].includes(expectedPlatform)) {
     ElMessage.warning('平台不符')
     return false
   }
@@ -1749,7 +1749,7 @@ function validateConnectPlatform(expectedPlatform) {
   return true
 }
 
-const OAUTH_PLATFORMS = new Set(['tiktok', 'facebook', 'instagram', 'reddit', 'threads', 'youtube', 'twitter'])
+const OAUTH_PLATFORMS = new Set(['tiktok', 'facebook', 'instagram', 'reddit', 'threads', 'youtube', 'twitter', 'patreon'])
 const OAUTH_PLATFORM_LABELS = { tiktok: 'TikTok', facebook: 'Facebook', instagram: 'Instagram', reddit: 'Reddit', threads: 'Threads', youtube: 'YouTube', twitter: 'Twitter/X' }
 
 function isOAuthPlatform(platform) { return OAUTH_PLATFORMS.has(platform) }

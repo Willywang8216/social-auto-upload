@@ -1180,7 +1180,7 @@ def login():
         cookie_path = account.cookie_path
         if not cookie_path:
             profile = profile_registry.get_profile(account.profile_id, db_path=db_path)
-            cookie_path = str(profiles.resolve_cookie_path(account.platform, profile.slug, account.account_name))
+            cookie_path = str(profile_registry.resolve_cookie_path(account.platform, profile.slug, account.account_name))
             profile_registry.update_account(account.id, cookie_path=cookie_path, db_path=db_path)
 
         queue_id = f"cookie:{account.platform}:{account.id}"
@@ -1300,6 +1300,8 @@ def postVideo():
 def updateUserinfo():
     # 获取JSON数据
     data = request.get_json()
+    if not data:
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
 
     # 从JSON数据中提取 type 和 userName
     user_id = data.get('id')
@@ -1437,7 +1439,7 @@ def upload_cookie():
         account_cookie = _lookup_account_cookie_path(int(account_id))
         if not account_cookie:
             return jsonify({
-                "code": 500,
+                "code": 404,
                 "msg": "账号不存在",
                 "data": None
             }), 404
@@ -1575,7 +1577,7 @@ def import_cookies(account_id):
     cookie_path = account.cookie_path
     if not cookie_path:
         profile = profile_registry.get_profile(account.profile_id, db_path=_current_db_path())
-        cookie_path = str(profiles.resolve_cookie_path(account.platform, profile.slug, account.account_name))
+        cookie_path = str(profile_registry.resolve_cookie_path(account.platform, profile.slug, account.account_name))
         profile_registry.update_account(account.id, cookie_path=cookie_path, db_path=_current_db_path())
 
     if not _cookie_path_is_allowed(Path(cookie_path)):
@@ -1600,7 +1602,7 @@ def download_cookie():
         file_path = request.args.get('filePath')
         if not file_path:
             return jsonify({
-                "code": 500,
+                "code": 400,
                 "msg": "缺少文件路径参数",
                 "data": None
             }), 400
@@ -1608,14 +1610,14 @@ def download_cookie():
         cookie_file_path = _resolve_cookie_path(file_path)
         if not _cookie_path_is_allowed(cookie_file_path):
             return jsonify({
-                "code": 500,
+                "code": 400,
                 "msg": "非法文件路径",
                 "data": None
             }), 400
 
         if not cookie_file_path.exists():
             return jsonify({
-                "code": 500,
+                "code": 404,
                 "msg": "Cookie文件不存在",
                 "data": None
             }), 404
@@ -2123,7 +2125,8 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                     config['accessTokenExpiresAt'] = str(config.get('metaUserAccessTokenExpiresAt'))
                 # Fetch Facebook page profile picture
                 try:
-                    pic_resp = session.get(f"{meta_auth.META_GRAPH_ROOT}/{config['pageId']}", params={"fields": "picture.type(large)", "access_token": config['accessToken']}, timeout=15)
+                    import requests as _requests
+                    pic_resp = _requests.get(f"{meta_auth.META_GRAPH_ROOT}/{config['pageId']}", params={"fields": "picture.type(large)", "access_token": config['accessToken']}, timeout=15)
                     pic_url = pic_resp.json().get("picture", {}).get("data", {}).get("url")
                     if pic_url:
                         config['avatarUrl'] = pic_url
@@ -3421,8 +3424,9 @@ def meta_oauth_callback():
             merged_config['accessToken'] = str(selected_page.get('access_token') or user_access_token or '')
             # Fetch Facebook page profile picture
             try:
+                import requests as _requests
                 page_token = selected_page.get('access_token') or user_access_token
-                pic_resp = session.get(f"{meta_auth.META_GRAPH_ROOT}/{merged_config['pageId']}", params={"fields": "picture.type(large)", "access_token": page_token}, timeout=15)
+                pic_resp = _requests.get(f"{meta_auth.META_GRAPH_ROOT}/{merged_config['pageId']}", params={"fields": "picture.type(large)", "access_token": page_token}, timeout=15)
                 pic_data = pic_resp.json()
                 pic_url = pic_data.get("picture", {}).get("data", {}).get("url")
                 if pic_url:

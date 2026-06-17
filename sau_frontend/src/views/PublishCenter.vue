@@ -967,12 +967,23 @@ function onMaterialSelectionChange(rows) {
 }
 
 function addMaterialsFromLibrary() {
+  const existingPaths = new Set(mediaFiles.value.map(f => f.path))
+  let skipped = 0
   for (const material of selectedMaterials.value) {
+    const path = material.filepath || material.file_path || material.filename
+    if (existingPaths.has(path)) {
+      skipped++
+      continue
+    }
     mediaFiles.value.push({
-      path: material.filepath || material.file_path || material.filename,
+      path,
       name: material.filename,
       size: material.filesize ? material.filesize * 1024 * 1024 : 0,
     })
+    existingPaths.add(path)
+  }
+  if (skipped > 0) {
+    ElMessage.warning(`已跳過 ${skipped} 個重複檔案`)
   }
   selectedMaterials.value = []
   materialLibraryVisible.value = false
@@ -1331,6 +1342,7 @@ function resetForm() {
   options.intro = true
   options.outro = true
   options.linkInFirstComment = false
+  options.tiktokDirectPost = false
   options.screenshots.enabled = false
   options.screenshots.count = 3
   options.screenshots.timestampsRaw = ''

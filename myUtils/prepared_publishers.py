@@ -495,16 +495,17 @@ def validate_facebook_config_live(config: dict[str, Any], *, session=None) -> di
 
 def _check_meta_token_not_expired(config: dict[str, Any], platform: str) -> None:
     """Raise early if the Meta user access token is expired."""
-    from datetime import datetime
+    from datetime import datetime, timezone
     expires_at = str(config.get("metaUserAccessTokenExpiresAt") or config.get("accessTokenExpiresAt") or "").strip()
     if expires_at:
         try:
             exp = datetime.fromisoformat(expires_at)
-            if datetime.now() >= exp:
+            now = datetime.now(timezone.utc) if exp.tzinfo else datetime.now()
+            if now >= exp:
                 raise PreparedPublishError(
                     f"{platform} token expired at {expires_at}. Reconnect the account via OAuth."
                 )
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
 
@@ -765,12 +766,13 @@ def _maybe_refresh_threads_token(config: dict[str, Any], *, session=None) -> dic
         return config
     expires_at = str(config.get("accessTokenExpiresAt") or "").strip()
     if expires_at:
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
         try:
             exp = datetime.fromisoformat(expires_at)
-            if datetime.now() < exp - timedelta(seconds=300):
+            now = datetime.now(timezone.utc) if exp.tzinfo else datetime.now()
+            if now < exp - timedelta(seconds=300):
                 return config
-        except ValueError:
+        except (ValueError, TypeError):
             pass
     try:
         refreshed = _threads_auth.refresh_long_lived_token(access_token=access_token, session=session)
@@ -1123,7 +1125,8 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
                 json=request_body,
                 timeout=120,
             )
-            _raise_for_status(response)
+            if response.status_code != 200:
+                _raise_tiktok_error(response)
             return {
                 "creator_info": creator_info,
                 "publish": _response_payload(response),
@@ -1413,12 +1416,13 @@ def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None) -> dic
         return config
     expires_at = str(config.get("accessTokenExpiresAt") or "").strip()
     if expires_at:
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
         try:
             exp = datetime.fromisoformat(expires_at)
-            if datetime.now() < exp - timedelta(seconds=300):
+            now = datetime.now(timezone.utc) if exp.tzinfo else datetime.now()
+            if now < exp - timedelta(seconds=300):
                 return config  # still valid, plenty of margin
-        except ValueError:
+        except (ValueError, TypeError):
             pass  # unparseable → try refresh
     try:
         result = refresh_twitter_access_token(config, session=session)

@@ -220,15 +220,26 @@ def write_cookie(path: Path, payload: bytes) -> None:
     else:
         on_disk = payload
 
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_bytes(on_disk)
+    # Use a unique temp file to avoid race conditions with concurrent writes
+    fd, tmp_str = tempfile.mkstemp(suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_str)
     try:
-        os.chmod(tmp_path, 0o600)
-    except OSError:
-        # Filesystems that don't support POSIX perms (e.g. Windows FAT)
-        # silently swallow the chmod; the rename below still succeeds.
-        pass
-    tmp_path.replace(path)
+        os.write(fd, on_disk)
+        os.close(fd)
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            # Filesystems that don't support POSIX perms (e.g. Windows FAT)
+            # silently swallow the chmod; the rename below still succeeds.
+            pass
+        tmp_path.replace(path)
+    except:
+        # Clean up temp file on failure
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def read_cookie(path: Path) -> bytes:

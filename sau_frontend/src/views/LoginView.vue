@@ -114,8 +114,8 @@ async function probeToken(token, { silent = false } = {}) {
       } else {
         errorMessage.value = error?.message || 'Cannot connect to backend. Please try again.'
       }
+      clearToken()
     }
-    clearToken()
     return false
   }
 }

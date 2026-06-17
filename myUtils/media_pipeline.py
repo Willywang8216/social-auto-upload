@@ -121,7 +121,9 @@ def concat_videos(
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         for p in resolved_parts:
-            f.write(f"file '{p}'\n")
+            # Escape single quotes for ffmpeg's concat demuxer format
+            escaped = str(p).replace("'", "'\\''")
+            f.write(f"file '{escaped}'\n")
         list_path = f.name
 
     try:

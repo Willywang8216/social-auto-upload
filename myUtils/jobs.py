@@ -582,7 +582,7 @@ def _maybe_finalise_job(conn: sqlite3.Connection, job_id: int) -> None:
     if row["failed_targets"] == 0 and row["cancelled_count"] == 0:
         final = JOB_SUCCEEDED
     elif row["completed_targets"] == 0:
-        final = JOB_FAILED
+        final = JOB_CANCELLED if row["failed_targets"] == 0 else JOB_FAILED
     else:
         # Partial success counts as failed at the job level so the caller
         # treats the result as needing attention; the per-target detail is

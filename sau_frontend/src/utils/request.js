@@ -4,6 +4,9 @@ import { ElMessage } from 'element-plus'
 import { clearToken, getToken } from '@/utils/auth'
 import { getApiBaseUrl } from '@/utils/api-url'
 
+// Guard to prevent duplicate 401 handling on concurrent requests
+let isRedirectingToLogin = false
+
 // 创建axios实例
 const request = axios.create({
   baseURL: getApiBaseUrl(),
@@ -53,14 +56,19 @@ request.interceptors.response.use(
       switch (status) {
         case 401:
         case 403:
-          ElMessage.error('未授權，請重新登入')
-          clearToken()
-          // Bounce back to the login screen using the hash router. Use a
-          // direct location.hash assignment rather than importing the
-          // router, which would create a circular dependency.
-          if (typeof window !== 'undefined' &&
-              window.location && !window.location.hash.includes('#/login')) {
-            window.location.hash = '#/login'
+          if (!isRedirectingToLogin) {
+            isRedirectingToLogin = true
+            ElMessage.error('未授權，請重新登入')
+            clearToken()
+            // Bounce back to the login screen using the hash router. Use a
+            // direct location.hash assignment rather than importing the
+            // router, which would create a circular dependency.
+            if (typeof window !== 'undefined' &&
+                window.location && !window.location.hash.includes('#/login')) {
+              window.location.hash = '#/login'
+            }
+            // Reset guard after navigation
+            setTimeout(() => { isRedirectingToLogin = false }, 1000)
           }
           break
         case 404:
