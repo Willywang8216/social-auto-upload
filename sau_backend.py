@@ -1,7 +1,6 @@
 import asyncio
 import hashlib
 import json
-import json
 import hmac
 import logging
 import os
@@ -416,14 +415,17 @@ def upload_file():
             "msg": "No selected file"
         }), 400
     try:
+        from werkzeug.utils import secure_filename
+        safe_name = secure_filename(file.filename) or "file"
         # UUIDv4 — random, no MAC/timestamp leak. UUIDv1 (the legacy choice
         # here) embeds the host MAC address and creation time in the
         # filename, which the upload directory exposes via /getFile.
         file_uuid = uuid.uuid4()
-        filepath = Path(BASE_DIR / "videoFile" / f"{file_uuid}_{file.filename}")
+        final_filename = f"{file_uuid}_{safe_name}"
+        filepath = Path(BASE_DIR / "videoFile" / final_filename)
         file.save(filepath)
         return jsonify({"code": 200, "msg": "File uploaded successfully",
-                        "data": f"{file_uuid}_{file.filename}"}), 200
+                        "data": final_filename}), 200
     except Exception as e:
         return jsonify({"code": 500, "msg": str(e), "data": None}), 500
 
@@ -805,14 +807,18 @@ def upload_save():
             "msg": "No selected file"
         }), 400
 
-    # 获取表单中的自定义文件名（可选）
-    custom_filename = request.form.get('filename', None)
-    if custom_filename:
-        filename = custom_filename + "." + file.filename.split('.')[-1]
-    else:
-        filename = file.filename
-
     try:
+        from werkzeug.utils import secure_filename
+        # 获取表单中的自定义文件名（可选）
+        custom_filename = request.form.get('filename', None)
+        if custom_filename:
+            safe_custom = secure_filename(custom_filename) or "file"
+            # Preserve original extension
+            orig_ext = Path(file.filename).suffix
+            filename = f"{safe_custom}{orig_ext}"
+        else:
+            filename = secure_filename(file.filename) or "file"
+
         # UUIDv4 — see /upload for the rationale (no MAC/timestamp leak).
         file_uuid = uuid.uuid4()
         final_filename = f"{file_uuid}_{filename}"

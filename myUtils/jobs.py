@@ -235,6 +235,16 @@ def enqueue_job(spec: JobSpec, *, db_path: Path | None = None) -> Job:
     key = spec.idempotency_key or derive_idempotency_key(spec)
     payload_json = json.dumps(spec.payload, sort_keys=True, ensure_ascii=False)
 
+    # Deduplicate targets first so total_targets matches the actual row count.
+    seen: set[tuple[str, str]] = set()
+    deduped_targets: list[tuple[str, str, Any]] = []
+    for account_ref, file_ref, schedule_at in spec.targets:
+        tup = (account_ref, file_ref)
+        if tup in seen:
+            continue
+        seen.add(tup)
+        deduped_targets.append((account_ref, file_ref, schedule_at))
+
     with _connect(db_path) as conn:
         existing = conn.execute(
             "SELECT * FROM publish_jobs WHERE idempotency_key = ?",
@@ -250,16 +260,11 @@ def enqueue_job(spec: JobSpec, *, db_path: Path | None = None) -> Job:
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (key, spec.profile_id, spec.platform, payload_json,
-             JOB_PENDING, len(spec.targets)),
+             JOB_PENDING, len(deduped_targets)),
         )
         job_id = cursor.lastrowid
 
-        seen: set[tuple[str, str]] = set()
-        for account_ref, file_ref, schedule_at in spec.targets:
-            tup = (account_ref, file_ref)
-            if tup in seen:
-                continue
-            seen.add(tup)
+        for account_ref, file_ref, schedule_at in deduped_targets:
             conn.execute(
                 """
                 INSERT INTO publish_job_targets
