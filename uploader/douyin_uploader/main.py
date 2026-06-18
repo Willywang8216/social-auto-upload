@@ -83,25 +83,42 @@ async def douyin_setup(account_file, handle=False, return_detail=False, qrcode_c
 
 
 async def _extract_douyin_qrcode_src(page: Page) -> str:
+    # Wait for SPA to load (not just the text, which can timeout on slow loads)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
+
     scan_login_tab = page.get_by_text("扫码登录", exact=True).first
-    await scan_login_tab.wait_for(timeout=30000)
+    # Use "attached" state: DOM presence is enough, avoids race with rendering
+    await scan_login_tab.wait_for(state="attached", timeout=60000)
 
-    qrcode_img = (
-        scan_login_tab
-        .locator("..")
-        .locator("xpath=following-sibling::div[1]")
-        .locator('img[aria-label="二维码"]')
-        .first
-    )
+    # New Douyin creator center uses base64 QR in animate_qrcode_container.
+    # Try multiple selectors as fallback.
+    qrcode_selectors = [
+        'div#animate_qrcode_container img[src^="data:image"]',
+        'div[class*="animate_qrcode_container"] img[src^="data:image"]',
+        'div[class*="scan_qrcode_login_content"] img[src^="data:image"]',
+        'img[aria-label="二维码"]',
+    ]
+    last_err: Exception | None = None
+    for sel in qrcode_selectors:
+        try:
+            el = page.locator(sel).first
+            await el.wait_for(state="visible", timeout=10000)
+            src = await el.get_attribute("src")
+            if src:
+                return src
+        except Exception as e:
+            last_err = e
+            continue
 
-    if not await qrcode_img.count():
-        qrcode_img = page.get_by_role("img", name="二维码").first
-
+    # Final fallback: role-based selector
+    qrcode_img = page.get_by_role("img", name="二维码").first
     await qrcode_img.wait_for(state="visible", timeout=30000)
     src = await qrcode_img.get_attribute("src")
     if not src:
-        raise RuntimeError("未获取到抖音登录二维码地址")
-
+        raise RuntimeError(f"未获取到抖音登录二维码地址 (last_err: {last_err})")
     return src
 
 
@@ -278,11 +295,14 @@ class DouYinBaseUploader(BaseVideoUploader):
         await description_editor.click()
         await page.keyboard.press("Control+KeyA")
         await page.keyboard.press("Delete")
-        await page.keyboard.type(description)
 
-        for tag in tags or []:
-            await page.keyboard.type(" #" + tag)
-            await page.keyboard.press("Space")
+        # Use textContent assignment for reliable handling of newlines and special chars
+        if tags:
+            tags_text = " ".join(f"#{t}" for t in tags)
+            full_text = description + "\n\n" + tags_text
+        else:
+            full_text = description
+        await description_editor.evaluate('(el, text) => el.textContent = text', full_text)
 
     async def set_location(self, page: Page, location: str = ""):
         if not location:
@@ -366,6 +386,78 @@ class DouYinBaseUploader(BaseVideoUploader):
         except Exception as e:
             douyin_logger.error(_msg("😢", f"设置商品链接时出错: {str(e)}"))
             return False
+
+    async def set_self_declaration(self, page: Page, declaration: str = "内容为个人观点或见解") -> None:
+        """抖音「自主声明」：打开声明弹窗 → 选指定类型 → 确定。失败时跳过不中断发布。"""
+        try:
+            entry = page.get_by_text("请选择自主声明").first
+            await entry.wait_for(state="visible", timeout=6000)
+            await entry.click()
+
+            dialog = page.locator(".semi-modal-content").filter(has_text="对作品内容添加声明").first
+            await dialog.wait_for(state="visible", timeout=6000)
+
+            option = dialog.locator(".semi-radio").filter(has_text=declaration).first
+            if await option.count():
+                await option.click(timeout=6000)
+            else:
+                await dialog.get_by_text(declaration, exact=True).first.click(timeout=6000, force=True)
+            await dialog.get_by_role("button", name="确定").click(timeout=6000)
+            await dialog.wait_for(state="hidden", timeout=6000)
+            douyin_logger.info(_msg("🧾", f"自主声明已选择「{declaration}」"))
+        except Exception as exc:
+            douyin_logger.warning(_msg("🧾", f"自主声明设置失败，跳过：{exc}"))
+
+    async def select_bgm(self, page: Page, bgm_name: str) -> bool:
+        """为图文发布选择 BGM，搜索无结果或异常均跳过不中断发布。"""
+        try:
+            music_entry = page.locator('text="选择音乐"').nth(1)
+            if not await music_entry.count():
+                music_entry = page.locator('text="选择音乐"').first
+            await music_entry.wait_for(state="visible", timeout=10000)
+            await music_entry.click()
+
+            sidesheet = page.locator(".semi-sidesheet-content").first
+            await sidesheet.wait_for(state="visible", timeout=8000)
+            search_input = sidesheet.locator('input.semi-input[placeholder="搜索音乐"]').first
+            await search_input.wait_for(state="visible", timeout=5000)
+            await search_input.fill(bgm_name)
+            await search_input.press("Enter")
+
+            await asyncio.sleep(2)
+            first_card = sidesheet.locator(".card-container-tmocjc").first
+            try:
+                await first_card.wait_for(state="visible", timeout=8000)
+            except Exception:
+                douyin_logger.warning(_msg("🎵", f"音乐「{bgm_name}」搜索结果为空，跳过"))
+                await self._close_music_sidesheet(page)
+                return False
+
+            apply_btn = first_card.locator(".apply-btn-LUPP0D").first
+            await apply_btn.evaluate("el => el.click()")
+            douyin_logger.info(_msg("🥳", f"BGM「{bgm_name}」已应用"))
+
+            try:
+                await sidesheet.wait_for(state="hidden", timeout=5000)
+            except Exception:
+                await self._close_music_sidesheet(page)
+            return True
+        except Exception as exc:
+            douyin_logger.warning(_msg("🎵", f"添加 BGM 时出错，跳过：{exc}"))
+            try:
+                await self._close_music_sidesheet(page)
+            except Exception:
+                pass
+            return False
+
+    async def _close_music_sidesheet(self, page: Page) -> None:
+        try:
+            close_btn = page.locator(".semi-sidesheet-close").first
+            if await close_btn.count() and await close_btn.is_visible():
+                await close_btn.click()
+                await asyncio.sleep(1)
+        except Exception:
+            pass
 
 
 class DouYinVideo(DouYinBaseUploader):
