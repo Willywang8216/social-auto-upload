@@ -237,5 +237,96 @@ class OAuthPayloadSafetyTests(unittest.TestCase):
         self.assertNotIn("refreshToken", fields, "Twitter callback payload should not contain refreshToken")
 
 
+flask_available = importlib.util.find_spec("flask") is not None
+
+
+@unittest.skipUnless(flask_available, "Flask not installed")
+class UploadRegisterKeyValidationTests(unittest.TestCase):
+    """Tests proving /upload/register rejects malicious keys."""
+
+    def setUp(self):
+        import sau_backend
+        import db.createTable as create_table
+
+        self.sau_backend = sau_backend
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base_dir = Path(self._tmp.name)
+        self.db_path = self.base_dir / "db" / "database.db"
+        create_table.bootstrap(self.db_path)
+
+        self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
+        self._base_dir_patch.start()
+
+        from myUtils.security import SecurityPolicy
+        self._orig_policy = sau_backend.app.config["SECURITY_POLICY"]
+        sau_backend.app.config["SECURITY_POLICY"] = SecurityPolicy(
+            tokens=frozenset(), cors_origins=("http://localhost:5173",)
+        )
+        sau_backend.app.config["TESTING"] = True
+        self.client = sau_backend.app.test_client()
+
+    def tearDown(self):
+        self._base_dir_patch.stop()
+        self.sau_backend.app.config["SECURITY_POLICY"] = self._orig_policy
+        self._tmp.cleanup()
+
+    def test_valid_key_accepted(self):
+        import uuid
+        key = f"uploads/{uuid.uuid4()}_video.mp4"
+        resp = self.client.post("/upload/register", json={
+            "filename": "video.mp4", "key": key, "public_url": "https://cdn.example.com/video.mp4", "size": 1024,
+        })
+        self.assertEqual(resp.status_code, 200)
+
+    def test_rejects_not_a_uuid(self):
+        resp = self.client.post("/upload/register", json={
+            "filename": "file.mp4", "key": "uploads/not-a-uuid_file.mp4", "public_url": "", "size": 0,
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("invalid key format", resp.get_json()["msg"])
+
+    def test_rejects_path_in_filename(self):
+        import uuid
+        key = f"uploads/{uuid.uuid4()}_bad/path.mp4"
+        resp = self.client.post("/upload/register", json={
+            "filename": "file.mp4", "key": key, "public_url": "", "size": 0,
+        })
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rejects_traversal_in_filename(self):
+        import uuid
+        key = f"uploads/{uuid.uuid4()}_..evil.mp4"
+        resp = self.client.post("/upload/register", json={
+            "filename": "file.mp4", "key": key, "public_url": "", "size": 0,
+        })
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rejects_absolute_path(self):
+        resp = self.client.post("/upload/register", json={
+            "filename": "file.mp4", "key": "/absolute/path.mp4", "public_url": "", "size": 0,
+        })
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rejects_dot_dot_traversal(self):
+        resp = self.client.post("/upload/register", json={
+            "filename": "file.mp4", "key": "../../conf.py", "public_url": "", "size": 0,
+        })
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rejects_empty_key(self):
+        resp = self.client.post("/upload/register", json={
+            "filename": "file.mp4", "key": "", "public_url": "", "size": 0,
+        })
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rejects_control_chars(self):
+        import uuid
+        key = f"uploads/{uuid.uuid4()}_file\x00.mp4"
+        resp = self.client.post("/upload/register", json={
+            "filename": "file.mp4", "key": key, "public_url": "", "size": 0,
+        })
+        self.assertEqual(resp.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()
