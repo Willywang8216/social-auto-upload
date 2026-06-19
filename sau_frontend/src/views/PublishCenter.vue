@@ -375,6 +375,9 @@
           <div v-for="job in submitResult.jobs" :key="job.id">
             <router-link :to="`/jobs?jobId=${job.id}`" class="pc-link">Job #{{ job.id }}</router-link>
             <span class="pc-subtle pc-ml-8">{{ job.platform }} — {{ job.totalTargets }} target(s)</span>
+            <el-tag v-if="tiktokJobStatuses[job.id]" :type="tiktokJobStatuses[job.id].type" size="small" style="margin-left: 8px;">
+              {{ tiktokJobStatuses[job.id].label }}
+            </el-tag>
           </div>
         </div>
       </div>
@@ -420,6 +423,36 @@
         <el-button type="primary" @click="addMaterialsFromLibrary">加入</el-button>
       </template>
     </el-dialog>
+
+    <!-- TikTok Review Modal -->
+    <TikTokReviewModal
+      v-if="tiktokReviewAccountId"
+      v-model:visible="tiktokReviewVisible"
+      :creator-info="tiktokCreatorInfo[tiktokReviewAccountId] || null"
+      :account-avatar="getAccountAvatar(tiktokReviewAccountId)"
+      :media-preview-url="mediaFiles.length > 0 ? (mediaFiles[0].publicUrl || ('/getFile?filename=' + encodeURIComponent(mediaFiles[0].path))) : ''"
+      :is-video="mediaFiles.length > 0 && isVideo(mediaFiles[0].path)"
+      :title="tiktokPostSettings[tiktokReviewAccountId]?.title || ''"
+      :privacy-level="tiktokPostSettings[tiktokReviewAccountId]?.privacyLevel || ''"
+      :allow-comment="tiktokPostSettings[tiktokReviewAccountId]?.allowComment || false"
+      :allow-duet="tiktokPostSettings[tiktokReviewAccountId]?.allowDuet || false"
+      :allow-stitch="tiktokPostSettings[tiktokReviewAccountId]?.allowStitch || false"
+      :content-disclosure-enabled="tiktokPostSettings[tiktokReviewAccountId]?.contentDisclosureEnabled || false"
+      :your-brand="tiktokPostSettings[tiktokReviewAccountId]?.yourBrand || false"
+      :branded-content="tiktokPostSettings[tiktokReviewAccountId]?.brandedContent || false"
+      :consent-checked="tiktokPostSettings[tiktokReviewAccountId]?.consentChecked || false"
+      :publishing="tiktokReviewPublishing"
+      @update:title="updateTiktokReviewField('title', $event)"
+      @update:privacy-level="updateTiktokReviewField('privacyLevel', $event)"
+      @update:allow-comment="updateTiktokReviewField('allowComment', $event)"
+      @update:allow-duet="updateTiktokReviewField('allowDuet', $event)"
+      @update:allow-stitch="updateTiktokReviewField('allowStitch', $event)"
+      @update:content-disclosure-enabled="updateTiktokReviewField('contentDisclosureEnabled', $event)"
+      @update:your-brand="updateTiktokReviewField('yourBrand', $event)"
+      @update:branded-content="updateTiktokReviewField('brandedContent', $event)"
+      @update:consent-checked="updateTiktokReviewField('consentChecked', $event)"
+      @publish="onTiktokReviewPublish"
+    />
   </div>
 </template>
 
@@ -436,6 +469,7 @@ import { publishCenterApi } from '@/api/publish-center'
 import { materialApi } from '@/api/material'
 import { tiktokApi } from '@/api/tiktok'
 import TikTokPostSettings from '@/components/TikTokPostSettings.vue'
+import TikTokReviewModal from '@/components/TikTokReviewModal.vue'
 
 const STAGGER_MINUTES = 5
 
@@ -526,9 +560,15 @@ const tiktokCreatorInfo = reactive({}) // accountId -> creator info response
 const tiktokPostSettings = reactive({}) // accountId -> per-post settings
 const tiktokSettingsValidity = reactive({}) // accountId -> boolean
 
+// TikTok review modal state
+const tiktokReviewVisible = ref(false)
+const tiktokReviewAccountId = ref(null)
+const tiktokReviewPublishing = ref(false)
+
 function ensureTiktokSettings(accountId) {
   if (!tiktokPostSettings[accountId]) {
     tiktokPostSettings[accountId] = {
+      title: '',
       privacyLevel: null,
       allowComment: false,
       allowDuet: false,
@@ -539,6 +579,80 @@ function ensureTiktokSettings(accountId) {
       consentChecked: false,
     }
   }
+}
+
+function updateTiktokReviewField(field, value) {
+  if (tiktokReviewAccountId.value) {
+    ensureTiktokSettings(tiktokReviewAccountId.value)
+    tiktokPostSettings[tiktokReviewAccountId.value][field] = value
+    // Auto-switch privacy if branded content + SELF_ONLY
+    if (field === 'brandedContent' && value && tiktokPostSettings[tiktokReviewAccountId.value].privacyLevel === 'SELF_ONLY') {
+      tiktokPostSettings[tiktokReviewAccountId.value].privacyLevel = 'PUBLIC_TO_EVERYONE'
+    }
+  }
+}
+
+function openTiktokReview(accountId) {
+  ensureTiktokSettings(accountId)
+  // Set title from brief if not already set
+  if (!tiktokPostSettings[accountId].title && brief.value) {
+    tiktokPostSettings[accountId].title = brief.value.slice(0, 150)
+  }
+  tiktokReviewAccountId.value = accountId
+  tiktokReviewVisible.value = true
+}
+
+async function onTiktokReviewPublish() {
+  tiktokReviewPublishing.value = true
+  try {
+    await submit()
+    tiktokReviewVisible.value = false
+  } finally {
+    tiktokReviewPublishing.value = false
+  }
+}
+
+// TikTok publish status polling
+const tiktokJobStatuses = reactive({}) // jobId -> { type, label }
+let statusPollInterval = null
+
+async function pollTiktokStatuses() {
+  if (!submitResult.value?.jobs?.length) return
+  for (const job of submitResult.value.jobs) {
+    if (job.platform !== 'tiktok') continue
+    try {
+      const resp = await tiktokApi.getPublishStatus(job.id)
+      const statuses = resp?.data || []
+      if (statuses.length > 0) {
+        const latest = statuses[statuses.length - 1]
+        const status = latest.status || latest.publish_status || ''
+        if (status === 'success' || status === 'published') {
+          tiktokJobStatuses[job.id] = { type: 'success', label: '已發佈' }
+        } else if (status === 'failed' || status === 'error') {
+          tiktokJobStatuses[job.id] = { type: 'danger', label: '發佈失敗' }
+        } else if (status === 'processing' || status === 'uploading') {
+          tiktokJobStatuses[job.id] = { type: 'warning', label: '處理中...' }
+        } else {
+          tiktokJobStatuses[job.id] = { type: 'info', label: status || '已送出' }
+        }
+      }
+    } catch {
+      // Ignore polling errors
+    }
+  }
+}
+
+function startStatusPolling() {
+  if (statusPollInterval) clearInterval(statusPollInterval)
+  pollTiktokStatuses()
+  statusPollInterval = setInterval(pollTiktokStatuses, 10000) // Poll every 10 seconds
+  // Stop after 5 minutes
+  setTimeout(() => {
+    if (statusPollInterval) {
+      clearInterval(statusPollInterval)
+      statusPollInterval = null
+    }
+  }, 300000)
 }
 
 onMounted(async () => {
@@ -1183,6 +1297,7 @@ function buildTiktokPostSettingsPayload() {
         const settings = tiktokPostSettings[account.id]
         if (settings) {
           out[account.id] = {
+            title: settings.title || '',
             privacyLevel: settings.privacyLevel,
             disableComment: !settings.allowComment,
             disableDuet: !settings.allowDuet,
@@ -1201,44 +1316,19 @@ function buildTiktokPostSettingsPayload() {
 }
 
 async function submit() {
-  // TikTok's app review requires explicit user confirmation before
-  // video.publish (direct-post) fires. The toggle only flips the
-  // behaviour for TikTok accounts in this batch — gate it behind a
-  // modal so the consent moment is visible in the demo recording.
+  // TikTok's app review requires a dedicated review page with creator info,
+  // metadata selection, commercial content disclosure, and explicit consent.
+  // Open the review modal for the first TikTok account instead of a simple confirm dialog.
   if (hasTiktokSelected.value) {
-    // Build compliance declaration based on commercial content settings
-    let hasBrandedContent = false
+    // Find first TikTok account
     for (const profileId of selectedProfileIds.value) {
       const accounts = profileAccountCache[profileId] || []
       for (const account of accounts) {
         if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
-          const settings = tiktokPostSettings[account.id]
-          if (settings?.contentDisclosureEnabled && settings?.brandedContent) {
-            hasBrandedContent = true
-          }
+          openTiktokReview(account.id)
+          return // submit will be called from the modal's publish event
         }
       }
-    }
-    const declaration = hasBrandedContent
-      ? '發佈即表示您同意 TikTok 的品牌合作內容政策和音樂使用確認。'
-      : '發佈即表示您同意 TikTok 的音樂使用確認。'
-
-    const confirmBody = options.tiktokDirectPost
-      ? `即將直接發佈到 TikTok 個人檔案（跳過草稿，無法在 TikTok App 內二次編輯）。\n\n${declaration}\n\n確認要繼續嗎？`
-      : `${declaration}\n\n確認要繼續嗎？`
-
-    try {
-      await ElMessageBox.confirm(
-        confirmBody,
-        '確認發佈到 TikTok',
-        {
-          type: 'warning',
-          confirmButtonText: '是，發佈',
-          cancelButtonText: '取消',
-        },
-      )
-    } catch (cancelled) {
-      return
     }
   }
   submitting.value = true
@@ -1262,6 +1352,10 @@ async function submit() {
         : '送出成功，但未產生任何工作',
       jobs: data.jobs,
       skipped: data.skipped,
+    }
+    // Start TikTok status polling if there are TikTok jobs
+    if (data.jobs?.some(j => j.platform === 'tiktok')) {
+      startStatusPolling()
     }
   } catch (err) {
     submitResult.value = { type: 'error', message: err?.message || '送出失敗' }

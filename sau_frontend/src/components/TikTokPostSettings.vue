@@ -41,6 +41,17 @@
     />
 
     <div v-if="!postLimitReached" class="tks-fields">
+      <!-- Title -->
+      <el-form-item label="標題" required>
+        <el-input
+          :model-value="modelValue.title"
+          placeholder="輸入標題"
+          :maxlength="150"
+          show-word-limit
+          @update:model-value="updateField('title', $event)"
+        />
+      </el-form-item>
+
       <!-- Privacy level -->
       <el-form-item label="隱私設定" required>
         <el-select
@@ -391,6 +402,7 @@ const declarationText = computed(() => {
 
 const isValid = computed(() => {
   if (postLimitReached.value) return false
+  if (!props.modelValue.title?.trim()) return false
   if (!props.modelValue.privacyLevel) return false
   if (props.modelValue.contentDisclosureEnabled && !props.modelValue.yourBrand && !props.modelValue.brandedContent) return false
   if (videoDurationError.value) return false
