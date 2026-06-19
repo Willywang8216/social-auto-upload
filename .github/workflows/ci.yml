@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --extra web
+
+      - name: Install Playwright browsers
+        run: uv run playwright install chromium
+
+      - name: Run backend tests
+        run: uv run pytest tests/ --ignore=tests/test_security_http.py -q
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: sau_frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: sau_frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: sau_frontend
+        run: npm run build
+
+  dependency-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check no playwright in requirements.txt
+        run: |
+          if grep -q "^playwright==" requirements.txt; then
+            echo "ERROR: requirements.txt contains playwright== dependency"
+            echo "The project uses patchright exclusively."
+            exit 1
+          fi
+          echo "OK: No playwright dependency found"
+
+      - name: Check patchright is present
+        run: |
+          if ! grep -q "^patchright==" requirements.txt; then
+            echo "ERROR: requirements.txt missing patchright== dependency"
+            exit 1
+          fi
+          echo "OK: patchright dependency found"

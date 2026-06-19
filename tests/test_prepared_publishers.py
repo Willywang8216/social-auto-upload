@@ -206,7 +206,7 @@ class PreparedPublisherTests(unittest.TestCase):
             'refreshToken': 'refresh-token',
             'accessTokenExpiresAt': '2000-01-01T00:00:00+00:00',
         })
-        with patch.dict(os.environ, {'TIKTOK_CLIENT_KEY': 'client-key', 'TIKTOK_CLIENT_SECRET': 'client-secret'}, clear=False):
+        with patch.dict(os.environ, {'TIKTOK_CLIENT_KEY': 'client-key', 'TIKTOK_CLIENT_SECRET': 'client-secret', 'SAU_TIKTOK_VERIFIED_URL_PREFIXES': 'https://cdn.example/'}, clear=False):
             result = prepared_publishers.publish_tiktok_sync(
                 account,
                 {
@@ -225,14 +225,15 @@ class PreparedPublisherTests(unittest.TestCase):
             _FakeResponse({'data': {'publish_id': 'tt-video-1'}}),
         ])
         account = SimpleNamespace(config={'accessToken': 'tt-token', 'privacyLevel': 'SELF_ONLY'})
-        result = prepared_publishers.publish_tiktok_sync(
-            account,
-            {
-                'message': 'TikTok launch',
-                'artifacts': [{'public_url': 'https://cdn.example/video.mp4', 'artifact_kind': 'remote_upload'}],
-            },
-            session=session,
-        )
+        with patch.dict(os.environ, {'SAU_TIKTOK_VERIFIED_URL_PREFIXES': 'https://cdn.example/'}, clear=False):
+            result = prepared_publishers.publish_tiktok_sync(
+                account,
+                {
+                    'message': 'TikTok launch',
+                    'artifacts': [{'public_url': 'https://cdn.example/video.mp4', 'artifact_kind': 'remote_upload'}],
+                },
+                session=session,
+            )
         self.assertEqual(session.calls[0][1], prepared_publishers.TIKTOK_CREATOR_INFO_URL)
         self.assertEqual(session.calls[1][1], prepared_publishers.TIKTOK_VIDEO_INIT_URL)
         self.assertEqual(result['request']['post_info']['privacy_level'], 'SELF_ONLY')
@@ -243,17 +244,18 @@ class PreparedPublisherTests(unittest.TestCase):
             _FakeResponse({'data': {'publish_id': 'tt-photo-1'}}),
         ])
         account = SimpleNamespace(config={'accessToken': 'tt-token', 'autoAddMusic': True})
-        result = prepared_publishers.publish_tiktok_sync(
-            account,
-            {
-                'message': 'TikTok photos',
-                'artifacts': [
-                    {'public_url': 'https://cdn.example/a.jpg', 'artifact_kind': 'remote_upload'},
-                    {'public_url': 'https://cdn.example/b.jpg', 'artifact_kind': 'remote_upload'},
-                ],
-            },
-            session=session,
-        )
+        with patch.dict(os.environ, {'SAU_TIKTOK_VERIFIED_URL_PREFIXES': 'https://cdn.example/'}, clear=False):
+            result = prepared_publishers.publish_tiktok_sync(
+                account,
+                {
+                    'message': 'TikTok photos',
+                    'artifacts': [
+                        {'public_url': 'https://cdn.example/a.jpg', 'artifact_kind': 'remote_upload'},
+                        {'public_url': 'https://cdn.example/b.jpg', 'artifact_kind': 'remote_upload'},
+                    ],
+                },
+                session=session,
+            )
         self.assertEqual(session.calls[1][1], prepared_publishers.TIKTOK_CONTENT_INIT_URL)
         self.assertEqual(result['request']['media_type'], 'PHOTO')
         self.assertEqual(result['request']['source_info']['photo_cover_index'], 0)

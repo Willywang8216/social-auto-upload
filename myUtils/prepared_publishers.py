@@ -50,6 +50,40 @@ TIKTOK_MAX_CAPTION_CHARS = 2200
 TIKTOK_ALLOWED_VIDEO_SUFFIXES = {".mp4", ".webm"}
 
 
+def _tiktok_verified_url_prefixes() -> list[str]:
+    """Return configured verified URL prefixes for TikTok PULL_FROM_URL."""
+    raw = str(os.environ.get("SAU_TIKTOK_VERIFIED_URL_PREFIXES") or "").strip()
+    if not raw:
+        return []
+    return [p.strip().rstrip("/") + "/" for p in raw.split(",") if p.strip()]
+
+
+def _tiktok_validate_pull_from_url(public_url: str) -> str:
+    """Validate that a public URL is under a verified TikTok prefix.
+
+    Returns the URL if valid, raises PreparedPublishError otherwise.
+    """
+    if not public_url:
+        raise PreparedPublishError(
+            "TikTok Direct Post requires a public_url for PULL_FROM_URL. "
+            "The media must be uploaded to server/storage first."
+        )
+    prefixes = _tiktok_verified_url_prefixes()
+    if not prefixes:
+        raise PreparedPublishError(
+            "TikTok Direct Post requires SAU_TIKTOK_VERIFIED_URL_PREFIXES to be configured. "
+            "Set it to your verified domain(s), comma-separated."
+        )
+    url_lower = public_url.lower().rstrip("/")
+    for prefix in prefixes:
+        if url_lower.startswith(prefix.lower().rstrip("/")):
+            return public_url
+    raise PreparedPublishError(
+        f"TikTok Direct Post URL '{public_url[:80]}...' does not match any verified prefix. "
+        f"Configure SAU_TIKTOK_VERIFIED_URL_PREFIXES with your verified domain(s)."
+    )
+
+
 class PreparedPublishError(RuntimeError):
     """Raised when a prepared publish cannot be completed."""
 
@@ -1045,8 +1079,12 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         public_url = video_item.get("public_url") or ""
         local_path = str(video_item.get("local_path") or "").strip()
 
+        # Use reviewed title from TikTokPostSettings if present, otherwise fall back to message
+        reviewed_title = str(tt_settings.get("title") or "").strip()
+        post_title = reviewed_title[:TIKTOK_MAX_CAPTION_CHARS] if reviewed_title else message[:TIKTOK_MAX_CAPTION_CHARS]
+
         post_info = {
-            "title": message[:TIKTOK_MAX_CAPTION_CHARS],
+            "title": post_title,
             "privacy_level": privacy_level,
             "disable_duet": bool(tt_settings.get("disableDuet", config.get("disableDuet", False))),
             "disable_comment": bool(tt_settings.get("disableComment", config.get("disableComment", False))),
@@ -1062,9 +1100,41 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             post_info["brand_content_toggle"] = bool(content_disclosure.get("brandedContent"))
             post_info["brand_organic_toggle"] = bool(content_disclosure.get("yourBrand"))
 
-        # Use FILE_UPLOAD when we have a local file (TikTok requires domain
-        # ownership verification for PULL_FROM_URL, which is impractical).
-        if local_path and Path(local_path).expanduser().resolve().is_file():
+        # For Direct Post, prefer PULL_FROM_URL when we have a verified public URL.
+        # TikTok requires domain ownership verification for PULL_FROM_URL.
+        # For Publish Center flow, media is uploaded to server/storage first,
+        # so PULL_FROM_URL is the correct mode.
+        if post_mode == "DIRECT_POST" and public_url:
+            # Validate URL is under a verified prefix
+            _tiktok_validate_pull_from_url(public_url)
+            request_body = {
+                "post_info": post_info,
+                "source_info": {
+                    "source": "PULL_FROM_URL",
+                    "video_url": public_url,
+                },
+                "post_mode": post_mode,
+            }
+            response = http.post(
+                TIKTOK_VIDEO_INIT_URL,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+                json=request_body,
+                timeout=120,
+            )
+            if response.status_code != 200:
+                _raise_tiktok_error(response)
+            return {
+                "creator_info": creator_info,
+                "publish": _response_payload(response),
+                "request": request_body,
+                "updated_config": updated_config,
+                "access_token": access_token,
+            }
+        elif local_path and Path(local_path).expanduser().resolve().is_file():
+            # FILE_UPLOAD for local files (non-Direct-Post or no public URL)
             video_path = Path(local_path).expanduser().resolve()
             file_size = video_path.stat().st_size
             # TikTok sandbox requires total_chunk_count=1. The upload function
@@ -1139,9 +1209,17 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         public_urls = [item.get("public_url") or "" for item in media["images"][:35]]
         if not all(public_urls):
             raise PreparedPublishError("TikTok photo publish requires public image URLs")
+        # Validate all URLs against verified prefixes for Direct Post
+        if post_mode == "DIRECT_POST":
+            for url in public_urls:
+                _tiktok_validate_pull_from_url(url)
         _validate_tiktok_photo_payload(public_urls, message=message)
+        # Use reviewed title from TikTokPostSettings if present
+        reviewed_title = str(tt_settings.get("title") or "").strip()
+        photo_title = reviewed_title if reviewed_title else _message_title(payload)
+
         photo_post_info = {
-            "title": _message_title(payload),
+            "title": photo_title[:TIKTOK_MAX_CAPTION_CHARS],
             "description": message[:TIKTOK_MAX_CAPTION_CHARS],
             "privacy_level": privacy_level,
             "disable_comment": bool(tt_settings.get("disableComment", config.get("disableComment", False))),

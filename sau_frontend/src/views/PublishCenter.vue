@@ -614,11 +614,37 @@ async function openTiktokReview(accountId) {
 async function onTiktokReviewPublish() {
   tiktokReviewPublishing.value = true
   try {
-    await submitAfterTiktokReview()
+    // Mark current account as reviewed
+    const reviewedAccountId = tiktokReviewAccountId.value
     tiktokReviewVisible.value = false
+
+    // Check if there are more unreviewed TikTok accounts
+    const nextAccountId = getNextUnreviewedTiktokAccount()
+    if (nextAccountId !== null) {
+      // Open review for next account
+      await openTiktokReview(nextAccountId)
+    } else {
+      // All accounts reviewed, submit
+      await submitAfterTiktokReview()
+    }
   } finally {
     tiktokReviewPublishing.value = false
   }
+}
+
+function getNextUnreviewedTiktokAccount() {
+  for (const profileId of selectedProfileIds.value) {
+    const accounts = profileAccountCache[profileId] || []
+    for (const account of accounts) {
+      if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
+        const settings = tiktokPostSettings[account.id]
+        if (!settings?.consentChecked) {
+          return account.id
+        }
+      }
+    }
+  }
+  return null
 }
 
 // TikTok publish status polling
@@ -755,6 +781,15 @@ function getAccountAvatar(accountId) {
     if (found) return accountAvatar(found)
   }
   return ''
+}
+
+// Invalidate reviewed state when selection changes
+function invalidateTiktokReviewState() {
+  for (const accountId of Object.keys(tiktokPostSettings)) {
+    if (tiktokPostSettings[accountId]?.consentChecked) {
+      tiktokPostSettings[accountId].consentChecked = false
+    }
+  }
 }
 
 async function onProfileSelectionChanged() {
@@ -1205,6 +1240,8 @@ const disabledReason = computed(() => {
 
 // Re-fetch creator info when account selection changes
 watch(selectedAccountIds, async (newIds, oldIds) => {
+  // Invalidate reviewed state when account selection changes
+  invalidateTiktokReviewState()
   // Initialize settings for newly selected TikTok accounts
   for (const profileId of selectedProfileIds.value) {
     const accounts = profileAccountCache[profileId] || []
@@ -1215,6 +1252,11 @@ watch(selectedAccountIds, async (newIds, oldIds) => {
     }
   }
   await fetchTiktokCreatorInfo()
+}, { deep: true })
+
+// Invalidate reviewed state when media files change
+watch(mediaFiles, () => {
+  invalidateTiktokReviewState()
 }, { deep: true })
 
 function buildOptionsPayload() {
