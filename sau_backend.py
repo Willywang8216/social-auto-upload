@@ -273,6 +273,63 @@ def _ensure_legacy_db_ready() -> Path:
     return db_path
 
 
+# ---------------------------------------------------------------------------
+# Shared upload/file safety helpers
+# ---------------------------------------------------------------------------
+
+def _safe_upload_filename(raw: str) -> str:
+    """Sanitize an upload filename using werkzeug.secure_filename.
+
+    Raises ValueError if the sanitized name is empty (e.g. all-special-chars input).
+    """
+    from werkzeug.utils import secure_filename
+    safe = secure_filename(raw or "")
+    if not safe:
+        raise ValueError("invalid filename: resolves to empty after sanitization")
+    return safe
+
+
+def _is_valid_upload_key(key: str) -> bool:
+    """Validate that an upload key matches the expected pattern.
+
+    Expected format: uploads/<uuid>_<safe_filename>
+    Rejects: path traversal, control characters, absolute paths.
+    """
+    import re
+    if not key or not isinstance(key, str):
+        return False
+    # Reject path traversal and control characters
+    if '..' in key:
+        return False
+    if key.startswith('/'):
+        return False
+    if any(ord(c) < 32 for c in key):
+        return False
+    # Must match uploads/<uuid>_<filename> pattern
+    pattern = r'^uploads/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_[^/\\]+$'
+    return bool(re.match(pattern, key))
+
+
+def _resolve_video_file_path_safely(file_path: str) -> Path | None:
+    """Resolve a file path under videoFile, rejecting anything that escapes.
+
+    Returns the resolved Path if it's inside videoFile, None otherwise.
+    """
+    if not file_path or not isinstance(file_path, str):
+        return None
+    base = (Path(BASE_DIR) / "videoFile").resolve()
+    try:
+        resolved = (base / file_path).resolve()
+    except (ValueError, OSError):
+        return None
+    # Check that the resolved path is inside the base directory
+    try:
+        resolved.relative_to(base)
+    except ValueError:
+        return None
+    return resolved
+
+
 @app.before_request
 def _enforce_auth():
     """Bearer-token gate for every non-public route.
@@ -444,11 +501,14 @@ def upload_direct():
         if not filename:
             return jsonify({"code": 400, "msg": "filename is required", "data": None}), 400
 
+        safe_name = _safe_upload_filename(filename)
         import uuid as _uuid
-        key = f"uploads/{_uuid.uuid4()}_{filename}"
+        key = f"uploads/{_uuid.uuid4()}_{safe_name}"
         from myUtils import do_spaces
         result = do_spaces.generate_presigned_upload_url(key, content_type)
         return jsonify({"code": 200, "msg": "ok", "data": result}), 200
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     except Exception as exc:
         logging.getLogger(__name__).exception("upload_direct failed")
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
@@ -528,15 +588,27 @@ def upload_register():
         if not key or not filename:
             return jsonify({"code": 400, "msg": "filename and key required", "data": None}), 400
 
-        filesize_mb = round(size / (1024 * 1024), 2)
+        # Validate key format to prevent path traversal via malicious keys
+        # For storage keys (uploads/ prefix), we allow slashes but reject traversal
+        if '..' in key or key.startswith('/') or any(ord(c) < 32 for c in key):
+            return jsonify({"code": 400, "msg": "invalid key format", "data": None}), 400
+
+        safe_name = _safe_upload_filename(filename)
+        try:
+            filesize_mb = round(float(size) / (1024 * 1024), 2)
+        except (TypeError, ValueError):
+            filesize_mb = 0
+
         db_path = _ensure_legacy_db_ready()
         with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_cdn_url) VALUES (?, ?, ?, ?, ?)",
-                (filename, filesize_mb, key, key, public_url),
+                (safe_name, filesize_mb, key, key, public_url),
             )
         return jsonify({"code": 200, "msg": "ok", "data": None}), 200
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     except Exception as exc:
         logging.getLogger(__name__).exception("upload_register failed")
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
@@ -558,7 +630,7 @@ def multipart_upload_init():
             return jsonify({"code": 400, "msg": "filename is required", "data": None}), 400
 
         import uuid as _uuid
-        safe_name = filename.replace('/', '_').replace('\\', '_')
+        safe_name = _safe_upload_filename(filename)
         key = f"uploads/{_uuid.uuid4()}_{safe_name}"
 
         from myUtils import do_spaces
@@ -998,9 +1070,9 @@ def delete_file():
 
             record = dict(record)
 
-            # 获取文件路径并删除实际文件
-            file_path = Path(BASE_DIR / "videoFile" / record['file_path'])
-            if file_path.exists():
+            # 获取文件路径并删除实际文件 (safe path resolution)
+            file_path = _resolve_video_file_path_safely(record['file_path'])
+            if file_path and file_path.exists():
                 try:
                     file_path.unlink()  # 删除文件
                     print(f"✅ 实际文件已删除: {file_path}")
@@ -1008,7 +1080,7 @@ def delete_file():
                     print(f"⚠️ 删除实际文件失败: {e}")
                     # 即使删除文件失败，也要继续删除数据库记录，避免数据不一致
             else:
-                print(f"⚠️ 实际文件不存在: {file_path}")
+                print(f"⚠️ 实际文件不存在或路径不安全: {record.get('file_path')}")
 
             # Delete from remote storage if applicable
             if record.get('storage_key') and record.get('storage_backend_id'):
@@ -1056,8 +1128,8 @@ def delete_files_batch():
                         failed.append({'id': file_id, 'error': 'Not found'})
                         continue
                     record = dict(record)
-                    file_path = Path(BASE_DIR / "videoFile" / record['file_path'])
-                    if file_path.exists():
+                    file_path = _resolve_video_file_path_safely(record['file_path'])
+                    if file_path and file_path.exists():
                         try:
                             file_path.unlink()
                         except Exception:
@@ -2581,10 +2653,14 @@ def _download_file_from_storage(file_path: str, *, db_path: Path) -> Path | None
         return None
     from myUtils.do_spaces import client_from_row
     client = client_from_row(backend_row)
-    local_path = Path(BASE_DIR) / "videoFile" / file_path
+    local_path = _resolve_video_file_path_safely(file_path)
+    if not local_path:
+        logger.warning("Refusing to download to unsafe path: %s", file_path)
+        return None
     if local_path.exists():
         return local_path
     try:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
         client.download_file(row["storage_key"], local_path)
         return local_path
     except Exception:
@@ -2618,8 +2694,8 @@ def _cleanup_local_files(*, db_path: Path, max_age_hours: int = 24) -> int:
                   AND upload_time < datetime('now', ?)
             """, (f"-{max_age_hours} hours",)).fetchall()
             for row in rows:
-                local = Path(BASE_DIR) / "videoFile" / row["file_path"]
-                if local.exists():
+                local = _resolve_video_file_path_safely(row["file_path"])
+                if local and local.exists():
                     try:
                         local.unlink()
                         removed += 1
@@ -2646,10 +2722,10 @@ def _ensure_file_record_for_path(file_path: str, *, db_path: Path) -> int:
         if row is not None:
             return int(row[0])
 
-        absolute_path = Path(BASE_DIR) / "videoFile" / file_path
+        absolute_path = _resolve_video_file_path_safely(file_path)
         filename = Path(file_path).name
         filesize = None
-        if absolute_path.exists():
+        if absolute_path and absolute_path.exists():
             filesize = round(float(absolute_path.stat().st_size) / (1024 * 1024), 2)
         cursor = conn.execute(
             """
@@ -3742,8 +3818,6 @@ def youtube_oauth_callback():
             'status': 'ok',
             'accountId': updated.id,
             'accountName': updated.account_name,
-            'accessToken': merged_config.get('accessToken', ''),
-            'refreshToken': merged_config.get('refreshToken', ''),
             'channelId': merged_config.get('channelId', ''),
             'channelTitle': merged_config.get('channelTitle', ''),
             'scope': merged_config.get('scope', ''),
@@ -3931,8 +4005,6 @@ def reddit_oauth_callback():
             'status': 'ok',
             'accountId': updated.id,
             'accountName': updated.account_name,
-            'accessToken': merged_config.get('accessToken', ''),
-            'refreshToken': merged_config.get('refreshToken', ''),
             'redditUserName': merged_config.get('redditUserName', ''),
             'scope': merged_config.get('scope', ''),
             'accessTokenExpiresAt': merged_config.get('accessTokenExpiresAt', ''),
@@ -4126,8 +4198,6 @@ def twitter_oauth_callback():
             'status': 'ok',
             'accountId': updated.id,
             'accountName': updated.account_name,
-            'accessToken': merged_config.get('accessToken', ''),
-            'refreshToken': merged_config.get('refreshToken', ''),
             'twitterUserName': merged_config.get('twitterUserName', ''),
             'twitterDisplayName': merged_config.get('twitterDisplayName', ''),
             'twitterUserId': merged_config.get('twitterUserId', ''),
