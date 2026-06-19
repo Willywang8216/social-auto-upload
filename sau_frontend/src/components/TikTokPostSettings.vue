@@ -304,31 +304,42 @@ const postLimitReached = computed(() => {
   return false
 })
 
-// --- Interaction capabilities from creator_info ---
+// --- Interaction capabilities from creator_info (official TikTok field names) ---
 
 const commentDisabledByApp = computed(() => {
   const info = props.creatorInfo
   if (!info) return false
-  // TikTok returns "0" for disabled, "1" for enabled, or boolean
-  const val = info?.comment ?? info?.data?.comment
-  if (val === undefined || val === null) return false
-  return val === '0' || val === 0 || val === false
+  // Official field: comment_disabled (boolean)
+  const val = info?.comment_disabled ?? info?.data?.comment_disabled
+  if (val !== undefined && val !== null) return val === true || val === 1
+  // Legacy fallback
+  const legacy = info?.comment ?? info?.data?.comment
+  if (legacy === undefined || legacy === null) return false
+  return legacy === '0' || legacy === 0 || legacy === false
 })
 
 const duetDisabledByApp = computed(() => {
   const info = props.creatorInfo
   if (!info) return false
-  const val = info?.duet ?? info?.data?.duet
-  if (val === undefined || val === null) return false
-  return val === '0' || val === 0 || val === false
+  // Official field: duet_disabled (boolean)
+  const val = info?.duet_disabled ?? info?.data?.duet_disabled
+  if (val !== undefined && val !== null) return val === true || val === 1
+  // Legacy fallback
+  const legacy = info?.duet ?? info?.data?.duet
+  if (legacy === undefined || legacy === null) return false
+  return legacy === '0' || legacy === 0 || legacy === false
 })
 
 const stitchDisabledByApp = computed(() => {
   const info = props.creatorInfo
   if (!info) return false
-  const val = info?.stitch ?? info?.data?.stitch
-  if (val === undefined || val === null) return false
-  return val === '0' || val === 0 || val === false
+  // Official field: stitch_disabled (boolean)
+  const val = info?.stitch_disabled ?? info?.data?.stitch_disabled
+  if (val !== undefined && val !== null) return val === true || val === 1
+  // Legacy fallback
+  const legacy = info?.stitch ?? info?.data?.stitch
+  if (legacy === undefined || legacy === null) return false
+  return legacy === '0' || legacy === 0 || legacy === false
 })
 
 const commentDisabledReason = '此帳號在 TikTok 設定中已停用留言功能'

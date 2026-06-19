@@ -7,11 +7,27 @@
     :close-on-press-escape="false"
     @update:model-value="$emit('update:visible', $event)"
   >
+    <!-- Creator info loading -->
+    <div v-if="creatorInfoLoading" class="trm-loading">
+      <el-icon class="is-loading"><Loading /></el-icon>
+      <span>正在載入 TikTok 創作者資訊...</span>
+    </div>
+
+    <!-- Creator info error -->
+    <el-alert
+      v-else-if="creatorInfo?._error"
+      :title="`無法載入創作者資訊：${creatorInfo._error}`"
+      type="error"
+      :closable="false"
+      show-icon
+      style="margin-bottom: 16px;"
+    />
+
     <!-- Creator info panel -->
-    <div v-if="creatorInfo" class="trm-creator">
+    <div v-else-if="creatorInfo" class="trm-creator">
       <img
-        v-if="accountAvatar"
-        :src="accountAvatar"
+        v-if="creatorAvatarUrl || accountAvatar"
+        :src="creatorAvatarUrl || accountAvatar"
         class="trm-creator-avatar"
         alt=""
         @error="(e) => e.target.style.display = 'none'"
@@ -24,6 +40,16 @@
         剩餘發佈次數：{{ remainingPostCount }}
       </el-tag>
     </div>
+
+    <!-- No creator info -->
+    <el-alert
+      v-else
+      title="無法載入 TikTok 創作者資訊，請稍後再試。"
+      type="error"
+      :closable="false"
+      show-icon
+      style="margin-bottom: 16px;"
+    />
 
     <!-- Post limit warning -->
     <el-alert
@@ -208,11 +234,12 @@
 
 <script setup>
 import { computed } from 'vue'
-import { InfoFilled } from '@element-plus/icons-vue'
+import { InfoFilled, Loading } from '@element-plus/icons-vue'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
   creatorInfo: { type: Object, default: null },
+  creatorInfoLoading: { type: Boolean, default: false },
   accountAvatar: { type: String, default: '' },
   mediaPreviewUrl: { type: String, default: '' },
   isVideo: { type: Boolean, default: true },
@@ -236,6 +263,11 @@ const emit = defineEmits([
 ])
 
 // --- Creator info derived ---
+
+const creatorAvatarUrl = computed(() => {
+  const info = props.creatorInfo
+  return info?.creator_avatar_url || info?.data?.creator_avatar_url || ''
+})
 
 const creatorNickname = computed(() => {
   const info = props.creatorInfo
@@ -261,24 +293,36 @@ const privacyLevelOptions = computed(() => {
   return info?.privacy_level_options || info?.data?.privacy_level_options || []
 })
 
-// --- Interaction capabilities ---
+// --- Interaction capabilities (official TikTok field names) ---
 
 const commentDisabledByApp = computed(() => {
   const info = props.creatorInfo
-  const val = info?.comment ?? info?.data?.comment
-  return val === '0' || val === 0 || val === false
+  // Official field: comment_disabled (boolean)
+  const val = info?.comment_disabled ?? info?.data?.comment_disabled
+  if (val !== undefined && val !== null) return val === true || val === 1
+  // Legacy fallback
+  const legacy = info?.comment ?? info?.data?.comment
+  return legacy === '0' || legacy === 0 || legacy === false
 })
 
 const duetDisabledByApp = computed(() => {
   const info = props.creatorInfo
-  const val = info?.duet ?? info?.data?.duet
-  return val === '0' || val === 0 || val === false
+  // Official field: duet_disabled (boolean)
+  const val = info?.duet_disabled ?? info?.data?.duet_disabled
+  if (val !== undefined && val !== null) return val === true || val === 1
+  // Legacy fallback
+  const legacy = info?.duet ?? info?.data?.duet
+  return legacy === '0' || legacy === 0 || legacy === false
 })
 
 const stitchDisabledByApp = computed(() => {
   const info = props.creatorInfo
-  const val = info?.stitch ?? info?.data?.stitch
-  return val === '0' || val === 0 || val === false
+  // Official field: stitch_disabled (boolean)
+  const val = info?.stitch_disabled ?? info?.data?.stitch_disabled
+  if (val !== undefined && val !== null) return val === true || val === 1
+  // Legacy fallback
+  const legacy = info?.stitch ?? info?.data?.stitch
+  return legacy === '0' || legacy === 0 || legacy === false
 })
 
 const commentDisabledReason = '此帳號在 TikTok 設定中已停用留言功能'
@@ -322,19 +366,23 @@ function onDisclosureToggle(value) {
   }
 }
 
-// --- Declaration text ---
+// --- Declaration text (English required for TikTok review) ---
 
 const declarationText = computed(() => {
   if (props.contentDisclosureEnabled && props.brandedContent) {
-    return '發佈即表示您同意 TikTok 的品牌合作內容政策和音樂使用確認。'
+    return 'By posting, you agree to TikTok\'s Branded Content Policy and Music Usage Confirmation.'
   }
-  return '發佈即表示您同意 TikTok 的音樂使用確認。'
+  return 'By posting, you agree to TikTok\'s Music Usage Confirmation.'
 })
 
 // --- Validity ---
 
 const canPublish = computed(() => {
+  if (props.creatorInfoLoading) return false
+  if (props.creatorInfo?._error) return false
+  if (!props.creatorInfo) return false
   if (postLimitReached.value) return false
+  if (!props.title?.trim()) return false
   if (!props.privacyLevel) return false
   if (props.contentDisclosureEnabled && !props.yourBrand && !props.brandedContent) return false
   if (!props.consentChecked) return false
@@ -343,6 +391,17 @@ const canPublish = computed(() => {
 </script>
 
 <style scoped>
+.trm-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px;
+  background: #f5f7fa;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  color: #909399;
+}
+
 .trm-creator {
   display: flex;
   align-items: center;

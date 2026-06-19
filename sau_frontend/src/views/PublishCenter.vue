@@ -442,6 +442,7 @@
       :branded-content="tiktokPostSettings[tiktokReviewAccountId]?.brandedContent || false"
       :consent-checked="tiktokPostSettings[tiktokReviewAccountId]?.consentChecked || false"
       :publishing="tiktokReviewPublishing"
+      :creator-info-loading="tiktokCreatorInfoLoading"
       @update:title="updateTiktokReviewField('title', $event)"
       @update:privacy-level="updateTiktokReviewField('privacyLevel', $event)"
       @update:allow-comment="updateTiktokReviewField('allowComment', $event)"
@@ -564,6 +565,7 @@ const tiktokSettingsValidity = reactive({}) // accountId -> boolean
 const tiktokReviewVisible = ref(false)
 const tiktokReviewAccountId = ref(null)
 const tiktokReviewPublishing = ref(false)
+const tiktokCreatorInfoLoading = ref(false)
 
 function ensureTiktokSettings(accountId) {
   if (!tiktokPostSettings[accountId]) {
@@ -592,7 +594,7 @@ function updateTiktokReviewField(field, value) {
   }
 }
 
-function openTiktokReview(accountId) {
+async function openTiktokReview(accountId) {
   ensureTiktokSettings(accountId)
   // Set title from brief if not already set
   if (!tiktokPostSettings[accountId].title && brief.value) {
@@ -600,12 +602,19 @@ function openTiktokReview(accountId) {
   }
   tiktokReviewAccountId.value = accountId
   tiktokReviewVisible.value = true
+  // Always fetch fresh creator info when opening the modal (TikTok requirement)
+  tiktokCreatorInfoLoading.value = true
+  try {
+    await fetchSingleTiktokCreatorInfo(accountId)
+  } finally {
+    tiktokCreatorInfoLoading.value = false
+  }
 }
 
 async function onTiktokReviewPublish() {
   tiktokReviewPublishing.value = true
   try {
-    await submit()
+    await submitAfterTiktokReview()
     tiktokReviewVisible.value = false
   } finally {
     tiktokReviewPublishing.value = false
@@ -777,15 +786,22 @@ async function fetchTiktokCreatorInfo() {
         const accountId = account.id
         ensureTiktokSettings(accountId)
         if (!tiktokCreatorInfo[accountId]) {
-          try {
-            const resp = await tiktokApi.getCreatorInfo(accountId)
-            tiktokCreatorInfo[accountId] = resp?.data || resp || {}
-          } catch (err) {
-            tiktokCreatorInfo[accountId] = { _error: err?.message || 'Failed to fetch creator info' }
-          }
+          await fetchSingleTiktokCreatorInfo(accountId)
         }
       }
     }
+  }
+}
+
+// Always fetch fresh creator info (for modal use - no caching)
+async function fetchSingleTiktokCreatorInfo(accountId) {
+  try {
+    const resp = await tiktokApi.getCreatorInfo(accountId)
+    tiktokCreatorInfo[accountId] = resp?.data || resp || {}
+    return tiktokCreatorInfo[accountId]
+  } catch (err) {
+    tiktokCreatorInfo[accountId] = { _error: err?.message || 'Failed to fetch creator info' }
+    return tiktokCreatorInfo[accountId]
   }
 }
 
@@ -1319,18 +1335,31 @@ async function submit() {
   // TikTok's app review requires a dedicated review page with creator info,
   // metadata selection, commercial content disclosure, and explicit consent.
   // Open the review modal for the first TikTok account instead of a simple confirm dialog.
-  if (hasTiktokSelected.value) {
-    // Find first TikTok account
+  if (hasTiktokSelected.value && options.tiktokDirectPost) {
+    // Check if all TikTok accounts have been reviewed
+    const tiktokAccounts = []
     for (const profileId of selectedProfileIds.value) {
       const accounts = profileAccountCache[profileId] || []
       for (const account of accounts) {
         if (account.platform === 'tiktok' && selectedAccountIds.value.includes(account.id)) {
-          openTiktokReview(account.id)
-          return // submit will be called from the modal's publish event
+          tiktokAccounts.push(account)
         }
       }
     }
+    // Open review for first unreviewed account
+    for (const account of tiktokAccounts) {
+      const settings = tiktokPostSettings[account.id]
+      if (!settings?.consentChecked) {
+        openTiktokReview(account.id)
+        return // submit will be called from the modal's publish event
+      }
+    }
   }
+  await submitAfterTiktokReview()
+}
+
+// This function bypasses the modal opening and actually submits to the backend
+async function submitAfterTiktokReview() {
   submitting.value = true
   submitResult.value = null
   try {
