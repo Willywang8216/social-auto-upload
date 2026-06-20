@@ -387,5 +387,47 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertIn('2200', str(ctx.exception))
 
 
+class RaiseForStatusTests(unittest.TestCase):
+    """_raise_for_status surfaces the platform error and redacts tokens."""
+
+    def test_surfaces_platform_error_message(self):
+        class _Resp:
+            status_code = 400
+
+            def raise_for_status(self):
+                raise Exception("400 Bad Request")
+
+            def json(self):
+                return {"error": {"message": "API access blocked.", "code": 200, "type": "OAuthException"}}
+
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers._raise_for_status(_Resp())
+        message = str(ctx.exception)
+        self.assertIn("API access blocked.", message)
+        self.assertIn("code=200", message)
+
+    def test_redact_tokens_helper(self):
+        self.assertEqual(
+            prepared_publishers._redact_tokens("https://g/v1?access_token=ABC123&x=1"),
+            "https://g/v1?access_token=<redacted>&x=1",
+        )
+
+    def test_token_never_leaks_when_no_json_body(self):
+        class _Resp:
+            status_code = 400
+
+            def raise_for_status(self):
+                raise Exception("400 for url https://graph/v1?access_token=SUPERSECRET")
+
+            def json(self):
+                raise ValueError("no json")
+
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers._raise_for_status(_Resp())
+        message = str(ctx.exception)
+        self.assertNotIn("SUPERSECRET", message)
+        self.assertIn("<redacted>", message)
+
+
 if __name__ == "__main__":
     unittest.main()

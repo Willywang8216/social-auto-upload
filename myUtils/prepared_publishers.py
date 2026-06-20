@@ -8,6 +8,7 @@ import hmac
 import json
 import mimetypes
 import os
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -135,9 +136,42 @@ def _get_session(session=None):
     return requests.Session()
 
 
+_ACCESS_TOKEN_RE = re.compile(r"(access_token=)[^&\s\"']+", re.IGNORECASE)
+
+
+def _redact_tokens(text: str) -> str:
+    """Strip access_token values so they never reach logs, errors, or the UI."""
+    return _ACCESS_TOKEN_RE.sub(r"\1<redacted>", text or "")
+
+
 def _raise_for_status(response) -> None:
-    if hasattr(response, "raise_for_status"):
+    if not hasattr(response, "raise_for_status"):
+        return
+    try:
         response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        status = getattr(response, "status_code", "?")
+        detail = ""
+        try:
+            body = response.json()
+            err = body.get("error") if isinstance(body, dict) else None
+            if isinstance(err, dict):
+                bits = [str(err.get("message") or "").strip()]
+                for key in ("code", "error_subcode", "type"):
+                    value = err.get(key)
+                    if value not in (None, ""):
+                        bits.append(f"{key}={value}")
+                detail = " ".join(b for b in bits if b)
+            elif body:
+                detail = str(body)[:300]
+        except Exception:  # noqa: BLE001
+            detail = (getattr(response, "text", "") or "")[:300]
+        # Collapse whitespace (Meta messages contain newlines) and redact tokens
+        # so the access_token in the request URL never leaks into logs/UI.
+        detail = _redact_tokens(" ".join(str(detail).split()))
+        if detail:
+            raise PreparedPublishError(f"HTTP {status}: {detail}") from None
+        raise PreparedPublishError(_redact_tokens(str(exc))) from None
 
 
 def _raise_tiktok_error(response) -> None:

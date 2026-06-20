@@ -102,10 +102,11 @@ def _request_data_for_options(
     keys to empty/false so the downstream logic doesn't silently fall
     back to the profile defaults.
 
-    For TikTok Direct Post, uploadToRemote is forced to true if a rclone
-    remote is configured, since TikTok requires a public_url.
+    Remote hosting of media (for URL-fetch platforms like TikTok/Meta/
+    Threads) is decided downstream in ``_prepare_campaign_media_artifacts``
+    from the selected platforms and the configured storage backends; here we
+    only forward an explicit user ``uploadToRemote`` toggle.
     """
-    import os
     options = options or {}
     profile_settings = profile.settings or {}
     request_data: dict = {
@@ -141,23 +142,11 @@ def _request_data_for_options(
         else None,
     }
 
-    # Default to local-only artifacts so the Publish Center flow does
-    # not silently depend on a configured rclone remote. Existing
-    # /campaigns/prepare callers keep their env-driven default.
-    # EXCEPTION: TikTok Direct Post requires public_url, so force remote upload
-    # if TikTok is selected and uploadToRemote is not explicitly disabled.
-    selected_platforms = set(selected_platforms or set())
-    has_tiktok = "tiktok" in {p.lower() for p in selected_platforms}
-    has_rclone = bool(os.environ.get("SAU_DEFAULT_RCLONE_REMOTE", "").strip())
-
-    if has_tiktok and has_rclone and "uploadToRemote" not in options:
-        # TikTok + rclone configured + user didn't explicitly set uploadToRemote
-        request_data["uploadToRemote"] = True
-    elif "uploadToRemote" in options:
-        # User explicitly set uploadToRemote
+    # Only forward an explicit user toggle; the backend auto-enables remote
+    # hosting when a URL-fetch platform is selected and a public storage
+    # backend (share/DO Spaces/rclone) is configured.
+    if "uploadToRemote" in options:
         request_data["uploadToRemote"] = bool(options.get("uploadToRemote", False))
-    # Otherwise, don't set uploadToRemote in request_data so the backend
-    # can check the SAU_DEFAULT_RCLONE_REMOTE env var
 
     return request_data
 
