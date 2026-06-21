@@ -100,6 +100,11 @@ def _request_data_for_options(
     Note: when an option toggle is off we explicitly set the relevant
     keys to empty/false so the downstream logic doesn't silently fall
     back to the profile defaults.
+
+    Remote hosting of media (for URL-fetch platforms like TikTok/Meta/
+    Threads) is decided downstream in ``_prepare_campaign_media_artifacts``
+    from the selected platforms and the configured storage backends; here we
+    only forward an explicit user ``uploadToRemote`` toggle.
     """
     options = options or {}
     profile_settings = profile.settings or {}
@@ -136,10 +141,12 @@ def _request_data_for_options(
         else None,
     }
 
-    # Default to local-only artifacts so the Publish Center flow does
-    # not silently depend on a configured rclone remote. Existing
-    # /campaigns/prepare callers keep their env-driven default.
-    request_data["uploadToRemote"] = bool(options.get("uploadToRemote", False))
+    # Only forward an explicit user toggle; the backend auto-enables remote
+    # hosting when a URL-fetch platform is selected and a public storage
+    # backend (share/DO Spaces/rclone) is configured.
+    if "uploadToRemote" in options:
+        request_data["uploadToRemote"] = bool(options.get("uploadToRemote", False))
+
     return request_data
 
 

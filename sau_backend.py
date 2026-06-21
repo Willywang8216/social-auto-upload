@@ -36,6 +36,7 @@ from myUtils import publish_orchestrator
 from myUtils import publish_templates as template_store
 from myUtils import account_events
 from myUtils import rclone_storage
+from myUtils import media_remote_storage
 from myUtils import analytics_store
 from myUtils import analytics_sync
 from myUtils import analytics_advisor
@@ -75,6 +76,17 @@ from myUtils.worker import default_executor, run_worker_drain
 from utils.files_times import generate_schedule_time_next_day
 
 _worker_drain_lock = threading.Lock()
+
+# Platforms that publish by handing the platform a public media URL (the
+# platform fetches the bytes itself), so they require a publicly-reachable
+# HTTPS URL. Other platforms (cookie/browser uploaders, byte-upload APIs)
+# use the local file directly and do not need remote hosting.
+_REMOTE_URL_PLATFORMS = {
+    profile_registry.PLATFORM_TIKTOK,
+    profile_registry.PLATFORM_FACEBOOK,
+    profile_registry.PLATFORM_INSTAGRAM,
+    profile_registry.PLATFORM_THREADS,
+}
 
 # Map the legacy numeric `type` field to the platform slug used by the job runtime.
 LEGACY_PLATFORM_CODES = {
@@ -2824,12 +2836,19 @@ def _prepare_campaign_media_artifacts(
     selected_platforms: set[str] | None = None,
     db_path: Path,
 ) -> dict:
-    upload_to_remote = bool(
-        request_data.get("uploadToRemote", os.environ.get("SAU_DEFAULT_RCLONE_REMOTE"))
-    )
     watermark_spec = _derive_watermark_spec(profile, request_data)
     selected_platforms = set(selected_platforms or set())
     tiktok_only = selected_platforms == {profile_registry.PLATFORM_TIKTOK}
+    # Remote-host media only when a URL-fetch platform is targeted (TikTok/
+    # Meta/Threads pull media by URL). An explicit uploadToRemote overrides;
+    # otherwise enable automatically when such a platform is present and a
+    # public storage backend (share/DO Spaces/rclone) is configured.
+    needs_public_url = bool(selected_platforms & _REMOTE_URL_PLATFORMS)
+    _explicit_remote = request_data.get("uploadToRemote")
+    if _explicit_remote is not None:
+        upload_to_remote = bool(_explicit_remote)
+    else:
+        upload_to_remote = needs_public_url and media_remote_storage.is_any_backend_configured()
 
     # Resolve intro/outro file paths from profile settings
     profile_settings = profile.settings or {}
@@ -2981,7 +3000,7 @@ def _prepare_campaign_media_artifacts(
                     public_shot_url = None
                     if upload_to_remote:
                         try:
-                            remote_shot = rclone_storage.upload_artifact(
+                            remote_shot = media_remote_storage.upload_artifact(
                                 shot_path,
                                 campaign_id=campaign_id,
                                 artifact_subdir="screenshots",
@@ -3017,7 +3036,7 @@ def _prepare_campaign_media_artifacts(
         if upload_to_remote:
             remote_source = source_path if tiktok_only else publish_path
             remote_kind = "raw_remote_upload" if tiktok_only else "remote_upload"
-            remote_artifact = rclone_storage.upload_artifact(
+            remote_artifact = media_remote_storage.upload_artifact(
                 remote_source,
                 campaign_id=campaign_id,
                 artifact_subdir="videos" if _is_video_file(remote_source) else "images",
@@ -3034,7 +3053,7 @@ def _prepare_campaign_media_artifacts(
                 db_path=db_path,
             )
             if not tiktok_only and publish_path != source_path:
-                raw_remote_artifact = rclone_storage.upload_artifact(
+                raw_remote_artifact = media_remote_storage.upload_artifact(
                     source_path,
                     campaign_id=campaign_id,
                     artifact_subdir="videos" if _is_video_file(source_path) else "images",
@@ -3051,13 +3070,30 @@ def _prepare_campaign_media_artifacts(
                     db_path=db_path,
                 )
         else:
-            # No remote upload — serve the file via the local /getFile endpoint
-            # so platforms like TikTok (PULL_FROM_URL) can access it.
+            # No remote upload. Cookie/byte-upload platforms use the local file
+            # directly; only emit a /getFile URL when it would actually be
+            # reachable. Never hand a URL-fetch platform an unreachable
+            # localhost URL (that guarantees a downstream 4xx) — leave it None
+            # so the publisher raises a clear "no public media URL" error.
+            public_url = None
             try:
                 from flask import request as _flask_request
                 base_url = _flask_request.host_url.rstrip("/")
                 served_filename = Path(publish_path).name
-                public_url = f"{base_url}/getFile?filename={served_filename}"
+                candidate = f"{base_url}/getFile?filename={served_filename}"
+                _is_public = (
+                    base_url.startswith("https://")
+                    and "localhost" not in base_url
+                    and "127.0.0.1" not in base_url
+                )
+                if needs_public_url and not _is_public:
+                    logging.getLogger(__name__).warning(
+                        "campaign %d targets URL-fetch platforms but no public "
+                        "storage backend produced a URL; suppressing unreachable %s",
+                        campaign_id, candidate,
+                    )
+                else:
+                    public_url = candidate
             except RuntimeError:
                 public_url = None
             campaign_store.add_campaign_artifact(
@@ -5609,13 +5645,17 @@ def campaigns_prepare():
             raise ValueError("No enabled accounts selected for this profile")
 
         watermark_spec = _derive_watermark_spec(profile, data)
-        if any(account.platform == profile_registry.PLATFORM_TIKTOK for account in account_rows):
-            upload_to_remote = bool(
-                data.get("uploadToRemote", os.environ.get("SAU_DEFAULT_RCLONE_REMOTE"))
+        if any(account.platform in _REMOTE_URL_PLATFORMS for account in account_rows):
+            _explicit_remote = data.get("uploadToRemote")
+            upload_to_remote = (
+                bool(_explicit_remote)
+                if _explicit_remote is not None
+                else media_remote_storage.is_any_backend_configured()
             )
             if not upload_to_remote:
                 raise ValueError(
-                    "TikTok direct post 需要可公開存取的媒體 URL；請啟用 OneDrive/rclone 上傳或提供可公開讀取的媒體來源"
+                    "此發佈需要可公開存取的媒體 URL（TikTok/Meta/Threads 以 URL 抓取媒體）；"
+                    "請設定 SAU_SHARE_*（tgstate）或 DO_SPACES_* 物件儲存後再試。"
                 )
 
         invalid_accounts = []

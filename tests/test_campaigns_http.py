@@ -217,7 +217,7 @@ class CampaignApiTests(unittest.TestCase):
             uploads.append(Path(local_path).name)
             return _RemoteArtifact(local_path)
 
-        with patch.object(self.sau_backend.rclone_storage, "upload_artifact", side_effect=fake_upload),              patch.dict("os.environ", {"SAU_DEFAULT_RCLONE_REMOTE": "demo-remote", "TIKTOK_ACCESS_TOKEN": "token"}, clear=False):
+        with patch.object(self.sau_backend.media_remote_storage, "upload_artifact", side_effect=fake_upload),              patch.dict("os.environ", {"SAU_DEFAULT_RCLONE_REMOTE": "demo-remote", "TIKTOK_ACCESS_TOKEN": "token"}, clear=False):
             prepare_response = self.client.post(
                 "/campaigns/prepare",
                 json={
