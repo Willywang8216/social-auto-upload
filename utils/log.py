@@ -61,6 +61,7 @@ xiaohongshu_logger = create_logger('xiaohongshu', 'logs/xiaohongshu.log')
 medium_logger = create_logger('medium', 'logs/medium.log')
 substack_logger = create_logger('substack', 'logs/substack.log')
 patreon_logger = create_logger('patreon', 'logs/patreon.log')
+youtube_logger = create_logger('youtube', 'logs/youtube.log')
 worker_logger = create_logger('worker', 'logs/worker.log')
 
 

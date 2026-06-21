@@ -1,10 +1,57 @@
 # social-auto-upload
 
 `social-auto-upload` 是一个强大的自动化工具，旨在帮助内容创作者和运营者高效地将视频内容一键发布到多个国内外主流社交媒体平台。
-项目实现了对 `抖音`、`Bilibili`、`小红书`、`快手`、`视频号`、`百家号` 以及 `TikTok` 等平台的视频上传、定时发布等功能。
+项目实现了对 `抖音`、`Bilibili`、`小红书`、`快手`、`视频号`、`百家号`、`TikTok` 以及 `YouTube` 等平台的视频上传、定时发布等功能。
 结合各平台 `uploader` 模块，您可以轻松配置和扩展支持的平台，并通过示例脚本快速上手。
 
 <img src="media/show/tkupload.gif" alt="tiktok show" width="800"/>
+
+## 💎 赞助商
+
+<table width="100%">
+ <tr>
+    <td width="25%" align="center" valign="middle">
+      <a href="https://chilltion.com/?ref=1y5k5k">
+        <img src="static/DolOffer.png" alt="DolOffer Sponsor" width="180">
+      </a>
+    </td>
+    <td width="75%" align="left" valign="middle">
+      感谢 <a href="https://doloffer.com/" target="_blank">DolOffer</a> 对本项目的支持！对于做内容矩阵、多平台分发和 AI 自动化运营的创作者来说，ChatGPT、Claude、YouTube Premium、Spotify、Apple Music、Notion、Office 等数字工具往往是长期成本。DolOffer 提供 AI、视频、音乐和效率工具相关的订阅与充值服务，帮助用户更低成本地配置常用数字产品。更多说明可查看 <a href="https://github.com/Doloffer-g/guide" target="_blank">DolOffer Guide</a>。使用优惠码 <code>AI8888</code> 可额外享受 9 折优惠，具体价格和服务规则以官网为准。  
+    </td>
+  </tr>
+  <tr>
+    <td width="25%" align="center" valign="middle">
+      <a href="https://chilltion.com/?ref=1y5k5k">
+        <img src="static/chilltion.png" alt="chilltion Sponsor" width="180">
+      </a>
+    </td>
+    <td width="75%" align="left" valign="middle">
+      轻视AI：一句话生产MG动画，适合知识，科普，讲解，教程，介绍等类型视频的低成本制作，视频矩阵，养号等，成本只有seedance等1%。现在<a href="https://chilltion.com/?ref=1y5k5k">注册</a>送1500积分
+    </td>
+  </tr>
+    <tr>
+        <td width="25%" align="center" valign="middle">
+          <a href="http://t.clawpower.vip/1005">
+            <img src="static/clawpower.png" alt="ClawPower Sponsor" width="180">
+          </a>
+        </td>
+        <td width="75%" align="left" valign="middle">
+          ClawPower 是一家稳定可靠 AI 大模型中转服务商，提供 Claude、GPT、Gemini 60+ 大模型接入。无论是 OpenClaw、Hermes 智能体自动化场景，Claude Code、Codex 编程工具接入，还是公众号、小红书内容创作；都能获得稳定、顺滑、可长期使用的模型服务体验。低至官方价格的 30%，点击<a href="http://t.clawpower.vip/1005">免费领取 5 刀现金</a>体验券
+        </td>
+      </tr>
+  <tr>
+    <td width="25%" align="center" valign="middle">
+      <img src="static/wechat.png" alt="Sponsor Contact" width="150">
+    </td>
+    <td width="75%" align="left" valign="middle">
+      <strong>成为赞助商</strong><br>
+      如果您有意赞助本项目，请扫描左侧微信二维码（添加时请注明来意：<strong>赞助</strong>）。
+    </td>
+  </tr>
+</table>
+
+---
+
 
 ## 目录
 
@@ -32,6 +79,7 @@
 | 视频号 | ✅ | ✅ | ❌ | — | ✅ | ❌ | ❌ | 对应 `tencent_uploader` |
 | 百家号 | ✅ | ✅ | ❌ | — | ✅ | ❌ | ❌ | 浏览器自动化 |
 | TikTok | ✅ | ✅ | ❌ | — | ✅ | ❌ | ❌ | 当前示例走 Chrome 版实现 |
+| YouTube | ✅ | ✅ | ❌ | — | ❌ | ✅ | ❌ | 浏览器自动化（Studio），支持加入播放列表/可见性 |
 | Medium | ✅ | — | — | ✅ | ❌ (草稿/立即) | ✅ | 🚧 | 浏览器自动化，Medium API 已弃用 |
 | Substack | ✅ | — | — | ✅ | ✅ (定时) | ✅ | 🚧 | 浏览器自动化，每写手一个 publication 子域名 |
 
@@ -239,7 +287,18 @@ sau substack login --account <account_name> [--profile <slug>] --headed
 sau substack check --account <account_name> [--profile <slug>]
 sau substack upload-post --account <account_name> [--profile <slug>] \
     --publication acme --file post.md --title "Hello world" --tags ai,python
+
+sau youtube login --account <account_name>
+sau youtube check --account <account_name>
+sau youtube upload-video --account <account_name> --file videos/demo.mp4 --title "示例标题" --desc "示例简介" --tags tag1,tag2 --playlist "我的系列" --visibility public
 ```
+
+> YouTube 说明：登录是交互式的（Google 账号，浏览器里完成，无二维码）。这里走浏览器自动化而不是官方 API，
+> 是因为**未通过 Google 合规审核的 API 项目上传的视频会被强制锁为私享、无法改公开**，对个人/单频道不实用；
+> 浏览器自动化没有此限制，可直接发布公开视频，也与本项目其它平台的 cookie 方案一致。
+> `--playlist` 适合连载/系列追更；`--visibility` 可选 `public`/`unlisted`/`private`。
+> 上传会**等进度到 100% 再点发布**（浏览器上传靠窗口开着传，传一半就发布会被掐断卡在中途）。
+> youtube.com 被墙的地区：在 `conf.py` 设 `YT_PROXY = "http://127.0.0.1:7890"`（chromium 不吃系统代理，需显式指定）。
 
 补充说明：
 
@@ -316,24 +375,8 @@ sau substack upload-post --account <account_name> [--profile <slug>] \
     </td>
 </table>
 
-### Active Core Team
 
-<table>
-    <td align="center">
-        <a href="https://leedebug.github.io/">
-            <img src="media/edan-qrcode.png" width="200px" alt="Edan Lee"/>
-            <br />
-            <sub><b>Edan Lee</b></sub>
-        </a>
-        <br />
-        <a href="https://github.com/dreammis/social-auto-upload/commits?author=LeeDebug" title="Code">💻</a>
-        <a href="https://leedebug.github.io/" title="Documentation">📖</a>
-        <br />
-        封装了 api 接口和 web 前端管理界面
-        <br />
-        （请注明来意：进群、学习、企业咨询等）
-    </td>
-</table>
+
 
 ## 🤝贡献指南
 
@@ -351,6 +394,13 @@ sau substack upload-post --account <account_name> [--profile <slug>] \
 4.  Push到您的分支 (`git push origin feature/YourFeature`)。
 5.  创建一个 Pull Request。
 
+## 主要贡献者
+
+<a href="https://github.com/dreammis/social-auto-upload/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=dreammis/social-auto-upload" />
+</a>
+
+
 ## 🙏致谢
 
 本项目的 Bilibili 上传能力基于开源项目 `biliup` 的能力进行接入与封装。
@@ -366,7 +416,7 @@ sau substack upload-post --account <account_name> [--profile <slug>] \
 
 > 如果这个项目对您有帮助，请给一个 ⭐ Star 以表示支持！
 
-[![Star History Chart](https://api.star-history.com/svg?repos=dreammis/social-auto-upload&type=Date)](https://star-history.com/#dreammis/social-auto-upload&Date)
 
-## Community
-LINUX DO - The New Ideal Community
+
+
+[![Star History Chart](https://api.star-history.com/svg?repos=dreammis/social-auto-upload&type=Date)](https://star-history.com/#dreammis/social-auto-upload&Date)
