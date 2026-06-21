@@ -11,6 +11,12 @@ EXPECTED_QR_RUNTIME_DEPS = {
     "opencv-python-headless==4.13.0.92",
     "segno==1.6.6",
 }
+EXPECTED_BROWSER_RUNTIME_DEPS = {
+    "patchright==1.58.2",
+}
+FORBIDDEN_BROWSER_RUNTIME_DEPS = {
+    "playwright==1.52.0",
+}
 
 
 class DependencyManifestDriftTests(unittest.TestCase):
@@ -22,6 +28,20 @@ class DependencyManifestDriftTests(unittest.TestCase):
             with self.subTest(dependency=dependency):
                 self.assertIn(dependency, pyproject_dependencies)
                 self.assertIn(dependency, requirements_dependencies)
+
+    def test_pyproject_and_requirements_use_patchright_without_playwright(self) -> None:
+        pyproject_dependencies = self._read_pyproject_dependencies()
+        requirements_dependencies = self._read_requirements_dependencies()
+
+        for dependency in EXPECTED_BROWSER_RUNTIME_DEPS:
+            with self.subTest(dependency=dependency):
+                self.assertIn(dependency, pyproject_dependencies)
+                self.assertIn(dependency, requirements_dependencies)
+
+        for dependency in FORBIDDEN_BROWSER_RUNTIME_DEPS:
+            with self.subTest(dependency=dependency):
+                self.assertNotIn(dependency, pyproject_dependencies)
+                self.assertNotIn(dependency, requirements_dependencies)
 
     def _read_pyproject_dependencies(self) -> set[str]:
         dependencies: set[str] = set()
