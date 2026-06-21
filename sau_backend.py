@@ -6890,7 +6890,7 @@ def api_list_media_assets():
         limit=limit,
         offset=offset,
     )
-    return jsonify({"code": 200, "msg": "ok", "data": [a.to_dict() for a in assets]})
+    return jsonify([a.to_dict() for a in assets])
 
 
 @app.route("/api/media/assets/<int:asset_id>", methods=["GET"])
@@ -7349,7 +7349,7 @@ def api_list_sheet_exports():
     exports = sheet_export_service.list_sheet_exports(
         campaign_id=campaign_id, profile_id=profile_id
     )
-    return jsonify({"code": 200, "msg": "ok", "data": [e.to_dict() for e in exports]})
+    return jsonify([e.to_dict() for e in exports])
 
 
 _maybe_start_account_maintenance_scheduler()

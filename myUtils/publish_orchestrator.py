@@ -92,7 +92,6 @@ def _request_data_for_options(
     brief: str,
     options: dict,
     profile: profile_registry.Profile,
-    selected_platforms: set[str] | None = None,
 ) -> dict:
     """Translate Publish Center option toggles into the request payload
     shape expected by ``_prepare_campaign_media_artifacts`` and
@@ -101,11 +100,7 @@ def _request_data_for_options(
     Note: when an option toggle is off we explicitly set the relevant
     keys to empty/false so the downstream logic doesn't silently fall
     back to the profile defaults.
-
-    For TikTok Direct Post, uploadToRemote is forced to true if a rclone
-    remote is configured, since TikTok requires a public_url.
     """
-    import os
     options = options or {}
     profile_settings = profile.settings or {}
     request_data: dict = {
@@ -144,45 +139,8 @@ def _request_data_for_options(
     # Default to local-only artifacts so the Publish Center flow does
     # not silently depend on a configured rclone remote. Existing
     # /campaigns/prepare callers keep their env-driven default.
-    # EXCEPTION: TikTok Direct Post requires public_url, so force remote upload
-    # if TikTok is selected and uploadToRemote is not explicitly disabled.
-    selected_platforms = set(selected_platforms or set())
-    has_tiktok = "tiktok" in {p.lower() for p in selected_platforms}
-    has_rclone = bool(os.environ.get("SAU_DEFAULT_RCLONE_REMOTE", "").strip())
-
-    if has_tiktok and has_rclone and "uploadToRemote" not in options:
-        # TikTok + rclone configured + user didn't explicitly set uploadToRemote
-        request_data["uploadToRemote"] = True
-    elif "uploadToRemote" in options:
-        # User explicitly set uploadToRemote
-        request_data["uploadToRemote"] = bool(options.get("uploadToRemote", False))
-    # Otherwise, don't set uploadToRemote in request_data so the backend
-    # can check the SAU_DEFAULT_RCLONE_REMOTE env var
-
+    request_data["uploadToRemote"] = bool(options.get("uploadToRemote", False))
     return request_data
-
-
-def _account_health_check(account: profile_registry.Account) -> tuple[bool, str | None]:
-    """Check if an account is ready for publishing.
-
-    Returns (is_healthy, reason_if_unhealthy).
-    Reason is None if healthy, or a message explaining why it's not ready.
-    """
-    # Only check OAuth accounts for missing tokens
-    if account.auth_type != "oauth":
-        # Non-OAuth accounts (cookie, manual, etc.) are assumed healthy if enabled
-        return True, None
-
-    # OAuth accounts must have an access token
-    config = account.config or {}
-    access_token = config.get("accessToken") or config.get("access_token")
-    if not access_token:
-        # Check if there's an env reference
-        if config.get("accessTokenEnv"):
-            return True, None  # Assuming env is configured
-        return False, f"Missing access token for {account.account_name} ({account.platform}). Reconnect this account."
-
-    return True, None
 
 
 def _resolve_accounts(
@@ -190,38 +148,16 @@ def _resolve_accounts(
     selected_account_ids: list[int] | None,
     *,
     db_path: Path,
-) -> tuple[list[profile_registry.Account], list[dict]]:
-    """Resolve accounts and filter out unhealthy ones.
-
-    Returns (healthy_accounts, skipped_with_reasons).
-    """
+) -> list[profile_registry.Account]:
     rows = profile_registry.list_accounts(
         profile_id=profile_id,
         enabled=True,
         db_path=db_path,
     )
     if not selected_account_ids:
-        rows = list(rows)
-    else:
-        allowed = {int(account_id) for account_id in selected_account_ids}
-        rows = [account for account in rows if account.id in allowed]
-
-    # Filter out unhealthy accounts
-    healthy = []
-    skipped = []
-    for account in rows:
-        is_healthy, reason = _account_health_check(account)
-        if is_healthy:
-            healthy.append(account)
-        else:
-            skipped.append({
-                "accountId": account.id,
-                "accountName": account.account_name,
-                "platform": account.platform,
-                "reason": reason or "account_not_ready",
-            })
-
-    return healthy, skipped
+        return list(rows)
+    allowed = {int(account_id) for account_id in selected_account_ids}
+    return [account for account in rows if account.id in allowed]
 
 
 def _files_with_roles(media_files: list[dict]) -> list[dict]:
@@ -295,17 +231,13 @@ def submit_publish(
 
     for profile_id in profile_ids:
         profile = profile_registry.get_profile(int(profile_id), db_path=db_path)
-        accounts, health_skipped = _resolve_accounts(profile.id, selected_account_ids, db_path=db_path)
-        skipped.extend(health_skipped)
+        accounts = _resolve_accounts(profile.id, selected_account_ids, db_path=db_path)
         if not accounts:
             skipped.append({"profileId": profile.id, "reason": "no_enabled_accounts"})
             continue
 
         request_data = _request_data_for_options(
-            brief=brief,
-            options=options,
-            profile=profile,
-            selected_platforms={account.platform for account in accounts},
+            brief=brief, options=options, profile=profile
         )
         campaign = campaign_store.create_campaign(
             profile.id,
