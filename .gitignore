@@ -201,3 +201,9 @@ convo.txt
 
 # Playwright MCP data
 .playwright-mcp/
+
+# Claude internal worktree state
+.claude_work/
+
+# Playwright browser sessions (runtime)
+sessions/
