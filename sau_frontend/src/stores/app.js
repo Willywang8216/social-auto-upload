@@ -1,14 +1,42 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+
+const STORAGE_KEY = 'sau-theme'
+
+function loadTheme() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
+    return {
+      theme: saved.theme || 'dark',
+      accent: saved.accent || 'lime',
+      density: saved.density || 'comfortable',
+    }
+  } catch { return { theme: 'dark', accent: 'lime', density: 'comfortable' } }
+}
 
 export const useAppStore = defineStore('app', () => {
-  // 是否是第一次进入账号管理页面
-  const isFirstTimeAccountManagement = ref(true)
-  
-  // 是否是第一次进入素材管理页面
-  const isFirstTimeMaterialManagement = ref(true)
+  // ---- Theme / appearance ----
+  const saved = loadTheme()
+  const theme = ref(saved.theme)
+  const accent = ref(saved.accent)
+  const density = ref(saved.density)
 
-  // 账号管理页面刷新状态
+  function setTheme(v) { theme.value = v }
+  function setAccent(v) { accent.value = v }
+  function setDensity(v) { density.value = v }
+
+  // Persist + apply to <html>
+  watch([theme, accent, density], ([t, a, d]) => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ theme: t, accent: a, density: d }))
+    const el = document.documentElement
+    el.setAttribute('data-theme', t)
+    el.setAttribute('data-accent', a)
+    el.setAttribute('data-density', d)
+  }, { immediate: true })
+
+  // ---- Existing state ----
+  const isFirstTimeAccountManagement = ref(true)
+  const isFirstTimeMaterialManagement = ref(true)
   const isAccountRefreshing = ref(false)
 
   // 素材列表数据
@@ -60,6 +88,10 @@ export const useAppStore = defineStore('app', () => {
   }
 
   return {
+    // Theme
+    theme, accent, density,
+    setTheme, setAccent, setDensity,
+    // Existing
     isFirstTimeAccountManagement,
     isFirstTimeMaterialManagement,
     isAccountRefreshing,

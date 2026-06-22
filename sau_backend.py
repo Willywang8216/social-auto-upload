@@ -7416,5 +7416,189 @@ def _periodic_local_cleanup():
 
 threading.Thread(target=_periodic_local_cleanup, daemon=True, name="local-cleanup").start()
 
+
+# ====================================================================
+# /api/* aliases — thin wrappers for the redesigned frontend contract
+# ====================================================================
+
+def _import_cookies_for_account(platform, account, profile, fmt, payload, *, db_path):
+    """Import cookies from JSON or Netscape format for a given platform/account."""
+    import json as _json
+    cookies = []
+    payload = (payload or "").strip()
+    if fmt in ("json", "editthiscookie") or payload[:1] in "[{":
+        data = _json.loads(payload)
+        arr = data if isinstance(data, list) else data.get("cookies", [])
+        for item in arr:
+            if not isinstance(item, dict) or "name" not in item or "value" not in item:
+                continue
+            cookies.append({
+                "name": str(item["name"]),
+                "value": str(item["value"]),
+                "domain": str(item.get("domain") or ""),
+                "path": str(item.get("path") or "/"),
+                "expires": item.get("expires", -1),
+                "httpOnly": bool(item.get("httpOnly", False)),
+                "secure": bool(item.get("secure", False)),
+                "sameSite": str(item.get("sameSite") or "Lax"),
+            })
+    else:
+        # Netscape cookies.txt
+        for line in payload.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 7:
+                cookies.append({
+                    "domain": parts[0], "path": parts[2],
+                    "secure": parts[3] == "TRUE",
+                    "expires": int(parts[4]) if parts[4].isdigit() else -1,
+                    "name": parts[5], "value": parts[6],
+                })
+    if not cookies:
+        raise ValueError("No cookies parsed from payload")
+    # Write cookies to the cookie store
+    safe_name = f"{profile}__{platform}__{account}".replace("/", "_")
+    cookie_dir = Path(BASE_DIR / "cookiesFile")
+    cookie_dir.mkdir(parents=True, exist_ok=True)
+    cookie_path = cookie_dir / f"{safe_name}.cookie"
+    from myUtils import cookie_storage
+    try:
+        cookie_storage.write_cookie_file(cookie_path, cookies)
+    except Exception:
+        cookie_path.write_text(_json.dumps(cookies), encoding="utf-8")
+    os.chmod(cookie_path, 0o600)
+    return {"ok": True, "account": account, "cookieStatus": "valid", "count": len(cookies)}
+
+@app.route("/api/accounts", methods=["GET"])
+def api_accounts():
+    """Return all accounts with cookie status and expiry, matching the
+    redesigned frontend's expected shape."""
+    db_path = _current_db_path()
+    rows = profile_registry.list_accounts(db_path=db_path)
+    out = []
+    for a in rows:
+        config = a.config or {}
+        platform = a.platform or ""
+        account_name = a.account_name or ""
+        handle = ""
+        if platform == "facebook":
+            handle = config.get("facebookPageName") or ""
+        elif platform == "instagram":
+            handle = config.get("instagramUserName") or ""
+        elif platform == "threads":
+            handle = config.get("threadsUserName") or ""
+        elif platform == "tiktok":
+            handle = config.get("displayName") or config.get("openId") or ""
+        elif platform == "youtube":
+            handle = config.get("channelTitle") or ""
+        elif platform == "reddit":
+            handle = config.get("redditUserName") or ""
+        elif platform == "twitter":
+            handle = config.get("twitterUserName") or ""
+
+        # Derive cookie status from expiry
+        expiry_raw = ""
+        is_meta = platform in ("facebook", "instagram")
+        if is_meta:
+            expiry_raw = config.get("metaUserAccessTokenExpiresAt") or config.get("accessTokenExpiresAt") or ""
+        elif platform in ("tiktok", "reddit", "youtube", "threads", "twitter"):
+            expiry_raw = config.get("accessTokenExpiresAt") or ""
+
+        cookie_status = "valid"
+        expires_human = "session"
+        if expiry_raw:
+            try:
+                exp_dt = prepared_publishers._parse_iso_datetime(expiry_raw)
+                if exp_dt:
+                    left = (exp_dt - prepared_publishers._utc_now()).total_seconds()
+                    if left <= 0:
+                        cookie_status = "expired"
+                        expires_human = "expired"
+                    elif left <= 86400:
+                        cookie_status = "soon"
+                        d = int(left // 86400)
+                        expires_human = f"in {d} days" if d else f"in {int(left // 3600)} hours"
+                    else:
+                        d = int(left // 86400)
+                        expires_human = f"in {d} days"
+            except Exception:
+                pass
+
+        out.append({
+            "id": a.id,
+            "platform": platform,
+            "name": account_name,
+            "handle": handle,
+            "profile": getattr(a, "profile_name", "") or "default",
+            "posts": 0,
+            "cookieStatus": cookie_status,
+            "expiresAt": expires_human,
+        })
+    return jsonify({"code": 200, "data": out, "msg": "ok"})
+
+
+@app.route("/api/accounts/health", methods=["GET"])
+def api_accounts_health():
+    """Per-platform readiness summary."""
+    db_path = _current_db_path()
+    rows = profile_registry.list_accounts(db_path=db_path)
+    agg = {}
+    for a in rows:
+        h = agg.setdefault(a.platform, {"id": a.platform, "ready": 0, "total": 0})
+        h["total"] += 1
+        if a.enabled and a.status in (0, 1):
+            h["ready"] += 1
+    for h in agg.values():
+        h["pct"] = round(100 * h["ready"] / h["total"]) if h["total"] else 0
+    return jsonify({"code": 200, "data": list(agg.values()), "msg": "ok"})
+
+
+@app.route("/api/accounts/<int:account_id>/check", methods=["POST"])
+def api_account_check(account_id):
+    """Check an account's connection / cookie validity."""
+    try:
+        result = _run_account_connection_check(account_id=account_id, db_path=_current_db_path())
+        return jsonify({"code": 200, "data": {"ok": True, "message": "Connection valid"}, "msg": "ok"})
+    except Exception as exc:
+        return jsonify({"code": 400, "data": {"ok": False, "message": str(exc)}, "msg": str(exc)}), 400
+
+
+@app.route("/api/auth/cookies/<int:account_id>/export", methods=["GET"])
+def api_cookies_export(account_id):
+    """Export decrypted cookies for an account."""
+    db_path = _current_db_path()
+    account = profile_registry.get_account(account_id, db_path=db_path)
+    if not account:
+        return jsonify(error="Account not found"), 404
+    cookie_path = Path(account.cookie_path) if account.cookie_path else None
+    if not cookie_path or not cookie_path.exists():
+        return jsonify(error="No cookie file on record"), 404
+    try:
+        from myUtils import cookie_storage
+        data = cookie_storage.read_cookie_file(cookie_path)
+    except Exception:
+        data = json.loads(cookie_path.read_text(encoding="utf-8"))
+    return jsonify({"code": 200, "data": data, "msg": "ok"})
+
+
+@app.route("/api/auth/cookies/import", methods=["POST"])
+def api_cookies_import():
+    """Import cookies for an account (JSON or Netscape format)."""
+    b = request.get_json(force=True) or {}
+    platform = b.get("platform")
+    account = b.get("account") or "imported"
+    profile = b.get("profile") or "default"
+    fmt = b.get("format", "json")
+    payload = b.get("payload", "")
+    if not platform:
+        return jsonify(error="platform is required"), 400
+    try:
+        result = _import_cookies_for_account(platform, account, profile, fmt, payload, db_path=_current_db_path())
+        return jsonify({"code": 200, "data": result, "msg": "ok"})
+    except Exception as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5409, threaded=True)

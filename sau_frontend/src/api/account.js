@@ -41,5 +41,42 @@ export const accountApi = {
 
   getMaintenanceStatus() {
     return http.get('/accounts/maintenance/status')
+  },
+
+  // --- New endpoints for the Control Room redesign ---
+
+  // Export decrypted cookies for an account
+  exportCookies(accountId) {
+    return http.get(`/accounts/${accountId}/export-cookies`)
+  },
+
+  // Import cookies (JSON or Netscape format)
+  importCookies(platform, account, profile, format, payload) {
+    return http.post('/accounts/import-cookies', { platform, account, profile, format, payload })
+  },
+
+  // Get all accounts via the new /api/accounts endpoint (returns flat array)
+  getAccountsApi() {
+    return http.get('/api/accounts')
+  },
+
+  // Check a single account's connection / cookie validity
+  checkConnection(accountId) {
+    return http.post(`/accounts/${accountId}/check-connection`)
+  },
+
+  // Start a QR/browser login session
+  startLogin(platform, account, profile) {
+    return http.post('/auth/login/start', { platform, account, profile })
+  },
+
+  // Poll login session status
+  pollLogin(sessionId) {
+    return http.get(`/auth/login/${sessionId}`)
+  },
+
+  // Cancel a login session
+  cancelLogin(sessionId) {
+    return http.post(`/auth/login/${sessionId}/cancel`)
   }
 }

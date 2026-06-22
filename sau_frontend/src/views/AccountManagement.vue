@@ -1,2828 +1,366 @@
 <template>
-  <div class="account-management">
-    <div class="page-header">
-      <h1>帳號管理</h1>
-      <div class="profile-toolbar">
-        <el-select v-model="selectedProfileFilter" style="width: 260px" placeholder="篩選 Profile">
-          <el-option label="全部帳號" value="all" />
-          <el-option label="Legacy 帳號" value="legacy" />
-          <el-option
-            v-for="profile in profileOptions"
-            :key="profile.id"
-            :label="profile.name"
-            :value="String(profile.id)"
-          />
-        </el-select>
-        <el-select v-model="selectedRiskFilter" style="width: 220px" placeholder="篩選風險">
-          <el-option label="全部風險" value="all" />
-          <el-option label="24h 內到期" value="expiring_24h" />
-          <el-option label="7 天內到期" value="expiring_7d" />
-          <el-option label="已逾期" value="overdue" />
-          <el-option label="需要重連" value="reconnect_required" />
-        </el-select>
-        <el-select v-model="selectedSortMode" style="width: 200px" placeholder="排序方式">
-          <el-option label="依風險" value="urgency" />
-          <el-option label="依到期時間" value="expiry" />
-          <el-option label="依平台" value="platform" />
-          <el-option label="依 Profile" value="profile" />
-          <el-option label="依名稱" value="name" />
-        </el-select>
-        <el-button plain :loading="maintenanceLoading" :disabled="bulkRefreshTargets.length < 1 && selectedProfileFilter === 'legacy'" @click="runMaintenanceSweep">維護刷新</el-button>
-        <el-button type="primary" plain @click="openProfileDialog">新增 Profile</el-button>
-        <el-button v-if="selectedProfileId" plain @click="openEditProfileDialog">編輯 Profile</el-button>
+  <div class="fade-in">
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <div class="seg">
+        <button :class="{ on: filter === 'all' }" @click="filter = 'all'">All</button>
+        <button :class="{ on: filter === 'ready' }" @click="filter = 'ready'">Ready</button>
+        <button :class="{ on: filter === 'attn' }" @click="filter = 'attn'">Needs auth</button>
+      </div>
+      <span class="count">{{ filteredAccounts.length }} accounts · {{ platformCount }} platforms</span>
+      <div class="spacer"></div>
+      <button class="btn-ghost" @click="runHealthCheck">
+        <component :is="icons.spark" :width="15" :height="15" /> Run health check
+      </button>
+      <button class="btn-primary" @click="openConnect()">
+        <component :is="icons.plus" /> Connect Account
+      </button>
+    </div>
+
+    <!-- Account grid -->
+    <div class="acct-grid">
+      <div v-for="acct in filteredAccounts" :key="acct.id" class="acct">
+        <div class="acct-top">
+          <div class="acct-logo" :style="{ background: platformBg(acct.platformSlug) }">
+            {{ platformShort(acct.platformSlug) }}
+          </div>
+          <div style="flex:1;min-width:0">
+            <div class="acct-name">{{ acct.accountName }}</div>
+            <div class="acct-handle">{{ acct.connectionDetail || acct.platform }}</div>
+          </div>
+          <span class="cookie-pill" :class="cookieStatusClass(acct)">
+            <span class="d"></span>{{ cookieStatusLabel(acct) }}
+          </span>
+        </div>
+        <div class="acct-body">
+          <div class="acct-stat">
+            <div class="n" style="font-size:13px">{{ acct.connectionLabel }}</div>
+            <div class="l">Status</div>
+          </div>
+          <div class="acct-stat">
+            <div class="n" style="font-size:13px">{{ acct.platform }}</div>
+            <div class="l">Platform</div>
+          </div>
+          <div class="acct-stat">
+            <div class="n" style="font-size:13px">{{ expiryLabel(acct) }}</div>
+            <div class="l">Cookie</div>
+          </div>
+        </div>
+        <div class="acct-actions">
+          <button class="mini-btn" :class="{ accent: cookieStatusClass(acct) !== 'ck-valid' }" @click="onReauth(acct)">
+            <component :is="icons.oauth" :width="13" :height="13" />
+            {{ acct.connectionLabel === 'Ready' ? 'Re-auth' : 'Reconnect' }}
+          </button>
+          <button class="mini-btn" @click="onExport(acct)">
+            <component :is="icons.upload" :width="13" :height="13" /> Export
+          </button>
+          <button class="mini-btn" title="Remove" style="flex:0 0 38px" @click="onRemove(acct)">✕</button>
+        </div>
       </div>
     </div>
 
-    <div class="maintenance-banner">
-      <span>Scheduler：{{ maintenanceStatus.enabled ? 'enabled' : 'disabled' }}</span>
-      <span>Running：{{ maintenanceStatus.running ? 'yes' : 'no' }}</span>
-      <span>Last run：{{ maintenanceStatus.lastFinishedAt || '—' }}</span>
-      <span>Next run：{{ nextMaintenanceRunLabel }}</span>
-      <span v-if="maintenanceStatus.lastResult">Refreshed：{{ maintenanceStatus.lastResult.refreshed || 0 }}</span>
-      <span v-if="maintenanceStatus.lastError" class="maintenance-error">Last error：{{ maintenanceStatus.lastError }}</span>
+    <!-- Empty state -->
+    <div v-if="filteredAccounts.length === 0" class="empty-state">
+      <div class="empty-icon">📭</div>
+      <h3>No accounts found</h3>
+      <p>Connect your first social media account to get started.</p>
     </div>
 
-    <div class="account-tabs">
-      <el-tabs v-model="activeTab" class="account-tabs-nav">
-        <el-tab-pane label="全部" name="all">
-          <AccountTabPane
-            :accounts="filteredAccounts"
-            :search-keyword="searchKeyword"
-            :refreshing="appStore.isAccountRefreshing"
-            :bulk-check-loading="bulkCheckLoading"
-            :bulk-refresh-loading="bulkRefreshLoading"
-            :bulk-check-count="bulkCheckTargets.length"
-            :bulk-refresh-count="bulkRefreshTargets.length"
-            :sort-mode="selectedSortMode"
-            :sort-order="selectedSortOrder"
-            empty-text="目前沒有帳號資料"
-            @add="handleAddAccount"
-            @edit="handleEdit"
-            @delete="handleDelete"
-            @download-cookie="handleDownloadCookie"
-            @upload-cookie="handleUploadCookie"
-            @refresh="refreshAccounts"
-            @relogin="handleReLogin"
-            @health-check="runRowHealthCheck"
-            @bulk-check="runBulkHealthCheck"
-            @bulk-refresh="runBulkRefresh"
-            @search="onSearchChange"
-            @sort-change="onTableSortChange"
-          />
-        </el-tab-pane>
-        <el-tab-pane
-          v-for="platform in accountPlatformTabs"
-          :key="platform.value"
-          :label="platform.label"
-          :name="platform.value"
-        >
-          <AccountTabPane
-            :accounts="getFilteredAccountsByPlatform(platform.label)"
-            :search-keyword="searchKeyword"
-            :refreshing="appStore.isAccountRefreshing"
-            :bulk-check-loading="bulkCheckLoading"
-            :bulk-refresh-loading="bulkRefreshLoading"
-            :bulk-check-count="bulkCheckTargets.length"
-            :bulk-refresh-count="bulkRefreshTargets.length"
-            :sort-mode="selectedSortMode"
-            :sort-order="selectedSortOrder"
-            :empty-text="`目前沒有${platform.label}帳號資料`"
-            @add="handleAddAccount"
-            @edit="handleEdit"
-            @delete="handleDelete"
-            @download-cookie="handleDownloadCookie"
-            @upload-cookie="handleUploadCookie"
-            @refresh="refreshAccounts"
-            @relogin="handleReLogin"
-            @health-check="runRowHealthCheck"
-            @bulk-check="runBulkHealthCheck"
-            @bulk-refresh="runBulkRefresh"
-            @search="onSearchChange"
-            @sort-change="onTableSortChange"
-          />
-        </el-tab-pane>
-      </el-tabs>
-    </div>
-
-    <div class="recent-account-events">
-      <div class="section-header">
-        <h2>最近帳號操作</h2>
-        <el-button text @click="fetchRecentAccountEvents">重新載入</el-button>
-      </div>
-      <el-table :data="recentAccountEvents" style="width: 100%" v-loading="eventsLoading">
-        <el-table-column prop="created_at" label="時間" width="180" />
-        <el-table-column prop="platform" label="平台" width="120" />
-        <el-table-column prop="account_name" label="帳號" min-width="180" />
-        <el-table-column prop="action" label="操作" width="140" />
-        <el-table-column label="結果" width="100">
-          <template #default="scope">
-            <el-tag :type="scope.row.status === 'ok' ? 'success' : 'danger'" effect="plain">{{ scope.row.status }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="summary" label="摘要" min-width="260" />
-      </el-table>
-    </div>
-
-
-    <el-dialog
-      v-model="profileDialogVisible"
-      :title="profileDialogMode === 'add' ? '新增 Profile' : '編輯 Profile'"
-      width="560px"
-      :close-on-click-modal="false"
-    >
-      <el-form :model="profileForm" label-width="100px" ref="profileFormRef">
-        <el-form-item label="名稱" required>
-          <el-input v-model="profileForm.name" placeholder="例如：Brand A" />
-        </el-form-item>
-        <el-form-item label="描述">
-          <el-input v-model="profileForm.description" type="textarea" :rows="2" />
-        </el-form-item>
-        <el-form-item label="System Prompt">
-          <el-input v-model="profileForm.systemPrompt" type="textarea" :rows="4" />
-        </el-form-item>
-        <el-form-item label="浮水印">
-          <el-input v-model="profileForm.watermark" placeholder="文字浮水印" />
-        </el-form-item>
-        <el-form-item label="聯絡資訊">
-          <el-input v-model="profileForm.contactDetails" />
-        </el-form-item>
-        <el-form-item label="CTA">
-          <el-input v-model="profileForm.ctaText" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <span class="dialog-footer">
-          <el-button @click="profileDialogVisible = false">取消</el-button>
-          <el-button type="primary" @click="submitProfileForm">{{ profileDialogMode === 'add' ? '建立 Profile' : '更新 Profile' }}</el-button>
-        </span>
-      </template>
-    </el-dialog>
-
-    <el-dialog
-      v-model="dialogVisible"
-      :title="dialogType === 'add' ? '新增帳號' : '編輯帳號'"
-      width="720px"
-      :close-on-click-modal="false"
-      :close-on-press-escape="!sseConnecting"
-      :show-close="!sseConnecting"
-    >
-      <el-form :model="accountForm" label-width="110px" :rules="rules" ref="accountFormRef">
-        <el-form-item label="Profile">
-          <el-select
-            v-model="accountForm.profileId"
-            clearable
-            filterable
-            placeholder="留空代表 Legacy 帳號"
-            style="width: 100%"
-            :disabled="sseConnecting"
-          >
-            <el-option
-              v-for="profile in profileOptions"
-              :key="profile.id"
-              :label="profile.name"
-              :value="profile.id"
-            />
-          </el-select>
-          <div class="field-hint">選擇 Profile 後會使用新的 profile/account registry；留空則維持舊版 QR login 帳號。</div>
-        </el-form-item>
-
-        <el-form-item label="平台" prop="platform">
-          <el-select
-            v-model="accountForm.platform"
-            placeholder="請選擇平台"
-            style="width: 100%"
-            :disabled="sseConnecting"
-          >
-            <el-option
-              v-for="platform in accountPlatformTabs"
-              :key="platform.value"
-              :label="platform.label"
-              :value="platform.value"
-            />
-          </el-select>
-        </el-form-item>
-
-        <el-form-item label="名稱" prop="name">
-          <el-input
-            v-model="accountForm.name"
-            placeholder="請輸入帳號名稱"
-            :disabled="sseConnecting"
-          />
-        </el-form-item>
-
-        <!-- Quick-connect: for OAuth platforms, show only the Connect button on add -->
-        <template v-if="dialogType === 'add' && isOAuthPlatform(accountForm.platform) && accountForm.platform !== 'reddit' && accountForm.platform !== 'twitter'">
-          <el-divider content-position="left">{{ oAuthPlatformLabel(accountForm.platform) }} 設定</el-divider>
-          <el-form-item label="Connection">
-            <div class="quick-connect-row">
-              <el-button :type="'primary'" plain size="large" style="width:100%" @click="quickConnect()">
-                Connect with {{ oAuthPlatformLabel(accountForm.platform) }}
-              </el-button>
-            </div>
-            <div class="field-hint">帳號會自動儲存，然後彈出 {{ oAuthPlatformLabel(accountForm.platform) }} OAuth 授權視窗。</div>
-          </el-form-item>
-        </template>
-
-        <!-- Reddit add flow: support both OAuth and cookie -->
-        <template v-if="dialogType === 'add' && accountForm.platform === 'reddit'">
-          <el-divider content-position="left">Reddit 設定</el-divider>
-          <el-form-item label="Auth type">
-            <el-select v-model="accountForm.redditAuthType" style="width: 100%">
-              <el-option label="API (OAuth)" value="api" />
-              <el-option label="Cookie-based (browser)" value="cookie" />
-            </el-select>
-          </el-form-item>
-          <template v-if="accountForm.redditAuthType === 'api'">
-            <el-form-item label="Connection">
-              <div class="quick-connect-row">
-                <el-button :type="'primary'" plain size="large" style="width:100%" @click="quickConnect()">
-                  Connect with Reddit
-                </el-button>
-              </div>
-              <div class="field-hint">帳號會自動儲存，然後彈出 Reddit OAuth 授權視窗。</div>
-            </el-form-item>
-          </template>
-          <template v-else>
-            <div class="quick-connect-row" style="margin-bottom: 10px;">
-              <el-button :type="'primary'" plain size="large" style="width:100%" @click="acquireCookie()">
-                Login with Browser
-              </el-button>
-            </div>
-            <div class="field-hint">點擊後彈出瀏覽器，在 Reddit 登入後 cookie 會自動儲存到 <code>cookies/reddit/&lt;profile&gt;/&lt;name&gt;.json</code></div>
-            <el-form-item label="Cookie 路徑">
-              <el-input v-model="accountForm.cookiePath" placeholder="自動產生" />
-            </el-form-item>
-          </template>
-          <el-form-item label="Subreddits">
-            <el-input
-              v-model="accountForm.subredditsText"
-              type="textarea"
-              :rows="3"
-              placeholder="用逗號或換行分隔，例如：suba, subb"
-            />
-          </el-form-item>
-          <el-form-item label="User Agent">
-            <el-input v-model="accountForm.userAgent" placeholder="可選，自訂 Reddit User-Agent" />
-          </el-form-item>
-        </template>
-
-        <!-- Non-OAuth structured platforms: show config fields directly on add -->
-        <template v-if="dialogType === 'add' && isStructuredAccountForm && !isOAuthPlatform(accountForm.platform)">
-          <el-divider content-position="left">{{ platformLabel(accountForm.platform) }} 設定</el-divider>
-          <div class="field-hint" style="margin-bottom: 12px;">
-            <template v-if="accountForm.platform === 'telegram'">
-              使用 Telegram Bot API。請先在 @BotFather 建立 Bot，將 Bot 加入目標頻道/群組並設為管理員，然後填入 Bot Token 和 Chat ID。
-            </template>
-            <template v-else-if="accountForm.platform === 'discord'">
-              使用 Discord Webhook。請先在 Discord 頻道設定 → 整合 → Webhook 中建立 Webhook，複製 URL。
-            </template>
+    <!-- Connect modal -->
+    <div v-if="showConnect" class="overlay" @click="showConnect = false">
+      <div class="modal" @click.stop>
+        <div class="modal-head">
+          <div class="dz-ic" style="width:38px;height:38px;border-radius:10px">
+            <component :is="icons.oauth" :width="18" :height="18" />
           </div>
-          <template v-if="accountForm.platform === 'telegram'">
-            <AccountTextFieldList :fields="telegramFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-          </template>
-          <template v-else-if="accountForm.platform === 'discord'">
-            <AccountTextFieldList :fields="discordFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-          </template>
-        </template>
-
-        <!-- Twitter add flow: supports both cookie and OAuth 2.0 -->
-        <template v-if="dialogType === 'add' && isStructuredAccountForm && accountForm.platform === 'twitter'">
-          <el-divider content-position="left">X / Twitter 設定</el-divider>
-          <div class="field-hint" style="margin-bottom: 12px;">
-            X / Twitter 支援兩種方式：Cookie（瀏覽器登入）或 OAuth 2.0 API。<br/>
-            Cookie 模式使用瀏覽器登入取得 cookie；API 模式使用 OAuth 2.0 授權，支持自動 token 刷新。
+          <div>
+            <h2>{{ connectData.account ? 'Re-authorize account' : 'Connect an account' }}</h2>
+            <div class="ms">Capture &amp; encrypt a platform session</div>
           </div>
-          <el-form-item label="Auth type">
-            <el-select v-model="accountForm.twitterAuthType" style="width: 100%">
-              <el-option label="Cookie-based (browser login)" value="cookie" />
-              <el-option label="OAuth 2.0 API" value="api" />
-            </el-select>
-          </el-form-item>
-          <template v-if="accountForm.twitterAuthType === 'cookie'">
-            <div class="quick-connect-row" style="margin-bottom: 10px;">
-              <el-button :type="'primary'" plain size="large" style="width:100%" @click="acquireCookie()">
-                Login with Browser
-              </el-button>
+          <button class="modal-x" @click="showConnect = false">✕</button>
+        </div>
+
+        <div class="modal-body">
+          <!-- Platform picker -->
+          <label style="display:block;font-size:12px;font-weight:600;color:var(--text-2);margin-bottom:8px">Platform</label>
+          <div class="plat-grid">
+            <div
+              v-for="p in allPlatforms"
+              :key="p.slug"
+              class="plat-pick"
+              :class="{ on: connectData.platform === p.slug }"
+              @click="connectData.platform = p.slug"
+            >
+              <div class="acct-logo" :style="{ background: p.color, width: '32px', height: '32px', borderRadius: '9px', fontSize: '13px' }">
+                {{ p.short }}
+              </div>
+              <span class="pn">{{ p.label }}</span>
             </div>
-            <div class="field-hint">點擊後彈出瀏覽器，在 X 登入後 cookie 會自動儲存到 <code>cookies/twitter/&lt;profile&gt;/&lt;name&gt;.json</code></div>
-            <el-form-item label="Cookie 路徑">
-              <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
-            </el-form-item>
-          </template>
-          <template v-else>
-            <div class="quick-connect-row" style="margin-bottom: 10px;">
-              <el-button :type="'primary'" plain size="large" style="width:100%" @click="connectWithTwitterApi()">
-                Connect with X / Twitter (OAuth 2.0)
-              </el-button>
+          </div>
+
+          <template v-if="connectData.platform">
+            <div style="display:flex;gap:12px;margin-top:18px">
+              <div class="field" style="flex:1;margin-top:0">
+                <label>Account name</label>
+                <input class="input" placeholder="e.g. acme.official" v-model="connectData.account" />
+              </div>
+              <div class="field" style="flex:1;margin-top:0">
+                <label>Profile</label>
+                <input class="input" v-model="connectData.profile" />
+              </div>
             </div>
-            <div class="field-hint">通過 OAuth 2.0 授權連接 X / Twitter 帳號，支持自動 token 刷新</div>
-            <AccountTextFieldList :fields="twitterFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-          </template>
-        </template>
 
-        <!-- Full edit panel: only shown when editing an existing account -->
-        <template v-if="dialogType === 'edit' && isStructuredAccountForm">
-          <el-form-item label="登入方式">
-            <el-select v-model="accountForm.authType" style="width: 100%">
-              <el-option label="cookie" value="cookie" />
-              <el-option label="oauth" value="oauth" />
-              <el-option label="manual" value="manual" />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item label="啟用狀態">
-            <el-switch v-model="accountForm.enabled" active-text="啟用" inactive-text="停用" />
-          </el-form-item>
-
-          <el-form-item v-if="accountForm.authType === 'cookie'" label="Cookie 路徑">
-            <el-input
-              v-model="accountForm.cookiePath"
-              placeholder="可留空，後端會依 Profile/平台自動產生"
-            />
-          </el-form-item>
-
-          <el-form-item label="Sheet Preset">
-            <el-input v-model="accountForm.sheetPostPreset" placeholder="對應 Google Sheet / 排程工具 preset 名稱" />
-          </el-form-item>
-
-          <template v-if="accountForm.platform === 'reddit'">
-            <el-divider content-position="left">Reddit 設定</el-divider>
-            <el-form-item label="Auth type">
-              <el-select v-model="accountForm.redditAuthType" style="width: 100%">
-                <el-option label="API (env keys)" value="api" />
-                <el-option label="Cookie-based (browser)" value="cookie" />
-              </el-select>
-            </el-form-item>
-            <template v-if="accountForm.redditAuthType === 'api'">
-              <el-form-item label="OAuth health">
-                <AccountConnectionPanel :rows="redditHealthRows" :actions="redditHealthActions" />
-              </el-form-item>
-              <AccountTextFieldList :fields="redditFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-            </template>
-            <template v-else>
-              <div class="quick-connect-row" style="margin-bottom: 10px;">
-                <el-button :type="'primary'" plain size="large" style="width:100%" @click="acquireCookie()">
-                  Login with Browser
-                </el-button>
-              </div>
-              <div class="quick-connect-row" style="margin-bottom: 10px;">
-                <el-button size="large" style="width:100%" @click="showCookieImport = true">
-                  Paste Cookies
-                </el-button>
-              </div>
-              <div class="field-hint">Login with Browser (Docker 需有 GUI) 或從瀏覽器 DevTools 貼上 Cookie</div>
-              <el-form-item label="Cookie 路徑">
-                <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
-              </el-form-item>
-            </template>
-            <el-form-item label="Subreddits">
-              <el-input
-                v-model="accountForm.subredditsText"
-                type="textarea"
-                :rows="3"
-                placeholder="用逗號或換行分隔，例如：suba, subb"
-              />
-            </el-form-item>
-            <el-form-item label="User Agent">
-              <el-input v-model="accountForm.userAgent" placeholder="可選，自訂 Reddit User-Agent" />
-            </el-form-item>
-          </template>
-
-          <template v-else-if="accountForm.platform === 'telegram'">
-            <el-divider content-position="left">Telegram 設定</el-divider>
-            <el-form-item label="Connection health">
-              <AccountConnectionPanel :rows="telegramHealthRows" :actions="telegramHealthActions" />
-            </el-form-item>
-            <AccountTextFieldList :fields="telegramFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-            <el-form-item label="Parse Mode">
-              <el-select v-model="accountForm.parseMode" clearable style="width: 100%">
-                <el-option label="HTML" value="HTML" />
-                <el-option label="MarkdownV2" value="MarkdownV2" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="靜默發送">
-              <el-switch v-model="accountForm.silent" />
-            </el-form-item>
-            <el-form-item label="關閉預覽">
-              <el-switch v-model="accountForm.disableWebPreview" />
-            </el-form-item>
-          </template>
-
-          <template v-else-if="accountForm.platform === 'youtube'">
-            <el-divider content-position="left">YouTube 設定</el-divider>
-            <el-form-item label="OAuth health">
-              <AccountConnectionPanel :rows="youtubeHealthRows" :actions="youtubeHealthActions" />
-            </el-form-item>
-            <AccountTextFieldList :fields="youtubeIdentityFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-            <el-form-item label="隱私狀態">
-              <el-select v-model="accountForm.privacyStatus" style="width: 100%">
-                <el-option label="private" value="private" />
-                <el-option label="unlisted" value="unlisted" />
-                <el-option label="public" value="public" />
-              </el-select>
-            </el-form-item>
-            <AccountTextFieldList :fields="youtubeFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-          </template>
-
-          <template v-else-if="accountForm.platform === 'facebook'">
-            <el-divider content-position="left">Facebook 設定</el-divider>
-            <el-form-item label="Connection health">
-              <AccountConnectionPanel :rows="facebookHealthRows" :actions="facebookHealthActions" />
-            </el-form-item>
-            <AccountTextFieldList :fields="facebookFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-          </template>
-
-          <template v-else-if="accountForm.platform === 'instagram'">
-            <el-divider content-position="left">Instagram 設定</el-divider>
-            <el-form-item label="Connection health">
-              <AccountConnectionPanel :rows="instagramHealthRows" :actions="instagramHealthActions" />
-            </el-form-item>
-            <AccountTextFieldList :fields="instagramFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-          </template>
-
-          <template v-else-if="accountForm.platform === 'threads'">
-            <el-divider content-position="left">Threads 設定</el-divider>
-            <el-form-item label="Connection health">
-              <AccountConnectionPanel :rows="threadsHealthRows" :actions="threadsHealthActions" />
-            </el-form-item>
-            <AccountTextFieldList :fields="threadsFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-          </template>
-
-          <template v-else-if="accountForm.platform === 'tiktok'">
-            <el-divider content-position="left">TikTok 設定</el-divider>
-            <el-form-item label="Connect with TikTok">
-              <div class="tiktok-connect-row">
-                <el-button type="primary" @click="connectWithTikTok">Connect with TikTok</el-button>
-                <el-button plain @click="refreshTikTokToken" :disabled="!accountForm.id">Refresh TikTok token</el-button>
-                <el-button plain @click="openTikTokReviewStatus">Open callback status</el-button>
-              </div>
-              <div class="field-hint">這會走 TikTok Login Kit for Web，並使用後端設定的 TikTok Redirect URI。</div>
-            </el-form-item>
-            <el-form-item label="Connected account">
-              <div class="tiktok-connected-preview">
-                <el-avatar v-if="accountForm.tiktokAvatarUrl" :src="accountForm.tiktokAvatarUrl" :size="40" />
-                <div class="tiktok-connected-text">
-                  <div><strong>{{ accountForm.tiktokDisplayName || 'Not connected yet' }}</strong></div>
-                  <div class="field-hint">Open ID: {{ accountForm.openId || '—' }}</div>
-                  <div class="field-hint">Scope: {{ accountForm.tiktokScope || '—' }}</div>
+            <!-- Method tabs -->
+            <div class="method-tabs" style="margin-top:18px">
+              <div class="method-tab" :class="{ on: connectMethod === 'qr' }" @click="connectMethod = 'qr'">
+                <div class="mi"><component :is="icons.oauth" :width="16" :height="16" /></div>
+                <div>
+                  <div class="mt">Scan to log in</div>
+                  <div class="md">QR / browser login</div>
                 </div>
               </div>
-            </el-form-item>
-            <el-form-item label="Connection health">
-              <AccountConnectionPanel :rows="tiktokHealthRows" />
-            </el-form-item>
-            <AccountTextFieldList :fields="tiktokTokenFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-            <el-form-item label="Publish Mode">
-              <el-select v-model="accountForm.publishMode" style="width: 100%">
-                <el-option label="direct" value="direct" />
-                <el-option label="draft" value="draft" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="Privacy Level">
-              <el-select v-model="accountForm.privacyLevel" style="width: 100%">
-                <el-option label="PUBLIC_TO_EVERYONE" value="PUBLIC_TO_EVERYONE" />
-                <el-option label="MUTUAL_FOLLOW_FRIENDS" value="MUTUAL_FOLLOW_FRIENDS" />
-                <el-option label="SELF_ONLY" value="SELF_ONLY" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="關閉留言">
-              <el-switch v-model="accountForm.disableComment" />
-            </el-form-item>
-            <el-form-item label="關閉 Duet">
-              <el-switch v-model="accountForm.disableDuet" />
-            </el-form-item>
-            <el-form-item label="關閉 Stitch">
-              <el-switch v-model="accountForm.disableStitch" />
-            </el-form-item>
-            <el-form-item label="自動配樂（圖片）">
-              <el-switch v-model="accountForm.autoAddMusic" />
-            </el-form-item>
-            <div class="field-hint">注意：TikTok 官方 Content Posting API 不允許品牌/促銷浮水印內容。</div>
-          </template>
-
-          <template v-else-if="accountForm.platform === 'discord'">
-            <el-divider content-position="left">Discord 設定</el-divider>
-            <el-form-item label="Connection health">
-              <AccountConnectionPanel :rows="discordHealthRows" :actions="discordHealthActions" />
-            </el-form-item>
-            <AccountTextFieldList :fields="discordFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-          </template>
-
-          <template v-else-if="accountForm.platform === 'twitter'">
-            <el-divider content-position="left">X / Twitter 設定</el-divider>
-            <el-form-item label="Auth type">
-              <el-select v-model="accountForm.twitterAuthType" style="width: 100%">
-                <el-option label="Cookie-based (legacy)" value="cookie" />
-                <el-option label="OAuth 2.0 API" value="api" />
-              </el-select>
-            </el-form-item>
-            <template v-if="accountForm.twitterAuthType === 'cookie'">
-              <div class="quick-connect-row" style="margin-bottom: 10px;">
-                <el-button :type="'primary'" plain size="large" style="width:100%" @click="acquireCookie()">
-                  Login with Browser
-                </el-button>
+              <div class="method-tab" :class="{ on: connectMethod === 'import' }" @click="connectMethod = 'import'">
+                <div class="mi"><component :is="icons.upload" :width="16" :height="16" /></div>
+                <div>
+                  <div class="mt">Import cookies</div>
+                  <div class="md">Paste / upload JSON</div>
+                </div>
               </div>
-              <div class="field-hint">點擊後彈出瀏覽器，在 X 登入後 cookie 會自動儲存到 <code>cookies/twitter/&lt;profile&gt;/&lt;name&gt;.json</code></div>
-              <el-form-item label="Cookie 路徑">
-                <el-input v-model="accountForm.cookiePath" placeholder="可留空，後端會依 Profile/平台自動產生" />
-              </el-form-item>
-            </template>
-            <template v-else>
-              <el-form-item label="Connection health">
-                <AccountConnectionPanel :rows="twitterHealthRows" :actions="twitterHealthActions" />
-              </el-form-item>
-              <AccountTextFieldList :fields="twitterFieldDefs" :model-value="accountForm" @update-field="updateAccountFormField" />
-            </template>
-          </template>
+            </div>
 
-          <template v-else-if="accountForm.platform === 'patreon'">
-            <el-divider content-position="left">Patreon 設定</el-divider>
-            <el-form-item label="Connection health" v-if="isStructuredAccountForm && accountForm.id">
-              <AccountConnectionPanel :rows="patreonHealthRows" :actions="patreonHealthActions" />
-            </el-form-item>
-            <el-form-item label="Auth type">
-              <el-select v-model="accountForm.patreonAuthType" style="width: 100%">
-                <el-option label="Cookie-based (browser login)" value="cookie" />
-                <el-option label="OAuth API" value="api" />
-              </el-select>
-            </el-form-item>
-            <template v-if="accountForm.patreonAuthType === 'cookie'">
-              <div class="quick-connect-row" style="margin-bottom: 10px;">
-                <el-button type="primary" plain size="large" style="width:100%" @click="acquireCookie()">
-                  Login with Browser
-                </el-button>
+            <!-- QR method -->
+            <div v-if="connectMethod === 'qr'" class="qr-wrap">
+              <div class="qr-box">
+                <svg viewBox="0 0 25 25" shape-rendering="crispEdges">
+                  <rect x="0" y="0" width="25" height="25" fill="#fff" />
+                  <rect x="0" y="0" width="7" height="7" fill="#0a0a0d" />
+                  <rect x="1" y="1" width="5" height="5" fill="#fff" />
+                  <rect x="2" y="2" width="3" height="3" fill="#0a0a0d" />
+                  <rect x="18" y="0" width="7" height="7" fill="#0a0a0d" />
+                  <rect x="19" y="1" width="5" height="5" fill="#fff" />
+                  <rect x="20" y="2" width="3" height="3" fill="#0a0a0d" />
+                  <rect x="0" y="18" width="7" height="7" fill="#0a0a0d" />
+                  <rect x="1" y="19" width="5" height="5" fill="#fff" />
+                  <rect x="2" y="20" width="3" height="3" fill="#0a0a0d" />
+                </svg>
               </div>
-              <div class="field-hint">Click to open a browser, log in to Patreon, and the cookie will be saved automatically.</div>
-              <el-form-item label="Cookie Path">
-                <el-input v-model="accountForm.cookiePath" placeholder="Auto-generated" />
-              </el-form-item>
-            </template>
-            <template v-else>
-              <el-form-item label="Connection">
-                <el-button type="primary" @click="connectWithPatreon">Connect with Patreon</el-button>
-              </el-form-item>
-            </template>
-            <el-form-item label="Campaign ID">
-              <el-input v-model="accountForm.patreonCampaignId" placeholder="Auto-filled after OAuth connect" />
-            </el-form-item>
-            <el-form-item label="Access Mode">
-              <el-select v-model="accountForm.patreonAccessMode" style="width: 100%">
-                <el-option label="Public (Everyone)" value="public" />
-                <el-option label="Patrons only" value="patrons" />
-                <el-option label="Specific tier" value="tier" />
-              </el-select>
-            </el-form-item>
-            <el-form-item v-if="accountForm.patreonAccessMode === 'tier'" label="Tier Name">
-              <el-input v-model="accountForm.patreonTierName" />
-            </el-form-item>
+              <div class="qr-info">
+                <span class="qs"><span class="d"></span>{{ loginStatusLabel }}</span>
+                <p>The backend opens a {{ platformLabel(connectData.platform) }} login session in a (headless) browser and renders its QR here. Once you confirm on your phone, it captures the session cookies and writes them <b>AES-GCM encrypted</b> to the cookie store.</p>
+                <div class="note">
+                  <component :is="icons.about" />
+                  <p>No password ever passes through Socialupload — only the resulting session cookie, encrypted at rest.</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Import method -->
+            <div v-else>
+              <div class="steps">
+                <div class="step"><span class="num">1</span><span>Open {{ platformLabel(connectData.platform) }} in your browser and log in.</span></div>
+                <div class="step"><span class="num">2</span><span>Export cookies with EditThisCookie / Cookie-Editor (JSON), or paste a Netscape <code>cookies.txt</code>.</span></div>
+                <div class="step"><span class="num">3</span><span>Paste below — the backend validates, normalizes and encrypts them.</span></div>
+              </div>
+              <div class="field">
+                <label>Cookie payload (JSON or Netscape)</label>
+                <textarea class="textarea" rows="5" placeholder='[{"name":"sessionid","value":"…","domain":".douyin.com"}]' v-model="connectData.paste"></textarea>
+              </div>
+            </div>
           </template>
-
-          <template v-else-if="accountForm.platform === 'teaching_blog'">
-            <el-divider content-position="left">Teaching Blog 設定</el-divider>
-            <el-form-item label="Connection health" v-if="isStructuredAccountForm && accountForm.id">
-              <AccountConnectionPanel :rows="teachingBlogHealthRows" :actions="teachingBlogHealthActions" />
-            </el-form-item>
-            <el-form-item label="GitHub Token Env">
-              <el-input v-model="accountForm.githubTokenEnv" placeholder="SAU_TEACHING_BLOG_GITHUB_TOKEN" />
-            </el-form-item>
-            <el-form-item label="Repo Owner">
-              <el-input v-model="accountForm.repoOwner" placeholder="e.g. your-github-username" />
-            </el-form-item>
-            <el-form-item label="Repo Name">
-              <el-input v-model="accountForm.repoName" placeholder="e.g. my-teaching-blog" />
-            </el-form-item>
-            <el-form-item label="Branch">
-              <el-input v-model="accountForm.contentBranch" placeholder="main" />
-            </el-form-item>
-            <el-form-item label="Content Directory">
-              <el-input v-model="accountForm.contentDir" placeholder="content/posts" />
-            </el-form-item>
-          </template>
-
-          <template v-else-if="accountForm.platform === 'nw_sw_blog'">
-            <el-divider content-position="left">NW/SW Blog 設定</el-divider>
-            <el-form-item label="Connection health" v-if="isStructuredAccountForm && accountForm.id">
-              <AccountConnectionPanel :rows="nwSwBlogHealthRows" :actions="nwSwBlogHealthActions" />
-            </el-form-item>
-            <el-form-item label="API Base URL">
-              <el-input v-model="accountForm.apiBase" placeholder="https://sexualwill.com" />
-            </el-form-item>
-            <el-form-item label="API Token Env">
-              <el-input v-model="accountForm.apiTokenEnv" placeholder="SAU_NW_SW_BLOG_API_TOKEN" />
-            </el-form-item>
-            <el-form-item label="Persona">
-              <el-select v-model="accountForm.blogPersona" style="width: 100%">
-                <el-option label="Sexualwill" value="sexualwill" />
-                <el-option label="Nakedwill" value="nakedwill" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="Locale">
-              <el-select v-model="accountForm.blogLocale" style="width: 100%">
-                <el-option label="English" value="en" />
-                <el-option label="中文" value="zh" />
-              </el-select>
-            </el-form-item>
-          </template>
-
-          <el-form-item label="進階 JSON">
-            <el-input
-              v-model="accountForm.advancedConfigText"
-              type="textarea"
-              :rows="6"
-              placeholder='如需額外設定，可填入 JSON，會與上方欄位合併'
-            />
-          </el-form-item>
-        </template>
-
-        <div v-else class="legacy-login-hint">
-          請先建立 Profile 並選擇平台，再新增該平台帳號。
         </div>
 
-        <div v-if="sseConnecting" class="qrcode-container">
-          <div v-if="qrCodeData && !loginStatus" class="qrcode-wrapper">
-            <p class="qrcode-tip">請使用對應平台 App 掃描 QR Code 登入</p>
-            <img :src="qrCodeData" alt="登入 QR Code" class="qrcode-image" />
-          </div>
-          <div v-else-if="!qrCodeData && !loginStatus" class="loading-wrapper">
-            <el-icon class="is-loading"><Refresh /></el-icon>
-            <span>載入中...</span>
-          </div>
-          <div v-else-if="loginStatus === '200'" class="success-wrapper">
-            <el-icon><CircleCheckFilled /></el-icon>
-            <span>新增成功</span>
-          </div>
-          <div v-else-if="loginStatus === '500'" class="error-wrapper">
-            <el-icon><CircleCloseFilled /></el-icon>
-            <span>新增失敗，請稍後再試</span>
-          </div>
-        </div>
-      </el-form>
-      <template #footer>
-        <span class="dialog-footer">
-          <el-button @click="dialogVisible = false">取消</el-button>
-          <el-button
-            type="primary"
-            @click="submitAccountForm"
-            :loading="sseConnecting"
-            :disabled="sseConnecting"
+        <div class="modal-foot">
+          <span class="ms" style="align-self:center;font-size:12px;color:var(--text-3)">
+            {{ connectData.platform ? platformLabel(connectData.platform) : 'Select a platform' }}
+          </span>
+          <div class="spacer"></div>
+          <button class="btn-sec" @click="showConnect = false">Cancel</button>
+          <button
+            v-if="connectMethod === 'import'"
+            class="btn-primary"
+            :disabled="!connectData.platform || !connectData.paste"
+            :style="{ opacity: (!connectData.platform || !connectData.paste) ? 0.5 : 1 }"
+            @click="doImport"
           >
-            {{ sseConnecting ? '處理中' : '確認' }}
-          </el-button>
-        </span>
-      </template>
-    </el-dialog>
-
-    <!-- Cookie Import Dialog -->
-    <el-dialog v-model="showCookieImport" title="Import Cookies from Browser" width="600px" :close-on-click-modal="false">
-      <div style="margin-bottom: 12px;">
-        <p style="margin: 0 0 8px; font-size: 13px; color: #909399;">
-          1. Open Reddit in Chrome and log in<br>
-          2. Press F12 > Application > Cookies > https://www.reddit.com<br>
-          3. Right-click the cookie table > "Copy all"<br>
-          4. Paste below
-        </p>
+            {{ importBusy ? 'Importing…' : 'Import & encrypt' }}
+          </button>
+          <button v-else class="btn-sec" disabled style="opacity:0.6">
+            {{ loginStatusLabel }}
+          </button>
+        </div>
       </div>
-      <el-input
-        v-model="cookieImportText"
-        type="textarea"
-        :rows="12"
-        placeholder="Paste cookies here (tab-separated from Chrome DevTools or JSON array from Cookie-Editor)"
-      />
-      <template #footer>
-        <el-button @click="showCookieImport = false">Cancel</el-button>
-        <el-button type="primary" :loading="cookieImportLoading" @click="submitCookieImport()">
-          Import
-        </el-button>
-      </template>
-    </el-dialog>
+    </div>
+
+    <!-- Toast -->
+    <div v-if="toast" class="toast">
+      <component :is="icons.check" :width="15" :height="15" /> {{ toast }}
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { CircleCheckFilled, CircleCloseFilled, Refresh } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-
-import { accountApi } from '@/api/account'
-import { metaApi } from '@/api/meta'
-import { profilesApi } from '@/api/profiles'
-import { redditApi } from '@/api/reddit'
-import { threadsApi } from '@/api/threads'
-import { twitterApi } from '@/api/x'
-import { tiktokApi } from '@/api/tiktok'
-import { youtubeApi } from '@/api/youtube'
-import { patreonApi } from '@/api/patreon'
-import AccountTabPane from '@/components/AccountTabPane.vue'
-import AccountConnectionPanel from '@/components/AccountConnectionPanel.vue'
-import AccountTextFieldList from '@/components/AccountTextFieldList.vue'
+import { ref, computed, onMounted } from 'vue'
 import { useAccountStore } from '@/stores/account'
-import { useAppStore } from '@/stores/app'
-import { useProfilesStore } from '@/stores/profiles'
-import { buildApiUrl } from '@/utils/api-url'
-import { appendAuthQuery, getToken } from '@/utils/auth'
-import { http } from '@/utils/request'
-import { PROFILE_PLATFORM_OPTIONS, getLegacyPlatformType, getPlatformMeta } from '@/utils/platforms'
-import { buildAccountManagementRouteQuery, normalizeAccountManagementRouteQuery } from '@/utils/accountQueueRouting'
-import {
-  redditFieldDefs,
-  youtubeIdentityFieldDefs,
-  youtubeFieldDefs,
-  facebookFieldDefs,
-  instagramFieldDefs,
-  threadsFieldDefs,
-  telegramFieldDefs,
-  tiktokTokenFieldDefs,
-  discordFieldDefs,
-  twitterFieldDefs,
-} from '@/utils/account-form-defs'
-import { buildAccountComparator, matchesAccountFilters } from '@/utils/account-list-sorting'
+import { accountApi } from '@/api/account'
+import { icons } from '@/utils/icons'
 
-const router = useRouter()
-const route = useRoute()
 const accountStore = useAccountStore()
-const appStore = useAppStore()
-const profilesStore = useProfilesStore()
 
-const activeTab = ref('all')
-const searchKeyword = ref('')
-const selectedProfileFilter = ref('all')
-const selectedRiskFilter = ref('all')
-const selectedSortMode = ref('urgency')
-const selectedSortOrder = ref('ascending')
-const syncingRouteFilters = ref(false)
-
-const accountPlatformTabs = PROFILE_PLATFORM_OPTIONS
-const profileOptions = computed(() => profilesStore.profiles)
-const selectedProfileId = computed(() => {
-  const val = selectedProfileFilter.value
-  if (val === 'all' || val === 'legacy' || !val) return null
-  return Number(val)
-})
-
-const dialogVisible = ref(false)
-const dialogType = ref('add')
-const showCookieImport = ref(false)
-const cookieImportText = ref('')
-const cookieImportLoading = ref(false)
-const accountFormRef = ref(null)
-const profileDialogVisible = ref(false)
-const profileDialogMode = ref('add')  // 'add' or 'edit'
-const editingProfileId = ref(null)
-const profileFormRef = ref(null)
-
-const makeEmptyAccountForm = () => ({
-  id: null,
-  profileId: null,
-  name: '',
-  platform: '',
-  authType: 'cookie',
-  enabled: true,
-  cookiePath: '',
-  sheetPostPreset: '',
-  subredditsText: '',
-  redditAuthType: 'api',
-  clientIdEnv: '',
-  clientSecretEnv: '',
-  refreshTokenEnv: '',
-  userAgent: '',
-  chatId: '',
-  botTokenEnv: '',
-  parseMode: '',
-  silent: false,
-  disableWebPreview: false,
-  channelId: '',
-  privacyStatus: 'private',
-  playlistId: '',
-  categoryId: '22',
-  pageId: '',
-  igUserId: '',
-  threadUserId: '',
-  accessToken: '',
-  refreshToken: '',
-  openId: '',
-  tiktokScope: '',
-  tiktokDisplayName: '',
-  tiktokAvatarUrl: '',
-  accessTokenExpiresAt: '',
-  refreshTokenExpiresAt: '',
-  accessTokenUpdatedAt: '',
-  connectedAt: '',
-  lastManualRefreshAt: '',
-  lastAutoRefreshAt: '',
-  redditUserName: '',
-  channelTitle: '',
-  facebookPageName: '',
-  instagramUserName: '',
-  threadsUserName: '',
-  telegramBotName: '',
-  telegramChatTitle: '',
-  discordWebhookName: '',
-  discordWebhookChannel: '',
-  twitterUserName: '',
-  twitterDisplayName: '',
-  lastConnectionCheckAt: '',
-  accessTokenEnv: '',
-  publishMode: 'direct',
-  privacyLevel: 'SELF_ONLY',
-  disableComment: false,
-  disableDuet: false,
-  disableStitch: false,
-  autoAddMusic: true,
-  videoCoverTimestampMs: '',
-  webhookUrlEnv: '',
-  patreonCampaignId: '',
-  patreonAuthType: 'cookie',
-  patreonAccessMode: 'public',
-  patreonTierName: '',
-  patreonUserName: '',
-  repoOwner: '',
-  repoName: '',
-  contentBranch: 'main',
-  contentDir: 'content/posts',
-  githubTokenEnv: '',
-  apiBase: '',
-  apiTokenEnv: '',
-  blogPersona: 'sexualwill',
-  blogLocale: 'en',
-  advancedConfigText: '',
-  twitterAuthType: 'cookie',
-  apiKeyEnv: '',
-  apiKeySecretEnv: '',
-  accessTokenSecretEnv: '',
-  status: '正常'
-})
-
-const accountForm = reactive(makeEmptyAccountForm())
-
-const profileForm = reactive({
-  name: '',
-  description: '',
-  systemPrompt: '',
-  watermark: '',
-  contactDetails: '',
-  ctaText: ''
-})
-
-const rules = {
-  platform: [{ required: true, message: '請選擇平台', trigger: 'change' }],
-  name: [{ required: true, message: '請輸入帳號名稱', trigger: 'blur' }]
+/* Platform metadata (colors + short labels for the card design) */
+const PLATFORM_META = {
+  douyin:      { label: '抖音 Douyin',      short: '抖', color: '#fe2c55' },
+  tiktok:      { label: 'TikTok',           short: 'TT', color: 'linear-gradient(135deg,#0b0b0b,#25f4ee)' },
+  bilibili:    { label: 'Bilibili',         short: 'B',  color: '#00aeec' },
+  xiaohongshu: { label: '小红书 RED',       short: '红', color: '#ff2442' },
+  kuaishou:    { label: '快手 Kuaishou',    short: '快', color: '#ff7a00' },
+  tencent:     { label: '视频号 Channels',  short: '视', color: '#07c160' },
+  channels:    { label: '视频号 Channels',  short: '视', color: '#07c160' },
+  baijiahao:   { label: '百家号 Baijia',    short: '百', color: '#3c4ce4' },
+  youtube:     { label: 'YouTube',          short: 'YT', color: '#ff0033' },
+  reddit:      { label: 'Reddit',           short: 'R',  color: '#ff4500' },
+  facebook:    { label: 'Facebook',         short: 'FB', color: '#1877f2' },
+  instagram:   { label: 'Instagram',        short: 'IG', color: 'linear-gradient(135deg,#833ab4,#fd1d1d,#fcb045)' },
+  threads:     { label: 'Threads',          short: 'TH', color: '#000' },
+  twitter:     { label: 'X / Twitter',      short: 'X',  color: '#000' },
+  telegram:    { label: 'Telegram',         short: 'TG', color: '#0088cc' },
+  discord:     { label: 'Discord',          short: 'DC', color: '#5865f2' },
+  medium:      { label: 'Medium',           short: 'M',  color: '#1a1a1a' },
+  substack:    { label: 'Substack',         short: 'S',  color: '#ff6719' },
+  patreon:     { label: 'Patreon',          short: 'P',  color: '#ff424d' },
 }
 
-const isStructuredAccountForm = computed(() => Boolean(accountForm.profileId))
+const allPlatforms = computed(() =>
+  Object.entries(PLATFORM_META).map(([slug, meta]) => ({ slug, ...meta }))
+)
 
-const sseConnecting = ref(false)
-const qrCodeData = ref('')
-const loginStatus = ref('')
-const tiktokHealth = reactive({
-  accountId: null,
-  lastRequest: null,
-  lastCallback: null,
-  lastRefresh: null,
-  lastWebhook: null,
-})
-const presentLabel = (value, whenPresent = 'present', whenMissing = 'missing') => (value ? whenPresent : whenMissing)
-
-const redditHealthRows = computed(() => [
-  { label: 'Username', value: accountForm.redditUserName || '—' },
-  { label: 'Access token', value: presentLabel(accountForm.accessToken) },
-  { label: 'Token updated', value: accountForm.accessTokenUpdatedAt || '—' },
-  { label: 'Token expires', value: accountForm.accessTokenExpiresAt || '—' },
-  { label: 'Last manual refresh', value: accountForm.lastManualRefreshAt || '—' }
-])
-const redditHealthActions = computed(() => [
-  { label: 'Connect with Reddit', type: 'primary', onClick: connectWithReddit },
-  { label: 'Refresh Reddit token', onClick: () => refreshStructuredToken('reddit') },
-  { label: 'Open OAuth status', onClick: () => openOauthReviewStatus('reddit') }
-])
-
-const telegramHealthRows = computed(() => [
-  { label: 'Bot', value: accountForm.telegramBotName || '—' },
-  { label: 'Chat', value: accountForm.telegramChatTitle || '—' },
-  { label: 'Bot token', value: presentLabel(accountForm.botTokenEnv, 'env-backed') },
-  { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
-])
-const telegramHealthActions = computed(() => [
-  { label: 'Check Telegram connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('telegram') }
-])
-
-const youtubeHealthRows = computed(() => [
-  { label: 'Channel title', value: accountForm.channelTitle || '—' },
-  { label: 'Access token', value: presentLabel(accountForm.accessToken) },
-  { label: 'Token updated', value: accountForm.accessTokenUpdatedAt || '—' },
-  { label: 'Token expires', value: accountForm.accessTokenExpiresAt || '—' },
-  { label: 'Last manual refresh', value: accountForm.lastManualRefreshAt || '—' }
-])
-const youtubeHealthActions = computed(() => [
-  { label: 'Connect with YouTube', type: 'primary', onClick: connectWithYouTube },
-  { label: 'Refresh YouTube token', onClick: () => refreshStructuredToken('youtube') },
-  { label: 'Open OAuth status', onClick: () => openOauthReviewStatus('youtube') }
-])
-
-const facebookHealthRows = computed(() => [
-  { label: 'Page name', value: accountForm.facebookPageName || '—' },
-  { label: 'Access token', value: accountForm.accessToken ? 'present' : presentLabel(accountForm.accessTokenEnv, 'env-backed') },
-  { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
-])
-const facebookHealthActions = computed(() => [
-  { label: 'Connect with Facebook', type: 'primary', onClick: () => connectWithMeta('facebook') },
-  { label: 'Refresh Facebook token', onClick: () => refreshStructuredToken('facebook') },
-  { label: 'Check Facebook connection', onClick: () => checkStructuredConnection('facebook') },
-  { label: 'Open OAuth status', onClick: () => openOauthReviewStatus('facebook') }
-])
-
-const instagramHealthRows = computed(() => [
-  { label: 'Username', value: accountForm.instagramUserName || '—' },
-  { label: 'Access token', value: accountForm.accessToken ? 'present' : presentLabel(accountForm.accessTokenEnv, 'env-backed') },
-  { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
-])
-const instagramHealthActions = computed(() => [
-  { label: 'Connect with Instagram', type: 'primary', onClick: () => connectWithMeta('instagram') },
-  { label: 'Refresh Instagram token', onClick: () => refreshStructuredToken('instagram') },
-  { label: 'Check Instagram connection', onClick: () => checkStructuredConnection('instagram') },
-  { label: 'Open OAuth status', onClick: () => openOauthReviewStatus('instagram') }
-])
-
-const threadsHealthRows = computed(() => [
-  { label: 'Username', value: accountForm.threadsUserName || '—' },
-  { label: 'Access token', value: accountForm.accessToken ? 'present' : presentLabel(accountForm.accessTokenEnv, 'env-backed') },
-  { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
-])
-const threadsHealthActions = computed(() => [
-  { label: 'Connect with Threads', type: 'primary', onClick: connectWithThreads },
-  { label: 'Refresh Threads token', onClick: () => refreshStructuredToken('threads') },
-  { label: 'Check Threads connection', onClick: () => checkStructuredConnection('threads') },
-  { label: 'Open OAuth status', onClick: () => openOauthReviewStatus('threads') }
-])
-
-const discordHealthRows = computed(() => [
-  { label: 'Webhook name', value: accountForm.discordWebhookName || '—' },
-  { label: 'Channel ID', value: accountForm.discordWebhookChannel || '—' },
-  { label: 'Webhook URL', value: presentLabel(accountForm.webhookUrlEnv, 'env-backed') },
-  { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
-])
-const discordHealthActions = computed(() => [
-  { label: 'Check Discord connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('discord') }
-])
-
-const patreonHealthRows = computed(() => [
-  { label: 'Auth type', value: accountForm.patreonAuthType === 'api' ? 'OAuth' : 'Cookie' },
-  { label: 'Username', value: accountForm.patreonUserName || '—' },
-  { label: 'Campaign', value: accountForm.patreonCampaignId || '—' },
-  { label: 'Access token', value: presentLabel(accountForm.accessToken) },
-  { label: 'Token updated', value: accountForm.accessTokenUpdatedAt || '—' },
-])
-const patreonHealthActions = computed(() => [
-  { label: 'Connect with Patreon', type: 'primary', onClick: connectWithPatreon },
-  { label: 'Refresh Patreon token', onClick: () => refreshStructuredToken('patreon') },
-])
-
-const teachingBlogHealthRows = computed(() => [
-  { label: 'Repo owner', value: accountForm.repoOwner || '—' },
-  { label: 'Repo name', value: accountForm.repoName || '—' },
-  { label: 'Branch', value: accountForm.contentBranch || 'main' },
-  { label: 'Content dir', value: accountForm.contentDir || 'content/posts' },
-  { label: 'GitHub token', value: presentLabel(accountForm.githubTokenEnv ? '(env)' : '') },
-])
-const teachingBlogHealthActions = computed(() => [
-  { label: 'Check connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('teaching_blog') },
-])
-
-const nwSwBlogHealthRows = computed(() => [
-  { label: 'API base', value: accountForm.apiBase || '—' },
-  { label: 'Persona', value: accountForm.blogPersona || '—' },
-  { label: 'Locale', value: accountForm.blogLocale || '—' },
-  { label: 'API token', value: presentLabel(accountForm.apiTokenEnv ? '(env)' : '') },
-])
-const nwSwBlogHealthActions = computed(() => [
-  { label: 'Check connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('nw_sw_blog') },
-])
-
-const twitterHealthRows = computed(() => [
-  { label: 'Auth type', value: accountForm.twitterAuthType === 'api' ? 'API' : 'Cookie' },
-  { label: 'Username', value: accountForm.twitterUserName ? `@${accountForm.twitterUserName}` : '—' },
-  { label: 'Display name', value: accountForm.twitterDisplayName || '—' },
-  { label: 'Access token', value: presentLabel(accountForm.accessToken) },
-  { label: 'Refresh token', value: presentLabel(accountForm.refreshToken) },
-  { label: 'Token expires', value: accountForm.accessTokenExpiresAt || '—' },
-  { label: 'Last token update', value: accountForm.accessTokenUpdatedAt || '—' },
-  { label: 'Connected at', value: accountForm.connectedAt || '—' },
-  { label: 'Last check', value: accountForm.lastConnectionCheckAt || '—' }
-])
-const twitterHealthActions = computed(() => [
-  { label: 'Check connection', disabled: !accountForm.id, onClick: () => checkStructuredConnection('twitter') },
-  { label: 'Refresh token', disabled: !accountForm.id || !accountForm.refreshToken, onClick: () => refreshStructuredToken('twitter') },
-  { label: 'Reconnect OAuth', disabled: !accountForm.id, onClick: () => connectWithTwitterApi() }
-])
-
-const tiktokHealthRows = computed(() => [
-  { label: 'Access token', value: presentLabel(accountForm.accessToken) },
-  { label: 'Refresh token', value: presentLabel(accountForm.refreshToken) },
-  { label: 'Last OAuth start', value: tiktokHealth.lastRequest?.requestedAt || '—' },
-  { label: 'Token expires', value: accountForm.accessTokenExpiresAt || '—' },
-  { label: 'Refresh expires', value: accountForm.refreshTokenExpiresAt || '—' },
-  { label: 'Connected at', value: accountForm.connectedAt || '—' },
-  { label: 'Last token update', value: accountForm.accessTokenUpdatedAt || '—' },
-  { label: 'Last auto refresh', value: accountForm.lastAutoRefreshAt || '—' },
-  { label: 'Last manual refresh', value: accountForm.lastManualRefreshAt || '—' },
-  { label: 'Last callback', value: tiktokHealth.lastCallback?.receivedAt || '—' },
-  { label: 'Last refresh', value: tiktokHealth.lastRefresh?.receivedAt || '—' },
-  { label: 'Last webhook', value: tiktokHealth.lastWebhook?.receivedAt || '—' },
-  { label: 'Webhook signature', value: tiktokHealth.lastWebhook?.signatureStatus || '—' }
-])
-
-const recentAccountEvents = ref([])
-const eventsLoading = ref(false)
-const maintenanceLoading = ref(false)
-const maintenanceStatus = ref({ enabled: false, running: false, lastFinishedAt: '', lastResult: null })
-let eventSource = null
-
+/* Filter state */
+const filter = ref('all')
 const filteredAccounts = computed(() => {
-  const keyword = searchKeyword.value.trim().toLowerCase()
-  const comparator = buildAccountComparator(selectedSortMode.value, selectedSortOrder.value)
+  if (filter.value === 'ready') return accounts.value.filter(a => a.connectionLabel === 'Ready')
+  if (filter.value === 'attn') return accounts.value.filter(a => a.connectionLabel !== 'Ready')
+  return accounts.value
+})
+const platformCount = computed(() => new Set(filteredAccounts.value.map(a => a.platformSlug)).size)
 
-  return accountStore.accounts
-    .filter((account) =>
-      matchesAccountFilters(account, {
-        profileFilter: selectedProfileFilter.value,
-        riskFilter: selectedRiskFilter.value,
-        keyword,
-      })
-    )
-    .sort(comparator)
+/* Helpers */
+const platformBg = (slug) => PLATFORM_META[slug]?.color || '#888'
+const platformShort = (slug) => PLATFORM_META[slug]?.short || '?'
+const platformLabel = (slug) => PLATFORM_META[slug]?.label || slug
+
+const cookieStatusClass = (acct) => {
+  if (acct.isOverdue || acct.reconnectRequired || acct.connectionLabel === 'Missing') return 'ck-exp'
+  if (acct.isExpiringWithin24h || acct.isExpiringWithin7d) return 'ck-soon'
+  return 'ck-valid'
+}
+const cookieStatusLabel = (acct) => {
+  const cls = cookieStatusClass(acct)
+  return cls === 'ck-exp' ? 'Expired' : cls === 'ck-soon' ? 'Expiring' : 'Valid'
+}
+const expiryLabel = (acct) => {
+  if (acct.isOverdue) return 'expired'
+  if (acct.secondsRemaining != null) {
+    const d = Math.floor(acct.secondsRemaining / 86400)
+    return d > 0 ? `in ${d}d` : `in ${Math.floor(acct.secondsRemaining / 3600)}h`
+  }
+  return acct.connectionLabel === 'Ready' ? 'session' : '—'
+}
+
+/* Actions */
+const flash = (msg) => { toast.value = msg; setTimeout(() => { toast.value = null }, 3000) }
+
+const onReauth = (acct) => {
+  openConnect({ platform: acct.platformSlug, account: acct.accountName, profile: acct.profileName })
+}
+const onExport = async (acct) => {
+  try {
+    const res = await accountApi.exportCookies(acct.id)
+    if (res?.data) {
+      const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = `${acct.platformSlug}_${acct.accountName}.cookies.json`; a.click()
+      URL.revokeObjectURL(url)
+      flash(`Exported cookies for ${acct.accountName}`)
+    }
+  } catch (e) { flash('Export failed: ' + e.message) }
+}
+const onRemove = async (acct) => {
+  if (!confirm(`Remove ${acct.accountName} (${acct.platform})?`)) return
+  try {
+    await accountApi.deleteAccount(acct.id)
+    accounts.value = accounts.value.filter(a => a.id !== acct.id)
+    flash(`Removed ${acct.accountName}`)
+  } catch (e) { flash('Remove failed: ' + e.message) }
+}
+const runHealthCheck = async () => {
+  try {
+    await accountApi.getHealthSummary()
+    flash('Health check complete')
+  } catch (e) { flash('Health check failed: ' + e.message) }
+}
+
+/* Connect modal */
+const showConnect = ref(false)
+const connectMethod = ref('qr')
+const connectData = ref({ platform: null, account: '', profile: 'default', paste: '' })
+const importBusy = ref(false)
+const loginStatus = ref('pending')
+const toast = ref(null)
+
+const loginStatusLabel = computed(() => {
+  const map = { pending: 'Waiting for scan…', scanned: 'Scanned — confirm on your phone', confirmed: 'Confirmed — saving session', saved: 'Saved', error: 'Login failed' }
+  return map[loginStatus.value] || 'Waiting for scan…'
 })
 
-const getFilteredAccountsByPlatform = (platformLabel) =>
-  filteredAccounts.value.filter((account) => account.platform === platformLabel)
-
-const bulkCheckLoading = ref(false)
-const bulkRefreshLoading = ref(false)
-
-const currentVisibleAccounts = computed(() => {
-  if (activeTab.value === 'all') return filteredAccounts.value
-  const tab = accountPlatformTabs.find((item) => item.value === activeTab.value)
-  if (!tab) return filteredAccounts.value
-  return getFilteredAccountsByPlatform(tab.label)
-})
-
-const bulkCheckTargets = computed(() =>
-  currentVisibleAccounts.value.filter((account) => account.supportsHealthAction && account.healthActionKind === 'check')
-)
-
-const bulkRefreshTargets = computed(() =>
-  currentVisibleAccounts.value.filter((account) => account.supportsHealthAction && account.healthActionKind === 'refresh')
-)
-
-const nextMaintenanceRunLabel = computed(() => {
-  const intervalSeconds = Number(maintenanceStatus.value?.intervalSeconds || 0)
-  if (!maintenanceStatus.value?.enabled || intervalSeconds <= 0) return '—'
-  if (maintenanceStatus.value?.running) return 'running now'
-  const reference = maintenanceStatus.value?.lastFinishedAt || maintenanceStatus.value?.lastStartedAt
-  if (!reference) return 'waiting for first run'
-  const parsed = new Date(reference)
-  if (Number.isNaN(parsed.getTime())) return '—'
-  return new Date(parsed.getTime() + intervalSeconds * 1000).toISOString()
-})
-
-const applyRouteFilters = () => {
-  const normalized = normalizeAccountManagementRouteQuery(route.query, accountPlatformTabs)
-  selectedRiskFilter.value = normalized.selectedRiskFilter
-  selectedProfileFilter.value = normalized.selectedProfileFilter
-  activeTab.value = normalized.activeTab
-  selectedSortMode.value = normalized.selectedSortMode
-  selectedSortOrder.value = normalized.selectedSortOrder
+const openConnect = (initial = {}) => {
+  connectData.value = { platform: initial.platform || null, account: initial.account || '', profile: initial.profile || 'default', paste: '' }
+  connectMethod.value = 'qr'
+  loginStatus.value = 'pending'
+  showConnect.value = true
 }
 
-const syncRouteFilters = async () => {
-  if (syncingRouteFilters.value) return
-
-  const { nextQuery, unchanged } = buildAccountManagementRouteQuery({
-    selectedRiskFilter: selectedRiskFilter.value,
-    selectedProfileFilter: selectedProfileFilter.value,
-    activeTab: activeTab.value,
-    selectedSortMode: selectedSortMode.value,
-    selectedSortOrder: selectedSortOrder.value,
-    currentQuery: route.query,
-  })
-  if (unchanged) return
-
-  syncingRouteFilters.value = true
+const doImport = async () => {
+  if (!connectData.value.platform || !connectData.value.paste) return
+  importBusy.value = true
   try {
-    await router.replace({ path: route.path, query: nextQuery })
-  } finally {
-    syncingRouteFilters.value = false
-  }
+    const fmt = connectData.value.paste.trim().startsWith('[') || connectData.value.paste.trim().startsWith('{') ? 'json' : 'netscape'
+    await accountApi.importCookies(connectData.value.platform, connectData.value.account, connectData.value.profile, fmt, connectData.value.paste)
+    flash(`Connected ${connectData.value.account || 'account'} · cookies stored (encrypted)`)
+    showConnect.value = false
+    await loadAccounts()
+  } catch (e) { flash('Import failed: ' + e.message) }
+  finally { importBusy.value = false }
 }
 
-const onSearchChange = (value) => {
-  searchKeyword.value = value
-}
-
-const updateAccountFormField = ({ key, value }) => {
-  accountForm[key] = value
-}
-
-const onTableSortChange = ({ mode, order }) => {
-  selectedSortMode.value = mode || 'urgency'
-  selectedSortOrder.value = order || 'ascending'
-}
-
-const assignIfValue = (target, key, value) => {
-  if (value !== '' && value != null) {
-    target[key] = value
-  }
-}
-
-const splitListField = (value) =>
-  String(value || '')
-    .split(/[,\n]/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-
-const resetAccountForm = () => {
-  Object.assign(accountForm, makeEmptyAccountForm(), {
-    profileId: selectedProfileFilter.value !== 'all' && selectedProfileFilter.value !== 'legacy'
-      ? Number(selectedProfileFilter.value)
-      : null,
-    platform: activeTab.value !== 'all' ? activeTab.value : ''
-  })
-}
-
-const loadStructuredFieldsFromConfig = (config) => {
-  accountForm.sheetPostPreset = config.sheetPostPreset || ''
-  accountForm.subredditsText = Array.isArray(config.subreddits) ? config.subreddits.join(', ') : ''
-  accountForm.clientIdEnv = config.clientIdEnv || ''
-  accountForm.clientSecretEnv = config.clientSecretEnv || ''
-  accountForm.refreshTokenEnv = config.refreshTokenEnv || ''
-  accountForm.userAgent = config.userAgent || ''
-  accountForm.chatId = config.chatId || ''
-  accountForm.botTokenEnv = config.botTokenEnv || ''
-  accountForm.parseMode = config.parseMode || ''
-  accountForm.silent = Boolean(config.silent)
-  accountForm.disableWebPreview = Boolean(config.disableWebPreview)
-  accountForm.channelId = config.channelId || ''
-  accountForm.privacyStatus = config.privacyStatus || 'private'
-  accountForm.playlistId = config.playlistId || ''
-  accountForm.categoryId = config.categoryId || '22'
-  accountForm.pageId = config.pageId || ''
-  accountForm.igUserId = config.igUserId || ''
-  accountForm.threadUserId = config.threadUserId || ''
-  accountForm.accessToken = config.accessToken || ''
-  accountForm.refreshToken = config.refreshToken || ''
-  accountForm.openId = config.openId || ''
-  accountForm.tiktokScope = config.scope || ''
-  accountForm.tiktokDisplayName = config.displayName || ''
-  accountForm.tiktokAvatarUrl = config.avatarUrl || ''
-  accountForm.accessTokenExpiresAt = config.accessTokenExpiresAt || ''
-  accountForm.refreshTokenExpiresAt = config.refreshTokenExpiresAt || ''
-  accountForm.accessTokenUpdatedAt = config.accessTokenUpdatedAt || ''
-  accountForm.connectedAt = config.connectedAt || ''
-  accountForm.lastManualRefreshAt = config.lastManualRefreshAt || ''
-  accountForm.lastAutoRefreshAt = config.lastAutoRefreshAt || ''
-  accountForm.redditUserName = config.redditUserName || ''
-  accountForm.channelTitle = config.channelTitle || ''
-  accountForm.facebookPageName = config.facebookPageName || ''
-  accountForm.instagramUserName = config.instagramUserName || ''
-  accountForm.threadsUserName = config.threadsUserName || ''
-  accountForm.telegramBotName = config.telegramBotName || ''
-  accountForm.telegramChatTitle = config.telegramChatTitle || ''
-  accountForm.discordWebhookName = config.discordWebhookName || ''
-  accountForm.discordWebhookChannel = config.discordWebhookChannel || ''
-  accountForm.lastConnectionCheckAt = config.lastConnectionCheckAt || ''
-  accountForm.accessTokenEnv = config.accessTokenEnv || ''
-  accountForm.publishMode = config.publishMode || 'direct'
-  accountForm.privacyLevel = config.privacyLevel || 'SELF_ONLY'
-  accountForm.disableComment = Boolean(config.disableComment)
-  accountForm.disableDuet = Boolean(config.disableDuet)
-  accountForm.disableStitch = Boolean(config.disableStitch)
-  accountForm.autoAddMusic = config.autoAddMusic !== false
-  accountForm.videoCoverTimestampMs = config.videoCoverTimestampMs != null ? String(config.videoCoverTimestampMs) : ''
-  accountForm.webhookUrlEnv = config.webhookUrlEnv || ''
-  accountForm.patreonCampaignId = config.campaignId || ''
-  accountForm.patreonAuthType = config.patreonAuthType || 'cookie'
-  accountForm.patreonAccessMode = config.accessMode || 'public'
-  accountForm.patreonTierName = config.tierName || ''
-  accountForm.patreonUserName = config.patreonUserName || ''
-  accountForm.twitterAuthType = config.twitterAuthType || 'cookie'
-  accountForm.apiKeyEnv = config.apiKeyEnv || ''
-  accountForm.apiKeySecretEnv = config.apiKeySecretEnv || ''
-  accountForm.accessTokenSecretEnv = config.accessTokenSecretEnv || ''
-  accountForm.twitterUserName = config.twitterUserName || ''
-  accountForm.twitterDisplayName = config.twitterDisplayName || ''
-  accountForm.redditAuthType = config.redditAuthType || 'api'
-  accountForm.githubTokenEnv = config.githubTokenEnv || ''
-  accountForm.repoOwner = config.repoOwner || ''
-  accountForm.repoName = config.repoName || ''
-  accountForm.contentBranch = config.branch || 'main'
-  accountForm.contentDir = config.contentDir || 'content/posts'
-  accountForm.apiBase = config.apiBase || ''
-  accountForm.apiTokenEnv = config.apiTokenEnv || ''
-  accountForm.blogPersona = config.persona || 'sexualwill'
-  accountForm.blogLocale = config.locale || 'en'
-}
-
-const openProfileDialog = () => {
-  profileDialogMode.value = 'add'
-  editingProfileId.value = null
-  Object.assign(profileForm, {
-    name: '',
-    description: '',
-    systemPrompt: '',
-    watermark: '',
-    contactDetails: '',
-    ctaText: ''
-  })
-  profileDialogVisible.value = true
-}
-
-const openEditProfileDialog = () => {
-  const profileId = selectedProfileId.value
-  if (!profileId) {
-    ElMessage.error('請先選擇要編輯的 Profile')
-    return
-  }
-  const profile = profilesStore.profiles.find(p => p.id === profileId)
-  if (!profile) {
-    ElMessage.error('找不到該 Profile')
-    return
-  }
-  profileDialogMode.value = 'edit'
-  editingProfileId.value = profileId
-  const settings = profile.settings || {}
-  Object.assign(profileForm, {
-    name: profile.name || '',
-    description: profile.description || '',
-    systemPrompt: settings.systemPrompt || '',
-    watermark: settings.watermark || '',
-    contactDetails: settings.contactDetails || '',
-    ctaText: settings.ctaText || ''
-  })
-  profileDialogVisible.value = true
-}
-
-const submitProfileForm = async () => {
-  if (!profileForm.name.trim()) {
-    ElMessage.error('請輸入 Profile 名稱')
-    return
-  }
-
+/* Load accounts on mount — uses /api/accounts which returns the enriched
+   shape directly (with cookieStatus, expiresAt, handle, profile). */
+const loadAccounts = async () => {
   try {
-    const payload = {
-      name: profileForm.name,
-      description: profileForm.description,
-      settings: {
-        systemPrompt: profileForm.systemPrompt,
-        watermark: profileForm.watermark,
-        contactDetails: profileForm.contactDetails,
-        ctaText: profileForm.ctaText
-      }
-    }
-    if (profileDialogMode.value === 'edit' && editingProfileId.value) {
-      await profilesApi.update(editingProfileId.value, payload)
-      ElMessage.success('Profile 更新成功')
-    } else {
-      const created = await profilesApi.create(payload)
-      selectedProfileFilter.value = String(created.data.id)
-      ElMessage.success('Profile 建立成功')
-    }
-    await profilesStore.refreshProfiles()
-    profileDialogVisible.value = false
-  } catch (error) {
-    console.error('Profile 操作失敗:', error)
-    ElMessage.error(error?.message || 'Profile 操作失敗')
-  }
+    const res = await accountApi.getAccountsApi()
+    const list = res?.data || res || []
+    // Map to the shape the component expects (merge with PLATFORM_META)
+    accounts.value = list.map(a => ({
+      id: a.id,
+      platformSlug: a.platform,
+      accountName: a.name,
+      platform: PLATFORM_META[a.platform]?.label || a.platform,
+      connectionLabel: a.cookieStatus === 'expired' ? 'Missing' : 'Ready',
+      connectionDetail: a.handle || '',
+      profileName: a.profile || 'default',
+      isOverdue: a.cookieStatus === 'expired',
+      isExpiringWithin24h: a.cookieStatus === 'soon',
+      isExpiringWithin7d: a.cookieStatus === 'soon',
+      reconnectRequired: a.cookieStatus === 'expired',
+      secondsRemaining: null,
+      cookieStatus: a.cookieStatus,
+      expiresAt: a.expiresAt,
+    }))
+  } catch (e) { console.warn('Failed to load accounts:', e) }
 }
 
-const fetchAccounts = async (validateLegacy = true) => {
-  if (appStore.isAccountRefreshing) return
-  appStore.setAccountRefreshing(true)
-
-  try {
-    const profiles = await profilesStore.refreshProfiles()
-    const legacyResponse = validateLegacy
-      ? await accountApi.getValidAccounts()
-      : await accountApi.getAccounts()
-    const legacyAccounts = legacyResponse?.data || []
-
-    const structuredGroups = await Promise.all(
-      profiles.map(async (profile) => {
-        const items = await profilesStore.fetchAccountsForProfile(profile.id)
-        return items.map((item) => ({ ...item, profileName: profile.name }))
-      })
-    )
-
-    accountStore.setAccounts([...legacyAccounts, ...structuredGroups.flat()])
-    if (validateLegacy) {
-      ElMessage.success('帳號資料取得成功')
-      if (appStore.isFirstTimeAccountManagement) {
-        appStore.setAccountManagementVisited()
-      }
-    }
-  } catch (error) {
-    console.error('取得帳號資料失敗:', error)
-    if (validateLegacy) {
-      ElMessage.error('取得帳號資料失敗')
-    }
-  } finally {
-    appStore.setAccountRefreshing(false)
-  }
-}
-
-const refreshAccounts = () => fetchAccounts(true)
-
-const fetchMaintenanceStatus = async () => {
-  try {
-    const response = await accountApi.getMaintenanceStatus()
-    maintenanceStatus.value = response?.data || maintenanceStatus.value
-  } catch (error) {
-    console.error('取得維護狀態失敗:', error)
-  }
-}
-
-const runMaintenanceSweep = async () => {
-  if (maintenanceLoading.value) return
-  const accountIds = bulkRefreshTargets.value.map((row) => row.id)
-  if (accountIds.length < 1) {
-    ElMessage.info('目前篩選範圍內沒有可維護的 refreshable 帳號')
-    return
-  }
-  maintenanceLoading.value = true
-  try {
-    const payload = {
-      accountIds,
-      platforms: [...new Set(bulkRefreshTargets.value.map((row) => row.platformSlug))],
-      maxAccounts: accountIds.length,
-      expiringWithinSeconds: 3600,
-    }
-    if (selectedProfileFilter.value !== 'all' && selectedProfileFilter.value !== 'legacy') {
-      payload.profileId = Number(selectedProfileFilter.value)
-    }
-    const response = await accountApi.runMaintenance(payload)
-    const data = response?.data || {}
-    for (const account of data.accounts || []) {
-      accountStore.updateAccount(account.id, account)
-    }
-    await Promise.all([fetchRecentAccountEvents(), fetchMaintenanceStatus()])
-    if ((data.refreshed || 0) > 0) {
-      ElMessage.success(`維護刷新完成：${data.refreshed} 個已刷新，${data.skipped || 0} 個略過`)
-    } else {
-      ElMessage.info(`維護檢查完成：0 個需刷新，${data.skipped || 0} 個略過`)
-    }
-  } catch (error) {
-    console.error('執行維護刷新失敗:', error)
-    ElMessage.error(error?.message || '執行維護刷新失敗')
-  } finally {
-    maintenanceLoading.value = false
-  }
-}
-
-const fetchRecentAccountEvents = async () => {
-  eventsLoading.value = true
-  try {
-    const params = { limit: 20 }
-    if (selectedProfileFilter.value !== 'all' && selectedProfileFilter.value !== 'legacy') {
-      params.profileId = Number(selectedProfileFilter.value)
-    }
-    if (activeTab.value !== 'all') {
-      params.platform = activeTab.value
-    }
-    const response = await accountApi.getRecentEvents(params)
-    recentAccountEvents.value = response?.data || []
-  } catch (error) {
-    console.error('取得帳號操作紀錄失敗:', error)
-  } finally {
-    eventsLoading.value = false
-  }
-}
-
-watch([activeTab, selectedProfileFilter], () => {
-  fetchRecentAccountEvents()
-})
-
-watch([selectedRiskFilter, selectedProfileFilter, activeTab, selectedSortMode, selectedSortOrder], () => {
-  syncRouteFilters()
-})
-
-watch(() => route.fullPath, () => {
-  if (syncingRouteFilters.value) return
-  applyRouteFilters()
-})
-
-const OAUTH_ONLY_PLATFORMS = new Set(['facebook', 'instagram', 'threads', 'youtube', 'tiktok'])
-watch(() => accountForm.platform, (newPlatform) => {
-  if (OAUTH_ONLY_PLATFORMS.has(newPlatform)) {
-    accountForm.authType = 'oauth'
-  }
-})
-
-onMounted(() => {
-  applyRouteFilters()
-  fetchAccounts(false)
-  fetchRecentAccountEvents()
-  fetchMaintenanceStatus()
-  window.addEventListener('message', handleTikTokOauthMessage)
-  window.addEventListener('message', handleRedditOauthMessage)
-  window.addEventListener('message', handleYouTubeOauthMessage)
-  window.addEventListener('message', handleThreadsOauthMessage)
-  window.addEventListener('message', handleMetaOauthMessage)
-  window.addEventListener('message', handleTwitterOauthMessage)
-  window.addEventListener('message', handlePatreonOauthMessage)
-  setTimeout(async () => {
-    await fetchAccounts(true)
-    // Auto-open dialog from query params (navigated from ProfileManagement)
-    const editId = route.query.editAccountId
-    const addToProfile = route.query.addAccountToProfile
-    if (editId) {
-      const account = accountStore.accounts.find(a => String(a.id) === String(editId))
-      if (account) {
-        handleEdit(account)
-      }
-      router.replace({ query: {} })
-    } else if (addToProfile) {
-      handleAddAccount()
-      accountForm.profileId = Number(addToProfile)
-      router.replace({ query: {} })
-    }
-  }, 300)
-})
-
-const resetTikTokHealth = () => {
-  Object.assign(tiktokHealth, {
-    accountId: null,
-    lastRequest: null,
-    lastCallback: null,
-    lastRefresh: null,
-    lastWebhook: null,
-  })
-}
-
-const loadTikTokHealth = async (accountId = null) => {
-  try {
-    const response = await tiktokApi.getStatus(accountId)
-    const data = response?.data || {}
-    Object.assign(tiktokHealth, {
-      accountId: data.accountId || accountId || null,
-      lastRequest: data.lastRequest || null,
-      lastCallback: data.lastCallback || null,
-      lastRefresh: data.lastRefresh || null,
-      lastWebhook: data.lastWebhook || null,
-    })
-  } catch (error) {
-    console.error('載入 TikTok health 失敗:', error)
-  }
-}
-
-const handleAddAccount = () => {
-  dialogType.value = 'add'
-  resetAccountForm()
-  resetTikTokHealth()
-  sseConnecting.value = false
-  qrCodeData.value = ''
-  loginStatus.value = ''
-  dialogVisible.value = true
-}
-
-const handleEdit = (row) => {
-  dialogType.value = 'edit'
-  Object.assign(accountForm, makeEmptyAccountForm(), {
-    id: row.id,
-    profileId: row.profileId,
-    name: row.name,
-    platform: row.platformSlug || row.platform,
-    authType: row.authType || row.auth_type || 'cookie',
-    enabled: row.enabled !== false,
-    cookiePath: row.filePath || '',
-    advancedConfigText: row.config && Object.keys(row.config).length > 0
-      ? JSON.stringify(row.config, null, 2)
-      : '',
-    status: row.status
-  })
-  loadStructuredFieldsFromConfig(row.config || {})
-  sseConnecting.value = false
-  qrCodeData.value = ''
-  loginStatus.value = ''
-  dialogVisible.value = true
-  if ((row.platformSlug || row.platform) === 'tiktok') {
-    loadTikTokHealth(row.id)
-  } else {
-    resetTikTokHealth()
-  }
-}
-
-const handleDelete = (row) => {
-  ElMessageBox.confirm(`確定要刪除帳號 ${row.name} 嗎？`, '警告', {
-    confirmButtonText: '確定',
-    cancelButtonText: '取消',
-    type: 'warning'
-  })
-    .then(async () => {
-      try {
-        const response = await accountApi.deleteAccount(row.id)
-        if (response.code === 200) {
-          accountStore.deleteAccount(row.id)
-          ElMessage.success('刪除成功')
-        }
-      } catch (error) {
-        console.error('刪除帳號失敗:', error)
-        ElMessage.error('刪除帳號失敗')
-      }
-    })
-    .catch(() => {})
-}
-
-const executeHealthAction = async (row, { silent = false } = {}) => {
-  if (!row || !row.id) return { ok: false, reason: 'missing_id', row }
-  try {
-    if (row.healthActionKind === 'refresh') {
-      const response = await profilesApi.refreshAccountToken(row.id)
-      accountStore.updateAccount(row.id, response?.data || row)
-      if (!silent) {
-        ElMessage.success(`${row.platform} token 已刷新`)
-      }
-      return { ok: true, kind: 'refresh', row, data: response?.data || row }
-    }
-    if (row.healthActionKind === 'check') {
-      const response = await profilesApi.checkAccountConnection(row.id)
-      accountStore.updateAccount(row.id, response?.data || row)
-      if (!silent) {
-        ElMessage.success(`${row.platform} connection checked`)
-      }
-      return { ok: true, kind: 'check', row, data: response?.data || row }
-    }
-    if (!silent) {
-      ElMessage.info('此帳號目前沒有可執行的健康檢查')
-    }
-    return { ok: false, reason: 'unsupported', row }
-  } catch (error) {
-    console.error('執行帳號健康檢查失敗:', error)
-    if (!silent) {
-      ElMessage.error(error?.message || '執行帳號健康檢查失敗')
-    }
-    return { ok: false, reason: 'error', row, error }
-  }
-}
-
-const runRowHealthCheck = async (row) => {
-  await executeHealthAction(row)
-}
-
-const runBulkHealthCheck = async () => {
-  if (bulkCheckTargets.value.length < 1 || bulkCheckLoading.value) return
-  bulkCheckLoading.value = true
-  try {
-    const response = await profilesApi.batchCheckConnections(bulkCheckTargets.value.map((row) => row.id))
-    const data = response?.data || {}
-    for (const account of data.accounts || []) {
-      accountStore.updateAccount(account.id, account)
-    }
-    if ((data.failed || 0) > 0) {
-      ElMessage.warning(`批次檢查完成：${data.succeeded || 0} 個成功，${data.failed || 0} 個失敗`)
-    } else {
-      ElMessage.success(`批次檢查完成：${data.succeeded || 0} 個成功`)
-    }
-  } catch (error) {
-    console.error('批次檢查失敗:', error)
-    ElMessage.error(error?.message || '批次檢查失敗')
-  } finally {
-    bulkCheckLoading.value = false
-  }
-}
-
-const runBulkRefresh = async () => {
-  if (bulkRefreshTargets.value.length < 1 || bulkRefreshLoading.value) return
-  bulkRefreshLoading.value = true
-  try {
-    const response = await profilesApi.batchRefreshTokens(bulkRefreshTargets.value.map((row) => row.id))
-    const data = response?.data || {}
-    for (const account of data.accounts || []) {
-      accountStore.updateAccount(account.id, account)
-    }
-    if ((data.failed || 0) > 0) {
-      ElMessage.warning(`批次刷新完成：${data.succeeded || 0} 個成功，${data.failed || 0} 個失敗`)
-    } else {
-      ElMessage.success(`批次刷新完成：${data.succeeded || 0} 個成功`)
-    }
-  } catch (error) {
-    console.error('批次刷新失敗:', error)
-    ElMessage.error(error?.message || '批次刷新失敗')
-  } finally {
-    bulkRefreshLoading.value = false
-  }
-}
-
-const handleDownloadCookie = async (row) => {
-  try {
-    const response = await fetch(
-      buildApiUrl(`/downloadCookie?filePath=${encodeURIComponent(row.filePath)}`),
-      {
-        headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {}
-      }
-    )
-    if (!response.ok) {
-      ElMessage.error(response.status === 401 ? '未授權，請重新登入' : '下載失敗')
-      return
-    }
-    const blob = await response.blob()
-    const objectUrl = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = objectUrl
-    link.download = `${row.name}_cookie.json`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    URL.revokeObjectURL(objectUrl)
-  } catch (error) {
-    console.error('下載 Cookie 失敗:', error)
-    ElMessage.error('下載 Cookie 失敗')
-  }
-}
-
-const handleUploadCookie = (row) => {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = '.json'
-  input.style.display = 'none'
-  document.body.appendChild(input)
-
-  input.onchange = async (event) => {
-    const file = event.target.files[0]
-    if (!file) return
-    if (!file.name.endsWith('.json')) {
-      ElMessage.error('請選擇 JSON 格式的 Cookie 檔案')
-      document.body.removeChild(input)
-      return
-    }
-
-    try {
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('id', row.id)
-      formData.append('platform', row.platformSlug || row.platform)
-      await http.upload('/uploadCookie', formData)
-      ElMessage.success('Cookie 檔案上傳成功')
-      await refreshAccounts()
-    } catch (error) {
-      ElMessage.error('Cookie 檔案上傳失敗')
-    } finally {
-      document.body.removeChild(input)
-    }
-  }
-
-  input.click()
-}
-
-const handleReLogin = (row) => {
-  if (!row.supportsRelogin) {
-    ElMessage.warning('此帳號不支援舊版 QR 重新登入，請改用 Cookie / OAuth 更新')
-    return
-  }
-
-  dialogType.value = 'edit'
-  Object.assign(accountForm, makeEmptyAccountForm(), {
-    id: row.id,
-    profileId: null,
-    name: row.name,
-    platform: row.platformSlug || row.platform,
-    authType: 'cookie',
-    enabled: true,
-    cookiePath: row.filePath || '',
-    status: row.status
-  })
-
-  sseConnecting.value = false
-  qrCodeData.value = ''
-  loginStatus.value = ''
-  dialogVisible.value = true
-
-  setTimeout(() => {
-    connectSSE(accountForm.platform, accountForm.name)
-  }, 300)
-}
-
-/** Auto-save the account if it hasn't been saved yet. Returns true on success. */
-async function ensureAccountSaved() {
-  if (accountForm.id) return true
-  if (!accountForm.profileId) {
-    ElMessage.warning('請先選擇一個 Profile')
-    return false
-  }
-  if (!accountForm.name.trim()) {
-    ElMessage.warning('請先輸入帳號名稱')
-    return false
-  }
-  if (!accountForm.platform) {
-    ElMessage.warning('請先選擇平台')
-    return false
-  }
-  try {
-    const authType = ((accountForm.platform === 'reddit' && accountForm.redditAuthType === 'cookie') || (accountForm.platform === 'twitter' && accountForm.twitterAuthType === 'cookie') || (accountForm.platform === 'patreon' && accountForm.patreonAuthType === 'cookie')) ? 'cookie' : 'oauth'
-    const payload = {
-      profileId: accountForm.profileId,
-      platform: accountForm.platform,
-      accountName: accountForm.name,
-      authType,
-      enabled: true,
-      config: buildStructuredConfig()
-    }
-    const result = await profilesApi.createAccount(accountForm.profileId, payload)
-    const data = result?.data || {}
-    accountForm.id = data.id
-    dialogType.value = 'edit'
-    ElMessage.success('帳號已自動儲存，繼續連線...')
-    await refreshAccounts()
-    return true
-  } catch (error) {
-    ElMessage.error(error?.message || '自動儲存失敗，請先手動儲存帳號')
-    return false
-  }
-}
-
-function validateConnectPlatform(expectedPlatform) {
-  if (!['facebook', 'instagram', 'reddit', 'threads', 'youtube', 'tiktok', 'twitter', 'patreon'].includes(expectedPlatform)) {
-    ElMessage.warning('平台不符')
-    return false
-  }
-  if (accountForm.platform !== expectedPlatform) {
-    ElMessage.warning(`目前選擇的平台不是 ${expectedPlatform}`)
-    return false
-  }
-  return true
-}
-
-const OAUTH_PLATFORMS = new Set(['tiktok', 'facebook', 'instagram', 'reddit', 'threads', 'youtube', 'twitter', 'patreon'])
-const OAUTH_PLATFORM_LABELS = { tiktok: 'TikTok', facebook: 'Facebook', instagram: 'Instagram', reddit: 'Reddit', threads: 'Threads', youtube: 'YouTube', twitter: 'Twitter/X' }
-
-function isOAuthPlatform(platform) { return OAUTH_PLATFORMS.has(platform) }
-function oAuthPlatformLabel(platform) { return OAUTH_PLATFORM_LABELS[platform] || platform }
-function platformLabel(platform) { const meta = getPlatformMeta(platform); return meta?.label || platform }
-
-async function quickConnect() {
-  if (!accountForm.profileId) { ElMessage.warning('請先選擇一個 Profile'); return }
-  if (!accountForm.name.trim()) { ElMessage.warning('請先輸入帳號名稱'); return }
-  if (!accountForm.platform) { ElMessage.warning('請先選擇平台'); return }
-  if (!await ensureAccountSaved()) return
-  const platform = accountForm.platform
-  if (platform === 'tiktok') await connectWithTikTok()
-  else if (platform === 'facebook' || platform === 'instagram') await connectWithMeta(platform)
-  else if (platform === 'reddit') await connectWithReddit()
-  else if (platform === 'threads') await connectWithThreads()
-  else if (platform === 'youtube') await connectWithYouTube()
-  else if (platform === 'twitter') {
-    if (accountForm.twitterAuthType === 'cookie') await acquireCookie()
-    else await connectWithTwitterApi()
-  }
-  else if (platform === 'patreon') {
-    if (accountForm.patreonAuthType === 'cookie') await acquireCookie()
-    else await connectWithPatreon()
-  }
-  else ElMessage.warning('此平台不支援 OAuth 連線')
-}
-
-async function connectWithTikTok() {
-  if (!accountForm.profileId) {
-    ElMessage.warning('請先選擇 Profile，再使用 TikTok Connect')
-    return
-  }
-  if (!accountForm.name.trim()) {
-    ElMessage.warning('請先輸入帳號名稱')
-    return
-  }
-  if (!await ensureAccountSaved()) return
-
-  const popup = window.open('', `tiktok-connect-${accountForm.id || Date.now()}`, 'width=560,height=760')
-  if (!popup) {
-    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
-    return
-  }
-  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to TikTok...</p>')
-
-  try {
-    const response = await tiktokApi.startOAuth({
-      profileId: accountForm.profileId,
-      accountId: accountForm.id,
-      accountName: accountForm.name,
-    })
-    popup.location = response.data.authorizeUrl
-  } catch (error) {
-    popup.close()
-    console.error('TikTok connect 啟動失敗:', error)
-    ElMessage.error(error?.message || 'TikTok connect 啟動失敗')
-  }
-}
-
-async function connectWithMeta(expectedPlatform) {
-  if (!validateConnectPlatform(expectedPlatform)) return
-  if (!await ensureAccountSaved()) return
-
-  const popup = window.open('', `meta-connect-${expectedPlatform}-${accountForm.id || Date.now()}`, 'width=720,height=820')
-  if (!popup) {
-    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
-    return
-  }
-  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to Meta...</p>')
-  try {
-    const scopes = expectedPlatform === 'instagram'
-      ? ['pages_show_list', 'instagram_basic', 'instagram_content_publish', 'business_management']
-      : ['pages_show_list', 'pages_manage_posts', 'pages_read_engagement', 'pages_manage_metadata', 'business_management']
-    const response = await metaApi.startOAuth({
-      profileId: accountForm.profileId,
-      accountId: accountForm.id,
-      accountName: accountForm.name,
-      scopes,
-    })
-    popup.location = response.data.authorizeUrl
-  } catch (error) {
-    popup.close()
-    console.error('Meta connect 啟動失敗:', error)
-    ElMessage.error(error?.message || 'Meta connect 啟動失敗')
-  }
-}
-
-async function connectWithReddit() {
-  if (!validateConnectPlatform('reddit')) return
-  if (!await ensureAccountSaved()) return
-
-  const popup = window.open('', `reddit-connect-${accountForm.id || Date.now()}`, 'width=720,height=820')
-  if (!popup) {
-    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
-    return
-  }
-  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to Reddit...</p>')
-  try {
-    const response = await redditApi.startOAuth({
-      profileId: accountForm.profileId,
-      accountId: accountForm.id,
-      accountName: accountForm.name,
-      scopes: ['identity', 'submit', 'read']
-    })
-    popup.location = response.data.authorizeUrl
-  } catch (error) {
-    popup.close()
-    console.error('Reddit connect 啟動失敗:', error)
-    ElMessage.error(error?.message || 'Reddit connect 啟動失敗')
-  }
-}
-
-async function connectWithThreads() {
-  if (!validateConnectPlatform('threads')) return
-  if (!await ensureAccountSaved()) return
-
-  const popup = window.open('', `threads-connect-${accountForm.id || Date.now()}`, 'width=720,height=820')
-  if (!popup) {
-    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
-    return
-  }
-  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to Threads...</p>')
-  try {
-    const response = await threadsApi.startOAuth({
-      profileId: accountForm.profileId,
-      accountId: accountForm.id,
-      accountName: accountForm.name,
-      scopes: ['threads_basic', 'threads_content_publish']
-    })
-    popup.location = response.data.authorizeUrl
-  } catch (error) {
-    popup.close()
-    console.error('Threads connect 啟動失敗:', error)
-    ElMessage.error(error?.message || 'Threads connect 啟動失敗')
-  }
-}
-
-async function connectWithPatreon() {
-  if (!validateConnectPlatform('patreon')) return
-  if (!await ensureAccountSaved()) return
-
-  const popup = window.open('', `patreon-connect-${accountForm.id || Date.now()}`, 'width=720,height=820')
-  if (!popup) {
-    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
-    return
-  }
-  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to Patreon...</p>')
-  try {
-    const response = await patreonApi.startOAuth({
-      profileId: accountForm.profileId,
-      accountId: accountForm.id,
-      accountName: accountForm.name,
-      scopes: ['identity', 'campaigns', 'campaigns.posts']
-    })
-    popup.location = response.data.authorizeUrl
-  } catch (error) {
-    popup.close()
-    console.error('Patreon connect 啟動失敗:', error)
-    ElMessage.error(error?.message || 'Patreon connect 啟動失敗')
-  }
-}
-
-async function connectWithYouTube() {
-  if (!validateConnectPlatform('youtube')) return
-  if (!await ensureAccountSaved()) return
-
-  const popup = window.open('', `youtube-connect-${accountForm.id || Date.now()}`, 'width=720,height=820')
-  if (!popup) {
-    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
-    return
-  }
-  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to YouTube...</p>')
-  try {
-    const response = await youtubeApi.startOAuth({
-      profileId: accountForm.profileId,
-      accountId: accountForm.id,
-      accountName: accountForm.name,
-      scopes: ['https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly']
-    })
-    popup.location = response.data.authorizeUrl
-  } catch (error) {
-    popup.close()
-    console.error('YouTube connect 啟動失敗:', error)
-    ElMessage.error(error?.message || 'YouTube connect 啟動失敗')
-  }
-}
-
-async function connectWithTwitterApi() {
-  if (!accountForm.profileId) { ElMessage.warning('請先選擇一個 Profile'); return }
-  if (!accountForm.name.trim()) { ElMessage.warning('請先輸入帳號名稱'); return }
-  if (accountForm.platform !== 'twitter') { ElMessage.warning('目前選擇的平台不是 Twitter'); return }
-  if (!await ensureAccountSaved()) return
-
-  const popup = window.open('', `twitter-connect-${accountForm.id || Date.now()}`, 'width=720,height=820')
-  if (!popup) {
-    ElMessage.error('瀏覽器阻擋了彈出視窗，請允許 popup 後重試')
-    return
-  }
-  popup.document.write('<p style="font-family: sans-serif; padding: 16px;">Redirecting to X / Twitter...</p>')
-  try {
-    const response = await twitterApi.startOAuth({
-      profileId: accountForm.profileId,
-      accountId: accountForm.id,
-      accountName: accountForm.name,
-      scopes: ['tweet.read', 'tweet.write', 'users.read', 'offline.access']
-    })
-    popup.location = response.data.authorizeUrl
-  } catch (error) {
-    popup.close()
-    console.error('Twitter connect 啟動失敗:', error)
-    ElMessage.error(error?.message || 'Twitter connect 啟動失敗')
-  }
-}
-
-async function checkStructuredConnection(expectedPlatform) {
-  if (!accountForm.id) {
-    ElMessage.warning('請先儲存帳號，再檢查連線')
-    return
-  }
-  if (accountForm.platform !== expectedPlatform) {
-    ElMessage.warning('目前帳號平台與檢查操作不符')
-    return
-  }
-  try {
-    const response = await profilesApi.checkAccountConnection(accountForm.id)
-    const account = response?.data || {}
-    const config = account.config || {}
-    accountForm.facebookPageName = config.facebookPageName || accountForm.facebookPageName
-    accountForm.instagramUserName = config.instagramUserName || accountForm.instagramUserName
-    accountForm.threadsUserName = config.threadsUserName || accountForm.threadsUserName
-    accountForm.telegramBotName = config.telegramBotName || accountForm.telegramBotName
-    accountForm.telegramChatTitle = config.telegramChatTitle || accountForm.telegramChatTitle
-    accountForm.discordWebhookName = config.discordWebhookName || accountForm.discordWebhookName
-    accountForm.discordWebhookChannel = config.discordWebhookChannel || accountForm.discordWebhookChannel
-    accountForm.twitterUserName = config.twitterUserName || accountForm.twitterUserName
-    accountForm.twitterDisplayName = config.twitterDisplayName || accountForm.twitterDisplayName
-    accountForm.lastConnectionCheckAt = config.lastConnectionCheckAt || accountForm.lastConnectionCheckAt
-    ElMessage.success(`${account.platform} connection checked`)
-  } catch (error) {
-    console.error('檢查平台連線失敗:', error)
-    ElMessage.error(error?.message || '檢查平台連線失敗')
-  }
-}
-
-async function refreshStructuredToken(expectedPlatform) {
-  if (!accountForm.id) {
-    ElMessage.warning('請先儲存帳號，再刷新 token')
-    return
-  }
-  if (accountForm.platform !== expectedPlatform) {
-    ElMessage.warning('目前帳號平台與刷新操作不符')
-    return
-  }
-  try {
-    const response = await profilesApi.refreshAccountToken(accountForm.id)
-    const account = response?.data || {}
-    const config = account.config || {}
-    accountForm.accessToken = config.accessToken || accountForm.accessToken
-    accountForm.accessTokenExpiresAt = config.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
-    accountForm.accessTokenUpdatedAt = config.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
-    accountForm.lastManualRefreshAt = config.lastManualRefreshAt || accountForm.lastManualRefreshAt
-    accountForm.redditUserName = config.redditUserName || accountForm.redditUserName
-    accountForm.channelTitle = config.channelTitle || accountForm.channelTitle
-    accountForm.threadUserId = config.threadUserId || accountForm.threadUserId
-    accountForm.threadsUserName = config.threadsUserName || accountForm.threadsUserName
-    accountForm.pageId = config.pageId || accountForm.pageId
-    accountForm.facebookPageName = config.facebookPageName || accountForm.facebookPageName
-    accountForm.igUserId = config.igUserId || accountForm.igUserId
-    accountForm.instagramUserName = config.instagramUserName || accountForm.instagramUserName
-    ElMessage.success(`${account.platform} token 已刷新`)
-  } catch (error) {
-    console.error('刷新平台 token 失敗:', error)
-    ElMessage.error(error?.message || '刷新平台 token 失敗')
-  }
-}
-
-async function refreshTikTokToken() {
-  if (!accountForm.id) {
-    ElMessage.warning('請先儲存 TikTok 帳號，再刷新 token')
-    return
-  }
-  try {
-    const response = await profilesApi.refreshAccountToken(accountForm.id)
-    const account = response?.data || {}
-    const config = account.config || {}
-    accountForm.accessToken = config.accessToken || accountForm.accessToken
-    accountForm.refreshToken = config.refreshToken || accountForm.refreshToken
-    accountForm.openId = config.openId || accountForm.openId
-    accountForm.tiktokScope = config.scope || accountForm.tiktokScope
-    accountForm.tiktokDisplayName = config.displayName || accountForm.tiktokDisplayName
-    accountForm.tiktokAvatarUrl = config.avatarUrl || accountForm.tiktokAvatarUrl
-    accountForm.accessTokenExpiresAt = config.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
-    accountForm.refreshTokenExpiresAt = config.refreshTokenExpiresAt || accountForm.refreshTokenExpiresAt
-    accountForm.accessTokenUpdatedAt = config.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
-    accountForm.connectedAt = config.connectedAt || accountForm.connectedAt
-    accountForm.lastManualRefreshAt = config.lastManualRefreshAt || accountForm.lastManualRefreshAt
-    accountForm.lastAutoRefreshAt = config.lastAutoRefreshAt || accountForm.lastAutoRefreshAt
-    await loadTikTokHealth(accountForm.id)
-    ElMessage.success('TikTok token 已刷新')
-  } catch (error) {
-    console.error('刷新 TikTok token 失敗:', error)
-    ElMessage.error(error?.message || '刷新 TikTok token 失敗')
-  }
-}
-
-function openOauthReviewStatus(platform) {
-  const query = { platform }
-  if (accountForm.id) {
-    query.accountId = String(accountForm.id)
-  }
-  router.push({ path: `/oauth-review/${platform}`, query })
-}
-
-function openTikTokReviewStatus() {
-  if (accountForm.id) {
-    router.push({ path: '/tiktok-review', query: { accountId: String(accountForm.id) } })
-    return
-  }
-  router.push('/tiktok-review')
-}
-
-function handleRedditOauthMessage(event) {
-  const payload = event?.data
-  if (!payload || payload.type !== 'sau:reddit-oauth') return
-  if (!payload.ok) {
-    ElMessage.error(payload.error || 'Reddit 授權失敗')
-    return
-  }
-  const data = payload.data || {}
-  accountForm.accessToken = data.accessToken || accountForm.accessToken
-  accountForm.refreshToken = data.refreshToken || accountForm.refreshToken
-  accountForm.redditUserName = data.redditUserName || accountForm.redditUserName
-  accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
-  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
-  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
-  ElMessage.success('Reddit 已連線')
-  dialogVisible.value = false
-  refreshAccounts()
-}
-
-function handleYouTubeOauthMessage(event) {
-  const payload = event?.data
-  if (!payload || payload.type !== 'sau:youtube-oauth') return
-  if (!payload.ok) {
-    ElMessage.error(payload.error || 'YouTube 授權失敗')
-    return
-  }
-  const data = payload.data || {}
-  accountForm.accessToken = data.accessToken || accountForm.accessToken
-  accountForm.refreshToken = data.refreshToken || accountForm.refreshToken
-  accountForm.channelId = data.channelId || accountForm.channelId
-  accountForm.channelTitle = data.channelTitle || accountForm.channelTitle
-  accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
-  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
-  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
-  ElMessage.success('YouTube 已連線')
-  dialogVisible.value = false
-  refreshAccounts()
-}
-
-function handleThreadsOauthMessage(event) {
-  const payload = event?.data
-  if (!payload || payload.type !== 'sau:threads-oauth') return
-  if (!payload.ok) {
-    ElMessage.error(payload.error || 'Threads 授權失敗')
-    return
-  }
-  const data = payload.data || {}
-  accountForm.accessToken = data.accessToken || accountForm.accessToken
-  accountForm.threadUserId = data.threadUserId || accountForm.threadUserId
-  accountForm.threadsUserName = data.threadsUserName || accountForm.threadsUserName
-  accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
-  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
-  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
-  accountForm.avatarUrl = data.avatarUrl || accountForm.avatarUrl
-  ElMessage.success('Threads 已連線')
-  dialogVisible.value = false
-  refreshAccounts()
-}
-
-function handleTwitterOauthMessage(event) {
-  const payload = event?.data
-  if (!payload || payload.type !== 'sau:twitter-oauth') return
-  if (!payload.ok) {
-    ElMessage.error(payload.error || 'Twitter 授權失敗')
-    return
-  }
-  const data = payload.data || {}
-  accountForm.accessToken = data.accessToken || accountForm.accessToken
-  accountForm.refreshToken = data.refreshToken || accountForm.refreshToken
-  accountForm.twitterUserName = data.twitterUserName || accountForm.twitterUserName
-  accountForm.twitterDisplayName = data.twitterDisplayName || accountForm.twitterDisplayName
-  accountForm.twitterUserId = data.twitterUserId || accountForm.twitterUserId
-  accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || accountForm.accessTokenExpiresAt
-  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
-  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
-  accountForm.avatarUrl = data.avatarUrl || accountForm.avatarUrl
-  accountForm.twitterAuthType = 'api'
-  ElMessage.success('Twitter/X 已連線')
-  dialogVisible.value = false
-  refreshAccounts()
-}
-
-function handlePatreonOauthMessage(event) {
-  const payload = event?.data
-  if (!payload || payload.type !== 'sau:patreon-oauth') return
-  if (!payload.ok) {
-    ElMessage.error(payload.error || 'Patreon 授權失敗')
-    return
-  }
-  const data = payload.data || {}
-  accountForm.accessToken = data.accessToken || accountForm.accessToken
-  accountForm.refreshToken = data.refreshToken || accountForm.refreshToken
-  accountForm.patreonUserName = data.patreonUserName || accountForm.patreonUserName
-  if (data.campaignId) accountForm.patreonCampaignId = data.campaignId
-  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || accountForm.accessTokenUpdatedAt
-  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
-  accountForm.patreonAuthType = 'api'
-  ElMessage.success('Patreon 已連線')
-  dialogVisible.value = false
-  refreshAccounts()
-}
-
-async function finalizeMetaPageSelection(page, tokenData, accountName, targetAccountId) {
-  try {
-    const accountId = targetAccountId || accountForm.id
-    console.log('🔍 finalizeMetaPageSelection called:', { page: { id: page.id, name: page.name, igUserId: page.igUserId, hasAccessToken: Boolean(page.access_token) }, tokenData: { hasUserAccessToken: Boolean(tokenData.userAccessToken), metaUserAccessTokenExpiresAt: tokenData.metaUserAccessTokenExpiresAt }, targetAccountId: accountId, currentFormId: accountForm.id })
-    const isIG = Boolean(page.igUserId)
-    // Read existing config to preserve fields like avatarUrl that the backend saved
-    const existingAccount = accountStore.accounts.find(a => String(a.id) === String(accountId))
-    const existingConfig = existingAccount?.config || {}
-    const config = {
-      ...existingConfig,
-      pageId: page.id,
-      facebookPageName: page.name,
-      accessToken: page.access_token,
-      metaUserAccessToken: tokenData.userAccessToken,
-      accessTokenUpdatedAt: new Date().toISOString(),
-      connectedAt: new Date().toISOString(),
-    }
-    if (tokenData.metaUserAccessTokenExpiresAt) {
-      config.metaUserAccessTokenExpiresAt = tokenData.metaUserAccessTokenExpiresAt
-      config.accessTokenExpiresAt = tokenData.metaUserAccessTokenExpiresAt
-    }
-    if (page.pictureUrl) {
-      config.avatarUrl = page.pictureUrl
-    }
-    if (isIG) {
-      config.igUserId = page.igUserId
-      config.instagramUserName = page.instagramUserName
-    }
-    await profilesApi.updateAccount(accountId, {
-      config,
-      authType: 'oauth',
-      enabled: true,
-      status: 1,
-    })
-    // Only update the form if this callback is for the account currently being edited
-    if (String(accountId) === String(accountForm.id)) {
-      accountForm.pageId = page.id
-      accountForm.facebookPageName = page.name
-      accountForm.accessToken = page.access_token
-      if (page.pictureUrl) {
-        accountForm.avatarUrl = page.pictureUrl
-      }
-      if (isIG) {
-        accountForm.igUserId = page.igUserId
-        accountForm.instagramUserName = page.instagramUserName
-      }
-    }
-    if (isIG) {
-      ElMessage.success(`Instagram 已連線至 @${page.instagramUserName}`)
-    } else {
-      ElMessage.success(`Facebook 已連線至 ${page.name}`)
-    }
-    dialogVisible.value = false
-    await refreshAccounts()
-  } catch (error) {
-    ElMessage.error(error?.message || '頁面選擇儲存失敗')
-  }
-}
-
-async function handleMetaOauthMessage(event) {
-  const payload = event?.data
-  if (!payload || payload.type !== 'sau:meta-oauth') return
-  console.log('🔍 handleMetaOauthMessage received:', { ok: payload.ok, hasSelectedPage: Boolean(payload.data?.selectedPage), hasTokenData: Boolean(payload.data?.tokenData), platform: payload.data?.platform, accountId: payload.data?.accountId, ourAccountId: accountForm.id })
-  if (!payload.ok) {
-    ElMessage.error(payload.error || 'Meta 授權失敗')
-    return
-  }
-  const data = payload.data || {}
-
-  // Use accountId from the postMessage (set by the picker) — NOT accountForm.id,
-  // which may point to a different account if multiple OAuth flows are open.
-  const targetAccountId = data.accountId || accountForm.id
-
-  // Selector path: user picked a page/IG from the picker
-  if (data.selectedPage && data.tokenData) {
-    finalizeMetaPageSelection(data.selectedPage, data.tokenData, accountForm.name, targetAccountId)
-    return
-  }
-
-  // Non-selector path: backend auto-selected (single page/IG).
-  // The backend already saved the config in the callback, but we explicitly
-  // PATCH here to make sure the frontend state is in sync.
-  // Merge with existing config to preserve fields like avatarUrl.
-  try {
-    const existingAccount = accountStore.accounts.find(a => String(a.id) === String(targetAccountId))
-    const existingConfig = existingAccount?.config || {}
-    const config = {
-      ...existingConfig,
-      pageId: data.pageId || '',
-      facebookPageName: data.facebookPageName || '',
-      accessToken: data.accessToken || '',
-      accessTokenUpdatedAt: data.accessTokenUpdatedAt || new Date().toISOString(),
-      connectedAt: data.connectedAt || new Date().toISOString(),
-    }
-    if (data.avatarUrl) {
-      config.avatarUrl = data.avatarUrl
-    }
-    if (data.platform === 'instagram') {
-      config.igUserId = data.igUserId || ''
-      config.instagramUserName = data.instagramUserName || ''
-    }
-    await profilesApi.updateAccount(targetAccountId, {
-      config,
-      authType: 'oauth',
-      enabled: true,
-      status: 1,
-    })
-    // Only update the form if this callback is for the account currently being edited
-    if (String(targetAccountId) === String(accountForm.id)) {
-      accountForm.accessToken = data.accessToken || accountForm.accessToken
-      accountForm.pageId = data.pageId || accountForm.pageId
-      accountForm.facebookPageName = data.facebookPageName || accountForm.facebookPageName
-      if (data.platform === 'instagram') {
-        accountForm.igUserId = data.igUserId || accountForm.igUserId
-        accountForm.instagramUserName = data.instagramUserName || accountForm.instagramUserName
-      }
-    }
-    if (data.platform === 'instagram') {
-      ElMessage.success(`Instagram 已連線至 @${data.instagramUserName || 'Instagram'}`)
-    } else {
-      ElMessage.success(`Facebook 已連線至 ${data.facebookPageName || 'Facebook Page'}`)
-    }
-    dialogVisible.value = false
-    await refreshAccounts()
-  } catch (error) {
-    console.error('Meta OAuth save failed:', error)
-    ElMessage.error(error?.message || 'Meta OAuth 儲存失敗')
-  }
-}
-
-function handleTikTokOauthMessage(event) {
-  const payload = event?.data
-  if (!payload || payload.type !== 'sau:tiktok-oauth') return
-  if (!payload.ok) {
-    ElMessage.error(payload.error || 'TikTok 授權失敗')
-    return
-  }
-  const data = payload.data || {}
-  accountForm.accessToken = data.accessToken || ''
-  accountForm.refreshToken = data.refreshToken || ''
-  accountForm.openId = data.openId || ''
-  accountForm.tiktokScope = data.scope || ''
-  accountForm.tiktokDisplayName = data.displayName || ''
-  accountForm.tiktokAvatarUrl = data.avatarUrl || ''
-  accountForm.accessTokenExpiresAt = data.accessTokenExpiresAt || ''
-  accountForm.refreshTokenExpiresAt = data.refreshTokenExpiresAt || ''
-  accountForm.accessTokenUpdatedAt = data.accessTokenUpdatedAt || ''
-  accountForm.connectedAt = data.connectedAt || accountForm.connectedAt
-  // Persist the OAuth tokens and user info to the backend
-  if (accountForm.id) {
-    profilesApi.updateAccount(accountForm.id, {
-      config: buildStructuredConfig(),
-      authType: 'oauth',
-    }).then(() => {
-      loadTikTokHealth(accountForm.id)
-      ElMessage.success('TikTok 已連線')
-      dialogVisible.value = false
-      refreshAccounts()
-    }).catch((err) => {
-      ElMessage.error('儲存 TikTok 連線失敗: ' + (err?.message || err))
-    })
-  } else {
-    ElMessage.success('TikTok 已連線')
-    dialogVisible.value = false
-    refreshAccounts()
-  }
-}
-
-const closeSSEConnection = () => {
-  if (eventSource) {
-    eventSource.close()
-    eventSource = null
-  }
-}
-
-async function acquireCookie() {
-  if (!await ensureAccountSaved()) return
-
-  // Close the dialog immediately so the user can see the browser window
-  dialogVisible.value = false
-  sseConnecting.value = false
-  qrCodeData.value = ''
-  loginStatus.value = ''
-
-  // Open SSE in background for cookie capture status
-  closeSSEConnection()
-  sseConnecting.value = true
-  const url = appendAuthQuery(buildApiUrl(`/login?accountId=${accountForm.id}`))
-  eventSource = new EventSource(url)
-
-  eventSource.onmessage = (event) => {
-    const data = event.data
-    if (data === '200') {
-      closeSSEConnection()
-      sseConnecting.value = false
-      ElMessage.success('Cookie 已成功儲存')
-      refreshAccounts()
-    } else if (data === '500') {
-      closeSSEConnection()
-      sseConnecting.value = false
-      ElMessage.error('Cookie 取得失敗，請稍後再試')
-    }
-  }
-
-  eventSource.onerror = (error) => {
-    console.error('SSE 連線錯誤:', error)
-    ElMessage.error('連線伺服器失敗，請稍後再試')
-    closeSSEConnection()
-    sseConnecting.value = false
-  }
-}
-
-const submitCookieImport = async () => {
-  if (!cookieImportText.value.trim()) {
-    ElMessage.warning('Please paste cookie data first')
-    return
-  }
-  if (!accountForm.id) {
-    if (!await ensureAccountSaved()) return
-  }
-  cookieImportLoading.value = true
-  try {
-    const response = await http.post(`/accounts/${accountForm.id}/import-cookies`, {
-      cookies: cookieImportText.value,
-    })
-    const data = response?.data || {}
-    ElMessage.success(data.msg || `Imported ${data.cookieCount || 0} cookies`)
-    showCookieImport.value = false
-    cookieImportText.value = ''
-    await refreshAccounts()
-  } catch (error) {
-    console.error('Cookie import failed:', error)
-    ElMessage.error(error?.response?.data?.msg || error?.message || 'Cookie import failed')
-  } finally {
-    cookieImportLoading.value = false
-  }
-}
-
-const connectSSE = (platform, name) => {
-  closeSSEConnection()
-  sseConnecting.value = true
-  qrCodeData.value = ''
-  loginStatus.value = ''
-
-  const type = String(getLegacyPlatformType(platform) || 1)
-  const url = appendAuthQuery(buildApiUrl(`/login?type=${type}&id=${encodeURIComponent(name)}`))
-  eventSource = new EventSource(url)
-
-  eventSource.onmessage = (event) => {
-    const data = event.data
-    if (!qrCodeData.value && data.length > 100) {
-      qrCodeData.value = data.startsWith('data:image') ? data : `data:image/png;base64,${data}`
-    } else if (data === '200' || data === '500') {
-      loginStatus.value = data
-      if (data === '200') {
-        setTimeout(() => {
-          closeSSEConnection()
-          setTimeout(() => {
-            dialogVisible.value = false
-            sseConnecting.value = false
-            ElMessage.success(dialogType.value === 'edit' ? '重新登入成功' : '帳號新增成功')
-            ElMessage({ type: 'info', message: '正在同步帳號資訊...', duration: 0 })
-            refreshAccounts().then(() => {
-              ElMessage.closeAll()
-              ElMessage.success('帳號資訊已更新')
-            })
-          }, 1000)
-        }, 1000)
-      } else {
-        closeSSEConnection()
-        setTimeout(() => {
-          sseConnecting.value = false
-          qrCodeData.value = ''
-          loginStatus.value = ''
-        }, 2000)
-      }
-    }
-  }
-
-  eventSource.onerror = (error) => {
-    console.error('SSE 連線錯誤:', error)
-    ElMessage.error('連線伺服器失敗，請稍後再試')
-    closeSSEConnection()
-    sseConnecting.value = false
-  }
-}
-
-const buildStructuredConfig = () => {
-  let config = {}
-  if (accountForm.advancedConfigText.trim()) {
-    try {
-      config = JSON.parse(accountForm.advancedConfigText)
-    } catch (error) {
-      throw new Error('進階 JSON 格式錯誤')
-    }
-  }
-
-  assignIfValue(config, 'sheetPostPreset', accountForm.sheetPostPreset.trim())
-
-  switch (accountForm.platform) {
-    case 'reddit':
-      assignIfValue(config, 'redditAuthType', accountForm.redditAuthType)
-      assignIfValue(config, 'subreddits', splitListField(accountForm.subredditsText))
-      assignIfValue(config, 'clientIdEnv', accountForm.clientIdEnv.trim())
-      assignIfValue(config, 'clientSecretEnv', accountForm.clientSecretEnv.trim())
-      assignIfValue(config, 'refreshTokenEnv', accountForm.refreshTokenEnv.trim())
-      assignIfValue(config, 'userAgent', accountForm.userAgent.trim())
-      assignIfValue(config, 'accessToken', accountForm.accessToken.trim())
-      assignIfValue(config, 'refreshToken', accountForm.refreshToken.trim())
-      assignIfValue(config, 'accessTokenExpiresAt', accountForm.accessTokenExpiresAt.trim())
-      assignIfValue(config, 'accessTokenUpdatedAt', accountForm.accessTokenUpdatedAt.trim())
-      assignIfValue(config, 'connectedAt', accountForm.connectedAt.trim())
-      assignIfValue(config, 'redditUserName', accountForm.redditUserName.trim())
-      break
-    case 'telegram':
-      assignIfValue(config, 'chatId', accountForm.chatId.trim())
-      assignIfValue(config, 'botTokenEnv', accountForm.botTokenEnv.trim())
-      assignIfValue(config, 'parseMode', accountForm.parseMode)
-      if (accountForm.silent) config.silent = true
-      if (accountForm.disableWebPreview) config.disableWebPreview = true
-      break
-    case 'youtube':
-      assignIfValue(config, 'channelId', accountForm.channelId.trim())
-      assignIfValue(config, 'channelTitle', accountForm.channelTitle.trim())
-      assignIfValue(config, 'privacyStatus', accountForm.privacyStatus)
-      assignIfValue(config, 'playlistId', accountForm.playlistId.trim())
-      assignIfValue(config, 'categoryId', accountForm.categoryId.trim())
-      assignIfValue(config, 'clientIdEnv', accountForm.clientIdEnv.trim())
-      assignIfValue(config, 'clientSecretEnv', accountForm.clientSecretEnv.trim())
-      assignIfValue(config, 'refreshTokenEnv', accountForm.refreshTokenEnv.trim())
-      assignIfValue(config, 'accessToken', accountForm.accessToken.trim())
-      assignIfValue(config, 'refreshToken', accountForm.refreshToken.trim())
-      assignIfValue(config, 'accessTokenExpiresAt', accountForm.accessTokenExpiresAt.trim())
-      assignIfValue(config, 'accessTokenUpdatedAt', accountForm.accessTokenUpdatedAt.trim())
-      assignIfValue(config, 'connectedAt', accountForm.connectedAt.trim())
-      break
-    case 'facebook':
-      assignIfValue(config, 'pageId', accountForm.pageId.trim())
-      assignIfValue(config, 'accessTokenEnv', accountForm.accessTokenEnv.trim())
-      break
-    case 'instagram':
-      assignIfValue(config, 'igUserId', accountForm.igUserId.trim())
-      assignIfValue(config, 'accessTokenEnv', accountForm.accessTokenEnv.trim())
-      break
-    case 'threads':
-      assignIfValue(config, 'userId', accountForm.threadUserId.trim())
-      assignIfValue(config, 'accessTokenEnv', accountForm.accessTokenEnv.trim())
-      break
-    case 'tiktok':
-      assignIfValue(config, 'publishMode', accountForm.publishMode)
-      assignIfValue(config, 'accessToken', accountForm.accessToken.trim())
-      assignIfValue(config, 'refreshToken', accountForm.refreshToken.trim())
-      assignIfValue(config, 'openId', accountForm.openId.trim())
-      assignIfValue(config, 'scope', accountForm.tiktokScope.trim())
-      assignIfValue(config, 'displayName', accountForm.tiktokDisplayName.trim())
-      assignIfValue(config, 'avatarUrl', accountForm.tiktokAvatarUrl.trim())
-      assignIfValue(config, 'accessTokenEnv', accountForm.accessTokenEnv.trim())
-      assignIfValue(config, 'privacyLevel', accountForm.privacyLevel)
-      if (accountForm.disableComment) config.disableComment = true
-      if (accountForm.disableDuet) config.disableDuet = true
-      if (accountForm.disableStitch) config.disableStitch = true
-      if (accountForm.autoAddMusic === false) config.autoAddMusic = false
-      if (accountForm.videoCoverTimestampMs.trim()) config.videoCoverTimestampMs = Number(accountForm.videoCoverTimestampMs.trim())
-      break
-    case 'discord':
-      assignIfValue(config, 'webhookUrlEnv', accountForm.webhookUrlEnv.trim())
-      break
-    case 'twitter':
-      assignIfValue(config, 'twitterAuthType', accountForm.twitterAuthType)
-      assignIfValue(config, 'apiKeyEnv', accountForm.apiKeyEnv.trim())
-      assignIfValue(config, 'apiKeySecretEnv', accountForm.apiKeySecretEnv.trim())
-      assignIfValue(config, 'accessTokenEnv', accountForm.accessTokenEnv.trim())
-      assignIfValue(config, 'accessTokenSecretEnv', accountForm.accessTokenSecretEnv.trim())
-      break
-    case 'patreon':
-      assignIfValue(config, 'campaignId', accountForm.patreonCampaignId.trim())
-      assignIfValue(config, 'patreonAuthType', accountForm.patreonAuthType)
-      assignIfValue(config, 'accessMode', accountForm.patreonAccessMode)
-      if (accountForm.patreonAccessMode === 'tier') {
-        assignIfValue(config, 'tierName', accountForm.patreonTierName.trim())
-      }
-      assignIfValue(config, 'patreonUserName', accountForm.patreonUserName.trim())
-      break
-    case 'teaching_blog':
-      assignIfValue(config, 'githubTokenEnv', accountForm.githubTokenEnv.trim())
-      assignIfValue(config, 'repoOwner', accountForm.repoOwner.trim())
-      assignIfValue(config, 'repoName', accountForm.repoName.trim())
-      assignIfValue(config, 'branch', accountForm.contentBranch.trim() || 'main')
-      assignIfValue(config, 'contentDir', accountForm.contentDir.trim() || 'content/posts')
-      break
-    case 'nw_sw_blog':
-      assignIfValue(config, 'apiBase', accountForm.apiBase.trim())
-      assignIfValue(config, 'apiTokenEnv', accountForm.apiTokenEnv.trim())
-      assignIfValue(config, 'persona', accountForm.blogPersona)
-      assignIfValue(config, 'locale', accountForm.blogLocale)
-      break
-    default:
-      break
-  }
-
-  return config
-}
-
-const submitStructuredAccount = async () => {
-  const payload = {
-    profileId: accountForm.profileId,
-    platform: accountForm.platform,
-    accountName: accountForm.name,
-    authType: accountForm.authType,
-    enabled: accountForm.enabled,
-    config: buildStructuredConfig()
-  }
-  if (accountForm.authType === 'cookie' && accountForm.cookiePath.trim()) {
-    payload.cookiePath = accountForm.cookiePath.trim()
-  }
-
-  const validation = await profilesApi.validateAccountConfig({
-    ...payload,
-    performLiveChecks: true
-  })
-  const result = validation?.data || {}
-  if (!result.valid) {
-    throw new Error((result.errors || []).join('；') || '帳號設定驗證失敗')
-  }
-  if (Array.isArray(result.warnings) && result.warnings.length > 0) {
-    ElMessage.warning(result.warnings.join('；'))
-  }
-
-  if (dialogType.value === 'add') {
-    await profilesApi.createAccount(accountForm.profileId, payload)
-  } else {
-    await profilesApi.updateAccount(accountForm.id, payload)
-  }
-}
-
-const submitLegacyAccount = async () => {
-  const legacyType = getLegacyPlatformType(accountForm.platform)
-  if (legacyType == null) {
-    throw new Error('非舊版平台帳號必須先指定 Profile')
-  }
-
-  if (dialogType.value === 'add') {
-    connectSSE(accountForm.platform, accountForm.name)
-    return
-  }
-
-  await accountApi.updateAccount({
-    id: accountForm.id,
-    type: legacyType,
-    userName: accountForm.name
-  })
-}
-
-const submitAccountForm = () => {
-  accountFormRef.value.validate(async (valid) => {
-    if (!valid) return false
-
-    try {
-      if (isStructuredAccountForm.value) {
-        await submitStructuredAccount()
-        dialogVisible.value = false
-        ElMessage.success(dialogType.value === 'add' ? '帳號新增成功' : '帳號更新成功')
-        await refreshAccounts()
-      } else {
-        await submitLegacyAccount()
-        if (dialogType.value === 'edit') {
-          dialogVisible.value = false
-          ElMessage.success('更新成功')
-          await refreshAccounts()
-        }
-      }
-    } catch (error) {
-      console.error('提交帳號失敗:', error)
-      ElMessage.error(error?.message || '提交帳號失敗')
-    }
-  })
-}
-
-onBeforeUnmount(() => {
-  closeSSEConnection()
-  window.removeEventListener('message', handleTikTokOauthMessage)
-  window.removeEventListener('message', handleRedditOauthMessage)
-  window.removeEventListener('message', handleYouTubeOauthMessage)
-  window.removeEventListener('message', handleThreadsOauthMessage)
-  window.removeEventListener('message', handleMetaOauthMessage)
-  window.removeEventListener('message', handleTwitterOauthMessage)
-  window.removeEventListener('message', handlePatreonOauthMessage)
-})
+// Local reactive accounts (not using the store's normalization since we
+// get pre-enriched data from /api/accounts)
+const accounts = ref([])
+
+onMounted(loadAccounts)
 </script>
-
-<style lang="scss" scoped>
-@keyframes rotate {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.account-management {
-  .page-header {
-    margin-bottom: 20px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-
-    h1 {
-      font-size: 24px;
-      color: var(--color-text);
-      margin: 0;
-    }
-
-    .profile-toolbar {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-  }
-
-  .maintenance-banner {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 16px;
-    margin: 12px 0 20px;
-    padding: 10px 12px;
-    background: #f5f7fa;
-    border-radius: 6px;
-    color: var(--color-text-secondary);
-    font-size: 13px;
-
-    .maintenance-error {
-      color: var(--color-danger);
-      word-break: break-word;
-    }
-  }
-
-  .recent-account-events {
-    margin-top: 24px;
-
-    .section-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 12px;
-
-      h2 {
-        margin: 0;
-        font-size: 18px;
-        color: var(--color-text);
-      }
-    }
-  }
-
-  .account-tabs {
-    background-color: #fff;
-    border-radius: 4px;
-    box-shadow: var(--shadow-lg);
-
-    .account-tabs-nav {
-      padding: 20px;
-    }
-  }
-
-  .field-hint,
-  .legacy-login-hint {
-    margin-top: 6px;
-    color: #909399;
-    font-size: 13px;
-    line-height: 1.6;
-  }
-
-  .legacy-login-hint {
-    margin-bottom: 12px;
-    padding: 10px 12px;
-    background: #f5f7fa;
-    border-radius: 4px;
-  }
-
-  .tiktok-connect-row {
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-
-  .tiktok-connected-preview {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-
-    .tiktok-connected-text {
-      min-width: 0;
-    }
-  }
-
-  .qrcode-container {
-    margin-top: 20px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: 250px;
-
-    .qrcode-wrapper {
-      text-align: center;
-
-      .qrcode-tip {
-        margin-bottom: 15px;
-        color: #606266;
-      }
-
-      .qrcode-image {
-        max-width: 200px;
-        max-height: 200px;
-        border: 1px solid #ebeef5;
-        background-color: black;
-      }
-    }
-
-    .loading-wrapper,
-    .success-wrapper,
-    .error-wrapper {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-
-      .el-icon {
-        font-size: 48px;
-
-        &.is-loading {
-          animation: rotate 1s linear infinite;
-        }
-      }
-
-      span {
-        font-size: 16px;
-      }
-    }
-
-    .success-wrapper .el-icon {
-      color: #67c23a;
-    }
-
-    .error-wrapper .el-icon {
-      color: #f56c6c;
-    }
-  }
-}
-</style>

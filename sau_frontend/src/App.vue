@@ -9,7 +9,7 @@
       </router-view>
     </template>
 
-    <!-- Authenticated pages — sidebar + header layout -->
+    <!-- Authenticated pages — Control Room layout -->
     <template v-else>
       <div class="app-layout">
         <!-- Sidebar -->
@@ -18,33 +18,47 @@
           <div class="sidebar-brand">
             <img src="/socialupload-app-icon.png" alt="Socialupload" class="sidebar-logo" />
             <transition name="fade">
-              <span v-show="!isCollapse" class="sidebar-title">Socialupload</span>
+              <div v-show="!isCollapse">
+                <div class="sidebar-title">social<b>upload</b></div>
+                <div class="sidebar-sub">
+                  <span class="wc-dot" style="width:6px;height:6px;box-shadow:none"></span>
+                  worker online
+                </div>
+              </div>
             </transition>
           </div>
 
           <!-- Navigation -->
           <nav class="sidebar-nav">
-            <router-link
-              v-for="item in navItems"
-              :key="item.path"
-              :to="item.path"
-              class="nav-item"
-              :class="{ active: isActive(item.path) }"
-            >
-              <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
-              <transition name="fade">
-                <span v-show="!isCollapse" class="nav-label">{{ item.label }}</span>
-              </transition>
-            </router-link>
+            <div v-for="group in navGroups" :key="group.label">
+              <div class="nav-group-label">{{ group.label }}</div>
+              <router-link
+                v-for="item in group.items"
+                :key="item.path"
+                :to="item.path"
+                class="nav-item"
+                :class="{ active: isActive(item.path) }"
+              >
+                <span class="nav-ic"><component :is="item.icon" /></span>
+                <transition name="fade">
+                  <span v-show="!isCollapse" class="nav-label">{{ item.label }}</span>
+                </transition>
+              </router-link>
+            </div>
           </nav>
 
-          <!-- Collapse toggle -->
+          <!-- Footer: worker card + collapse -->
           <div class="sidebar-footer">
+            <div class="worker-card">
+              <span class="wc-dot"></span>
+              <div class="wc-text">
+                <div class="t">Worker active</div>
+                <div class="s">3 / 3 concurrent · {{ pendingJobCount }} queued</div>
+              </div>
+            </div>
             <button class="collapse-btn" @click="toggleSidebar" :title="isCollapse ? 'Expand' : 'Collapse'">
-              <el-icon>
-                <Fold v-if="!isCollapse" />
-                <Expand v-else />
-              </el-icon>
+              <component :is="isCollapse ? icons.expand : icons.collapse" :width="15" :height="15" />
+              <span v-show="!isCollapse" class="sidebar-footer-text">Collapse</span>
             </button>
           </div>
         </aside>
@@ -53,17 +67,35 @@
         <div class="app-main">
           <!-- Header -->
           <header class="app-header">
-            <div class="header-left">
-              <el-breadcrumb separator="/">
-                <el-breadcrumb-item :to="{ path: '/dashboard' }">Home</el-breadcrumb-item>
-                <el-breadcrumb-item v-if="currentNav">{{ currentNav.label }}</el-breadcrumb-item>
-              </el-breadcrumb>
+            <div class="tb-titles">
+              <div class="tb-title">{{ currentTitle }}</div>
+              <div class="tb-sub">{{ currentSubtitle }}</div>
             </div>
-            <div class="header-right">
-              <router-link class="header-link" to="/">Landing</router-link>
-              <router-link class="header-link" to="/privacy">Privacy</router-link>
-              <router-link class="header-link" to="/terms">Terms</router-link>
+            <div class="tb-spacer"></div>
+            <div class="search-box">
+              <component :is="icons.search" :width="16" :height="16" />
+              <span>Search accounts, jobs…</span>
+              <span class="kbd">⌘K</span>
             </div>
+            <button class="icon-btn" title="Notifications">
+              <component :is="icons.bell" />
+              <span class="dot"></span>
+            </button>
+            <router-link to="/publish-center" class="btn-primary">
+              <component :is="icons.plus" :width="16" :height="16" /> New Publish
+            </router-link>
+            <!-- Theme switcher -->
+            <div class="theme-switch">
+              <button
+                v-for="t in themes"
+                :key="t"
+                class="theme-btn"
+                :class="{ on: appStore.theme === t }"
+                @click="appStore.setTheme(t)"
+                :title="t"
+              >{{ t === 'dark' ? '🌙' : '☀️' }}</button>
+            </div>
+            <div class="avatar">A</div>
           </header>
 
           <!-- Content -->
@@ -92,301 +124,107 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
-import {
-  HomeFilled,
-  User,
-  Folder,
-  Picture,
-  Upload,
-  Files,
-  List,
-  TrendCharts,
-  Edit,
-  Document,
-  Connection,
-  DataAnalysis,
-  Fold,
-  Expand
-} from '@element-plus/icons-vue'
+import { useAppStore } from '@/stores/app'
+import { icons } from '@/utils/icons'
 
 const route = useRoute()
+const appStore = useAppStore()
 
 const usePublicLayout = computed(() => Boolean(route.meta?.publicLayout))
 const isCollapse = ref(false)
+const toggleSidebar = () => { isCollapse.value = !isCollapse.value }
 
-const toggleSidebar = () => {
-  isCollapse.value = !isCollapse.value
-}
+const themes = ['dark', 'light']
 
-/* Navigation items — all English labels */
-const navItems = [
-  { path: '/dashboard',            label: 'Dashboard',       icon: HomeFilled },
-  { path: '/account-management',   label: 'Accounts',        icon: User },
-  { path: '/profile-management',   label: 'Profiles',        icon: Folder },
-  { path: '/material-management',  label: 'Materials',       icon: Picture },
-  { path: '/publish-center',       label: 'Publish Center',  icon: Upload },
-  { path: '/template-management',  label: 'Templates',       icon: Files },
-  { path: '/jobs',                 label: 'Jobs',            icon: List },
-  { path: '/video-analytics',      label: 'Analytics',       icon: TrendCharts },
-  { path: '/batch-upload',         label: 'Batch Upload',    icon: Upload },
-  { path: '/campaign-builder',     label: 'Campaigns',       icon: Edit },
-  { path: '/sheet-exports',        label: 'Sheet Exports',   icon: Document },
-  { path: '/api-docs',             label: 'API Docs',        icon: Document },
-  { path: '/oauth-review',         label: 'OAuth Status',    icon: Connection },
-  { path: '/about',                label: 'About',           icon: DataAnalysis },
+/* Navigation groups — matches the redesign sidebar structure */
+const navGroups = [
+  {
+    label: 'Workspace',
+    items: [
+      { path: '/dashboard',        label: 'Dashboard',      icon: icons.dashboard },
+      { path: '/publish-center',   label: 'Publish Center', icon: icons.publish },
+      { path: '/jobs',             label: 'Jobs',           icon: icons.jobs },
+    ],
+  },
+  {
+    label: 'Library',
+    items: [
+      { path: '/account-management',  label: 'Accounts',   icon: icons.accounts },
+      { path: '/profile-management',  label: 'Profiles',   icon: icons.profiles },
+      { path: '/material-management', label: 'Materials',  icon: icons.materials },
+      { path: '/template-management', label: 'Templates',  icon: icons.templates },
+    ],
+  },
+  {
+    label: 'Insights',
+    items: [
+      { path: '/video-analytics',   label: 'Analytics',     icon: icons.analytics },
+      { path: '/campaign-builder',  label: 'Campaigns',     icon: icons.campaigns },
+      { path: '/sheet-exports',     label: 'Sheet Exports', icon: icons.sheet },
+      { path: '/batch-upload',      label: 'Batch Upload',  icon: icons.upload },
+    ],
+  },
+  {
+    label: 'System',
+    items: [
+      { path: '/api-docs',     label: 'API Docs',     icon: icons.api },
+      { path: '/oauth-review', label: 'OAuth Status', icon: icons.oauth },
+      { path: '/about',        label: 'About',        icon: icons.about },
+    ],
+  },
 ]
 
-const isActive = (path) => route.path === path || route.path.startsWith(path + '/')
+/* Current page title/subtitle for the topbar */
+const titleMap = {
+  '/dashboard':            ['Dashboard',       'Your publishing operation at a glance'],
+  '/publish-center':       ['Publish Center',  'Compose once, distribute everywhere'],
+  '/jobs':                 ['Jobs',            'Async publish queue & worker activity'],
+  '/account-management':   ['Accounts',        'Connected social platform identities'],
+  '/profile-management':   ['Profiles',        'Brands & people you publish as'],
+  '/material-management':  ['Materials',       'Your media library'],
+  '/template-management':  ['Templates',       'Reusable publish presets'],
+  '/video-analytics':      ['Analytics',       'Performance across platforms'],
+  '/campaign-builder':     ['Campaigns',       'Coordinated multi-platform pushes'],
+  '/sheet-exports':        ['Sheet Exports',   'Scheduled data exports'],
+  '/batch-upload':         ['Batch Upload',    'Batch media processing'],
+  '/api-docs':             ['API Docs',        'REST endpoints & tokens'],
+  '/oauth-review':         ['OAuth Status',    'Platform review & connection state'],
+  '/about':                ['About',           'System info & version'],
+}
 
-const currentNav = computed(() => navItems.find(item => isActive(item.path)))
+const currentTitle = computed(() => titleMap[route.path]?.[0] || 'Socialupload')
+const currentSubtitle = computed(() => titleMap[route.path]?.[1] || '')
+const pendingJobCount = ref(0)
+
+const isActive = (path) => route.path === path || route.path.startsWith(path + '/')
 </script>
 
-<style lang="scss" scoped>
-/* ======================================================================
-   Layout Shell
-   ====================================================================== */
-
-.app-layout {
+<style scoped>
+/* Theme switch buttons in the header */
+.theme-switch {
   display: flex;
-  height: 100vh;
-  overflow: hidden;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 3px;
 }
-
-
-/* ======================================================================
-   Sidebar
-   ====================================================================== */
-
-.app-sidebar {
-  width: var(--sidebar-width);
-  background: var(--sidebar-bg);
-  display: flex;
-  flex-direction: column;
-  transition: width var(--transition-slow);
-  flex-shrink: 0;
-  z-index: 10;
-
-  &.collapsed {
-    width: var(--sidebar-width-collapsed);
-  }
-}
-
-/* Brand */
-.sidebar-brand {
-  height: var(--header-height);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  flex-shrink: 0;
-  overflow: hidden;
-}
-
-.sidebar-logo {
+.theme-btn {
   width: 28px;
   height: 28px;
-  border-radius: 6px;
-  flex-shrink: 0;
-}
-
-.sidebar-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: #fff;
-  white-space: nowrap;
-  letter-spacing: -0.02em;
-}
-
-/* Navigation */
-.sidebar-nav {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 12px 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
-  border-radius: var(--radius-md);
-  color: var(--sidebar-text);
-  text-decoration: none;
-  font-size: 14px;
-  font-weight: 500;
-  transition: all var(--transition-fast);
-  white-space: nowrap;
-  overflow: hidden;
-
-  &:hover {
-    background: var(--sidebar-bg-hover);
-    color: var(--sidebar-text-active);
-  }
-
-  &.active {
-    background: var(--sidebar-bg-active);
-    color: var(--sidebar-text-active);
-
-    .nav-icon {
-      color: var(--color-primary);
-    }
-  }
-}
-
-.nav-icon {
-  font-size: 18px;
-  flex-shrink: 0;
-}
-
-.nav-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Footer */
-.sidebar-footer {
-  padding: 12px 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  flex-shrink: 0;
-}
-
-.collapse-btn {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 36px;
-  border-radius: var(--radius-md);
   border: none;
-  background: transparent;
-  color: var(--sidebar-text);
+  background: none;
+  border-radius: 6px;
+  font-size: 14px;
   cursor: pointer;
-  transition: all var(--transition-fast);
-
-  &:hover {
-    background: var(--sidebar-bg-hover);
-    color: var(--sidebar-text-active);
-  }
-
-  .el-icon {
-    font-size: 18px;
-  }
+  transition: .14s;
+  display: grid;
+  place-items: center;
 }
-
-
-/* ======================================================================
-   Main Area
-   ====================================================================== */
-
-.app-main {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-width: 0;
+.theme-btn.on {
+  background: var(--raised);
 }
-
-/* Header */
-.app-header {
-  height: var(--header-height);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 24px;
-  background: var(--color-bg);
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
-}
-
-.header-left {
-  display: flex;
-  align-items: center;
-}
-
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.header-link {
-  font-size: 13px;
-  color: var(--color-text-muted);
-  text-decoration: none;
-  font-weight: 500;
-  transition: color var(--transition-fast);
-
-  &:hover {
-    color: var(--color-primary);
-  }
-}
-
-/* Content */
-.app-content {
-  flex: 1;
-  overflow-y: auto;
-  background: var(--color-bg-page);
-}
-
-/* Footer */
-.app-footer {
-  height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 24px;
-  background: var(--color-bg);
-  border-top: 1px solid var(--color-border);
-  flex-shrink: 0;
-}
-
-.footer-brand {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text-secondary);
-}
-
-.footer-links {
-  display: flex;
-  gap: 16px;
-
-  a {
-    font-size: 13px;
-    color: var(--color-text-muted);
-    text-decoration: none;
-
-    &:hover {
-      color: var(--color-primary);
-    }
-  }
-}
-
-
-/* ======================================================================
-   Responsive
-   ====================================================================== */
-
-@media (max-width: 768px) {
-  .app-sidebar {
-    width: var(--sidebar-width-collapsed);
-
-    .sidebar-title,
-    .nav-label {
-      display: none;
-    }
-  }
-
-  .app-header {
-    padding: 0 16px;
-  }
-
-  .header-right {
-    display: none;
-  }
+.theme-btn:hover:not(.on) {
+  background: var(--raised);
 }
 </style>
