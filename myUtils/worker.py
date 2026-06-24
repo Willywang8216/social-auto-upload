@@ -24,6 +24,7 @@ import inspect
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -75,6 +76,12 @@ class WorkerConfig:
 
 
 class PublishWorker:
+    # Token refresh runs every N ticks (at 1s poll interval ≈ every 5 min by default)
+    _MAINTENANCE_TICK_INTERVAL: int = 300
+    _REFRESHABLE_PLATFORMS: frozenset = frozenset({
+        "tiktok", "reddit", "youtube", "threads", "facebook", "instagram", "twitter",
+    })
+
     def __init__(
         self,
         executor: Executor,
@@ -88,6 +95,8 @@ class PublishWorker:
         self._concurrency = AccountConcurrency(self._config.max_concurrent)
         self._stop = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
+        self._maintenance_counter: int = 0
+        self._maintenance_done: bool = False  # guard against duplicate runs
 
     def stop(self) -> None:
         self._stop.set()
@@ -124,6 +133,211 @@ class PublishWorker:
             ).fetchone()
         return row is not None
 
+    # -------------------------------------------------------------------------
+    # Self-maintenance — OAuth token refresh for structured accounts
+    # Runs on a slow cadence inside the tick loop so the standalone worker
+    # does not depend on the Flask maintenance thread.
+    # -------------------------------------------------------------------------
+
+    def _is_account_stale(self, account: profile_registry.Account) -> bool:
+        """Return True if the account's token is missing or expires within 5 min."""
+        import sqlite3
+        config = dict(account.config or {})
+        platform = account.platform
+
+        # Only structured (profile-based) OAuth accounts are refreshable
+        if platform not in self._REFRESHABLE_PLATFORMS:
+            return False
+
+        auth_type = str(config.get("twitterAuthType") or account.auth_type or "").strip().lower()
+        if platform == "twitter" and auth_type == "cookie":
+            return False  # cookie-based Twitter is not refreshable via API
+
+        if platform in {"facebook", "instagram"}:
+            meta_user_token = str(config.get("metaUserAccessToken") or "").strip()
+            if not meta_user_token:
+                return False
+            access_token = str(config.get("accessToken") or "").strip()
+            if not access_token:
+                return True
+            expires_at = self._parse_iso_datetime(
+                str(config.get("metaUserAccessTokenExpiresAt") or config.get("accessTokenExpiresAt") or "")
+            )
+            if expires_at is None:
+                return False
+            return expires_at <= (self._utc_now() + timedelta(seconds=300))
+
+        access_token = str(config.get("accessToken") or "").strip()
+        if not access_token:
+            return True
+        expires_at = self._parse_iso_datetime(str(config.get("accessTokenExpiresAt") or ""))
+        if expires_at is None:
+            return False
+        return expires_at <= (self._utc_now() + timedelta(seconds=300))
+
+    @staticmethod
+    def _utc_now() -> "datetime":
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+
+    @staticmethod
+    def _parse_iso_datetime(value: str):
+        from datetime import datetime
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except (ValueError, TypeError):
+            return None
+
+    def _refresh_account(self, account: profile_registry.Account) -> None:
+        """Refresh a stale account token using prepared_publishers helpers."""
+        import sqlite3
+        config = dict(account.config or {})
+        platform = account.platform
+        now = datetime.now(tz=__import__("datetime").timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+
+        try:
+            if platform == "tiktok":
+                refresh_token = str(config.get("refreshToken") or "").strip()
+                if not refresh_token:
+                    return
+                from myUtils import tiktok_auth
+                token_payload = tiktok_auth.refresh_access_token(refresh_token=refresh_token)
+                access_token = str(token_payload.get("access_token") or "")
+                user_info = tiktok_auth.fetch_user_info(access_token=access_token) if access_token else {}
+                # Apply via the same helper used in publish flow
+                new_config = prepared_publishers._apply_tiktok_token_payload(config, token_payload, user_info)
+                new_config.update({
+                    "openId": token_payload.get("open_id") or config.get("openId") or "",
+                    "scope": token_payload.get("scope") or config.get("scope") or "",
+                    "displayName": user_info.get("data", {}).get("user", {}).get("display_name") or config.get("displayName") or "",
+                    "avatarUrl": user_info.get("data", {}).get("user", {}).get("avatar_url") or config.get("avatarUrl") or "",
+                    "lastAutoRefreshAt": now,
+                })
+                config = new_config
+
+            elif platform == "reddit":
+                if str(config.get("redditAuthType") or "") == "cookie":
+                    return
+                refreshed = prepared_publishers.refresh_reddit_access_token(config)
+                config.update({
+                    "accessToken": refreshed["access_token"],
+                    "scope": refreshed.get("scope", config.get("scope", "")),
+                    "accessTokenUpdatedAt": now,
+                    "lastAutoRefreshAt": now,
+                })
+                expires_in = refreshed.get("expires_in")
+                if expires_in:
+                    config["accessTokenExpiresAt"] = (
+                        datetime.now() + timedelta(seconds=int(expires_in))
+                    ).isoformat(timespec="seconds")
+
+            elif platform == "youtube":
+                refreshed = prepared_publishers.refresh_youtube_access_token(config)
+                config.update({
+                    "accessToken": refreshed["access_token"],
+                    "accessTokenUpdatedAt": now,
+                    "lastAutoRefreshAt": now,
+                })
+                expires_in = refreshed.get("expires_in")
+                if expires_in:
+                    config["accessTokenExpiresAt"] = (
+                        datetime.now() + timedelta(seconds=int(expires_in))
+                    ).isoformat(timespec="seconds")
+
+            elif platform == "threads":
+                access_token = str(config.get("accessToken") or "").strip()
+                if not access_token:
+                    return
+                from myUtils import threads_auth
+                refreshed = threads_auth.refresh_long_lived_token(access_token=access_token)
+                config.update({
+                    "accessToken": str(refreshed.get("access_token") or access_token),
+                    "accessTokenUpdatedAt": now,
+                    "lastAutoRefreshAt": now,
+                })
+                expires_in = refreshed.get("expires_in")
+                if expires_in:
+                    config["accessTokenExpiresAt"] = (
+                        datetime.now() + timedelta(seconds=int(expires_in))
+                    ).isoformat(timespec="seconds")
+
+            elif platform in {"facebook", "instagram"}:
+                meta_user_token = str(config.get("metaUserAccessToken") or "").strip()
+                if not meta_user_token:
+                    return
+                from myUtils import meta_auth
+                refreshed = meta_auth.exchange_for_long_lived_token(access_token=meta_user_token)
+                config.update({
+                    "metaUserAccessToken": refreshed.get("access_token") or meta_user_token,
+                    "accessTokenUpdatedAt": now,
+                    "lastAutoRefreshAt": now,
+                })
+                expires_in = refreshed.get("expires_in")
+                if expires_in:
+                    config["metaUserAccessTokenExpiresAt"] = (
+                        datetime.now() + timedelta(seconds=int(expires_in))
+                    ).isoformat(timespec="seconds")
+
+            elif platform == "twitter":
+                refresh_token = str(config.get("refreshToken") or "").strip()
+                if not refresh_token or config.get("twitterAuthType") != "api":
+                    return
+                result = prepared_publishers.refresh_twitter_access_token(config)
+                config.update({
+                    "accessToken": result["access_token"],
+                    "refreshToken": result.get("refresh_token") or refresh_token,
+                    "accessTokenUpdatedAt": now,
+                    "lastAutoRefreshAt": now,
+                })
+                expires_in = result.get("expires_in")
+                if expires_in:
+                    config["accessTokenExpiresAt"] = (
+                        datetime.now() + timedelta(seconds=int(expires_in))
+                    ).isoformat(timespec="seconds")
+
+            else:
+                return  # unknown platform
+
+            # Persist updated config back to the database
+            profile_registry.update_account(
+                account.id,
+                config=config,
+                auth_type="oauth",
+                status=1,
+                db_path=self._db_path,
+            )
+            _logger.info(f"worker self-maintenance: refreshed {platform} account id={account.id}")
+
+        except Exception as exc:
+            _logger.warning(f"worker self-maintenance: failed to refresh {platform} account id={account.id}: {exc}")
+
+    async def _run_maintenance_tick(self) -> None:
+        """Background scan-and-refresh for stale OAuth accounts."""
+        if self._maintenance_done:
+            return
+        try:
+            accounts = profile_registry.list_accounts(enabled=True, db_path=self._db_path)
+        except Exception as exc:
+            _logger.warning(f"worker self-maintenance: could not list accounts: {exc}")
+            self._maintenance_done = True
+            return
+
+        stale = [a for a in accounts if self._is_account_stale(a)]
+        if not stale:
+            self._maintenance_done = True
+            return
+
+        _logger.info(f"worker self-maintenance: refreshing {len(stale)} stale accounts")
+        for account in stale:
+            if self._stop.is_set():
+                break
+            # Run refresh synchronously in a thread pool so it doesn't block the async loop
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                await asyncio.get_event_loop().run_in_executor(pool, self._refresh_account, account)
+
     async def _tick(self) -> None:
         # Reap finished tasks first so their account_refs free up.
         done = {task for task in self._tasks if task.done()}
@@ -134,6 +348,13 @@ class PublishWorker:
             exc = task.exception()
             if exc is not None:
                 _logger.error(f"worker task crashed: {exc!r}")
+
+        # Self-maintenance: scan and refresh stale OAuth accounts on a slow cadence
+        # (~every _MAINTENANCE_TICK_INTERVAL ticks = 5 min at 1s poll interval).
+        self._maintenance_counter += 1
+        if self._maintenance_counter >= self._MAINTENANCE_TICK_INTERVAL:
+            self._maintenance_counter = 0
+            asyncio.create_task(self._run_maintenance_tick())
 
         in_flight = self._concurrency.in_flight_accounts()
         slots_free = self._config.max_concurrent - len(self._tasks)

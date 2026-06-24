@@ -577,8 +577,64 @@ def _check_meta_token_not_expired(config: dict[str, Any], platform: str) -> None
             pass
 
 
+def _is_meta_token_stale(config: dict[str, Any], *, skew_seconds: int = 300) -> bool:
+    """Return True if the Meta user access token is missing or expires within skew_seconds."""
+    expires_at_str = str(config.get("metaUserAccessTokenExpiresAt") or config.get("accessTokenExpiresAt") or "").strip()
+    if not expires_at_str:
+        return False  # no expiry tracked → assume ok
+    expires_at = _parse_iso_datetime(expires_at_str)
+    if expires_at is None:
+        return False
+    return expires_at <= (_utc_now() + timedelta(seconds=skew_seconds))
+
+
+def _maybe_refresh_meta_token(config: dict[str, Any], platform: str, *, session=None) -> dict[str, Any]:
+    """Refresh the Meta user access token for Facebook or Instagram if stale.
+
+    Uses the long-lived token exchange endpoint (fb_exchange_token) which returns
+    a new long-lived token valid for 60 days. Stores metaUserAccessToken and
+    metaUserAccessTokenExpiresAt in the config for future checks.
+    """
+    from myUtils import meta_auth as _meta_auth
+    meta_user_token = str(config.get("metaUserAccessToken") or "").strip()
+    if not meta_user_token:
+        return config  # no user token to refresh
+
+    if not _is_meta_token_stale(config):
+        return config  # still valid
+
+    try:
+        refreshed = _meta_auth.exchange_for_long_lived_token(access_token=meta_user_token)
+    except Exception:
+        return config  # best-effort: keep using the old token
+
+    if not refreshed or not refreshed.get("access_token"):
+        return config
+
+    updated = dict(config)
+    updated["metaUserAccessToken"] = refreshed["access_token"]
+    expires_in = refreshed.get("expires_in")
+    if expires_in not in (None, ""):
+        updated["metaUserAccessTokenExpiresAt"] = (
+            datetime.now() + timedelta(seconds=int(expires_in))
+        ).isoformat(timespec="seconds")
+    updated["accessTokenUpdatedAt"] = datetime.now().isoformat(timespec="seconds")
+    return updated
+
+
+def _maybe_refresh_facebook_token(config: dict[str, Any], *, session=None) -> dict[str, Any]:
+    """Refresh Facebook user token if expired or about to expire."""
+    return _maybe_refresh_meta_token(config, "facebook", session=session)
+
+
+def _maybe_refresh_instagram_token(config: dict[str, Any], *, session=None) -> dict[str, Any]:
+    """Refresh Instagram user token if expired or about to expire."""
+    return _maybe_refresh_meta_token(config, "instagram", session=session)
+
+
 def publish_facebook_sync(account, payload: dict, *, session=None) -> list[Any]:
-    config = account.config or {}
+    config = dict(account.config or {})
+    config = _maybe_refresh_facebook_token(config, session=session)
     _check_meta_token_not_expired(config, "Facebook")
     page_id = str(config.get("pageId") or "").strip()
     access_token = str(_config_value(config, "accessToken") or "").strip()
@@ -717,7 +773,8 @@ def validate_instagram_config_live(config: dict[str, Any], *, session=None) -> d
 
 
 def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
-    config = account.config or {}
+    config = dict(account.config or {})
+    config = _maybe_refresh_instagram_token(config, session=session)
     _check_meta_token_not_expired(config, "Instagram")
     ig_user_id = str(config.get("igUserId") or "").strip()
     access_token = str(_config_value(config, "accessToken") or "").strip()
