@@ -17,7 +17,17 @@
           <el-option v-for="p in OAUTH_PLATFORMS" :key="p.value" :label="p.label" :value="p.value" />
         </el-select>
       </div>
-      <el-button type="primary" @click="refreshStatus" :loading="loading">重新載入</el-button>
+      <div class="header-actions">
+        <el-button
+          v-if="!platform && Object.keys(allStatuses).length > 0"
+          type="warning"
+          :loading="bulkRefreshing"
+          @click="handleBulkReauth"
+        >
+          <el-icon><Refresh /></el-icon> 重新驗證全部
+        </el-button>
+        <el-button type="primary" @click="refreshStatus" :loading="loading">重新載入</el-button>
+      </div>
     </div>
 
     <!-- All-platforms summary view -->
@@ -160,7 +170,7 @@
 </template>
 
 <script setup>
-import { ArrowLeft } from '@element-plus/icons-vue'
+import { ArrowLeft, Refresh } from '@element-plus/icons-vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -180,6 +190,7 @@ const OAUTH_PLATFORMS = [
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
+const bulkRefreshing = ref(false)
 const refreshingToken = ref(false)
 const selectedPlatform = ref('')
 const allStatuses = reactive({})
@@ -322,6 +333,26 @@ function goToAccountQueue() {
   router.push({ path: '/account-management', query })
 }
 
+async function handleBulkReauth() {
+  const accountsToRefresh = OAUTH_PLATFORMS
+    .filter(p => allStatuses[p.value]?.accountId)
+    .map(p => allStatuses[p.value].accountId)
+  if (!accountsToRefresh.length) {
+    ElMessage.warning('目前沒有可重新驗證的 OAuth 帳號')
+    return
+  }
+  bulkRefreshing.value = true
+  try {
+    await profilesApi.batchRefreshTokens(accountsToRefresh)
+    ElMessage.success(`已對 ${accountsToRefresh.length} 個帳號發送重新驗證要求`)
+    await fetchAllStatuses()
+  } catch (e) {
+    ElMessage.error('批量重新驗證失敗：' + (e.message || e))
+  } finally {
+    bulkRefreshing.value = false
+  }
+}
+
 async function handleRefreshToken() {
   if (!status.accountId) return
   refreshingToken.value = true
@@ -399,6 +430,12 @@ watch([platform, accountId], () => {
       margin: 0;
       font-size: 24px;
     }
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
   }
 
   .platform-summary-card {

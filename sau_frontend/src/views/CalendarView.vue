@@ -156,6 +156,7 @@ const setToday = () => { view.value = { y: today.getFullYear(), m: today.getMont
 .cal-grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
+  grid-template-rows: auto 1fr;
   gap: 1px;
   background: var(--line);
   border: 1px solid var(--line);
@@ -174,12 +175,14 @@ const setToday = () => { view.value = { y: today.getFullYear(), m: today.getMont
   text-align: center;
   letter-spacing: .05em;
   text-transform: uppercase;
+  line-height: 1;
 }
 
 .cal-cell {
   background: var(--panel);
   padding: 8px;
-  min-height: 80px;
+  min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
   gap: 3px;
