@@ -78,7 +78,7 @@ defineEmits(['request-advice'])
 
 <style scoped lang="scss">
 .advisor-panel {
-  margin-top: 20px;
+  margin-top: var(--space-6);
 }
 
 .advisor-header {
@@ -96,7 +96,7 @@ defineEmits(['request-advice'])
 }
 
 .advisor-empty {
-  padding: 20px 0;
+  padding: var(--space-6) 0;
 }
 
 .advisor-loading {
@@ -107,15 +107,15 @@ defineEmits(['request-advice'])
   .advisor-summary {
     font-size: 14px;
     line-height: 1.6;
-    margin-bottom: 16px;
+    margin-bottom: var(--space-5);
     padding: 12px;
-    background: #f0f9ff;
-    border-radius: 8px;
-    border-left: 3px solid #409eff;
+    background: var(--accent-soft);
+    border-radius: var(--r-md);
+    border-left: 3px solid var(--accent);
   }
 
   .advisor-section {
-    margin-bottom: 16px;
+    margin-bottom: var(--space-5);
 
     h4 {
       display: flex;
@@ -124,7 +124,7 @@ defineEmits(['request-advice'])
       font-size: 14px;
       font-weight: 600;
       margin-bottom: 8px;
-      color: #303133;
+      color: var(--text);
     }
 
     ul {
@@ -137,7 +137,7 @@ defineEmits(['request-advice'])
         position: relative;
         font-size: 13px;
         line-height: 1.5;
-        color: #606266;
+        color: var(--text-2);
 
         &::before {
           content: '';
@@ -147,7 +147,7 @@ defineEmits(['request-advice'])
           width: 6px;
           height: 6px;
           border-radius: 50%;
-          background: #409eff;
+          background: var(--accent);
         }
       }
     }
@@ -160,7 +160,7 @@ defineEmits(['request-advice'])
     margin-bottom: 8px;
     font-size: 13px;
     line-height: 1.5;
-    color: #606266;
+    color: var(--text-2);
 
     .el-tag {
       flex-shrink: 0;

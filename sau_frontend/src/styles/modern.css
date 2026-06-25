@@ -846,9 +846,10 @@ button { font-family:inherit; cursor:pointer; }
 .el-textarea__inner { border-radius:var(--r-md); background:var(--panel-2); border-color:var(--line); color:var(--text); transition:border-color var(--transition-fast), box-shadow var(--transition-fast); }
 .el-textarea__inner:focus { box-shadow:0 0 0 2px var(--accent-soft); border-color:var(--accent); }
 
-.el-table { border-radius:var(--r-lg); overflow:hidden; --el-table-border-color:var(--line); --el-table-header-bg-color:var(--panel-2); --el-table-bg-color:var(--panel); --el-table-tr-bg-color:var(--panel); --el-table-row-hover-bg-color:var(--raised); }
+.el-table { border-radius:var(--r-lg); overflow:hidden; --el-table-border-color:var(--line); --el-table-header-bg-color:var(--panel-2); --el-table-bg-color:var(--panel); --el-table-tr-bg-color:var(--panel); --el-table-row-hover-bg-color:var(--raised); --el-table-striped-bg-color:var(--panel-2); }
 .el-table th.el-table__cell { font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-2); background:var(--panel-2) !important; }
-.el-table td.el-table__cell { border-bottom-color:var(--line); font-size:13px; color:var(--text); }
+.el-table td.el-table__cell { border-bottom-color:var(--line); font-size:13px; color:var(--text); background:var(--panel); }
+.el-table__body tr:hover > td.el-table__cell { background:var(--raised) !important; }
 
 .el-tag { border-radius:var(--r-full); font-weight:500; font-size:12px; border:none; padding:0 10px; height:24px; line-height:24px; }
 .el-tag--success { --el-tag-bg-color:var(--color-success-light); --el-tag-text-color:#5fd98a; }
@@ -885,7 +886,9 @@ button { font-family:inherit; cursor:pointer; }
 .el-select-dropdown__item { color:var(--text); }
 .el-select-dropdown__item.is-hovering { background:var(--raised); }
 .el-select-dropdown__item.is-selected { color:var(--accent); font-weight:600; }
-.el-pagination { --el-pagination-bg-color:var(--panel); --el-pagination-text-color:var(--text-2); --el-pagination-button-bg-color:var(--panel-2); }
+.el-upload-dragger { background:var(--panel-2) !important; border-color:var(--line) !important; border-radius:var(--r-lg); transition:all var(--transition-fast); }
+.el-upload-dragger:hover { border-color:var(--accent) !important; background:var(--raised) !important; }
+.el-upload-dragger .el-icon--upload { color:var(--text-3); }
 .el-pagination button { background:var(--panel-2) !important; color:var(--text-2); }
 .el-date-editor .el-input__wrapper { background:var(--panel-2) !important; }
 .el-radio__label { color:var(--text); }

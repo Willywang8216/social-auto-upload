@@ -19,7 +19,7 @@
           :value="p.id"
         >
           <span>{{ p.name }}</span>
-          <span style="float: right; color: #8492a6; font-size: 12px">{{ p.slug }}</span>
+          <span style="float: right; color: var(--text-3); font-size: 12px">{{ p.slug }}</span>
         </el-option>
       </el-select>
       <div v-if="selectedProfile" class="profile-preview">
@@ -361,23 +361,23 @@ function statusTagType(status) {
 
 <style scoped>
 .campaign-builder {
-  padding: 20px;
+  padding: var(--space-6);
   max-width: 1000px;
   margin: 0 auto;
 }
 .step-card {
-  margin-top: 20px;
+  margin-top: var(--space-6);
 }
 .step-actions {
-  margin-top: 20px;
+  margin-top: var(--space-6);
   display: flex;
   gap: 12px;
 }
 .profile-preview {
-  margin-top: 16px;
+  margin-top: var(--space-4);
   padding: 12px;
-  background: #f5f7fa;
-  border-radius: 4px;
+  background: var(--raised);
+  border-radius: var(--r-md);
 }
 .profile-preview p {
   margin: 4px 0;
@@ -385,63 +385,63 @@ function statusTagType(status) {
 }
 .media-group-option {
   padding: 8px 0;
-  border-bottom: 1px solid #ebeef5;
+  border-bottom: 1px solid var(--line);
 }
 .theme-tag {
-  color: #409eff;
+  color: var(--accent);
 }
 .notes-preview {
-  color: #909399;
+  color: var(--text-3);
 }
 .post-review-card {
-  border: 1px solid #ebeef5;
-  border-radius: 8px;
-  padding: 16px;
-  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--space-6);
+  margin-bottom: var(--space-5);
 }
 .post-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
+  margin-bottom: var(--space-4);
 }
 .char-count {
   margin-left: auto;
   font-size: 12px;
-  color: #909399;
+  color: var(--text-3);
 }
 .validation-errors {
-  margin-bottom: 12px;
+  margin-bottom: var(--space-4);
 }
 .validation-errors .el-alert {
   margin-bottom: 4px;
 }
 .post-field {
-  margin-top: 8px;
+  margin-top: var(--space-3);
 }
 .post-field label {
   font-size: 12px;
-  color: #606266;
+  color: var(--text-2);
   margin-bottom: 4px;
   display: block;
 }
 .post-actions {
-  margin-top: 12px;
+  margin-top: var(--space-4);
   display: flex;
   gap: 8px;
 }
 .export-actions {
-  margin-top: 24px;
+  margin-top: var(--space-8);
   display: flex;
-  gap: 16px;
+  gap: var(--space-5);
   justify-content: center;
 }
 .export-result {
-  margin-top: 24px;
+  margin-top: var(--space-8);
 }
 .empty-state {
   text-align: center;
-  padding: 40px;
-  color: #909399;
+  padding: var(--space-10);
+  color: var(--text-3);
 }
 </style>

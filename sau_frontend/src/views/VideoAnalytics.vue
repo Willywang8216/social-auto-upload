@@ -437,23 +437,22 @@ onMounted(async () => {
 })
 </script>
 
-<style scoped lang="scss">
 .video-analytics {
-  padding: 20px;
+  padding: var(--space-6);
 }
 
 .page-header {
-  margin-bottom: 20px;
+  margin-bottom: var(--space-6);
 
   h1 {
     font-size: 24px;
     font-weight: 600;
-    color: #303133;
+    color: var(--text);
   }
 }
 
 .filter-card {
-  margin-bottom: 20px;
+  margin-bottom: var(--space-6);
 }
 
 .filter-row {
@@ -468,7 +467,7 @@ onMounted(async () => {
 }
 
 .summary-row {
-  margin-bottom: 20px;
+  margin-bottom: var(--space-6);
 }
 
 .stat-card {
@@ -488,42 +487,42 @@ onMounted(async () => {
     font-size: 24px;
 
     &.views-icon {
-      background: #ecf5ff;
-      color: #409eff;
+      background: var(--accent-soft);
+      color: var(--accent);
     }
     &.engagement-icon {
-      background: #fdf6ec;
-      color: #e6a23c;
+      background: var(--color-warning-light);
+      color: var(--color-warning);
     }
     &.rate-icon {
-      background: #f0f9eb;
-      color: #67c23a;
+      background: var(--color-success-light);
+      color: var(--color-success);
     }
     &.count-icon {
-      background: #fef0f0;
-      color: #f56c6c;
+      background: var(--color-danger-light);
+      color: var(--color-danger);
     }
   }
 
   .stat-value {
     font-size: 24px;
     font-weight: 700;
-    color: #303133;
+    color: var(--text);
   }
 
   .stat-label {
     font-size: 13px;
-    color: #909399;
+    color: var(--text-2);
     margin-top: 4px;
   }
 }
 
 .chart-row {
-  margin-bottom: 20px;
+  margin-bottom: var(--space-6);
 }
 
 .section-card {
-  margin-bottom: 20px;
+  margin-bottom: var(--space-6);
 }
 
 .video-thumbnail {
@@ -534,6 +533,5 @@ onMounted(async () => {
 }
 
 .no-thumbnail {
-  color: #c0c4cc;
+  color: var(--text-3);
 }
-</style>
