@@ -469,50 +469,50 @@ onMounted(() => {
 }
 
 .material-management {
-  
+
   .page-header {
-    margin-bottom: 20px;
-    
+    margin-bottom: var(--space-6);
+
     h1 {
       font-size: 24px;
       font-weight: 500;
-      color: var(--color-text);
+      color: var(--text);
       margin: 0;
     }
   }
-  
+
   .material-list-container {
-    background-color: #fff;
-    border-radius: 4px;
-    box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
-    padding: 20px;
-    
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: var(--space-6);
+
     .material-search {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 20px;
-      
+      margin-bottom: var(--space-6);
+
       .el-input {
         width: 300px;
       }
-      
+
       .action-buttons {
         display: flex;
         gap: 10px;
-        
+
         .is-loading {
           animation: rotate 1s linear infinite;
         }
       }
     }
-    
+
     .material-list {
-      margin-top: 20px;
+      margin-top: var(--space-6);
     }
-    
+
     .empty-data {
-      padding: 40px 0;
+      padding: var(--space-10) 0;
     }
   }
   

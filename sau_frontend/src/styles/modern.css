@@ -198,6 +198,11 @@ button { font-family:inherit; cursor:pointer; }
 .app-content::-webkit-scrollbar-thumb { background:var(--line-2); border-radius:5px; }
 .app-content::-webkit-scrollbar-track { background:transparent; }
 
+/* Pages that use height:100% to fill remaining space must NOT overflow the scroll container */
+.calendar-view {
+  min-height: 0; /* critical: allows flex child to shrink below content size */
+}
+
 .app-footer { height:48px; display:flex; align-items:center; justify-content:space-between; padding:0 24px; background:var(--panel); border-top:1px solid var(--line); flex-shrink:0; }
 .footer-brand { font-size:13px; font-weight:600; color:var(--text-2); }
 .footer-links { display:flex; gap:16px; }

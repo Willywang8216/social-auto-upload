@@ -273,25 +273,25 @@ onBeforeUnmount(() => {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 20px;
+    margin-bottom: var(--space-6);
 
     h1 {
       font-size: 24px;
-      color: var(--color-text);
+      color: var(--text);
       margin: 0;
     }
 
     .page-actions {
       display: flex;
-      gap: 10px;
+      gap: var(--space-3);
     }
   }
 
   .jobs-list {
-    background-color: #fff;
-    border-radius: 4px;
-    box-shadow: var(--shadow-lg);
-    padding: 20px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: var(--space-6);
   }
 
   .job-progress-cell {
@@ -301,7 +301,7 @@ onBeforeUnmount(() => {
 
     .counters {
       font-size: 12px;
-      color: var(--color-text-secondary);
+      color: var(--text-2);
     }
   }
 }

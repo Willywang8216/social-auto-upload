@@ -222,32 +222,32 @@ function tiktokStatusLabel(status) {
 
 <style lang="scss" scoped>
 .publish-job-progress {
-  margin: 16px 0;
-  padding: 16px;
-  background-color: #f5f7fa;
-  border: 1px solid #e4e7ed;
-  border-radius: 6px;
+  margin: var(--space-5) 0;
+  padding: var(--space-5);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
 
   .progress-header {
     display: flex;
     align-items: center;
     gap: 12px;
-    margin-bottom: 12px;
+    margin-bottom: var(--space-4);
 
     .job-id {
       font-weight: 500;
-      color: #303133;
+      color: var(--text);
     }
 
     .counters {
-      color: #606266;
+      color: var(--text-2);
       font-size: 13px;
       flex: 1;
     }
   }
 
   .progress-bar {
-    margin-bottom: 12px;
+    margin-bottom: var(--space-4);
   }
 
   .targets {
@@ -261,10 +261,10 @@ function tiktokStatusLabel(status) {
       gap: 12px;
       align-items: center;
       padding: 6px 10px;
-      background-color: #fff;
-      border-radius: 4px;
+      background: var(--panel);
+      border-radius: var(--r-md);
       font-size: 13px;
-      color: #606266;
+      color: var(--text-2);
 
       .target-account,
       .target-file {
@@ -274,12 +274,12 @@ function tiktokStatusLabel(status) {
       }
 
       .target-attempts {
-        color: #e6a23c;
+        color: var(--color-warning);
         font-size: 12px;
       }
 
       .target-error {
-        color: #f56c6c;
+        color: var(--color-danger);
         font-size: 12px;
         max-width: 280px;
         overflow: hidden;
@@ -288,24 +288,24 @@ function tiktokStatusLabel(status) {
       }
 
       &.target-failed {
-        background-color: #fef0f0;
+        background: var(--color-danger-light);
       }
 
       &.target-succeeded {
-        background-color: #f0f9eb;
+        background: var(--color-success-light);
       }
     }
   }
 
   .tiktok-statuses {
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px solid #e4e7ed;
+    margin-top: var(--space-4);
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--line);
 
     .tiktok-statuses-title {
       font-size: 13px;
       font-weight: 500;
-      color: #303133;
+      color: var(--text);
       margin-bottom: 8px;
     }
 
@@ -314,29 +314,29 @@ function tiktokStatusLabel(status) {
       align-items: center;
       gap: 10px;
       padding: 6px 10px;
-      background-color: #fff;
-      border-radius: 4px;
+      background: var(--panel);
+      border-radius: var(--r-md);
       font-size: 13px;
-      color: #606266;
+      color: var(--text-2);
       margin-bottom: 4px;
 
       &.tiktok-publish_complete {
-        background-color: #f0f9eb;
+        background: var(--color-success-light);
       }
 
       &.tiktok-failed {
-        background-color: #fef0f0;
+        background: var(--color-danger-light);
       }
 
       .tiktok-link {
-        color: #409eff;
+        color: var(--accent);
         text-decoration: none;
         font-size: 12px;
         &:hover { text-decoration: underline; }
       }
 
       .tiktok-fail {
-        color: #f56c6c;
+        color: var(--color-danger);
         font-size: 12px;
       }
     }

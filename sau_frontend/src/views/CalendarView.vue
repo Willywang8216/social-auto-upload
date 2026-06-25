@@ -106,6 +106,7 @@ const setToday = () => { view.value = { y: today.getFullYear(), m: today.getMont
   height: 100%;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .cal-head {
