@@ -327,7 +327,7 @@ const sections = ref([
 }
 .api-section {
   margin-bottom: 16px;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--el-border-color, #ebeef5);
   border-radius: 8px;
   padding: 12px 16px;
 }
@@ -342,7 +342,7 @@ const sections = ref([
 .endpoint {
   margin: 8px 0 16px 0;
   padding: 12px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light, #f5f7fa);
   border-radius: 6px;
 }
 .endpoint-header {
@@ -356,7 +356,7 @@ const sections = ref([
   font-size: 14px;
 }
 .desc {
-  color: #606266;
+  color: var(--el-text-color-regular, #606266);
   font-size: 13px;
 }
 .endpoint-detail {
@@ -364,8 +364,8 @@ const sections = ref([
   font-size: 13px;
 }
 .endpoint-detail pre {
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: var(--el-fill-color-dark, #1e1e1e);
+  color: var(--el-text-color-primary, #d4d4d4);
   padding: 12px;
   border-radius: 4px;
   overflow-x: auto;
@@ -380,7 +380,8 @@ const sections = ref([
   margin: 2px 0;
 }
 code {
-  background: #e8e8e8;
+  background: var(--el-fill-color, #e8e8e8);
+  color: var(--el-text-color-primary);
   padding: 1px 4px;
   border-radius: 3px;
   font-size: 12px;

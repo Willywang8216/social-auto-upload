@@ -7389,7 +7389,7 @@ def api_list_sheet_exports():
     exports = sheet_export_service.list_sheet_exports(
         campaign_id=campaign_id, profile_id=profile_id
     )
-    return jsonify([e.to_dict() for e in exports])
+    return jsonify({"code": 200, "msg": "ok", "data": [e.to_dict() for e in exports]})
 
 
 _maybe_start_account_maintenance_scheduler()
