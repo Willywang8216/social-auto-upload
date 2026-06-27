@@ -7,6 +7,7 @@ like/reply/repost counts.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import requests
@@ -24,6 +25,60 @@ def _get_access_token(config: dict[str, Any]) -> str:
     if not token:
         raise ValueError("Threads analytics requires accessToken in account config")
     return token
+
+
+def _refresh_token_if_expired(config: dict[str, Any]) -> dict[str, Any]:
+    """Refresh the Threads long-lived token if it's near expiry.
+
+    Updates ``config`` in-place and returns it.
+    """
+    from datetime import datetime, timedelta
+
+    expires_at = config.get("accessTokenExpiresAt")
+    if expires_at:
+        try:
+            exp_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00").replace("+00:00", ""))
+            if datetime.now() < exp_dt - timedelta(days=7):
+                return config  # token still fresh (with 7-day buffer)
+        except Exception:
+            pass
+
+    token = str(config.get("accessToken") or "").strip()
+    if not token:
+        return config
+
+    client_secret_env = "THREADS_APP_SECRET"
+    client_secret = str(os.environ.get(client_secret_env) or os.environ.get("THREADS_CLIENT_SECRET") or "").strip()
+    if not client_secret:
+        logger.warning("Threads: cannot refresh token — missing %s env var", client_secret_env)
+        return config
+
+    try:
+        resp = requests.get(
+            f"{THREADS_GRAPH_ROOT}/refresh_access_token",
+            params={
+                "grant_type": "th_refresh_token",
+                "access_token": token,
+                "client_secret": client_secret,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        new_token = payload.get("access_token")
+        if new_token:
+            config["accessToken"] = new_token
+            config["accessTokenUpdatedAt"] = datetime.now().isoformat(timespec="seconds")
+            expires_in = payload.get("expires_in")
+            if expires_in not in (None, ""):
+                config["accessTokenExpiresAt"] = (
+                    datetime.now() + timedelta(seconds=int(expires_in))
+                ).isoformat(timespec="seconds")
+            logger.info("Threads: refreshed long-lived token")
+    except Exception as exc:
+        logger.warning("Threads: token refresh failed (%s). Re-authorize the account.", exc)
+
+    return config
 
 
 def list_threads_posts(
@@ -51,10 +106,10 @@ def list_threads_posts(
                 pass
             code = error.get("code", 0)
             msg = error.get("message", resp.text[:200])
-            # Permission/auth errors or API access blocked — skip gracefully
-            if code == 190 or "permission" in msg.lower() or "blocked" in msg.lower() or resp.status_code in (400, 401, 403):
-                logger.warning("Threads user %s: API error %d (%s). Re-authorize or check API access.", user_id, resp.status_code, msg[:200])
-                return []
+            # Auth errors — raise so sync reports an error
+            if code == 190 or "permission" in msg.lower() or resp.status_code in (400, 401, 403):
+                logger.warning("Threads user %s: auth error %d (%s). Token may be expired — re-authorize.", user_id, resp.status_code, msg[:200])
+                raise requests.HTTPError(f"Threads user {user_id}: auth error ({resp.status_code}) — token may be expired", response=resp)
             resp.raise_for_status()
         data = resp.json()
 
@@ -86,6 +141,9 @@ def sync_threads_account(
     user_id = str(config.get("threadUserId") or config.get("userId") or "").strip()
     if not user_id:
         raise ValueError("Threads account config missing threadUserId")
+
+    # Refresh token if near expiry
+    _refresh_token_if_expired(config)
 
     access_token = _get_access_token(config)
     raw_posts = list_threads_posts(user_id, access_token, session, max_results=max_videos)

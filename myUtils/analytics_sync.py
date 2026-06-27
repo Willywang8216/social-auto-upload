@@ -53,6 +53,10 @@ def _sync_facebook(account: Account, db_path: Path, session: requests.Session) -
     from myUtils.analytics.facebook_analytics import sync_facebook_account
     config = account.config or {}
     videos = sync_facebook_account(config, session)
+    # Save refreshed token back to DB
+    if config != (account.config or {}):
+        from myUtils import profiles as profile_registry
+        profile_registry.update_account(account.id, config=config, db_path=db_path)
     return _store_videos(account, videos, db_path)
 
 
@@ -60,6 +64,10 @@ def _sync_instagram(account: Account, db_path: Path, session: requests.Session) 
     from myUtils.analytics.instagram_analytics import sync_instagram_account
     config = account.config or {}
     videos = sync_instagram_account(config, session)
+    # Save refreshed token back to DB
+    if config != (account.config or {}):
+        from myUtils import profiles as profile_registry
+        profile_registry.update_account(account.id, config=config, db_path=db_path)
     return _store_videos(account, videos, db_path)
 
 
@@ -67,6 +75,10 @@ def _sync_threads(account: Account, db_path: Path, session: requests.Session) ->
     from myUtils.analytics.threads_analytics import sync_threads_account
     config = account.config or {}
     videos = sync_threads_account(config, session)
+    # Save refreshed token back to DB
+    if config != (account.config or {}):
+        from myUtils import profiles as profile_registry
+        profile_registry.update_account(account.id, config=config, db_path=db_path)
     return _store_videos(account, videos, db_path)
 
 

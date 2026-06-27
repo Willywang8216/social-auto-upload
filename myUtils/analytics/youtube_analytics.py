@@ -210,7 +210,7 @@ def sync_youtube_account(
         access_token = _refresh_token(config, session)
     except ValueError as exc:
         logger.warning("YouTube channel %s: token refresh failed (%s). Re-authorize the account.", channel_id, exc)
-        return []
+        raise  # surface auth failure so sync logs it as an error
     video_ids = list_channel_videos(channel_id, access_token, session, max_results=max_videos)
 
     if not video_ids:

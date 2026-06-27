@@ -7,6 +7,7 @@ view/like/comment/share counts.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import requests
@@ -26,6 +27,67 @@ def _get_access_token(config: dict[str, Any]) -> str:
     return token
 
 
+def _refresh_token_if_expired(config: dict[str, Any]) -> dict[str, Any]:
+    """Refresh the Meta long-lived user token if it's near expiry.
+
+    Updates ``config`` in-place and returns it.  Uses the
+    ``metaUserAccessToken`` to exchange for a fresh long-lived token via
+    the ``fb_exchange_token`` grant.
+    """
+    from datetime import datetime, timedelta
+
+    updated_at = config.get("accessTokenUpdatedAt")
+    if updated_at:
+        try:
+            updated_dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00").replace("+00:00", ""))
+        except Exception:
+            updated_dt = None
+        if updated_dt and datetime.now() - updated_dt < timedelta(days=50):
+            return config  # token still fresh
+
+    user_token = str(config.get("metaUserAccessToken") or config.get("accessToken") or "").strip()
+    if not user_token:
+        return config  # nothing to refresh
+
+    client_id_env = "META_APP_ID"
+    client_secret_env = "META_APP_SECRET"
+    client_id = str(os.environ.get(client_id_env) or os.environ.get("FACEBOOK_APP_ID") or os.environ.get("FB_APP_ID") or "").strip()
+    client_secret = str(os.environ.get(client_secret_env) or os.environ.get("FACEBOOK_APP_SECRET") or os.environ.get("FB_APP_SECRET") or "").strip()
+    if not client_id or not client_secret:
+        logger.warning("Facebook: cannot refresh token — missing %s/%s env vars", client_id_env, client_secret_env)
+        return config
+
+    try:
+        resp = requests.get(
+            f"{META_GRAPH_ROOT}/oauth/access_token",
+            params={
+                "grant_type": "fb_exchange_token",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "fb_exchange_token": user_token,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        new_token = payload.get("access_token")
+        if new_token:
+            config["metaUserAccessToken"] = new_token
+            config["accessToken"] = new_token
+            from datetime import datetime, timedelta
+            config["accessTokenUpdatedAt"] = datetime.now().isoformat(timespec="seconds")
+            expires_in = payload.get("expires_in")
+            if expires_in not in (None, ""):
+                config["accessTokenExpiresAt"] = (
+                    datetime.now() + timedelta(seconds=int(expires_in))
+                ).isoformat(timespec="seconds")
+            logger.info("Facebook: refreshed long-lived user token")
+    except Exception as exc:
+        logger.warning("Facebook: token refresh failed (%s). Re-authorize the account.", exc)
+
+    return config
+
+
 def list_page_videos(
     page_id: str,
     access_token: str,
@@ -43,14 +105,14 @@ def list_page_videos(
 
     while len(videos) < max_results:
         resp = session.get(url, params=params, timeout=30)
-        if resp.status_code == 400:
+        if resp.status_code in (400, 401, 403):
             error = resp.json().get("error", {})
             code = error.get("code", 0)
             msg = error.get("message", "")
-            # Permission errors — log and return empty instead of crashing
-            if code == 190 or "permission" in msg.lower():
-                logger.warning("Facebook page %s: missing permissions (%s). Re-authorize with pages_read_engagement scope.", page_id, msg[:200])
-                return []
+            # Auth/permission errors — raise so sync reports an error
+            if code == 190 or "permission" in msg.lower() or resp.status_code == 401:
+                logger.warning("Facebook page %s: auth error %d (%s). Token may be expired — re-authorize.", page_id, resp.status_code, msg[:200])
+                raise requests.HTTPError(f"Facebook page {page_id}: auth error ({resp.status_code}) — token may be expired", response=resp)
             raise requests.HTTPError(f"Facebook API error: {msg}", response=resp)
         resp.raise_for_status()
         data = resp.json()
@@ -133,6 +195,9 @@ def sync_facebook_account(
     page_id = str(config.get("pageId") or "").strip()
     if not page_id:
         raise ValueError("Facebook account config missing pageId")
+
+    # Refresh token if near expiry
+    _refresh_token_if_expired(config)
 
     access_token = _get_access_token(config)
     raw_videos = list_page_videos(page_id, access_token, session, max_results=max_videos)
