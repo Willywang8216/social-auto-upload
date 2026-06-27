@@ -109,10 +109,10 @@ def list_page_videos(
             error = resp.json().get("error", {})
             code = error.get("code", 0)
             msg = error.get("message", "")
-            # Auth/permission errors — raise so sync reports an error
+            # Auth/permission errors — raise with the actual API message
             if code == 190 or "permission" in msg.lower() or resp.status_code == 401:
-                logger.warning("Facebook page %s: auth error %d (%s). Token may be expired — re-authorize.", page_id, resp.status_code, msg[:200])
-                raise requests.HTTPError(f"Facebook page {page_id}: auth error ({resp.status_code}) — token may be expired", response=resp)
+                logger.warning("Facebook page %s: %s", page_id, msg[:300])
+                raise requests.HTTPError(f"Facebook page {page_id}: {msg[:200]}", response=resp)
             raise requests.HTTPError(f"Facebook API error: {msg}", response=resp)
         resp.raise_for_status()
         data = resp.json()

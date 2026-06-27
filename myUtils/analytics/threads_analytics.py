@@ -108,8 +108,8 @@ def list_threads_posts(
             msg = error.get("message", resp.text[:200])
             # Auth errors — raise so sync reports an error
             if code == 190 or "permission" in msg.lower() or resp.status_code in (400, 401, 403):
-                logger.warning("Threads user %s: auth error %d (%s). Token may be expired — re-authorize.", user_id, resp.status_code, msg[:200])
-                raise requests.HTTPError(f"Threads user {user_id}: auth error ({resp.status_code}) — token may be expired", response=resp)
+                logger.warning("Threads user %s: %s", user_id, msg[:300])
+                raise requests.HTTPError(f"Threads user {user_id}: {msg[:200]}", response=resp)
             resp.raise_for_status()
         data = resp.json()
 

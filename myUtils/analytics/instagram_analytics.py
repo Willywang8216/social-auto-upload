@@ -110,8 +110,8 @@ def list_ig_media(
             code = error.get("code", 0)
             msg = error.get("message", "")
             if code == 190 or "permission" in msg.lower() or resp.status_code == 401:
-                logger.warning("Instagram user %s: auth error %d (%s). Token may be expired — re-authorize.", ig_user_id, resp.status_code, msg[:200])
-                raise requests.HTTPError(f"Instagram user {ig_user_id}: auth error ({resp.status_code}) — token may be expired", response=resp)
+                logger.warning("Instagram user %s: %s", ig_user_id, msg[:300])
+                raise requests.HTTPError(f"Instagram user {ig_user_id}: {msg[:200]}", response=resp)
             raise requests.HTTPError(f"Instagram API error: {msg}", response=resp)
         resp.raise_for_status()
         data = resp.json()
