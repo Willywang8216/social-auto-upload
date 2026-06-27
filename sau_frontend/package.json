@@ -8,7 +8,12 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "demo:record": "playwright test demo/demo.spec.ts",
+    "demo:record:headed": "playwright test demo/demo.spec.ts --headed",
+    "demo:convert": "bash ../demo/compose_video.sh",
+    "demo:narration": "python3 ../demo/generate_narrations.py",
+    "demo:all": "npm run demo:narration && npm run demo:record && npm run demo:convert"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
@@ -22,6 +27,7 @@
     "vue-router": "^4.5.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@vitejs/plugin-vue": "^5.2.3",
     "vite": "^6.3.5",
     "vitest": "^2.1.9"

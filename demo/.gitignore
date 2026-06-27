@@ -1,0 +1,8 @@
+# Generated demo artifacts
+output/
+narrations/
+.env
+*.mp3
+*.wav
+*.mp4
+*.webm
