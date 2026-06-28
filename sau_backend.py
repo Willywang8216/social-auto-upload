@@ -7539,11 +7539,15 @@ def api_accounts():
             except Exception:
                 pass
 
+        # Extract avatar URL from config (stored by OAuth callbacks / token refreshes)
+        avatar_url = config.get("avatarUrl") or config.get("avatar_url") or config.get("profileImageUrl") or ""
+
         out.append({
             "id": a.id,
             "platform": platform,
             "name": account_name,
             "handle": handle,
+            "avatarUrl": avatar_url,
             "profile": getattr(a, "profile_name", "") or "default",
             "authType": getattr(a, "auth_type", "") or "cookie",
             "posts": 0,

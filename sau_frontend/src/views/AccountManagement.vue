@@ -24,8 +24,14 @@
     <div class="acct-grid">
       <div v-for="acct in filteredAccounts" :key="acct.id" class="acct">
         <div class="acct-top">
-          <div class="acct-logo" :style="{ background: platformBg(acct.platformSlug) }">
-            {{ platformShort(acct.platformSlug) }}
+          <div class="acct-logo-wrap">
+            <img v-if="acct.avatarUrl" :src="acct.avatarUrl" class="acct-avatar" @error="e => e.target.style.display='none'" />
+            <div v-else class="acct-logo" :style="{ background: platformBg(acct.platformSlug) }">
+              {{ platformShort(acct.platformSlug) }}
+            </div>
+            <span class="acct-platform-badge" :style="{ background: platformBg(acct.platformSlug) }">
+              {{ platformShort(acct.platformSlug) }}
+            </span>
           </div>
           <div style="flex:1;min-width:0">
             <div class="acct-name">{{ acct.accountName }}</div>
@@ -511,6 +517,7 @@ const loadAccounts = async () => {
       const isExpired = a.cookieStatus === 'expired'
       const isSoon = a.cookieStatus === 'soon'
       return {
+        avatarUrl: a.avatarUrl || '',
         id: a.id,
         platformSlug: a.platform,
         accountName: a.name,
@@ -538,3 +545,35 @@ const accounts = ref([])
 
 onMounted(loadAccounts)
 </script>
+
+<style scoped>
+.acct-logo-wrap {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  flex-shrink: 0;
+}
+.acct-avatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+.acct-platform-badge {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 8px;
+  font-weight: 700;
+  font-family: var(--font-display);
+  border: 2px solid var(--bg-1, #0a0a0d);
+  line-height: 1;
+}
+</style>
