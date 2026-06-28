@@ -51,6 +51,9 @@
             <component :is="icons.oauth" :width="13" :height="13" />
             {{ acct.connectionLabel === 'Ready' ? 'Re-auth' : 'Reconnect' }}
           </button>
+          <button v-if="acct.authType === 'oauth' && (acct.isExpiringWithin24h || acct.isExpiringWithin7d)" class="mini-btn" @click="onRefreshToken(acct)">
+            <component :is="icons.spark" :width="13" :height="13" /> Refresh
+          </button>
           <button class="mini-btn" @click="onExport(acct)">
             <component :is="icons.upload" :width="13" :height="13" /> Export
           </button>
@@ -314,6 +317,13 @@ const flash = (msg) => { toast.value = msg; setTimeout(() => { toast.value = nul
 const onReauth = (acct) => {
   openConnect({ platform: acct.platformSlug, account: acct.accountName, profile: acct.profileName })
 }
+const onRefreshToken = async (acct) => {
+  try {
+    await profilesApi.refreshAccountToken(acct.id)
+    flash(`Token refreshed for ${acct.accountName}`)
+    await loadAccounts()
+  } catch (e) { flash('Refresh failed: ' + e.message) }
+}
 const onExport = async (acct) => {
   try {
     const res = await accountApi.exportCookies(acct.id)
@@ -377,21 +387,32 @@ const doOAuthConnect = async () => {
     const accountName = connectData.value.account || `${platform}-oauth`
     const profile = connectData.value.profile || 'default'
 
-    // Step 1: Get or create a profile to attach the account to
+    // Step 1: Get profiles
     const profilesRes = await profilesApi.list()
     const profiles = profilesRes?.data || profilesRes || []
     const profileId = profiles[0]?.id || 1
 
-    // Step 2: Create the account (with authType: 'oauth')
-    const createRes = await profilesApi.createAccount(profileId, {
-      accountName,
-      platform,
-      authType: 'oauth',
-      profile,
-    })
-    const newAccount = createRes?.data || createRes
-    const accountId = newAccount?.id
-    if (!accountId) throw new Error('Failed to create account')
+    // Step 2: Find existing account or create new one
+    let accountId = null
+    const existingAccount = accounts.value.find(
+      a => a.platformSlug === platform && a.accountName === accountName
+    )
+
+    if (existingAccount) {
+      // Reuse existing account for reauth
+      accountId = existingAccount.id
+    } else {
+      // Create new account
+      const createRes = await profilesApi.createAccount(profileId, {
+        accountName,
+        platform,
+        authType: 'oauth',
+        profile,
+      })
+      const newAccount = createRes?.data || createRes
+      accountId = newAccount?.id
+      if (!accountId) throw new Error('Failed to create account')
+    }
 
     // Step 3: Start OAuth flow
     let oauthRes
@@ -423,7 +444,7 @@ const doOAuthConnect = async () => {
         window.removeEventListener('message', handler)
         popup.close()
         if (event.data.ok) {
-          flash(`Connected ${accountName} via OAuth`)
+          flash(existingAccount ? `Re-authenticated ${accountName}` : `Connected ${accountName} via OAuth`)
           showConnect.value = false
         } else {
           flash('OAuth failed: ' + (event.data.error || 'Unknown error'))
