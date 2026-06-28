@@ -7508,6 +7508,9 @@ def api_accounts():
         elif platform in ("tiktok", "reddit", "youtube", "threads", "twitter"):
             expiry_raw = config.get("accessTokenExpiresAt") or ""
 
+        auth_type = getattr(a, "auth_type", "") or "cookie"
+        is_oauth = auth_type == "oauth"
+
         cookie_status = "valid"
         expires_human = "session"
         if expiry_raw:
@@ -7518,13 +7521,21 @@ def api_accounts():
                     if left <= 0:
                         cookie_status = "expired"
                         expires_human = "expired"
-                    elif left <= 86400:
-                        cookie_status = "soon"
-                        d = int(left // 86400)
-                        expires_human = f"in {d} days" if d else f"in {int(left // 3600)} hours"
                     else:
-                        d = int(left // 86400)
-                        expires_human = f"in {d} days"
+                        # OAuth tokens have short lifetimes (1-2h) and auto-refresh.
+                        # Only flag as "soon" when actually close to expiring (< 5 min).
+                        # Cookie sessions last weeks, so keep the 24h warning window.
+                        soon_threshold = 300 if is_oauth else 86400
+                        if left <= soon_threshold:
+                            cookie_status = "soon"
+                        # Human-readable remaining time
+                        if left < 3600:
+                            expires_human = f"in {int(left // 60)} min"
+                        elif left < 86400:
+                            expires_human = f"in {int(left // 3600)} hours"
+                        else:
+                            d = int(left // 86400)
+                            expires_human = f"in {d} days"
             except Exception:
                 pass
 
