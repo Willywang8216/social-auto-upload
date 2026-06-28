@@ -476,6 +476,52 @@ def terms_page():
     directory, filename = _frontend_public_asset('terms-of-service.html')
     return send_from_directory(str(directory), filename)
 
+
+@app.route('/data-deletion')
+@app.route('/data-deletion/')
+def data_deletion_page():
+    """Serve the data deletion instructions page (SPA route)."""
+    return send_from_directory(str(_frontend_index_dir()), 'index.html')
+
+
+@app.route('/api/data-deletion-request', methods=['POST'])
+def api_data_deletion_request():
+    """Handle data deletion request form submissions."""
+    data = request.get_json(silent=True) or {}
+    name = data.get('name', '').strip()
+    email = data.get('email', '').strip()
+    account = data.get('account', '').strip()
+    details = data.get('details', '').strip()
+
+    if not name or not email:
+        return jsonify({'code': 400, 'msg': 'Name and email are required'}), 400
+
+    # Log the deletion request
+    logging.getLogger(__name__).warning(
+        '[data-deletion] request received: name=%s email=%s account=%s details=%s',
+        name, email, account, details
+    )
+
+    # Store in a simple file for tracking
+    import json as _json
+    from datetime import datetime
+    db_path = _current_db_path()
+    request_entry = {
+        'timestamp': datetime.now().isoformat(),
+        'name': name,
+        'email': email,
+        'account': account,
+        'details': details,
+    }
+    deletion_log = db_path.parent / 'data_deletion_requests.jsonl'
+    try:
+        with open(deletion_log, 'a') as f:
+            f.write(_json.dumps(request_entry) + '\n')
+    except Exception:
+        pass
+
+    return jsonify({'code': 200, 'msg': 'Deletion request submitted successfully'}), 200
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:

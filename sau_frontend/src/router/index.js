@@ -27,6 +27,7 @@ const Settings           = () => import('../views/SettingsView.vue')
 const Help               = () => import('../views/HelpView.vue')
 const PrivacyPolicy      = () => import('../views/PrivacyPolicy.vue')
 const TermsOfUse         = () => import('../views/TermsOfUse.vue')
+const DataDeletion       = () => import('../views/DataDeletion.vue')
 
 /* Section layout wrappers */
 const PublishLayout   = () => import('../components/PublishLayout.vue')
@@ -62,6 +63,12 @@ const routes = [
     name: 'TermsOfUse',
     component: TermsOfUse,
     meta: { public: true, publicLayout: true, title: 'Terms of Service — Socialupload' }
+  },
+  {
+    path: '/data-deletion',
+    name: 'DataDeletion',
+    component: DataDeletion,
+    meta: { public: true, publicLayout: true, title: 'Data Deletion — Socialupload' }
   },
 
   /* Dashboard — top-level, no tabs */
