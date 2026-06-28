@@ -224,6 +224,7 @@ OAUTH_DEFAULT_PLATFORMS: frozenset[str] = frozenset(
         PLATFORM_INSTAGRAM,
         PLATFORM_THREADS,
         PLATFORM_YOUTUBE,
+        PLATFORM_TWITTER,
     }
 )
 

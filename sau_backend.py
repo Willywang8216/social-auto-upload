@@ -7534,6 +7534,7 @@ def api_accounts():
             "name": account_name,
             "handle": handle,
             "profile": getattr(a, "profile_name", "") or "default",
+            "authType": getattr(a, "auth_type", "") or "cookie",
             "posts": 0,
             "cookieStatus": cookie_status,
             "expiresAt": expires_human,

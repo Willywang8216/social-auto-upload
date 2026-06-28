@@ -238,6 +238,7 @@ import { tiktokApi } from '@/api/tiktok'
 import { metaApi } from '@/api/meta'
 import { threadsApi } from '@/api/threads'
 import { youtubeApi } from '@/api/youtube'
+import { twitterApi } from '@/api/twitter'
 import { icons } from '@/utils/icons'
 
 const accountStore = useAccountStore()
@@ -266,7 +267,7 @@ const PLATFORM_META = {
 }
 
 /* Platforms that support OAuth (default auth method) */
-const OAUTH_PLATFORMS = ['tiktok', 'facebook', 'instagram', 'threads', 'youtube']
+const OAUTH_PLATFORMS = ['tiktok', 'facebook', 'instagram', 'threads', 'youtube', 'twitter']
 
 const allPlatforms = computed(() =>
   Object.entries(PLATFORM_META).map(([slug, meta]) => ({ slug, ...meta }))
@@ -287,21 +288,24 @@ const platformShort = (slug) => PLATFORM_META[slug]?.short || '?'
 const platformLabel = (slug) => PLATFORM_META[slug]?.label || slug
 
 const cookieStatusClass = (acct) => {
-  if (acct.isOverdue || acct.reconnectRequired || acct.connectionLabel === 'Missing') return 'ck-exp'
+  if (acct.isOverdue || acct.reconnectRequired || acct.connectionLabel === 'Missing' || acct.connectionLabel === 'Token expired') return 'ck-exp'
   if (acct.isExpiringWithin24h || acct.isExpiringWithin7d) return 'ck-soon'
   return 'ck-valid'
 }
 const cookieStatusLabel = (acct) => {
   const cls = cookieStatusClass(acct)
-  return cls === 'ck-exp' ? 'Expired' : cls === 'ck-soon' ? 'Expiring' : 'Valid'
+  const isOAuth = acct.authType === 'oauth'
+  if (cls === 'ck-exp') return isOAuth ? 'Token expired' : 'Expired'
+  if (cls === 'ck-soon') return isOAuth ? 'Token expiring' : 'Expiring'
+  return isOAuth ? 'Connected' : 'Valid'
 }
 const expiryLabel = (acct) => {
-  if (acct.isOverdue) return 'expired'
+  if (acct.isOverdue) return acct.authType === 'oauth' ? 'token expired' : 'expired'
   if (acct.secondsRemaining != null) {
     const d = Math.floor(acct.secondsRemaining / 86400)
     return d > 0 ? `in ${d}d` : `in ${Math.floor(acct.secondsRemaining / 3600)}h`
   }
-  return acct.connectionLabel === 'Ready' ? 'session' : '—'
+  return acct.connectionLabel === 'Ready' ? (acct.authType === 'oauth' ? 'token' : 'session') : '—'
 }
 
 /* Actions */
@@ -400,6 +404,8 @@ const doOAuthConnect = async () => {
       oauthRes = await threadsApi.startOAuth(payload)
     } else if (platform === 'youtube') {
       oauthRes = await youtubeApi.startOAuth(payload)
+    } else if (platform === 'twitter') {
+      oauthRes = await twitterApi.startOAuth(payload)
     }
 
     const authorizeUrl = oauthRes?.data?.authorizeUrl
@@ -460,22 +466,29 @@ const loadAccounts = async () => {
     const res = await accountApi.getAccountsApi()
     const list = res?.data || res || []
     // Map to the shape the component expects (merge with PLATFORM_META)
-    accounts.value = list.map(a => ({
-      id: a.id,
-      platformSlug: a.platform,
-      accountName: a.name,
-      platform: PLATFORM_META[a.platform]?.label || a.platform,
-      connectionLabel: a.cookieStatus === 'expired' ? 'Missing' : 'Ready',
-      connectionDetail: a.handle || '',
-      profileName: a.profile || 'default',
-      isOverdue: a.cookieStatus === 'expired',
-      isExpiringWithin24h: a.cookieStatus === 'soon',
-      isExpiringWithin7d: a.cookieStatus === 'soon',
-      reconnectRequired: a.cookieStatus === 'expired',
-      secondsRemaining: null,
-      cookieStatus: a.cookieStatus,
-      expiresAt: a.expiresAt,
-    }))
+    accounts.value = list.map(a => {
+      const isOAuth = a.authType === 'oauth'
+      const isExpired = a.cookieStatus === 'expired'
+      const isSoon = a.cookieStatus === 'soon'
+      return {
+        id: a.id,
+        platformSlug: a.platform,
+        accountName: a.name,
+        platform: PLATFORM_META[a.platform]?.label || a.platform,
+        authType: a.authType || 'cookie',
+        // For OAuth accounts, show "Token expired" instead of "Missing"
+        connectionLabel: isExpired ? (isOAuth ? 'Token expired' : 'Missing') : 'Ready',
+        connectionDetail: a.handle || '',
+        profileName: a.profile || 'default',
+        isOverdue: isExpired,
+        isExpiringWithin24h: isSoon,
+        isExpiringWithin7d: isSoon,
+        reconnectRequired: isExpired,
+        secondsRemaining: null,
+        cookieStatus: a.cookieStatus,
+        expiresAt: a.expiresAt,
+      }
+    })
   } catch (e) { console.warn('Failed to load accounts:', e) }
 }
 

@@ -4,7 +4,7 @@ import { getLegacyPlatformType, getPlatformLabel, getPublishPlatformSlug } from 
 
 const HEALTH_REFRESH_PLATFORMS = new Set(['tiktok', 'reddit', 'youtube', 'threads', 'twitter'])
 const HEALTH_CHECK_PLATFORMS = new Set(['facebook', 'instagram', 'telegram', 'discord'])
-const OAUTH_DEFAULT_PLATFORMS = new Set(['tiktok', 'facebook', 'instagram', 'threads', 'youtube'])
+const OAUTH_DEFAULT_PLATFORMS = new Set(['tiktok', 'facebook', 'instagram', 'threads', 'youtube', 'twitter'])
 
 export const useAccountStore = defineStore('account', () => {
   const accounts = ref([])
