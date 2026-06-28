@@ -217,11 +217,27 @@ COOKIE_REQUIRED_PLATFORMS: frozenset[str] = frozenset(
     }
 )
 
+OAUTH_DEFAULT_PLATFORMS: frozenset[str] = frozenset(
+    {
+        PLATFORM_TIKTOK,
+        PLATFORM_FACEBOOK,
+        PLATFORM_INSTAGRAM,
+        PLATFORM_THREADS,
+        PLATFORM_YOUTUBE,
+    }
+)
+
 
 def platform_requires_cookie(platform: str) -> bool:
     if platform not in SUPPORTED_PLATFORMS:
         raise ValueError(f"Unsupported platform: {platform!r}")
     return platform in COOKIE_REQUIRED_PLATFORMS
+
+
+def platform_defaults_to_oauth(platform: str) -> bool:
+    if platform not in SUPPORTED_PLATFORMS:
+        raise ValueError(f"Unsupported platform: {platform!r}")
+    return platform in OAUTH_DEFAULT_PLATFORMS
 
 
 def platform_supports_direct_publish(platform: str) -> bool:

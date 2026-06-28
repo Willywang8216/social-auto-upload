@@ -2538,7 +2538,9 @@ def _maybe_start_account_maintenance_scheduler() -> None:
 
 def _validate_account_payload(data: dict, *, db_path: Path, profile_id: int | None = None, perform_live_checks: bool = False):
     platform = str(data.get("platform", "") or "").strip().lower()
-    auth_type = str(data.get("authType", "cookie") or "cookie")
+    # Default to 'oauth' for platforms that support it, 'cookie' otherwise
+    _default_auth = "oauth" if (platform and profile_registry.platform_defaults_to_oauth(platform)) else "cookie"
+    auth_type = str(data.get("authType", _default_auth) or _default_auth)
     config = data.get("config") if isinstance(data.get("config"), dict) else {}
     cookie_path = str(data.get("cookiePath", "") or "")
     return account_validation.validate_structured_account_config(
@@ -5150,7 +5152,7 @@ def profile_accounts_create(profile_id):
                 platform,
                 account_name,
                 cookie_path=data.get("cookiePath"),
-                auth_type=str(data.get("authType", "cookie") or "cookie"),
+                auth_type=str(data.get("authType") or ("oauth" if profile_registry.platform_defaults_to_oauth(platform) else "cookie")),
                 config=data.get("config") if isinstance(data.get("config"), dict) else None,
                 enabled=bool(data.get("enabled", True)),
                 status=int(data.get("status", 0) or 0),

@@ -4,6 +4,7 @@ import { getLegacyPlatformType, getPlatformLabel, getPublishPlatformSlug } from 
 
 const HEALTH_REFRESH_PLATFORMS = new Set(['tiktok', 'reddit', 'youtube', 'threads', 'twitter'])
 const HEALTH_CHECK_PLATFORMS = new Set(['facebook', 'instagram', 'telegram', 'discord'])
+const OAUTH_DEFAULT_PLATFORMS = new Set(['tiktok', 'facebook', 'instagram', 'threads', 'youtube'])
 
 export const useAccountStore = defineStore('account', () => {
   const accounts = ref([])
@@ -175,7 +176,7 @@ export const useAccountStore = defineStore('account', () => {
     const isLegacy = item.isLegacy ?? profileId == null
     const config = { ...(item.config || {}) }
     if (filePath && !config.cookiePath) config.cookiePath = filePath
-    const authType = item.authType || item.auth_type || 'cookie'
+    const authType = item.authType || item.auth_type || (OAUTH_DEFAULT_PLATFORMS.has(platformSlug) ? 'oauth' : 'cookie')
     const result = {
       id: item.id,
       type: item.type ?? getLegacyPlatformType(platformSlug),

@@ -112,6 +112,13 @@
 
             <!-- Method tabs -->
             <div class="method-tabs" style="margin-top:18px">
+              <div v-if="isOAuthPlatform" class="method-tab" :class="{ on: connectMethod === 'oauth' }" @click="connectMethod = 'oauth'">
+                <div class="mi"><component :is="icons.oauth" :width="16" :height="16" /></div>
+                <div>
+                  <div class="mt">OAuth Connect</div>
+                  <div class="md">Authorize via {{ platformLabel(connectData.platform) }}</div>
+                </div>
+              </div>
               <div class="method-tab" :class="{ on: connectMethod === 'qr' }" @click="connectMethod = 'qr'">
                 <div class="mi"><component :is="icons.oauth" :width="16" :height="16" /></div>
                 <div>
@@ -128,8 +135,23 @@
               </div>
             </div>
 
+            <!-- OAuth method -->
+            <div v-if="connectMethod === 'oauth'" class="qr-wrap">
+              <div class="qr-box" style="display:flex;align-items:center;justify-content:center">
+                <component :is="icons.oauth" :width="36" :height="36" />
+              </div>
+              <div class="qr-info">
+                <span class="qs"><span class="d"></span>OAuth Authorization</span>
+                <p>Click "Connect with OAuth" to open {{ platformLabel(connectData.platform) }}'s authorization page. You'll grant API access — no cookies or passwords needed. Tokens are stored encrypted and auto-refreshed.</p>
+                <div class="note">
+                  <component :is="icons.about" />
+                  <p>OAuth is the recommended auth method. Your credentials never pass through this app — only the platform's official authorization flow is used.</p>
+                </div>
+              </div>
+            </div>
+
             <!-- QR method -->
-            <div v-if="connectMethod === 'qr'" class="qr-wrap">
+            <div v-else-if="connectMethod === 'qr'" class="qr-wrap">
               <div class="qr-box">
                 <svg viewBox="0 0 25 25" shape-rendering="crispEdges">
                   <rect x="0" y="0" width="25" height="25" fill="#fff" />
@@ -176,7 +198,16 @@
           <div class="spacer"></div>
           <button class="btn-sec" @click="showConnect = false">Cancel</button>
           <button
-            v-if="connectMethod === 'import'"
+            v-if="connectMethod === 'oauth'"
+            class="btn-primary"
+            :disabled="!connectData.platform || !connectData.account || oauthBusy"
+            :style="{ opacity: (!connectData.platform || !connectData.account || oauthBusy) ? 0.5 : 1 }"
+            @click="doOAuthConnect"
+          >
+            {{ oauthBusy ? 'Connecting…' : 'Connect with OAuth' }}
+          </button>
+          <button
+            v-else-if="connectMethod === 'import'"
             class="btn-primary"
             :disabled="!connectData.platform || !connectData.paste"
             :style="{ opacity: (!connectData.platform || !connectData.paste) ? 0.5 : 1 }"
@@ -202,6 +233,11 @@
 import { ref, computed, onMounted } from 'vue'
 import { useAccountStore } from '@/stores/account'
 import { accountApi } from '@/api/account'
+import { profilesApi } from '@/api/profiles'
+import { tiktokApi } from '@/api/tiktok'
+import { metaApi } from '@/api/meta'
+import { threadsApi } from '@/api/threads'
+import { youtubeApi } from '@/api/youtube'
 import { icons } from '@/utils/icons'
 
 const accountStore = useAccountStore()
@@ -228,6 +264,9 @@ const PLATFORM_META = {
   substack:    { label: 'Substack',         short: 'S',  color: '#ff6719' },
   patreon:     { label: 'Patreon',          short: 'P',  color: '#ff424d' },
 }
+
+/* Platforms that support OAuth (default auth method) */
+const OAUTH_PLATFORMS = ['tiktok', 'facebook', 'instagram', 'threads', 'youtube']
 
 const allPlatforms = computed(() =>
   Object.entries(PLATFORM_META).map(([slug, meta]) => ({ slug, ...meta }))
@@ -304,8 +343,13 @@ const showConnect = ref(false)
 const connectMethod = ref('qr')
 const connectData = ref({ platform: null, account: '', profile: 'default', paste: '' })
 const importBusy = ref(false)
+const oauthBusy = ref(false)
 const loginStatus = ref('pending')
 const toast = ref(null)
+
+const isOAuthPlatform = computed(() =>
+  connectData.value.platform && OAUTH_PLATFORMS.includes(connectData.value.platform)
+)
 
 const loginStatusLabel = computed(() => {
   const map = { pending: 'Waiting for scan…', scanned: 'Scanned — confirm on your phone', confirmed: 'Confirmed — saving session', saved: 'Saved', error: 'Login failed' }
@@ -314,9 +358,86 @@ const loginStatusLabel = computed(() => {
 
 const openConnect = (initial = {}) => {
   connectData.value = { platform: initial.platform || null, account: initial.account || '', profile: initial.profile || 'default', paste: '' }
-  connectMethod.value = 'qr'
+  // Default to OAuth for platforms that support it
+  connectMethod.value = initial.platform && OAUTH_PLATFORMS.includes(initial.platform) ? 'oauth' : 'qr'
   loginStatus.value = 'pending'
   showConnect.value = true
+}
+
+/* Start OAuth flow for supported platforms */
+const doOAuthConnect = async () => {
+  if (!connectData.value.platform) return
+  oauthBusy.value = true
+  try {
+    const platform = connectData.value.platform
+    const accountName = connectData.value.account || `${platform}-oauth`
+    const profile = connectData.value.profile || 'default'
+
+    // Step 1: Get or create a profile to attach the account to
+    const profilesRes = await profilesApi.list()
+    const profiles = profilesRes?.data || profilesRes || []
+    const profileId = profiles[0]?.id || 1
+
+    // Step 2: Create the account (with authType: 'oauth')
+    const createRes = await profilesApi.createAccount(profileId, {
+      accountName,
+      platform,
+      authType: 'oauth',
+      profile,
+    })
+    const newAccount = createRes?.data || createRes
+    const accountId = newAccount?.id
+    if (!accountId) throw new Error('Failed to create account')
+
+    // Step 3: Start OAuth flow
+    let oauthRes
+    const payload = { accountId, accountName, profileId }
+    if (platform === 'tiktok') {
+      oauthRes = await tiktokApi.startOAuth(payload)
+    } else if (platform === 'facebook' || platform === 'instagram') {
+      oauthRes = await metaApi.startOAuth(payload)
+    } else if (platform === 'threads') {
+      oauthRes = await threadsApi.startOAuth(payload)
+    } else if (platform === 'youtube') {
+      oauthRes = await youtubeApi.startOAuth(payload)
+    }
+
+    const authorizeUrl = oauthRes?.data?.authorizeUrl
+    if (!authorizeUrl) throw new Error('No authorize URL returned')
+
+    // Step 4: Open OAuth popup
+    const popup = window.open(authorizeUrl, 'oauth-popup', 'width=600,height=700,scrollbars=yes')
+    if (!popup) throw new Error('Popup blocked — please allow popups for this site')
+
+    // Step 5: Listen for the OAuth callback postMessage
+    // Backend sends: { type: 'sau:{platform}-oauth', ok: true/false, data/error }
+    const expectedType = `sau:${platform === 'facebook' || platform === 'instagram' ? 'meta' : platform}-oauth`
+    const handler = (event) => {
+      if (event.data?.type === expectedType) {
+        window.removeEventListener('message', handler)
+        popup.close()
+        if (event.data.ok) {
+          flash(`Connected ${accountName} via OAuth`)
+          showConnect.value = false
+        } else {
+          flash('OAuth failed: ' + (event.data.error || 'Unknown error'))
+        }
+        loadAccounts()
+      }
+    }
+    window.addEventListener('message', handler)
+
+    // Cleanup if popup is closed manually
+    const checkClosed = setInterval(() => {
+      if (popup.closed) {
+        clearInterval(checkClosed)
+        window.removeEventListener('message', handler)
+        // Refresh accounts in case OAuth completed
+        loadAccounts()
+      }
+    }, 1000)
+  } catch (e) { flash('OAuth failed: ' + e.message) }
+  finally { oauthBusy.value = false }
 }
 
 const doImport = async () => {
