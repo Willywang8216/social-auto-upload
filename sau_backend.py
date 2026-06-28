@@ -3455,7 +3455,7 @@ def meta_oauth_callback():
         result.pop('picker_html', None)
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:meta-oauth', ok: true, data: {json.dumps(result, ensure_ascii=False)} }}, _oauth_post_message_origin());
+          window.opener.postMessage({{ type: 'sau:meta-oauth', ok: true, data: {json.dumps(result, ensure_ascii=False)} }}, '*');
         }}
         window.close();
         </script><p>Already completed. You may close this window.</p></body></html>"""
@@ -3478,7 +3478,7 @@ def meta_oauth_callback():
             )
         return Response("""<html><body><script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'sau:meta-oauth', ok: false, error: %r }, _oauth_post_message_origin());
+              window.opener.postMessage({ type: 'sau:meta-oauth', ok: false, error: %r }, '*');
             }
             window.close();
             </script><p>Meta authorization failed. You may close this window.</p></body></html>""" % error, mimetype='text/html')
@@ -3535,7 +3535,7 @@ def meta_oauth_callback():
             }});
             function selectPage(p) {{
               if (window.opener) {{
-                window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'facebook',accountId:ACCOUNT_ID,selectedPage:p,pages:PAGES,tokenData:TOKEN_DATA}}}}, _oauth_post_message_origin());
+                window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'facebook',accountId:ACCOUNT_ID,selectedPage:p,pages:PAGES,tokenData:TOKEN_DATA}}}}, '*');
               }}
               window.close();
             }}
@@ -3643,7 +3643,7 @@ def meta_oauth_callback():
             }});
             function selectIG(ig) {{
               if (window.opener) {{
-                window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'instagram',accountId:ACCOUNT_ID,selectedPage:{{id:ig.pageId,name:ig.facebookPageName,access_token:ig.pageAccessToken,igUserId:ig.igUserId,instagramUserName:ig.instagramUserName}},tokenData:TOKEN_DATA}}}}, _oauth_post_message_origin());
+                window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'instagram',accountId:ACCOUNT_ID,selectedPage:{{id:ig.pageId,name:ig.facebookPageName,access_token:ig.pageAccessToken,igUserId:ig.igUserId,instagramUserName:ig.instagramUserName}},tokenData:TOKEN_DATA}}}}, '*');
               }}
               window.close();
             }}
@@ -3717,7 +3717,7 @@ def meta_oauth_callback():
         )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:meta-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, _oauth_post_message_origin());
+          window.opener.postMessage({{ type: 'sau:meta-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
         }}
         window.close();
         </script><p>Meta authorization completed. You may close this window.</p></body></html>"""
@@ -3815,7 +3815,7 @@ def youtube_oauth_callback():
             )
         return Response("""<html><body><script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'sau:youtube-oauth', ok: false, error: %r }, _oauth_post_message_origin());
+              window.opener.postMessage({ type: 'sau:youtube-oauth', ok: false, error: %r }, '*');
             }
             window.close();
             </script><p>YouTube authorization failed. You may close this window.</p></body></html>""" % error, mimetype='text/html')
@@ -3897,7 +3897,7 @@ def youtube_oauth_callback():
         )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:youtube-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, _oauth_post_message_origin());
+          window.opener.postMessage({{ type: 'sau:youtube-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
         }}
         window.close();
         </script><p>YouTube authorization completed. You may close this window.</p></body></html>"""
@@ -4002,7 +4002,7 @@ def reddit_oauth_callback():
         return Response(
             """<html><body><script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'sau:reddit-oauth', ok: false, error: %r }, _oauth_post_message_origin());
+              window.opener.postMessage({ type: 'sau:reddit-oauth', ok: false, error: %r }, '*');
             }
             window.close();
             </script><p>Reddit authorization failed. You may close this window.</p></body></html>""" % error,
@@ -4082,7 +4082,7 @@ def reddit_oauth_callback():
         )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:reddit-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, _oauth_post_message_origin());
+          window.opener.postMessage({{ type: 'sau:reddit-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
         }}
         window.close();
         </script><p>Reddit authorization completed. You may close this window.</p></body></html>"""
@@ -4191,7 +4191,7 @@ def twitter_oauth_callback():
         return Response(
             """<html><body><script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'sau:twitter-oauth', ok: false, error: %r }, _oauth_post_message_origin());
+              window.opener.postMessage({ type: 'sau:twitter-oauth', ok: false, error: %r }, '*');
             }
             window.close();
             </script><p>Twitter authorization failed. You may close this window.</p></body></html>""" % error,
@@ -4278,7 +4278,7 @@ def twitter_oauth_callback():
         )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:twitter-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, _oauth_post_message_origin());
+          window.opener.postMessage({{ type: 'sau:twitter-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
         }}
         window.close();
         </script><p>Twitter authorization completed. You may close this window.</p></body></html>"""
@@ -4504,7 +4504,7 @@ def threads_oauth_callback():
             )
         return Response("""<html><body><script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'sau:threads-oauth', ok: false, error: %r }, _oauth_post_message_origin());
+              window.opener.postMessage({ type: 'sau:threads-oauth', ok: false, error: %r }, '*');
             }
             window.close();
             </script><p>Threads authorization failed. You may close this window.</p></body></html>""" % error, mimetype='text/html')
@@ -4575,7 +4575,7 @@ def threads_oauth_callback():
         )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:threads-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, _oauth_post_message_origin());
+          window.opener.postMessage({{ type: 'sau:threads-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
         }}
         window.close();
         </script><p>Threads authorization completed. You may close this window.</p></body></html>"""
@@ -4666,7 +4666,7 @@ def tiktok_oauth_callback():
         result = request_state.result
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:tiktok-oauth', ok: true, data: {json.dumps(result, ensure_ascii=False)} }}, _oauth_post_message_origin());
+          window.opener.postMessage({{ type: 'sau:tiktok-oauth', ok: true, data: {json.dumps(result, ensure_ascii=False)} }}, '*');
         }}
         window.close();
         </script><p>TikTok authorization completed. You may close this window.</p></body></html>"""
@@ -4707,7 +4707,7 @@ def tiktok_oauth_callback():
         return Response(
             """<html><body><script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'sau:tiktok-oauth', ok: false, error: %r }, _oauth_post_message_origin());
+              window.opener.postMessage({ type: 'sau:tiktok-oauth', ok: false, error: %r }, '*');
             }
             window.close();
             </script><p>TikTok authorization failed. You may close this window.</p></body></html>""" % error,
@@ -4796,7 +4796,7 @@ def tiktok_oauth_callback():
             )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:tiktok-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, _oauth_post_message_origin());
+          window.opener.postMessage({{ type: 'sau:tiktok-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
         }}
         window.close();
         </script><p>TikTok authorization completed. You may close this window.</p></body></html>"""
@@ -6477,7 +6477,7 @@ def patreon_oauth_callback():
         return Response(
             """<html><body><script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'sau:patreon-oauth', ok: false, error: %r }, _oauth_post_message_origin());
+              window.opener.postMessage({ type: 'sau:patreon-oauth', ok: false, error: %r }, '*');
             }
             window.close();
             </script><p>Patreon authorization failed. You may close this window.</p></body></html>""" % error,
@@ -6558,7 +6558,7 @@ def patreon_oauth_callback():
         )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:patreon-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, _oauth_post_message_origin());
+          window.opener.postMessage({{ type: 'sau:patreon-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
         }}
         window.close();
         </script><p>Patreon authorization completed. You may close this window.</p></body></html>"""
