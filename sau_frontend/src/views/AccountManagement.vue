@@ -12,6 +12,9 @@
       <button class="btn-ghost" @click="runHealthCheck">
         <component :is="icons.spark" :width="15" :height="15" /> Run health check
       </button>
+      <button class="btn-ghost" @click="onRefreshAll" :disabled="refreshAllBusy">
+        <component :is="icons.oauth" :width="15" :height="15" /> {{ refreshAllBusy ? 'Refreshing…' : 'Refresh tokens' }}
+      </button>
       <button class="btn-primary" @click="openConnect()">
         <component :is="icons.plus" /> Connect Account
       </button>
@@ -324,6 +327,21 @@ const onRefreshToken = async (acct) => {
     await loadAccounts()
   } catch (e) { flash('Refresh failed: ' + e.message) }
 }
+const onRefreshAll = async () => {
+  refreshAllBusy.value = true
+  try {
+    const oauthAccounts = accounts.value.filter(a => a.authType === 'oauth')
+    if (oauthAccounts.length === 0) {
+      flash('No OAuth accounts to refresh')
+      return
+    }
+    const ids = oauthAccounts.map(a => a.id)
+    await profilesApi.batchRefreshTokens(ids)
+    flash(`Refreshed ${ids.length} OAuth account(s)`)
+    await loadAccounts()
+  } catch (e) { flash('Refresh all failed: ' + e.message) }
+  finally { refreshAllBusy.value = false }
+}
 const onExport = async (acct) => {
   try {
     const res = await accountApi.exportCookies(acct.id)
@@ -358,6 +376,7 @@ const connectMethod = ref('qr')
 const connectData = ref({ platform: null, account: '', profile: 'default', paste: '' })
 const importBusy = ref(false)
 const oauthBusy = ref(false)
+const refreshAllBusy = ref(false)
 const loginStatus = ref('pending')
 const toast = ref(null)
 
