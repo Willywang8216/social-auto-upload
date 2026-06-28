@@ -96,7 +96,6 @@ class PublishWorker:
         self._stop = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
         self._maintenance_counter: int = 0
-        self._maintenance_done: bool = False  # guard against duplicate runs
 
     def stop(self) -> None:
         self._stop.set()
@@ -315,18 +314,14 @@ class PublishWorker:
 
     async def _run_maintenance_tick(self) -> None:
         """Background scan-and-refresh for stale OAuth accounts."""
-        if self._maintenance_done:
-            return
         try:
             accounts = profile_registry.list_accounts(enabled=True, db_path=self._db_path)
         except Exception as exc:
             _logger.warning(f"worker self-maintenance: could not list accounts: {exc}")
-            self._maintenance_done = True
             return
 
         stale = [a for a in accounts if self._is_account_stale(a)]
         if not stale:
-            self._maintenance_done = True
             return
 
         _logger.info(f"worker self-maintenance: refreshing {len(stale)} stale accounts")
