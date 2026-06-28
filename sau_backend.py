@@ -2128,7 +2128,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
             expires_in = refreshed.get('expires_in')
             if expires_in:
                 config['accessTokenExpiresAt'] = (
-                    datetime.now() + timedelta(seconds=int(expires_in))
+                    datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
                 ).isoformat(timespec='seconds')
             updated = profile_registry.update_account(
                 account_id,
@@ -2148,7 +2148,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
             expires_in = refreshed.get('expires_in')
             if expires_in:
                 config['accessTokenExpiresAt'] = (
-                    datetime.now() + timedelta(seconds=int(expires_in))
+                    datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
                 ).isoformat(timespec='seconds')
             channel_items = refreshed.get('channel', {}).get('items', []) if isinstance(refreshed.get('channel'), dict) else []
             if channel_items:
@@ -2185,7 +2185,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
             expires_in = refreshed.get('expires_in')
             if expires_in:
                 config['accessTokenExpiresAt'] = (
-                    datetime.now() + timedelta(seconds=int(expires_in))
+                    datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
                 ).isoformat(timespec='seconds')
             updated = profile_registry.update_account(
                 account_id,
@@ -2285,7 +2285,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
             expires_in = refreshed.get('expires_in')
             if expires_in:
                 config['accessTokenExpiresAt'] = (
-                    datetime.now() + timedelta(seconds=int(expires_in))
+                    datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
                 ).isoformat(timespec='seconds')
             updated = profile_registry.update_account(
                 account_id,
@@ -3847,7 +3847,7 @@ def youtube_oauth_callback():
         merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
         expires_in = token_payload.get('expires_in')
         if expires_in not in (None, ''):
-            merged_config['accessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+            merged_config['accessTokenExpiresAt'] = (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
         if first.get('id'):
             merged_config['channelId'] = first.get('id')
         if snippet.get('title'):
@@ -4035,7 +4035,7 @@ def reddit_oauth_callback():
         merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
         expires_in = token_payload.get('expires_in')
         if expires_in not in (None, ''):
-            merged_config['accessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+            merged_config['accessTokenExpiresAt'] = (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
         merged_config['redditUserName'] = str(user_info.get('name') or merged_config.get('redditUserName') or '')
         merged_config['scope'] = str(token_payload.get('scope') or merged_config.get('scope') or ' '.join(request_state.scopes))
         merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
@@ -4220,7 +4220,7 @@ def twitter_oauth_callback():
         merged_config['tokenType'] = token_payload.get('token_type', 'bearer')
         expires_in = token_payload.get('expires_in')
         if expires_in not in (None, ''):
-            merged_config['accessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+            merged_config['accessTokenExpiresAt'] = (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
         user_data = user_info.get('data', user_info) if isinstance(user_info, dict) else {}
         if isinstance(user_data, dict):
             merged_config['twitterUserId'] = str(user_data.get('id') or merged_config.get('twitterUserId') or '')
@@ -4532,7 +4532,7 @@ def threads_oauth_callback():
         merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
         expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
         if expires_in not in (None, ''):
-            merged_config['accessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+            merged_config['accessTokenExpiresAt'] = (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
         merged_config['scope'] = str(merged_config.get('scope') or ' '.join(request_state.scopes))
         merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
         updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
@@ -6510,7 +6510,7 @@ def patreon_oauth_callback():
         merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
         expires_in = token_payload.get('expires_in')
         if expires_in not in (None, ''):
-            merged_config['accessTokenExpiresAt'] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+            merged_config['accessTokenExpiresAt'] = (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
 
         # Extract user info from Patreon identity response
         user_data = (user_info.get('data') or {}).get('attributes') or {}
