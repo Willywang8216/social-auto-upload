@@ -25,10 +25,7 @@
       <div v-for="acct in filteredAccounts" :key="acct.id" class="acct">
         <div class="acct-top">
           <div class="acct-logo-wrap">
-            <img v-if="acct.avatarUrl" :src="acct.avatarUrl" class="acct-avatar" @error="e => e.target.style.display='none'" />
-            <div v-else class="acct-logo" :style="{ background: platformBg(acct.platformSlug) }">
-              {{ platformShort(acct.platformSlug) }}
-            </div>
+            <img :src="acct.avatarUrl || defaultAvatar(acct.accountName)" class="acct-avatar" @error="e => e.target.src = defaultAvatar(acct.accountName)" />
             <span class="acct-platform-badge" :style="{ background: platformBg(acct.platformSlug) }">
               {{ platformShort(acct.platformSlug) }}
             </span>
@@ -298,6 +295,7 @@ const platformCount = computed(() => new Set(filteredAccounts.value.map(a => a.p
 const platformBg = (slug) => PLATFORM_META[slug]?.color || '#888'
 const platformShort = (slug) => PLATFORM_META[slug]?.short || '?'
 const platformLabel = (slug) => PLATFORM_META[slug]?.label || slug
+const defaultAvatar = (name) => `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random&size=84&bold=true`
 
 const cookieStatusClass = (acct) => {
   if (acct.isOverdue || acct.reconnectRequired || acct.connectionLabel === 'Missing' || acct.connectionLabel === 'Token expired') return 'ck-exp'
