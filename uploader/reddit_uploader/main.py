@@ -75,7 +75,7 @@ async def _post_reddit_cookie(
 ) -> str:
     resolved_account = Path(account_file).expanduser().resolve()
     async with async_playwright() as p:
-        launch_options = await get_browser_options(p)
+        launch_options = get_browser_options()
         launch_options["headless"] = headless if LOCAL_CHROME_HEADLESS else False
         browser = await p.chromium.launch(**launch_options)
         context = await browser.new_context(
