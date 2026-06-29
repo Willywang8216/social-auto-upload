@@ -7647,6 +7647,78 @@ def api_cookies_export(account_id):
     return jsonify({"code": 200, "data": data, "msg": "ok"})
 
 
+@app.route("/accounts/import-cookies", methods=["POST"])
+def accounts_import_cookies():
+    """Import cookies for a platform account (JSON or Netscape format).
+
+    Creates the account in the database if it doesn't already exist,
+    then writes the parsed cookies to the cookie store.
+    """
+    b = request.get_json(force=True) or {}
+    platform = b.get("platform")
+    account = b.get("account") or "imported"
+    profile = b.get("profile") or "default"
+    fmt = b.get("format", "json")
+    payload = b.get("payload", "")
+    if not platform:
+        return jsonify({"code": 400, "msg": "platform is required", "data": None}), 400
+    if not payload:
+        return jsonify({"code": 400, "msg": "No cookie data provided", "data": None}), 400
+
+    db_path = _current_db_path()
+
+    # Find or create the account in the database
+    existing = None
+    try:
+        all_accounts = profile_registry.list_accounts(db_path=db_path)
+        for a in all_accounts:
+            if a.platform == platform and a.account_name == account:
+                existing = a
+                break
+    except Exception:
+        pass
+
+    if existing is None:
+        # Get or create a default profile
+        profiles = profile_registry.list_profiles(db_path=db_path)
+        profile_id = profiles[0].id if profiles else 1
+        try:
+            existing = profile_registry.create_account(
+                profile_id=profile_id,
+                platform=platform,
+                account_name=account,
+                auth_type="cookie",
+                db_path=db_path,
+            )
+        except Exception:
+            # Account may have been created by a concurrent request
+            all_accounts = profile_registry.list_accounts(db_path=db_path)
+            for a in all_accounts:
+                if a.platform == platform and a.account_name == account:
+                    existing = a
+                    break
+
+    if existing is None:
+        return jsonify({"code": 500, "msg": "Failed to create or find account", "data": None}), 500
+
+    # Import cookies
+    try:
+        result = _import_cookies_for_account(platform, account, profile, fmt, payload, db_path=db_path)
+        # Update account cookie_path and status
+        safe_name = f"{profile}__{platform}__{account}".replace("/", "_")
+        cookie_path = Path(BASE_DIR / "cookiesFile" / f"{safe_name}.cookie")
+        profile_registry.update_account(
+            existing.id,
+            cookie_path=str(cookie_path),
+            status=1,
+            db_path=db_path,
+        )
+        result["accountId"] = existing.id
+        return jsonify({"code": 200, "data": result, "msg": "ok"})
+    except Exception as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+
 @app.route("/api/auth/cookies/import", methods=["POST"])
 def api_cookies_import():
     """Import cookies for an account (JSON or Netscape format)."""
