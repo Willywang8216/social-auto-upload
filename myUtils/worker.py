@@ -760,7 +760,12 @@ async def _publish_prepared_reddit(
     if account is None:
         raise ValueError("Prepared Reddit publish requires a structured account")
     config = dict(account.config or {})
-    reddit_auth_type = str(config.get("redditAuthType") or "api")
+    # Check config first, then fall back to the account's database auth_type
+    reddit_auth_type = str(
+        config.get("redditAuthType")
+        or getattr(account, "auth_type", None)
+        or "api"
+    )
 
     if reddit_auth_type == "cookie":
         if not account_file:
