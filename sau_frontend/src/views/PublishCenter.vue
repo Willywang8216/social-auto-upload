@@ -1596,11 +1596,11 @@ function resetForm() {
   font-size: 16px;
 }
 .pc-subtle {
-  color: #888;
+  color: var(--text-3, #888);
   font-size: 12px;
 }
 .pc-help {
-  color: #b0b0b0;
+  color: var(--text-3, #b0b0b0);
   font-size: 12px;
   margin-top: 4px;
 }
@@ -1627,7 +1627,7 @@ function resetForm() {
   align-items: center;
   gap: 10px;
   padding: 6px 10px;
-  background: #f7f7f7;
+  background: var(--raised, #f7f7f7);
   border-radius: 6px;
 }
 .pc-media-preview {
@@ -1654,7 +1654,7 @@ function resetForm() {
   white-space: nowrap;
 }
 .pc-media-duration {
-  color: #606266;
+  color: var(--text-2, #606266);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
@@ -1662,7 +1662,7 @@ function resetForm() {
 .pc-duration-hint {
   margin-top: 6px;
   font-size: 12px;
-  color: #909399;
+  color: var(--text-3, #909399);
 }
 .pc-upload-progress-list {
   margin-top: 10px;
@@ -1677,7 +1677,7 @@ function resetForm() {
 }
 .pc-upload-filename {
   font-size: 13px;
-  color: #606266;
+  color: var(--text-2, #606266);
   min-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1686,7 +1686,7 @@ function resetForm() {
 .pc-profile-accounts {
   margin-top: 12px;
   padding: 8px 10px;
-  background: #fafafa;
+  background: var(--raised, #fafafa);
   border-radius: 6px;
 }
 .pc-profile-title {
@@ -1728,7 +1728,7 @@ function resetForm() {
   gap: 10px;
 }
 .pc-account-draft {
-  border-top: 1px solid #f0f0f0;
+  border-top: 1px solid var(--line, #f0f0f0);
   padding: 10px 0;
 }
 .pc-account-head {
