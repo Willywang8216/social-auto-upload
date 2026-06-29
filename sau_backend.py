@@ -7683,7 +7683,7 @@ def accounts_import_cookies():
         profiles = profile_registry.list_profiles(db_path=db_path)
         profile_id = profiles[0].id if profiles else 1
         try:
-            existing = profile_registry.create_account(
+            existing = profile_registry.add_account(
                 profile_id=profile_id,
                 platform=platform,
                 account_name=account,
@@ -7716,6 +7716,8 @@ def accounts_import_cookies():
         result["accountId"] = existing.id
         return jsonify({"code": 200, "data": result, "msg": "ok"})
     except Exception as exc:
+        import traceback
+        logging.getLogger(__name__).error("Cookie import failed: %s\n%s", exc, traceback.format_exc())
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
 
 
