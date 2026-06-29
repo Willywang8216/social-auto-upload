@@ -767,7 +767,11 @@ async def _publish_prepared_reddit(
             raise ValueError("Prepared Reddit cookie publish requires account_file (storage_state)")
         from uploader.reddit_uploader.main import RedditCookieVideo
 
-        subreddits = config.get("subreddits") or []
+        # Check payload draft for subreddits override, then fall back to account config
+        draft = payload.get("draft") or {}
+        subreddits = draft.get("subreddits") or config.get("subreddits") or []
+        if isinstance(subreddits, str):
+            subreddits = [s.strip() for s in subreddits.split(",") if s.strip()]
         if not subreddits:
             raise ValueError("Reddit cookie publish requires at least one subreddit")
         title = payload.get("message") or payload.get("draft", {}).get("message", "") or ""

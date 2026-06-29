@@ -1,4 +1,5 @@
 export const redditFieldDefs = [
+  { key: 'subreddits', label: 'Subreddits', placeholder: 'e.g. videos, funny, gaming (comma-separated)', type: 'tags' },
   { key: 'clientIdEnv', label: 'Client ID Env', placeholder: '例如：REDDIT_CLIENT_ID' },
   { key: 'clientSecretEnv', label: 'Client Secret Env', placeholder: '例如：REDDIT_CLIENT_SECRET' },
   { key: 'refreshTokenEnv', label: 'Refresh Token Env', placeholder: '例如：REDDIT_REFRESH_TOKEN' }

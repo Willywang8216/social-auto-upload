@@ -301,6 +301,31 @@ const sections = ref([
     ]
   },
   {
+    title: '🟠 Reddit Config',
+    open: false,
+    endpoints: [
+      { method: 'POST', path: '/profiles/:id/accounts', description: 'Create Reddit account with subreddits',
+        params: [
+          { name: 'platform', type: 'string', desc: '"reddit"' },
+          { name: 'account_name', type: 'string', desc: 'Account display name' },
+          { name: 'auth_type', type: 'string', desc: '"oauth" or "cookie"' },
+          { name: 'config.subreddits', type: 'array', desc: 'Array of subreddit names, e.g. ["videos", "funny"]' },
+          { name: 'config.redditAuthType', type: 'string', desc: '"api" (OAuth) or "cookie"' },
+          { name: 'config.clientIdEnv', type: 'string', desc: 'Env var name for Reddit client ID' },
+          { name: 'config.clientSecretEnv', type: 'string', desc: 'Env var name for Reddit client secret' },
+          { name: 'config.refreshTokenEnv', type: 'string', desc: 'Env var name for Reddit refresh token' },
+        ]
+      },
+      { method: 'POST', path: '/publish-center/submit', description: 'Publish to Reddit (subreddits override)',
+        params: [
+          { name: 'accountDrafts[id].subreddits', type: 'array', desc: 'Override subreddits per account, e.g. ["gaming", "videos"]' },
+          { name: 'accountDrafts[id].title', type: 'string', desc: 'Post title (max 300 chars)' },
+          { name: 'accountDrafts[id].message', type: 'string', desc: 'Post body text' },
+        ]
+      },
+    ]
+  },
+  {
     title: '📈 Analytics',
     open: false,
     endpoints: [

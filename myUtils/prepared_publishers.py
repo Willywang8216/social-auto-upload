@@ -1751,7 +1751,11 @@ def refresh_twitter_access_token(config: dict[str, Any], *, session=None) -> dic
 def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
     config = dict(account.config or {})
     config.setdefault("accountName", getattr(account, "account_name", "sau"))
-    subreddits = config.get("subreddits") or []
+    # Check payload draft for subreddits override, then fall back to account config
+    draft = payload.get("draft") or {}
+    subreddits = draft.get("subreddits") or config.get("subreddits") or []
+    if isinstance(subreddits, str):
+        subreddits = [s.strip() for s in subreddits.split(",") if s.strip()]
     if not isinstance(subreddits, list) or not subreddits:
         raise PreparedPublishError("Reddit publish requires a non-empty subreddits array")
 

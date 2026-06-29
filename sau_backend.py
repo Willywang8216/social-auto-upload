@@ -6153,6 +6153,7 @@ def _publish_center_preview_payload(*, profile, accounts, drafts_by_account):
             "maxChars": rule.max_chars if rule is not None else None,
             "supportsFirstComment": platform_capabilities.platform_supports_first_comment(account.platform),
             "supportsMultiMedia": platform_capabilities.platform_supports_multi_media(account.platform),
+            "configSubreddits": (account.config or {}).get("subreddits", []) if account.platform == "reddit" else [],
         })
     return profile_payload
 

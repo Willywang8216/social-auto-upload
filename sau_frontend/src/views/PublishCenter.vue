@@ -292,6 +292,30 @@
               <span class="pc-subtle">第一則留言：</span>
               <el-input v-model="account.draft.firstComment" placeholder="貼文連結等資訊" />
             </div>
+            <!-- Reddit subreddits selector -->
+            <div v-if="account.platform === 'reddit'" class="pc-draft-field">
+              <el-text size="small" type="info">Subreddits：</el-text>
+              <el-select
+                v-model="account.draft.subreddits"
+                multiple
+                filterable
+                allow-create
+                default-first-option
+                placeholder="Enter subreddit names (e.g. videos, funny)"
+                size="small"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="sub in (account.configSubreddits || [])"
+                  :key="sub"
+                  :label="'r/' + sub"
+                  :value="sub"
+                />
+              </el-select>
+              <el-text size="small" type="info" style="margin-top:4px;display:block">
+                Type a subreddit name and press Enter to add. These override the account defaults.
+              </el-text>
+            </div>
             <!-- TikTok per-post settings (audit compliance) -->
             <TikTokPostSettings
               v-if="account.platform === 'tiktok'"
@@ -1302,6 +1326,15 @@ async function generatePreviews() {
       options: buildOptionsPayload(),
     })
     previews.value = response?.data?.profiles || []
+    // Initialize Reddit subreddits from account config defaults
+    for (const profile of previews.value) {
+      for (const account of profile.accounts) {
+        if (account.platform === 'reddit' && !account.draft?.subreddits) {
+          if (!account.draft) account.draft = {}
+          account.draft.subreddits = [...(account.configSubreddits || [])]
+        }
+      }
+    }
     expandedProfiles.value = previews.value.map((p) => p.profileId)
   } finally {
     generating.value = false
