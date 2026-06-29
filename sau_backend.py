@@ -7654,55 +7654,57 @@ def accounts_import_cookies():
     Creates the account in the database if it doesn't already exist,
     then writes the parsed cookies to the cookie store.
     """
-    b = request.get_json(force=True) or {}
-    platform = b.get("platform")
-    account = b.get("account") or "imported"
-    profile = b.get("profile") or "default"
-    fmt = b.get("format", "json")
-    payload = b.get("payload", "")
-    if not platform:
-        return jsonify({"code": 400, "msg": "platform is required", "data": None}), 400
-    if not payload:
-        return jsonify({"code": 400, "msg": "No cookie data provided", "data": None}), 400
-
-    db_path = _current_db_path()
-
-    # Find or create the account in the database
-    existing = None
     try:
-        all_accounts = profile_registry.list_accounts(db_path=db_path)
-        for a in all_accounts:
-            if a.platform == platform and a.account_name == account:
-                existing = a
-                break
-    except Exception:
-        pass
+        b = request.get_json(force=True) or {}
+        platform = b.get("platform")
+        account = b.get("account") or "imported"
+        profile = b.get("profile") or "default"
+        fmt = b.get("format", "json")
+        payload = b.get("payload", "")
+        if not platform:
+            return jsonify({"code": 400, "msg": "platform is required", "data": None}), 400
+        if not payload:
+            return jsonify({"code": 400, "msg": "No cookie data provided", "data": None}), 400
 
-    if existing is None:
-        # Get or create a default profile
-        profiles = profile_registry.list_profiles(db_path=db_path)
-        profile_id = profiles[0].id if profiles else 1
+        db_path = _current_db_path()
+
+        # Find or create the account in the database
+        existing = None
         try:
-            existing = profile_registry.add_account(
-                profile_id=profile_id,
-                platform=platform,
-                account_name=account,
-                auth_type="cookie",
-                db_path=db_path,
-            )
-        except Exception:
-            # Account may have been created by a concurrent request
             all_accounts = profile_registry.list_accounts(db_path=db_path)
             for a in all_accounts:
                 if a.platform == platform and a.account_name == account:
                     existing = a
                     break
+        except Exception:
+            pass
 
-    if existing is None:
-        return jsonify({"code": 500, "msg": "Failed to create or find account", "data": None}), 500
+        if existing is None:
+            # Get or create a default profile
+            profiles = profile_registry.list_profiles(db_path=db_path)
+            profile_id = profiles[0].id if profiles else 1
+            try:
+                existing = profile_registry.add_account(
+                    profile_id=profile_id,
+                    platform=platform,
+                    account_name=account,
+                    auth_type="cookie",
+                    db_path=db_path,
+                )
+            except Exception as create_exc:
+                logging.getLogger(__name__).warning("add_account failed (will retry lookup): %s", create_exc)
+                # Account may have been created by a concurrent request
+                all_accounts = profile_registry.list_accounts(db_path=db_path)
+                for a in all_accounts:
+                    if a.platform == platform and a.account_name == account:
+                        existing = a
+                        break
 
-    # Import cookies
-    try:
+        if existing is None:
+            logging.getLogger(__name__).error("accounts_import_cookies: could not create or find account platform=%s account=%s", platform, account)
+            return jsonify({"code": 500, "msg": "Failed to create or find account", "data": None}), 500
+
+        # Import cookies
         result = _import_cookies_for_account(platform, account, profile, fmt, payload, db_path=db_path)
         # Update account cookie_path and status
         safe_name = f"{profile}__{platform}__{account}".replace("/", "_")
@@ -7718,7 +7720,7 @@ def accounts_import_cookies():
     except Exception as exc:
         import traceback
         logging.getLogger(__name__).error("Cookie import failed: %s\n%s", exc, traceback.format_exc())
-        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
 
 
 @app.route("/api/auth/cookies/import", methods=["POST"])
