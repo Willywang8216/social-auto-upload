@@ -429,5 +429,237 @@ class RaiseForStatusTests(unittest.TestCase):
         self.assertIn("<redacted>", message)
 
 
+class RedditPublisherTests(unittest.TestCase):
+    """Comprehensive tests for Reddit publishing functions."""
+
+    # --- validate_reddit_config_live ---
+
+    def test_validate_reddit_config_live_returns_token_and_me(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "reddit-token"}),
+            _FakeResponse({"name": "brand-user"}),
+        ])
+        result = prepared_publishers.validate_reddit_config_live(
+            {"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh"},
+            session=session,
+        )
+        self.assertEqual(result["access_token"], "reddit-token")
+        self.assertEqual(result["me"]["name"], "brand-user")
+        self.assertEqual(session.calls[0][1], prepared_publishers.REDDIT_TOKEN_URL)
+        self.assertEqual(session.calls[1][1], prepared_publishers.REDDIT_ME_URL)
+
+    def test_validate_reddit_config_live_uses_custom_user_agent(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"name": "user"}),
+        ])
+        prepared_publishers.validate_reddit_config_live(
+            {"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "userAgent": "custom-agent/1.0"},
+            session=session,
+        )
+        self.assertEqual(session.calls[1][2]["headers"]["User-Agent"], "custom-agent/1.0")
+
+    # --- refresh_reddit_access_token error paths ---
+
+    def test_refresh_reddit_requires_credentials(self):
+        session = _RecordingSession()
+        with patch.dict(os.environ, {"REDDIT_CLIENT_ID": "", "REDDIT_CLIENT_SECRET": "", "REDDIT_REFRESH_TOKEN": ""}, clear=False):
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.refresh_reddit_access_token({}, session=session)
+            self.assertIn("requires clientId", str(ctx.exception))
+
+    def test_refresh_reddit_requires_client_secret(self):
+        session = _RecordingSession()
+        with patch.dict(os.environ, {"REDDIT_CLIENT_ID": "", "REDDIT_CLIENT_SECRET": "", "REDDIT_REFRESH_TOKEN": ""}, clear=False):
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.refresh_reddit_access_token(
+                    {"clientId": "cid", "refreshToken": "refresh"}, session=session
+                )
+            self.assertIn("requires clientId", str(ctx.exception))
+
+    def test_refresh_reddit_requires_refresh_token(self):
+        session = _RecordingSession()
+        with patch.dict(os.environ, {"REDDIT_CLIENT_ID": "", "REDDIT_CLIENT_SECRET": "", "REDDIT_REFRESH_TOKEN": ""}, clear=False):
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.refresh_reddit_access_token(
+                    {"clientId": "cid", "clientSecret": "secret"}, session=session
+                )
+            self.assertIn("requires clientId", str(ctx.exception))
+
+    def test_refresh_reddit_raises_when_no_access_token_in_response(self):
+        session = _RecordingSession([
+            _FakeResponse({"expires_in": 3600}),  # no access_token
+        ])
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers.refresh_reddit_access_token(
+                {"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh"},
+                session=session,
+            )
+        self.assertIn("access_token", str(ctx.exception))
+
+    # --- _reddit_access_token error paths ---
+
+    def test_reddit_access_token_requires_all_credentials(self):
+        session = _RecordingSession()
+        with self.assertRaises(prepared_publishers.PreparedPublishError):
+            prepared_publishers._reddit_access_token({}, session=session)
+
+    def test_reddit_access_token_raises_when_no_token_in_response(self):
+        session = _RecordingSession([
+            _FakeResponse({"token_type": "bearer"}),  # no access_token
+        ])
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers._reddit_access_token(
+                {"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh"},
+                session=session,
+            )
+        self.assertIn("access_token", str(ctx.exception))
+
+    def test_reddit_access_token_resolves_env_references(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "env-token"}),
+        ])
+        with patch.dict(os.environ, {"MY_CID": "cid", "MY_SECRET": "secret", "MY_REFRESH": "refresh"}, clear=False):
+            token = prepared_publishers._reddit_access_token(
+                {"clientIdEnv": "MY_CID", "clientSecretEnv": "MY_SECRET", "refreshTokenEnv": "MY_REFRESH"},
+                session=session,
+            )
+        self.assertEqual(token, "env-token")
+
+    # --- publish_reddit_sync error paths ---
+
+    def test_publish_reddit_requires_non_empty_subreddits(self):
+        session = _RecordingSession()
+        account = SimpleNamespace(account_name="test", config={"subreddits": []})
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers.publish_reddit_sync(account, {"message": "test"}, session=session)
+        self.assertIn("subreddits", str(ctx.exception))
+
+    def test_publish_reddit_splits_comma_separated_subreddits(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": "suba,subb"},
+        )
+        prepared_publishers.publish_reddit_sync(account, {"message": "test"}, session=session)
+        self.assertEqual(session.calls[1][2]["data"]["sr"], "suba")
+
+    def test_publish_reddit_raises_on_api_errors(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": [["NO_TEXT", "you need to enter text"]]}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": ["test"]},
+        )
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers.publish_reddit_sync(account, {"message": "test"}, session=session)
+        self.assertIn("r/test", str(ctx.exception))
+        self.assertIn("NO_TEXT", str(ctx.exception))
+
+    def test_publish_reddit_uses_self_post_when_no_media(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": ["test"]},
+        )
+        prepared_publishers.publish_reddit_sync(
+            account,
+            {"message": "Hello Reddit"},
+            session=session,
+        )
+        data = session.calls[1][2]["data"]
+        self.assertEqual(data["kind"], "self")
+        self.assertEqual(data["text"], "Hello Reddit")
+
+    def test_publish_reddit_uses_link_post_when_media_url_present(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": ["test"]},
+        )
+        prepared_publishers.publish_reddit_sync(
+            account,
+            {
+                "message": "Video post",
+                "artifacts": [{"public_url": "https://cdn.example/video.mp4", "artifact_kind": "remote_upload"}],
+            },
+            session=session,
+        )
+        data = session.calls[1][2]["data"]
+        self.assertEqual(data["kind"], "link")
+        self.assertEqual(data["url"], "https://cdn.example/video.mp4")
+
+    def test_publish_reddit_truncates_title_to_300_chars(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": ["test"]},
+        )
+        long_title = "A" * 500
+        prepared_publishers.publish_reddit_sync(
+            account,
+            {"message": long_title},
+            session=session,
+        )
+        data = session.calls[1][2]["data"]
+        # _message_title truncates to 100 chars first, then publish_reddit_sync truncates to 300
+        self.assertLessEqual(len(data["title"]), 300)
+
+    def test_publish_reddit_uses_draft_subreddits_over_config(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": ["config_sub"]},
+        )
+        prepared_publishers.publish_reddit_sync(
+            account,
+            {"message": "test", "draft": {"subreddits": ["draft_sub"]}},
+            session=session,
+        )
+        data = session.calls[1][2]["data"]
+        self.assertEqual(data["sr"], "draft_sub")
+
+    def test_publish_reddit_extracts_video_over_image(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": ["test"]},
+        )
+        prepared_publishers.publish_reddit_sync(
+            account,
+            {
+                "message": "Post with media",
+                "artifacts": [
+                    {"public_url": "https://cdn.example/image.jpg", "artifact_kind": "watermarked_image"},
+                    {"public_url": "https://cdn.example/video.mp4", "artifact_kind": "remote_upload"},
+                ],
+            },
+            session=session,
+        )
+        data = session.calls[1][2]["data"]
+        self.assertEqual(data["kind"], "link")
+        self.assertEqual(data["url"], "https://cdn.example/video.mp4")
+
+
 if __name__ == "__main__":
     unittest.main()

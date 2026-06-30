@@ -122,6 +122,111 @@ class PreparedWorkerDispatchTests(unittest.TestCase):
             )
         self.assertIn("Unsupported prepared publish platform", str(ctx.exception))
 
+    def test_reddit_api_dispatch_calls_publish_reddit_sync(self) -> None:
+        target = jobs.Target(
+            id=1,
+            job_id=1,
+            account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1",
+            schedule_at=None,
+            status=jobs.TARGET_RUNNING,
+            attempts=1,
+        )
+        payload = {
+            "campaignId": 10,
+            "campaignPostId": 22,
+            "message": "Reddit post",
+            "draft": {"subreddits": ["python"]},
+        }
+        captured = {}
+
+        def fake_publish_reddit(account, payload):
+            captured["account"] = account
+            captured["payload"] = payload
+
+        mock_account = type("Account", (), {"config": {"redditAuthType": "api"}, "account_name": "test"})()
+        with patch.object(worker.prepared_publishers, "publish_reddit_sync", fake_publish_reddit):
+            asyncio.run(
+                worker._publish_prepared_reddit(
+                    "reddit",
+                    payload,
+                    target,
+                    account=mock_account,
+                    account_file=Path("/tmp/reddit-cookie.json"),
+                )
+            )
+
+        self.assertEqual(captured["account"], mock_account)
+        self.assertEqual(captured["payload"]["message"], "Reddit post")
+
+    def test_reddit_cookie_dispatch_raises_without_account_file(self) -> None:
+        target = jobs.Target(
+            id=1,
+            job_id=1,
+            account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1",
+            schedule_at=None,
+            status=jobs.TARGET_RUNNING,
+            attempts=1,
+        )
+        mock_account = type("Account", (), {"config": {"redditAuthType": "cookie"}, "account_name": "test"})()
+        with self.assertRaises(ValueError) as ctx:
+            asyncio.run(
+                worker._publish_prepared_reddit(
+                    "reddit",
+                    {"message": "test", "draft": {"subreddits": ["python"]}},
+                    target,
+                    account=mock_account,
+                    account_file=None,
+                )
+            )
+        self.assertIn("account_file", str(ctx.exception))
+
+    def test_reddit_cookie_dispatch_raises_without_subreddits(self) -> None:
+        target = jobs.Target(
+            id=1,
+            job_id=1,
+            account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1",
+            schedule_at=None,
+            status=jobs.TARGET_RUNNING,
+            attempts=1,
+        )
+        mock_account = type("Account", (), {"config": {"redditAuthType": "cookie"}, "account_name": "test"})()
+        with self.assertRaises(ValueError) as ctx:
+            asyncio.run(
+                worker._publish_prepared_reddit(
+                    "reddit",
+                    {"message": "test"},
+                    target,
+                    account=mock_account,
+                    account_file=Path("/tmp/cookie.json"),
+                )
+            )
+        self.assertIn("subreddit", str(ctx.exception))
+
+    def test_reddit_dispatch_raises_without_account(self) -> None:
+        target = jobs.Target(
+            id=1,
+            job_id=1,
+            account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1",
+            schedule_at=None,
+            status=jobs.TARGET_RUNNING,
+            attempts=1,
+        )
+        with self.assertRaises(ValueError) as ctx:
+            asyncio.run(
+                worker._publish_prepared_reddit(
+                    "reddit",
+                    {"message": "test"},
+                    target,
+                    account=None,
+                    account_file=None,
+                )
+            )
+        self.assertIn("structured account", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
