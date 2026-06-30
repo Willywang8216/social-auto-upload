@@ -66,6 +66,50 @@ class RedditAuthTests(unittest.TestCase):
         self.assertEqual(session.calls[0][1], reddit_auth.REDDIT_ME_URL)
         self.assertEqual(session.calls[0][2]['headers']['Authorization'], 'Bearer token')
 
+    def test_build_authorize_url_with_default_scopes(self):
+        url = reddit_auth.build_authorize_url(
+            client_id='cid',
+            redirect_uri='https://example.com/cb',
+            state='st',
+        )
+        self.assertIn('scope=identity+submit+read', url)
+
+    def test_build_state_token_is_url_safe(self):
+        token = reddit_auth.build_state_token()
+        self.assertIsInstance(token, str)
+        self.assertGreater(len(token), 10)
+
+    def test_exchange_code_raises_on_oauth_error(self):
+        session = _FakeSession([_FakeResponse({'error': 'invalid_grant', 'error_description': 'Code expired'})])
+        with patch.dict(os.environ, {'REDDIT_CLIENT_ID': 'cid', 'REDDIT_CLIENT_SECRET': 'secret'}, clear=False):
+            with self.assertRaises(reddit_auth.RedditOAuthError) as ctx:
+                reddit_auth.exchange_code_for_token(
+                    code='bad-code',
+                    redirect_uri='https://example.com/cb',
+                    session=session,
+                )
+        self.assertIn('Code expired', str(ctx.exception))
+
+    def test_fetch_user_info_raises_on_error(self):
+        session = _FakeSession([_FakeResponse({'error': 401, 'message': 'Unauthorized'})])
+        with self.assertRaises(reddit_auth.RedditOAuthError) as ctx:
+            reddit_auth.fetch_user_info(access_token='bad-token', session=session)
+        self.assertIn('Unauthorized', str(ctx.exception))
+
+    def test_required_env_raises_when_missing(self):
+        with patch.dict(os.environ, {'REDDIT_CLIENT_ID': ''}, clear=False):
+            with self.assertRaises(reddit_auth.RedditOAuthError) as ctx:
+                reddit_auth._required_env('REDDIT_CLIENT_ID')
+        self.assertIn('REDDIT_CLIENT_ID', str(ctx.exception))
+
+    def test_user_agent_defaults_when_none(self):
+        agent = reddit_auth._user_agent(None)
+        self.assertIn('social-auto-upload', agent)
+
+    def test_user_agent_uses_provided_value(self):
+        agent = reddit_auth._user_agent('custom-agent/1.0')
+        self.assertEqual(agent, 'custom-agent/1.0')
+
 
 if __name__ == '__main__':
     unittest.main()
