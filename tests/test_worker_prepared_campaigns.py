@@ -227,6 +227,235 @@ class PreparedWorkerDispatchTests(unittest.TestCase):
             )
         self.assertIn("structured account", str(ctx.exception))
 
+    def test_reddit_cookie_mode_single_subreddit(self) -> None:
+        """Cookie mode publishes to a single subreddit from the draft."""
+        target = jobs.Target(
+            id=1, job_id=1, account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1", schedule_at=None,
+            status=jobs.TARGET_RUNNING, attempts=1,
+        )
+        payload = {
+            "message": "My Post Title",
+            "draft": {"subreddits": ["python"]},
+        }
+        captured = {}
+
+        mock_account = type("Account", (), {
+            "config": {"redditAuthType": "cookie"},
+            "account_name": "test",
+        })()
+
+        async def fake_main(self_uploader):
+            captured["title"] = self_uploader.title
+            captured["subreddit"] = self_uploader.subreddit
+            captured["account_file"] = self_uploader.account_file
+            return "https://reddit.com/r/python/comments/abc/post"
+
+        with patch("uploader.reddit_uploader.main.RedditCookieVideo.main", fake_main):
+            asyncio.run(
+                worker._publish_prepared_reddit(
+                    "reddit", payload, target,
+                    account=mock_account,
+                    account_file=Path("/tmp/cookie.json"),
+                )
+            )
+
+        self.assertEqual(captured["title"], "My Post Title")
+        self.assertEqual(captured["subreddit"], "python")
+        self.assertEqual(captured["account_file"], "/tmp/cookie.json")
+
+    def test_reddit_cookie_mode_multiple_subreddits(self) -> None:
+        """Cookie mode iterates over all subreddits in the draft."""
+        target = jobs.Target(
+            id=1, job_id=1, account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1", schedule_at=None,
+            status=jobs.TARGET_RUNNING, attempts=1,
+        )
+        payload = {
+            "message": "Multi Post",
+            "draft": {"subreddits": ["python", "learnpython", "coding"]},
+        }
+        posted_to = []
+
+        mock_account = type("Account", (), {
+            "config": {"redditAuthType": "cookie"},
+            "account_name": "test",
+        })()
+
+        async def fake_main(self_uploader):
+            posted_to.append(self_uploader.subreddit)
+            return "https://reddit.com/r/test/comments/abc/post"
+
+        with patch("uploader.reddit_uploader.main.RedditCookieVideo.main", fake_main):
+            asyncio.run(
+                worker._publish_prepared_reddit(
+                    "reddit", payload, target,
+                    account=mock_account,
+                    account_file=Path("/tmp/cookie.json"),
+                )
+            )
+
+        self.assertEqual(posted_to, ["python", "learnpython", "coding"])
+
+    def test_reddit_cookie_mode_falls_back_to_account_config_subreddits(self) -> None:
+        """When draft has no subreddits, uses account config subreddits."""
+        target = jobs.Target(
+            id=1, job_id=1, account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1", schedule_at=None,
+            status=jobs.TARGET_RUNNING, attempts=1,
+        )
+        payload = {"message": "Config Post"}
+        posted_to = []
+
+        mock_account = type("Account", (), {
+            "config": {"redditAuthType": "cookie", "subreddits": ["askreddit", "todayilearned"]},
+            "account_name": "test",
+        })()
+
+        async def fake_main(self_uploader):
+            posted_to.append(self_uploader.subreddit)
+            return "https://reddit.com/r/test/comments/abc/post"
+
+        with patch("uploader.reddit_uploader.main.RedditCookieVideo.main", fake_main):
+            asyncio.run(
+                worker._publish_prepared_reddit(
+                    "reddit", payload, target,
+                    account=mock_account,
+                    account_file=Path("/tmp/cookie.json"),
+                )
+            )
+
+        self.assertEqual(posted_to, ["askreddit", "todayilearned"])
+
+    def test_reddit_cookie_mode_with_media_from_artifacts(self) -> None:
+        """Cookie mode passes first artifact local_path as media_path."""
+        target = jobs.Target(
+            id=1, job_id=1, account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1", schedule_at=None,
+            status=jobs.TARGET_RUNNING, attempts=1,
+        )
+        payload = {
+            "message": "Media Post",
+            "draft": {"subreddits": ["videos"]},
+            "artifacts": [
+                {"local_path": "/tmp/video1.mp4"},
+                {"local_path": "/tmp/video2.mp4"},
+            ],
+        }
+        captured = {}
+
+        mock_account = type("Account", (), {
+            "config": {"redditAuthType": "cookie"},
+            "account_name": "test",
+        })()
+
+        async def fake_main(self_uploader):
+            captured["file_path"] = self_uploader.file_path
+            return "https://reddit.com/r/videos/comments/abc/post"
+
+        with patch("uploader.reddit_uploader.main.RedditCookieVideo.main", fake_main):
+            asyncio.run(
+                worker._publish_prepared_reddit(
+                    "reddit", payload, target,
+                    account=mock_account,
+                    account_file=Path("/tmp/cookie.json"),
+                )
+            )
+
+        self.assertEqual(captured["file_path"], "/tmp/video1.mp4")
+
+    def test_reddit_cookie_mode_with_body_text(self) -> None:
+        """Cookie mode passes draft body as body_text."""
+        target = jobs.Target(
+            id=1, job_id=1, account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1", schedule_at=None,
+            status=jobs.TARGET_RUNNING, attempts=1,
+        )
+        payload = {
+            "message": "Body Post",
+            "draft": {"subreddits": ["python"], "body": "Extra details here"},
+        }
+        captured = {}
+
+        mock_account = type("Account", (), {
+            "config": {"redditAuthType": "cookie"},
+            "account_name": "test",
+        })()
+
+        async def fake_main(self_uploader):
+            captured["body_text"] = self_uploader.body_text
+            return "https://reddit.com/r/python/comments/abc/post"
+
+        with patch("uploader.reddit_uploader.main.RedditCookieVideo.main", fake_main):
+            asyncio.run(
+                worker._publish_prepared_reddit(
+                    "reddit", payload, target,
+                    account=mock_account,
+                    account_file=Path("/tmp/cookie.json"),
+                )
+            )
+
+        self.assertEqual(captured["body_text"], "Extra details here")
+
+    def test_reddit_cookie_mode_comma_separated_subreddits(self) -> None:
+        """Cookie mode handles comma-separated subreddit string."""
+        target = jobs.Target(
+            id=1, job_id=1, account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1", schedule_at=None,
+            status=jobs.TARGET_RUNNING, attempts=1,
+        )
+        payload = {
+            "message": "CSV Post",
+            "draft": {"subreddits": "python, learnpython"},
+        }
+        posted_to = []
+
+        mock_account = type("Account", (), {
+            "config": {"redditAuthType": "cookie"},
+            "account_name": "test",
+        })()
+
+        async def fake_main(self_uploader):
+            posted_to.append(self_uploader.subreddit)
+            return "https://reddit.com/r/test/comments/abc/post"
+
+        with patch("uploader.reddit_uploader.main.RedditCookieVideo.main", fake_main):
+            asyncio.run(
+                worker._publish_prepared_reddit(
+                    "reddit", payload, target,
+                    account=mock_account,
+                    account_file=Path("/tmp/cookie.json"),
+                )
+            )
+
+        self.assertEqual(posted_to, ["python", "learnpython"])
+
+    def test_reddit_auth_type_defaults_to_api(self) -> None:
+        """When redditAuthType is not set, defaults to API mode."""
+        target = jobs.Target(
+            id=1, job_id=1, account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1", schedule_at=None,
+            status=jobs.TARGET_RUNNING, attempts=1,
+        )
+        payload = {"message": "test", "draft": {"subreddits": ["python"]}}
+        captured = {}
+
+        mock_account = type("Account", (), {"config": {}, "account_name": "test"})()
+
+        def fake_publish_reddit(account, payload):
+            captured["called"] = True
+
+        with patch.object(worker.prepared_publishers, "publish_reddit_sync", fake_publish_reddit):
+            asyncio.run(
+                worker._publish_prepared_reddit(
+                    "reddit", payload, target,
+                    account=mock_account,
+                    account_file=Path("/tmp/cookie.json"),
+                )
+            )
+
+        self.assertTrue(captured.get("called"))
+
 
 if __name__ == "__main__":
     unittest.main()

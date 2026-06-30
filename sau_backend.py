@@ -7507,16 +7507,18 @@ def _import_cookies_for_account(platform, account, profile, fmt, payload, *, db_
                 })
     if not cookies:
         raise ValueError("No cookies parsed from payload")
-    # Write cookies to the cookie store
+    # Write cookies to the cookie store in Playwright storage_state format
     safe_name = f"{profile}__{platform}__{account}".replace("/", "_")
     cookie_dir = Path(BASE_DIR / "cookiesFile")
     cookie_dir.mkdir(parents=True, exist_ok=True)
     cookie_path = cookie_dir / f"{safe_name}.cookie"
+    storage_state = {"cookies": cookies, "origins": []}
+    payload_bytes = _json.dumps(storage_state, ensure_ascii=False).encode("utf-8")
     from myUtils import cookie_storage
     try:
-        cookie_storage.write_cookie_file(cookie_path, cookies)
+        cookie_storage.write_cookie(cookie_path, payload_bytes)
     except Exception:
-        cookie_path.write_text(_json.dumps(cookies), encoding="utf-8")
+        cookie_path.write_bytes(payload_bytes)
     os.chmod(cookie_path, 0o600)
     return {"ok": True, "account": account, "cookieStatus": "valid", "count": len(cookies)}
 

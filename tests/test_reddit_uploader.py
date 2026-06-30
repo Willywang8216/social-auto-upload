@@ -478,6 +478,668 @@ class RedditCookieVideoTests(unittest.TestCase):
         )
 
 
+class WaitAndClickErrorTests(unittest.TestCase):
+    """Error-path tests for _wait_and_click helper."""
+
+    @patch("uploader.reddit_uploader.main.asyncio.sleep", new_callable=AsyncMock)
+    def test_timeout_from_wait_for_selector_propagates(self, mock_sleep):
+        page = FakePage()
+        page.wait_for_selector = AsyncMock(side_effect=Exception("Timeout 5000ms exceeded"))
+        with self.assertRaises(Exception) as ctx:
+            _run_async(_wait_and_click(page, "#gone", timeout_ms=5000))
+        self.assertIn("Timeout", str(ctx.exception))
+        page.click.assert_not_called()
+
+    @patch("uploader.reddit_uploader.main.asyncio.sleep", new_callable=AsyncMock)
+    def test_click_failure_propagates(self, mock_sleep):
+        page = FakePage()
+        page.click = AsyncMock(side_effect=Exception("element detached"))
+        with self.assertRaises(Exception) as ctx:
+            _run_async(_wait_and_click(page, "#sel", timeout_ms=5000))
+        self.assertIn("detached", str(ctx.exception))
+        page.wait_for_selector.assert_called_once()
+
+
+class WaitAndFillErrorTests(unittest.TestCase):
+    """Error-path tests for _wait_and_fill helper."""
+
+    @patch("uploader.reddit_uploader.main.asyncio.sleep", new_callable=AsyncMock)
+    def test_timeout_from_wait_for_selector_propagates(self, mock_sleep):
+        page = FakePage()
+        page.wait_for_selector = AsyncMock(side_effect=Exception("Timeout 8000ms exceeded"))
+        with self.assertRaises(Exception) as ctx:
+            _run_async(_wait_and_fill(page, "#input", "text", timeout_ms=8000))
+        self.assertIn("Timeout", str(ctx.exception))
+        page.fill.assert_not_called()
+
+    @patch("uploader.reddit_uploader.main.asyncio.sleep", new_callable=AsyncMock)
+    def test_fill_failure_propagates(self, mock_sleep):
+        page = FakePage()
+        page.fill = AsyncMock(side_effect=Exception("not editable"))
+        with self.assertRaises(Exception) as ctx:
+            _run_async(_wait_and_fill(page, "#input", "text", timeout_ms=5000))
+        self.assertIn("not editable", str(ctx.exception))
+
+
+class SelectCommunityEdgeCaseTests(unittest.TestCase):
+    """Edge-case tests for _select_community helper."""
+
+    @patch("uploader.reddit_uploader.main.asyncio.sleep", new_callable=AsyncMock)
+    def test_timeout_on_input_wait_propagates(self, mock_sleep):
+        page = FakePage()
+        locator = FakeLocator()
+        locator.wait_for = AsyncMock(side_effect=Exception("element not found"))
+        page.locator = MagicMock(return_value=locator)
+        with self.assertRaises(Exception) as ctx:
+            _run_async(_select_community(page, "python", timeout_ms=5000))
+        self.assertIn("not found", str(ctx.exception))
+
+    @patch("uploader.reddit_uploader.main.asyncio.sleep", new_callable=AsyncMock)
+    def test_fill_failure_on_community_input_propagates(self, mock_sleep):
+        page = FakePage()
+        locator = FakeLocator()
+        locator.fill = AsyncMock(side_effect=Exception("fill failed"))
+        page.locator = MagicMock(return_value=locator)
+        with self.assertRaises(Exception):
+            _run_async(_select_community(page, "python", timeout_ms=5000))
+
+    @patch("uploader.reddit_uploader.main.asyncio.sleep", new_callable=AsyncMock)
+    def test_both_autocomplete_and_enter_fail_raises(self, mock_sleep):
+        """If autocomplete times out AND Enter press fails, the error propagates."""
+        page = FakePage()
+        locator = FakeLocator()
+        locator.press = AsyncMock(side_effect=Exception("press failed"))
+        page.locator = MagicMock(return_value=locator)
+        page.wait_for_selector = AsyncMock(side_effect=Exception("timeout"))
+        with self.assertRaises(Exception):
+            _run_async(_select_community(page, "obscure", timeout_ms=5000))
+
+
+class UploadMediaEdgeCaseTests(unittest.TestCase):
+    """Edge-case tests for _upload_media helper."""
+
+    @patch("uploader.reddit_uploader.main.asyncio.sleep", new_callable=AsyncMock)
+    def test_media_path_as_path_object_resolves(self, mock_sleep):
+        page = FakePage()
+        tab_locator = FakeLocator()
+        file_locator = FakeLocator()
+        page.locator = MagicMock(side_effect=[tab_locator, file_locator])
+
+        _run_async(_upload_media(page, Path("/tmp/video.mp4"), timeout_ms=30000))
+
+        file_locator.set_input_files.assert_called_once()
+        called_path = file_locator.set_input_files.call_args[0][0]
+        self.assertTrue(Path(called_path).is_absolute())
+
+    @patch("uploader.reddit_uploader.main.asyncio.sleep", new_callable=AsyncMock)
+    def test_set_input_files_failure_propagates(self, mock_sleep):
+        page = FakePage()
+        tab_locator = FakeLocator()
+        file_locator = FakeLocator()
+        file_locator.set_input_files = AsyncMock(side_effect=Exception("file not found"))
+        page.locator = MagicMock(side_effect=[tab_locator, file_locator])
+
+        with self.assertRaises(Exception) as ctx:
+            _run_async(_upload_media(page, "/tmp/missing.mp4", timeout_ms=30000))
+        self.assertIn("file not found", str(ctx.exception))
+
+    @patch("uploader.reddit_uploader.main.asyncio.sleep", new_callable=AsyncMock)
+    def test_tab_click_failure_is_swallowed_and_file_still_set(self, mock_sleep):
+        """If clicking the Images tab fails, file upload should still proceed."""
+        page = FakePage()
+        tab_locator = FakeLocator()
+        tab_locator.click = AsyncMock(side_effect=Exception("click intercepted"))
+        file_locator = FakeLocator()
+        page.locator = MagicMock(side_effect=[tab_locator, file_locator])
+
+        _run_async(_upload_media(page, "/tmp/video.mp4", timeout_ms=30000))
+
+        file_locator.set_input_files.assert_called_once()
+
+    @patch("uploader.reddit_uploader.main.asyncio.sleep", new_callable=AsyncMock)
+    def test_wait_for_timeout_called_after_file_upload(self, mock_sleep):
+        page = FakePage()
+        tab_locator = FakeLocator()
+        file_locator = FakeLocator()
+        page.locator = MagicMock(side_effect=[tab_locator, file_locator])
+
+        _run_async(_upload_media(page, "/tmp/video.mp4", timeout_ms=30000))
+
+        page.wait_for_timeout.assert_called_once_with(3000)
+
+
+class PostRedditCookieErrorTests(unittest.TestCase):
+    """Error-path and edge-case tests for _post_reddit_cookie function."""
+
+    @patch("uploader.reddit_uploader.main.set_init_script", new_callable=AsyncMock)
+    @patch("uploader.reddit_uploader.main.get_browser_options", return_value={})
+    @patch("uploader.reddit_uploader.main.async_playwright")
+    @patch("uploader.reddit_uploader.main.LOCAL_CHROME_HEADLESS", True)
+    def test_first_login_redirect_then_recovery_succeeds(self, mock_pw, mock_opts, mock_init):
+        """If first goto lands on /login but second goto resolves, the post continues."""
+        page = FakePage()
+        # First call: url is /login (triggers the redirect check)
+        # After goto REDDIT_LOGIN_URL, url becomes /submit (recovered)
+        page.url = "https://www.reddit.com/login"
+
+        goto_calls = 0
+        async def fake_goto(url, **kwargs):
+            nonlocal goto_calls
+            goto_calls += 1
+            if goto_calls >= 2:
+                page.url = "https://www.reddit.com/submit"
+
+        page.goto = AsyncMock(side_effect=fake_goto)
+
+        community_locator = FakeLocator()
+        title_locator = FakeLocator()
+        submit_locator = FakeLocator()
+
+        def locator_factory(selector):
+            if selector == COMMUNITY_SELECTOR:
+                return community_locator
+            elif selector == TITLE_SELECTOR:
+                return title_locator
+            elif selector == SUBMIT_BUTTON_SELECTOR:
+                return submit_locator
+            return FakeLocator()
+
+        page.locator = MagicMock(side_effect=locator_factory)
+        page.wait_for_url = AsyncMock()
+        # After recovery, set url to final post URL
+        async def fake_wait_url(pattern, **kwargs):
+            page.url = "https://www.reddit.com/r/python/comments/xyz/recovered/"
+        page.wait_for_url = AsyncMock(side_effect=fake_wait_url)
+
+        context = FakeContext(page)
+        browser = FakeBrowser(context)
+        pw = FakePlaywright(browser)
+        mock_pw.return_value = pw
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            f.write(b'{"cookies": []}')
+            account_file = f.name
+
+        result = _run_async(
+            _post_reddit_cookie(
+                account_file=account_file,
+                subreddit="python",
+                title="Recovery Post",
+                headless=True,
+            )
+        )
+        self.assertIn("recovered", result)
+        self.assertEqual(goto_calls, 2)
+
+    @patch("uploader.reddit_uploader.main.set_init_script", new_callable=AsyncMock)
+    @patch("uploader.reddit_uploader.main.get_browser_options", return_value={})
+    @patch("uploader.reddit_uploader.main.async_playwright")
+    @patch("uploader.reddit_uploader.main.LOCAL_CHROME_HEADLESS", True)
+    def test_double_login_check_raises_runtime_error(self, mock_pw, mock_opts, mock_init):
+        """Both initial goto and retry land on /login → RuntimeError."""
+        page = FakePage()
+        page.url = "https://www.reddit.com/login"
+
+        context = FakeContext(page)
+        browser = FakeBrowser(context)
+        pw = FakePlaywright(browser)
+        mock_pw.return_value = pw
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            f.write(b'{"cookies": []}')
+            account_file = f.name
+
+        with self.assertRaises(RuntimeError) as ctx:
+            _run_async(
+                _post_reddit_cookie(
+                    account_file=account_file,
+                    subreddit="python",
+                    title="Fail",
+                    headless=True,
+                )
+            )
+        self.assertIn("cookie may be expired", str(ctx.exception))
+
+    @patch("uploader.reddit_uploader.main.set_init_script", new_callable=AsyncMock)
+    @patch("uploader.reddit_uploader.main.get_browser_options", return_value={})
+    @patch("uploader.reddit_uploader.main.async_playwright")
+    @patch("uploader.reddit_uploader.main.LOCAL_CHROME_HEADLESS", True)
+    def test_body_text_with_zero_count_skips_fill(self, mock_pw, mock_opts, mock_init):
+        """When body element count is 0, body fill is skipped."""
+        page = FakePage()
+        page.url = "https://www.reddit.com/r/python/comments/abc123/test/"
+
+        community_locator = FakeLocator()
+        title_locator = FakeLocator()
+        body_locator = FakeLocator(count=0)
+        submit_locator = FakeLocator()
+
+        def locator_factory(selector):
+            if selector == COMMUNITY_SELECTOR:
+                return community_locator
+            elif selector == TITLE_SELECTOR:
+                return title_locator
+            elif selector == BODY_SELECTOR:
+                return body_locator
+            elif selector == SUBMIT_BUTTON_SELECTOR:
+                return submit_locator
+            return FakeLocator()
+
+        page.locator = MagicMock(side_effect=locator_factory)
+        page.wait_for_url = AsyncMock()
+
+        context = FakeContext(page)
+        browser = FakeBrowser(context)
+        pw = FakePlaywright(browser)
+        mock_pw.return_value = pw
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            f.write(b'{"cookies": []}')
+            account_file = f.name
+
+        result = _run_async(
+            _post_reddit_cookie(
+                account_file=account_file,
+                subreddit="python",
+                title="Test",
+                body_text="Should not be filled",
+                headless=True,
+            )
+        )
+        body_locator.fill.assert_not_called()
+
+    @patch("uploader.reddit_uploader.main.set_init_script", new_callable=AsyncMock)
+    @patch("uploader.reddit_uploader.main.get_browser_options", return_value={})
+    @patch("uploader.reddit_uploader.main.async_playwright")
+    @patch("uploader.reddit_uploader.main.LOCAL_CHROME_HEADLESS", True)
+    def test_context_and_browser_closed_on_exception(self, mock_pw, mock_opts, mock_init):
+        """context.close() and browser.close() are called even when an exception occurs."""
+        page = FakePage()
+        page.url = "https://www.reddit.com/submit"
+        page.goto = AsyncMock(side_effect=Exception("navigation failed"))
+
+        context = FakeContext(page)
+        browser = FakeBrowser(context)
+        pw = FakePlaywright(browser)
+        mock_pw.return_value = pw
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            f.write(b'{"cookies": []}')
+            account_file = f.name
+
+        with self.assertRaises(Exception):
+            _run_async(
+                _post_reddit_cookie(
+                    account_file=account_file,
+                    subreddit="python",
+                    title="Test",
+                    headless=True,
+                )
+            )
+
+        context.close.assert_called_once()
+        browser.close.assert_called_once()
+
+    @patch("uploader.reddit_uploader.main.set_init_script", new_callable=AsyncMock)
+    @patch("uploader.reddit_uploader.main.get_browser_options", return_value={})
+    @patch("uploader.reddit_uploader.main.async_playwright")
+    @patch("uploader.reddit_uploader.main.LOCAL_CHROME_HEADLESS", True)
+    def test_submit_button_timeout_raises(self, mock_pw, mock_opts, mock_init):
+        """If submit button never becomes visible, the error propagates."""
+        page = FakePage()
+        page.url = "https://www.reddit.com/submit"
+
+        community_locator = FakeLocator()
+        title_locator = FakeLocator()
+        submit_locator = FakeLocator()
+        submit_locator.wait_for = AsyncMock(side_effect=Exception("Timeout waiting for submit"))
+
+        def locator_factory(selector):
+            if selector == COMMUNITY_SELECTOR:
+                return community_locator
+            elif selector == TITLE_SELECTOR:
+                return title_locator
+            elif selector == SUBMIT_BUTTON_SELECTOR:
+                return submit_locator
+            return FakeLocator()
+
+        page.locator = MagicMock(side_effect=locator_factory)
+
+        context = FakeContext(page)
+        browser = FakeBrowser(context)
+        pw = FakePlaywright(browser)
+        mock_pw.return_value = pw
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            f.write(b'{"cookies": []}')
+            account_file = f.name
+
+        with self.assertRaises(Exception) as ctx:
+            _run_async(
+                _post_reddit_cookie(
+                    account_file=account_file,
+                    subreddit="python",
+                    title="Test",
+                    headless=True,
+                )
+            )
+        self.assertIn("submit", str(ctx.exception))
+
+    @patch("uploader.reddit_uploader.main.set_init_script", new_callable=AsyncMock)
+    @patch("uploader.reddit_uploader.main.get_browser_options", return_value={})
+    @patch("uploader.reddit_uploader.main.async_playwright")
+    @patch("uploader.reddit_uploader.main.LOCAL_CHROME_HEADLESS", True)
+    def test_wait_for_url_timeout_raises(self, mock_pw, mock_opts, mock_init):
+        """If wait_for_url times out after submit, the error propagates."""
+        page = FakePage()
+        page.url = "https://www.reddit.com/submit"
+
+        community_locator = FakeLocator()
+        title_locator = FakeLocator()
+        submit_locator = FakeLocator()
+
+        def locator_factory(selector):
+            if selector == COMMUNITY_SELECTOR:
+                return community_locator
+            elif selector == TITLE_SELECTOR:
+                return title_locator
+            elif selector == SUBMIT_BUTTON_SELECTOR:
+                return submit_locator
+            return FakeLocator()
+
+        page.locator = MagicMock(side_effect=locator_factory)
+        page.wait_for_url = AsyncMock(side_effect=Exception("Timeout waiting for URL"))
+
+        context = FakeContext(page)
+        browser = FakeBrowser(context)
+        pw = FakePlaywright(browser)
+        mock_pw.return_value = pw
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            f.write(b'{"cookies": []}')
+            account_file = f.name
+
+        with self.assertRaises(Exception) as ctx:
+            _run_async(
+                _post_reddit_cookie(
+                    account_file=account_file,
+                    subreddit="python",
+                    title="Test",
+                    headless=True,
+                )
+            )
+        self.assertIn("URL", str(ctx.exception))
+
+    @patch("uploader.reddit_uploader.main.set_init_script", new_callable=AsyncMock)
+    @patch("uploader.reddit_uploader.main.get_browser_options", return_value={})
+    @patch("uploader.reddit_uploader.main.async_playwright")
+    @patch("uploader.reddit_uploader.main.LOCAL_CHROME_HEADLESS", True)
+    def test_post_with_both_body_and_media(self, mock_pw, mock_opts, mock_init):
+        """Post with both body_text and media_path fills body AND uploads media."""
+        page = FakePage()
+        page.url = "https://www.reddit.com/r/python/comments/abc123/test/"
+
+        community_locator = FakeLocator()
+        title_locator = FakeLocator()
+        body_locator = FakeLocator(count=1)
+        tab_locator = FakeLocator()
+        file_locator = FakeLocator()
+        submit_locator = FakeLocator()
+
+        call_order = []
+        def locator_factory(selector):
+            if selector == COMMUNITY_SELECTOR:
+                return community_locator
+            elif selector == TITLE_SELECTOR:
+                call_order.append("title")
+                return title_locator
+            elif selector == BODY_SELECTOR:
+                call_order.append("body")
+                return body_locator
+            elif selector == "button[role='tab']:has-text('Images')":
+                call_order.append("tab")
+                return tab_locator
+            elif selector == FILE_INPUT_SELECTOR:
+                call_order.append("file")
+                return file_locator
+            elif selector == SUBMIT_BUTTON_SELECTOR:
+                call_order.append("submit")
+                return submit_locator
+            return FakeLocator()
+
+        page.locator = MagicMock(side_effect=locator_factory)
+        page.wait_for_url = AsyncMock()
+
+        context = FakeContext(page)
+        browser = FakeBrowser(context)
+        pw = FakePlaywright(browser)
+        mock_pw.return_value = pw
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            f.write(b'{"cookies": []}')
+            account_file = f.name
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(b'video content')
+            media_file = f.name
+
+        result = _run_async(
+            _post_reddit_cookie(
+                account_file=account_file,
+                subreddit="python",
+                title="Full Post",
+                body_text="Body content here",
+                media_path=media_file,
+                headless=True,
+            )
+        )
+
+        body_locator.fill.assert_called_once_with("Body content here")
+        file_locator.set_input_files.assert_called_once()
+
+    @patch("uploader.reddit_uploader.main.set_init_script", new_callable=AsyncMock)
+    @patch("uploader.reddit_uploader.main.get_browser_options", return_value={})
+    @patch("uploader.reddit_uploader.main.async_playwright")
+    @patch("uploader.reddit_uploader.main.LOCAL_CHROME_HEADLESS", True)
+    def test_media_path_as_path_object(self, mock_pw, mock_opts, mock_init):
+        """media_path as a Path object is resolved correctly."""
+        page = FakePage()
+        page.url = "https://www.reddit.com/r/python/comments/abc123/test/"
+
+        community_locator = FakeLocator()
+        title_locator = FakeLocator()
+        tab_locator = FakeLocator()
+        file_locator = FakeLocator()
+        submit_locator = FakeLocator()
+
+        def locator_factory(selector):
+            if selector == COMMUNITY_SELECTOR:
+                return community_locator
+            elif selector == TITLE_SELECTOR:
+                return title_locator
+            elif selector == "button[role='tab']:has-text('Images')":
+                return tab_locator
+            elif selector == FILE_INPUT_SELECTOR:
+                return file_locator
+            elif selector == SUBMIT_BUTTON_SELECTOR:
+                return submit_locator
+            return FakeLocator()
+
+        page.locator = MagicMock(side_effect=locator_factory)
+        page.wait_for_url = AsyncMock()
+
+        context = FakeContext(page)
+        browser = FakeBrowser(context)
+        pw = FakePlaywright(browser)
+        mock_pw.return_value = pw
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            f.write(b'{"cookies": []}')
+            account_file = f.name
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(b'video content')
+            media_file = Path(f.name)
+
+        result = _run_async(
+            _post_reddit_cookie(
+                account_file=account_file,
+                subreddit="python",
+                title="Path Test",
+                media_path=media_file,
+                headless=True,
+            )
+        )
+
+        file_locator.set_input_files.assert_called_once()
+
+    @patch("uploader.reddit_uploader.main.set_init_script", new_callable=AsyncMock)
+    @patch("uploader.reddit_uploader.main.get_browser_options", return_value={})
+    @patch("uploader.reddit_uploader.main.async_playwright")
+    @patch("uploader.reddit_uploader.main.LOCAL_CHROME_HEADLESS", True)
+    def test_account_file_path_resolved_to_absolute(self, mock_pw, mock_opts, mock_init):
+        """Account file path is resolved to absolute before passing to new_context."""
+        page = FakePage()
+        page.url = "https://www.reddit.com/r/test/comments/abc/post/"
+
+        community_locator = FakeLocator()
+        title_locator = FakeLocator()
+        submit_locator = FakeLocator()
+
+        def locator_factory(selector):
+            if selector == COMMUNITY_SELECTOR:
+                return community_locator
+            elif selector == TITLE_SELECTOR:
+                return title_locator
+            elif selector == SUBMIT_BUTTON_SELECTOR:
+                return submit_locator
+            return FakeLocator()
+
+        page.locator = MagicMock(side_effect=locator_factory)
+        page.wait_for_url = AsyncMock()
+
+        context = FakeContext(page)
+        browser = FakeBrowser(context)
+        pw = FakePlaywright(browser)
+        mock_pw.return_value = pw
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            f.write(b'{"cookies": []}')
+            account_file = f.name
+
+        _run_async(
+            _post_reddit_cookie(
+                account_file=account_file,
+                subreddit="test",
+                title="Test",
+                headless=True,
+            )
+        )
+
+        storage_arg = browser.new_context.call_args[1]["storage_state"]
+        self.assertTrue(Path(storage_arg).is_absolute())
+
+
+class RedditCookieVideoEdgeCaseTests(unittest.TestCase):
+    """Edge-case tests for RedditCookieVideo class."""
+
+    def test_multiple_r_prefixes_stripped(self):
+        """lstrip('r/') strips all leading r and / chars, so r/r/python → python."""
+        uploader = RedditCookieVideo(
+            title="Test",
+            subreddit="r/r/python",
+            account_file="/tmp/cookies.json",
+        )
+        self.assertEqual(uploader.subreddit, "python")
+
+    def test_subreddit_with_special_characters(self):
+        uploader = RedditCookieVideo(
+            title="Test",
+            subreddit="r/C++",
+            account_file="/tmp/cookies.json",
+        )
+        self.assertEqual(uploader.subreddit, "C++")
+
+    def test_subreddit_with_underscores(self):
+        uploader = RedditCookieVideo(
+            title="Test",
+            subreddit="r/AskReddit",
+            account_file="/tmp/cookies.json",
+        )
+        self.assertEqual(uploader.subreddit, "AskReddit")
+
+    def test_headless_defaults_to_true(self):
+        uploader = RedditCookieVideo(
+            title="Test",
+            subreddit="python",
+            account_file="/tmp/cookies.json",
+        )
+        self.assertTrue(uploader.headless)
+
+    def test_body_text_defaults_to_empty(self):
+        uploader = RedditCookieVideo(
+            title="Test",
+            subreddit="python",
+            account_file="/tmp/cookies.json",
+        )
+        self.assertEqual(uploader.body_text, "")
+
+    def test_file_path_defaults_to_empty(self):
+        uploader = RedditCookieVideo(
+            title="Test",
+            subreddit="python",
+            account_file="/tmp/cookies.json",
+        )
+        self.assertEqual(uploader.file_path, "")
+
+    @patch("uploader.reddit_uploader.main._post_reddit_cookie", new_callable=AsyncMock)
+    @patch("uploader.reddit_uploader.main.LOCAL_CHROME_HEADLESS", True)
+    def test_main_returns_post_url(self, mock_post):
+        mock_post.return_value = "https://reddit.com/r/test/comments/xyz/my_post"
+        uploader = RedditCookieVideo(
+            title="Test",
+            subreddit="python",
+            account_file="/tmp/cookies.json",
+        )
+        result = _run_async(uploader.main())
+        self.assertEqual(result, "https://reddit.com/r/test/comments/xyz/my_post")
+
+    @patch("uploader.reddit_uploader.main._post_reddit_cookie", new_callable=AsyncMock)
+    @patch("uploader.reddit_uploader.main.LOCAL_CHROME_HEADLESS", True)
+    def test_main_propagates_exception(self, mock_post):
+        mock_post.side_effect = RuntimeError("cookie may be expired")
+        uploader = RedditCookieVideo(
+            title="Test",
+            subreddit="python",
+            account_file="/tmp/cookies.json",
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            _run_async(uploader.main())
+        self.assertIn("expired", str(ctx.exception))
+
+    @patch("uploader.reddit_uploader.main._post_reddit_cookie", new_callable=AsyncMock)
+    @patch("uploader.reddit_uploader.main.LOCAL_CHROME_HEADLESS", True)
+    def test_main_with_all_optional_params(self, mock_post):
+        mock_post.return_value = "https://reddit.com/r/all/comments/abc/post"
+        uploader = RedditCookieVideo(
+            title="Full Title",
+            subreddit="r/all",
+            account_file="/tmp/cookies.json",
+            file_path="/tmp/vid.mp4",
+            body_text="Extra info",
+            headless=False,
+        )
+        result = _run_async(uploader.main())
+        mock_post.assert_called_once_with(
+            account_file="/tmp/cookies.json",
+            subreddit="all",
+            title="Full Title",
+            body_text="Extra info",
+            media_path="/tmp/vid.mp4",
+            headless=False,
+        )
+
+
 class SelectorConstantsTests(unittest.TestCase):
     """Verify selector constants match expected Reddit DOM patterns."""
 
