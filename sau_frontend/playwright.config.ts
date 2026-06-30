@@ -9,11 +9,11 @@ export default defineConfig({
   use: {
     browserName: 'chromium',
     headless: true,
-    viewport: { width: 1280, height: 720 },
+    viewport: { width: 1920, height: 1080 },
     video: 'on',
     recordVideo: {
       dir: 'demo/output',
-      size: { width: 1280, height: 720 },
+      size: { width: 1920, height: 1080 },
     },
     trace: 'retain-on-failure',
     baseURL: 'http://localhost:5409',

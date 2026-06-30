@@ -174,7 +174,7 @@ if [ -n "$NARRATION_CONCAT" ] && [ -f "$NARRATION_CONCAT" ]; then
   ffmpeg -y \
     -i "$WEBM_FILE" \
     -i "$NARRATION_CONCAT" \
-    -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,subtitles='$SRT_FILE':force_style='FontName=Arial,FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Bold=1,MarginV=30'" \
+    -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,subtitles='$SRT_FILE':force_style='FontName=Arial,FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Bold=1,MarginV=40'" \
     -c:v libx264 -preset medium -crf $CRF \
     -c:a aac -b:a $AUDIO_BITRATE \
     -shortest \
@@ -183,7 +183,7 @@ else
   # Video only + subtitles (no narration)
   ffmpeg -y \
     -i "$WEBM_FILE" \
-    -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,subtitles='$SRT_FILE':force_style='FontName=Arial,FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Bold=1,MarginV=30'" \
+    -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,subtitles='$SRT_FILE':force_style='FontName=Arial,FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Bold=1,MarginV=40'" \
     -c:v libx264 -preset medium -crf $CRF \
     -c:a aac -b:a $AUDIO_BITRATE \
     "$FINAL" 2>&1 | tail -10
@@ -206,7 +206,7 @@ if [ "$SIZE_KB" -gt 50000 ]; then
   COMPRESSED="${FINAL%.mp4}_compressed.mp4"
   ffmpeg -y -i "$FINAL" \
     -c:v libx264 -preset fast -crf 28 \
-    -vf "scale=1280:-2" \
+    -vf "scale=1920:-2" \
     -c:a aac -b:a 96k \
     "$COMPRESSED" 2>&1 | tail -5
   mv "$COMPRESSED" "$FINAL"
