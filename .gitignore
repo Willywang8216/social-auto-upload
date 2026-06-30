@@ -207,3 +207,9 @@ convo.txt
 
 # Playwright browser sessions (runtime)
 sessions/
+
+# Claude Code local config
+.claude/
+
+# Audio test files
+*.m4a
