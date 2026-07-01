@@ -75,6 +75,7 @@ class FakePage:
         self.locator = MagicMock(return_value=FakeLocator())
         self.keyboard = MagicMock()
         self.keyboard.press = AsyncMock()
+        self.evaluate = AsyncMock(return_value="")
 
 
 class FakeContext:

@@ -9,3 +9,7 @@ DEBUG_MODE = True  # default debug behavior
 # connections time out and the (patchright) chromium does NOT use the system proxy.
 # Point this at your local proxy port, e.g. "http://127.0.0.1:7890". None = no proxy.
 YT_PROXY = None
+# Optional proxy for the Reddit uploader. Reddit blocks datacenter IPs,
+# so you need a residential proxy or SSH tunnel to your home machine.
+# e.g. "socks5://127.0.0.1:1080" for SSH SOCKS tunnel, or "http://proxy:port"
+REDDIT_PROXY = None

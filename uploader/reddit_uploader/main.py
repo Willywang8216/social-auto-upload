@@ -11,7 +11,7 @@ from pathlib import Path
 
 from patchright.async_api import Page, async_playwright
 
-from utils.conf_defaults import DEBUG_MODE, LOCAL_CHROME_HEADLESS
+from utils.conf_defaults import DEBUG_MODE, LOCAL_CHROME_HEADLESS, REDDIT_PROXY
 from utils.browser_hook import get_browser_options
 from utils.base_social_media import set_init_script
 
@@ -77,6 +77,8 @@ async def _post_reddit_cookie(
     async with async_playwright() as p:
         launch_options = get_browser_options()
         launch_options["headless"] = headless if LOCAL_CHROME_HEADLESS else False
+        if REDDIT_PROXY:
+            launch_options["proxy"] = {"server": REDDIT_PROXY}
         browser = await p.chromium.launch(**launch_options)
         context = await browser.new_context(
             storage_state=str(resolved_account),
@@ -88,6 +90,15 @@ async def _post_reddit_cookie(
         try:
             await page.goto(REDDIT_SUBMIT_URL, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(2)
+
+            # Check for Reddit's IP block
+            body_text_content = await page.evaluate("document.body.innerText")
+            if "blocked by network security" in body_text_content.lower():
+                raise RuntimeError(
+                    "Reddit blocked this IP address. Configure REDDIT_PROXY in conf.py "
+                    "with a residential proxy or SSH tunnel to your home machine. "
+                    f"Current page: {page.url}"
+                )
 
             if "/login" in page.url:
                 await page.goto(REDDIT_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
