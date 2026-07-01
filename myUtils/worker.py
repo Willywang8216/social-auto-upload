@@ -541,6 +541,7 @@ def _prepared_artifact_local_paths(payload: dict) -> list[Path]:
 def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
     """Download missing artifact files from remote storage before publish."""
     import sqlite3
+    import requests as _requests
     for artifact in payload.get("artifacts", []) or []:
         local_path = artifact.get("local_path")
         if not local_path:
@@ -556,22 +557,58 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             with sqlite3.connect(db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
-                    "SELECT storage_key, storage_backend_id, file_path FROM file_records WHERE id = ? AND storage_key IS NOT NULL",
+                    "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path FROM file_records WHERE id = ?",
                     (int(source_id),),
                 ).fetchone()
             if not row:
                 continue
-            with sqlite3.connect(db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                backend = conn.execute(
-                    "SELECT * FROM storage_backends WHERE id = ?", (row["storage_backend_id"],)
-                ).fetchone()
-            if not backend:
-                continue
-            from myUtils.do_spaces import client_from_row
-            client = client_from_row(dict(backend))
+
             p.parent.mkdir(parents=True, exist_ok=True)
-            client.download_file(row["storage_key"], p)
+            downloaded = False
+
+            # Try 1: Download via storage backend client (DO Spaces / S3)
+            if row["storage_key"] and row["storage_backend_id"]:
+                try:
+                    with sqlite3.connect(db_path) as conn:
+                        conn.row_factory = sqlite3.Row
+                        backend = conn.execute(
+                            "SELECT * FROM storage_backends WHERE id = ?", (row["storage_backend_id"],)
+                        ).fetchone()
+                    if backend:
+                        from myUtils.do_spaces import client_from_row
+                        client = client_from_row(dict(backend))
+                        client.download_file(row["storage_key"], p)
+                        downloaded = True
+                except Exception:
+                    pass
+
+            # Try 2: Download via public CDN URL (R2 public bucket)
+            if not downloaded and row["storage_cdn_url"]:
+                try:
+                    resp = _requests.get(row["storage_cdn_url"], timeout=60)
+                    resp.raise_for_status()
+                    p.write_bytes(resp.content)
+                    downloaded = True
+                except Exception:
+                    pass
+
+            # Try 3: Check media_assets table for R2 public_url
+            if not downloaded:
+                try:
+                    with sqlite3.connect(db_path) as conn:
+                        conn.row_factory = sqlite3.Row
+                        asset = conn.execute(
+                            "SELECT public_url FROM media_assets WHERE local_original_path LIKE ? AND public_url IS NOT NULL",
+                            (f"%{p.name}%",),
+                        ).fetchone()
+                    if asset and asset["public_url"]:
+                        resp = _requests.get(asset["public_url"], timeout=60)
+                        resp.raise_for_status()
+                        p.write_bytes(resp.content)
+                        downloaded = True
+                except Exception:
+                    pass
+
         except Exception:
             continue
 
