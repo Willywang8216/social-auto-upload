@@ -9,7 +9,7 @@ services:
       - ./videoFile:/app/videoFile
       - ./cookiesFile:/app/cookiesFile
       - ./cookies:/app/cookies
-      - ${SAU_CONF_FILE:-./conf.example.py}:/app/conf.py
+      - ${SAU_CONF_FILE:-./conf.py}:/app/conf.py
       - ./data:/app/data
       - ./db:/app/db
     networks:
