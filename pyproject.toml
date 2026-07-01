@@ -46,6 +46,11 @@ web = [
 [tool.uv]
 package = true
 
+[dependency-groups]
+dev = [
+  "pytest",
+]
+
 [tool.setuptools]
 py-modules = ["conf", "sau_cli"]
 include-package-data = true

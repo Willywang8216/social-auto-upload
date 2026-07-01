@@ -21,7 +21,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: uv sync --extra web
+        run: uv sync --extra web --group dev
 
       - name: Install Patchright browsers
         run: uv run patchright install chromium
@@ -37,7 +37,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: sau_frontend/package-lock.json
 
