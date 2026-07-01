@@ -166,7 +166,6 @@ cookies
 .vite/
 dist/
 node_modules/
-package-lock.json
 
 # database
 db/database.db
