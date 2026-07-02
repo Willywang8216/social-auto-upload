@@ -8,6 +8,7 @@ Self-healing system that:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -111,6 +112,15 @@ class ProxyManager:
 
     def test_post_access(self, proxy: str, cookies: dict) -> bool:
         """Test if a proxy can make POST requests to Reddit."""
+        # Try without token_v2 first (it often causes 403)
+        cookies_no_t2 = {k: v for k, v in cookies.items() if k != "token_v2"}
+        if self._try_post(proxy, cookies_no_t2):
+            return True
+        # Try with all cookies
+        return self._try_post(proxy, cookies)
+
+    def _try_post(self, proxy: str, cookies: dict) -> bool:
+        """Try a POST request and check if it's accepted."""
         try:
             r = requests.post(
                 f"{REDDIT_API}/api/submit",
