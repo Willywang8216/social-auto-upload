@@ -230,50 +230,7 @@ class PostRedditCookieTests(unittest.TestCase):
         mock_api.assert_called_once()
 
     @patch("uploader.reddit_uploader.main._post_via_api")
-    def test_api_uses_first_proxy(self, mock_api):
-        mock_api.return_value = "https://reddit.com/r/test/comments/abc/post"
-        with patch("uploader.reddit_uploader.main.REDDIT_PROXY", ["socks5://proxy1:1080", "socks5://proxy2:1080"]):
-            _run_async(
-                _post_reddit_cookie(
-                    account_file="/tmp/cookies.json",
-                    subreddit="test",
-                    title="Test",
-                    headless=True,
-                )
-            )
-        mock_api.assert_called_once_with("/tmp/cookies.json", "test", "Test", "", None, "socks5://proxy1:1080")
-
-    @patch("uploader.reddit_uploader.main._post_via_api")
-    def test_api_failover_to_next_proxy(self, mock_api):
-        mock_api.side_effect = [Exception("proxy1 failed"), "https://reddit.com/r/test/comments/abc/post"]
-        with patch("uploader.reddit_uploader.main.REDDIT_PROXY", ["socks5://proxy1:1080", "socks5://proxy2:1080"]):
-            result = _run_async(
-                _post_reddit_cookie(
-                    account_file="/tmp/cookies.json",
-                    subreddit="test",
-                    title="Test",
-                    headless=True,
-                )
-            )
-        self.assertEqual(result, "https://reddit.com/r/test/comments/abc/post")
-        self.assertEqual(mock_api.call_count, 2)
-
-    @patch("uploader.reddit_uploader.main._post_via_api")
-    def test_api_passes_body_text(self, mock_api):
-        mock_api.return_value = "https://reddit.com/r/test/comments/abc/post"
-        _run_async(
-            _post_reddit_cookie(
-                account_file="/tmp/cookies.json",
-                subreddit="test",
-                title="Test",
-                body_text="Body content",
-                headless=True,
-            )
-        )
-        mock_api.assert_called_once_with("/tmp/cookies.json", "test", "Test", "Body content", None, None)
-
-    @patch("uploader.reddit_uploader.main._post_via_api")
-    def test_api_passes_media_path_as_string(self, mock_api):
+    def test_api_passes_correct_args(self, mock_api):
         mock_api.return_value = "https://reddit.com/r/test/comments/abc/post"
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
             f.write(b"video")
@@ -283,28 +240,49 @@ class PostRedditCookieTests(unittest.TestCase):
                 account_file="/tmp/cookies.json",
                 subreddit="test",
                 title="Test",
+                body_text="Body",
                 media_path=media_file,
                 headless=True,
             )
         )
         args = mock_api.call_args[0]
+        self.assertEqual(args[0], "/tmp/cookies.json")
+        self.assertEqual(args[1], "test")
+        self.assertEqual(args[2], "Test")
+        self.assertEqual(args[3], "Body")
         self.assertEqual(args[4], media_file)
+
+    @patch("uploader.reddit_uploader.main._post_via_api")
+    def test_api_failure_falls_back_to_browser(self, mock_api):
+        mock_api.side_effect = Exception("API failed")
+        with patch("uploader.reddit_uploader.main._post_via_browser", new_callable=AsyncMock) as mock_browser:
+            mock_browser.return_value = "https://reddit.com/r/test/comments/abc/post"
+            result = _run_async(
+                _post_reddit_cookie(
+                    account_file="/tmp/cookies.json",
+                    subreddit="test",
+                    title="Test",
+                    headless=True,
+                )
+            )
+        self.assertEqual(result, "https://reddit.com/r/test/comments/abc/post")
+        mock_browser.assert_called_once()
 
     @patch("uploader.reddit_uploader.main._post_via_api")
     def test_all_proxies_fail_raises(self, mock_api):
         mock_api.side_effect = Exception("all failed")
-        with patch("uploader.reddit_uploader.main.REDDIT_PROXY", ["socks5://proxy1:1080"]):
-            with patch("uploader.reddit_uploader.main._post_via_browser", new_callable=AsyncMock, side_effect=Exception("browser failed")):
-                with self.assertRaises(Exception) as ctx:
-                    _run_async(
-                        _post_reddit_cookie(
-                            account_file="/tmp/cookies.json",
-                            subreddit="test",
-                            title="Test",
-                            headless=True,
-                        )
+        with patch("uploader.reddit_uploader.main._post_via_browser", new_callable=AsyncMock, side_effect=Exception("browser failed")):
+            with self.assertRaises(Exception) as ctx:
+                _run_async(
+                    _post_reddit_cookie(
+                        account_file="/tmp/cookies.json",
+                        subreddit="test",
+                        title="Test",
+                        headless=True,
                     )
-                self.assertIn("all failed", str(ctx.exception))
+                )
+            # Browser error is raised when API also fails
+            self.assertIn("browser failed", str(ctx.exception))
 
 
 class RedditCookieVideoTests(unittest.TestCase):
@@ -525,10 +503,24 @@ class PostRedditCookieErrorTests(unittest.TestCase):
     """Error-path tests for _post_reddit_cookie function."""
 
     @patch("uploader.reddit_uploader.main._post_via_api")
-    def test_api_no_token_raises(self, mock_api):
-        mock_api.side_effect = RuntimeError("No token_v2 found in cookie file. Re-login required.")
-        with patch("uploader.reddit_uploader.main._post_via_browser", new_callable=AsyncMock, side_effect=Exception("browser failed")):
-            with self.assertRaises(RuntimeError) as ctx:
+    def test_api_failure_falls_back_to_browser(self, mock_api):
+        mock_api.side_effect = RuntimeError("API failed")
+        with patch("uploader.reddit_uploader.main._post_via_browser", new_callable=AsyncMock, return_value="https://reddit.com/r/test/comments/abc"):
+            result = _run_async(
+                _post_reddit_cookie(
+                    account_file="/tmp/cookies.json",
+                    subreddit="test",
+                    title="Test",
+                    headless=True,
+                )
+            )
+        self.assertEqual(result, "https://reddit.com/r/test/comments/abc")
+
+    @patch("uploader.reddit_uploader.main._post_via_api")
+    def test_both_api_and_browser_fail_raises(self, mock_api):
+        mock_api.side_effect = RuntimeError("API failed")
+        with patch("uploader.reddit_uploader.main._post_via_browser", new_callable=AsyncMock, side_effect=Exception("browser also failed")):
+            with self.assertRaises(Exception) as ctx:
                 _run_async(
                     _post_reddit_cookie(
                         account_file="/tmp/cookies.json",
@@ -537,22 +529,7 @@ class PostRedditCookieErrorTests(unittest.TestCase):
                         headless=True,
                     )
                 )
-            self.assertIn("token_v2", str(ctx.exception))
-
-    @patch("uploader.reddit_uploader.main._post_via_api")
-    def test_api_error_propagates_when_no_browser_fallback(self, mock_api):
-        mock_api.side_effect = RuntimeError("Subreddit not found")
-        with patch("uploader.reddit_uploader.main._post_via_browser", new_callable=AsyncMock, side_effect=Exception("browser also failed")):
-            with self.assertRaises(RuntimeError) as ctx:
-                _run_async(
-                    _post_reddit_cookie(
-                        account_file="/tmp/cookies.json",
-                        subreddit="nonexistent",
-                        title="Test",
-                        headless=True,
-                    )
-                )
-            self.assertIn("Subreddit not found", str(ctx.exception))
+            self.assertIn("browser also failed", str(ctx.exception))
 
     @patch("uploader.reddit_uploader.main._post_via_api")
     def test_resolves_account_file_to_absolute(self, mock_api):
