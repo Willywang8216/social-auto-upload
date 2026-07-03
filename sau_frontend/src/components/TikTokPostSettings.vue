@@ -275,8 +275,10 @@ const creatorNickname = computed(() => {
 
 const remainingPostCount = computed(() => {
   // Simulate limit for demo/recording
-  if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('simulate_limit') === '1') {
-    return 0
+  if (typeof window !== 'undefined') {
+    const hash = window.location.hash || ''
+    const search = hash.includes('?') ? hash.split('?')[1] : window.location.search
+    if (new URLSearchParams(search).get('simulate_limit') === '1') return 0
   }
   const info = props.creatorInfo
   if (!info) return null
@@ -299,8 +301,11 @@ const privacyLevelOptions = computed(() => {
 
 const postLimitReached = computed(() => {
   // Simulate limit for demo/recording: add ?simulate_limit=1 to URL
-  if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('simulate_limit') === '1') {
-    return true
+  // Works with hash routing: /#/publish/compose?simulate_limit=1
+  if (typeof window !== 'undefined') {
+    const hash = window.location.hash || ''
+    const search = hash.includes('?') ? hash.split('?')[1] : window.location.search
+    if (new URLSearchParams(search).get('simulate_limit') === '1') return true
   }
   const info = props.creatorInfo
   if (!info) return false
