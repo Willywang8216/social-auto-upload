@@ -69,7 +69,7 @@
           >
             <span>{{ opt.label }}</span>
             <el-tooltip v-if="opt.disabledReason" :content="opt.disabledReason" placement="right">
-              <el-icon style="margin-left: 4px; color: #909399;"><InfoFilled /></el-icon>
+              <el-icon style="margin-left: 4px; color: var(--text-3);"><InfoFilled /></el-icon>
             </el-tooltip>
           </el-option>
         </el-select>
@@ -130,7 +130,7 @@
             content="您需要說明您的內容是推廣自己、第三方，或兩者皆是。"
             placement="top"
           >
-            <el-icon style="margin-left: 4px; vertical-align: middle; color: #909399;"><InfoFilled /></el-icon>
+            <el-icon style="margin-left: 4px; vertical-align: middle; color: var(--text-3);"><InfoFilled /></el-icon>
           </el-tooltip>
         </template>
         <el-switch
@@ -444,11 +444,11 @@ function onDisclosureToggle(value) {
 
 <style scoped>
 .tiktok-post-settings {
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--line);
   border-radius: 6px;
   padding: 12px;
   margin-top: 8px;
-  background: #fafafa;
+  background: var(--panel-2);
 }
 
 .tks-creator {
@@ -493,7 +493,7 @@ function onDisclosureToggle(value) {
 }
 
 .tks-disclosure-hint {
-  color: #909399;
+  color: var(--text-3);
   font-size: 12px;
   margin-left: 4px;
 }
@@ -501,7 +501,7 @@ function onDisclosureToggle(value) {
 .tks-declaration {
   margin-top: 12px;
   padding: 8px 12px;
-  background: #f0f9eb;
+  background: var(--color-success-light);
   border-radius: 4px;
   border-left: 3px solid #67c23a;
 }

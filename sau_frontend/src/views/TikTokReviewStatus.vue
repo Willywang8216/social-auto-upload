@@ -207,7 +207,7 @@ onBeforeUnmount(() => {
 
     span {
       width: 110px;
-      color: #909399;
+      color: var(--text-3);
       flex-shrink: 0;
     }
 
@@ -231,7 +231,7 @@ onBeforeUnmount(() => {
       margin: 0;
       white-space: pre-wrap;
       word-break: break-word;
-      background: #f5f7fa;
+      background: var(--panel-2);
       padding: 12px;
       border-radius: 6px;
       font-size: 12px;

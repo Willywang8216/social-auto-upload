@@ -539,7 +539,7 @@ onMounted(() => {
   
   .form-tip {
     font-size: 12px;
-    color: #909399;
+    color: var(--text-3);
     margin-top: 5px;
   }
   
@@ -559,7 +559,7 @@ onMounted(() => {
 }
 
 .upload-file-item {
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--line);
   border-radius: 4px;
   padding: 10px;
   margin-bottom: 10px;
@@ -567,7 +567,7 @@ onMounted(() => {
 
 .upload-file-item .file-name {
   font-size: 14px;
-  color: #606266;
+  color: var(--text-2);
   margin-bottom: 5px;
   display: block;
 }
@@ -590,7 +590,7 @@ onMounted(() => {
 
 /* 修改上传进度条样式 */
 :deep(.el-progress__text) {
-  color: #303133 !important; /* 深灰色字体，确保在各种背景上都可见 */
+  color: var(--text) !important; /* 深灰色字体，确保在各种背景上都可见 */
   font-size: 12px;
 }
 
@@ -599,11 +599,11 @@ onMounted(() => {
 }
 
 .upload-file-item {
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--line);
   border-radius: 6px; /* 增加圆角 */
   padding: 12px; /* 增加内边距 */
   margin-bottom: 12px; /* 增加外边距 */
-  background-color: #fafafa; /* 轻微背景色 */
+  background-color: var(--panel-2); /* 轻微背景色 */
   transition: box-shadow 0.3s; /* 添加过渡效果 */
 }
 
@@ -613,7 +613,7 @@ onMounted(() => {
 
 .upload-file-item .file-name {
   font-size: 14px;
-  color: #303133; /* 深灰色字体 */
+  color: var(--text); /* 深灰色字体 */
   margin-bottom: 8px; /* 增加底部间距 */
   display: block;
   font-weight: 500;

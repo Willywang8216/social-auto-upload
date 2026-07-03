@@ -35,7 +35,7 @@ defineProps({
 <style lang="scss" scoped>
 .connection-panel-card {
   width: 100%;
-  background: #f5f7fa;
+  background: var(--panel-2);
   border-radius: 6px;
   padding: 12px;
 
@@ -50,7 +50,7 @@ defineProps({
     }
 
     span {
-      color: #909399;
+      color: var(--text-3);
     }
 
     strong {

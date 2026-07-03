@@ -135,14 +135,14 @@ const submitRequest = async () => {
 <style lang="scss" scoped>
 .legal-page {
   min-height: 100vh;
-  background: #f5f7fa;
+  background: var(--bg);
   padding: 32px 16px;
 }
 
 .legal-card {
   max-width: 920px;
   margin: 0 auto;
-  background: #fff;
+  background: var(--panel);
   border-radius: 12px;
   padding: 32px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
@@ -153,18 +153,18 @@ const submitRequest = async () => {
     h1 {
       margin: 0 0 8px;
       font-size: 30px;
-      color: #303133;
+      color: var(--text);
     }
 
     .meta {
       margin: 0 0 12px;
-      color: #909399;
+      color: var(--text-3);
       font-size: 13px;
     }
 
     .summary {
       margin: 0;
-      color: #606266;
+      color: var(--text-2);
       line-height: 1.8;
     }
   }
@@ -175,11 +175,11 @@ const submitRequest = async () => {
     h2 {
       margin: 0 0 10px;
       font-size: 18px;
-      color: #303133;
+      color: var(--text);
     }
 
     p, li {
-      color: #606266;
+      color: var(--text-2);
       line-height: 1.85;
       font-size: 15px;
     }
@@ -190,20 +190,20 @@ const submitRequest = async () => {
     }
 
     code {
-      background: #f0f2f5;
+      background: var(--panel-2);
       padding: 2px 8px;
       border-radius: 4px;
       font-size: 13px;
-      color: #303133;
+      color: var(--text);
     }
   }
 
   .deletion-form {
     margin-top: 16px;
     padding: 20px;
-    background: #f9fafb;
+    background: var(--panel-2);
     border-radius: 8px;
-    border: 1px solid #ebeef5;
+    border: 1px solid var(--line);
 
     .field {
       margin-bottom: 14px;
@@ -212,23 +212,23 @@ const submitRequest = async () => {
         display: block;
         font-size: 13px;
         font-weight: 600;
-        color: #303133;
+        color: var(--text);
         margin-bottom: 6px;
       }
 
       .input, .textarea {
         width: 100%;
         padding: 10px 12px;
-        border: 1px solid #dcdfe6;
+        border: 1px solid var(--line);
         border-radius: 6px;
         font-size: 14px;
-        color: #303133;
-        background: #fff;
+        color: var(--text);
+        background: var(--panel);
         box-sizing: border-box;
 
         &:focus {
           outline: none;
-          border-color: #409eff;
+          border-color: var(--accent);
         }
       }
 
@@ -239,7 +239,7 @@ const submitRequest = async () => {
     }
 
     .btn-primary {
-      background: #409eff;
+      background: var(--accent);
       color: #fff;
       border: none;
       padding: 10px 24px;
@@ -256,7 +256,7 @@ const submitRequest = async () => {
 
     .success-msg {
       margin-top: 12px;
-      color: #67c23a;
+      color: var(--color-success);
       font-weight: 600;
       font-size: 14px;
     }
@@ -265,12 +265,12 @@ const submitRequest = async () => {
   .legal-links {
     margin-top: 24px;
     padding-top: 20px;
-    border-top: 1px solid #ebeef5;
+    border-top: 1px solid var(--line);
     display: flex;
     gap: 20px;
 
     a {
-      color: #409eff;
+      color: var(--accent);
       text-decoration: none;
       font-weight: 500;
     }

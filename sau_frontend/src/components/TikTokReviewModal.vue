@@ -106,7 +106,7 @@
         >
           <span>{{ opt.label }}</span>
           <el-tooltip v-if="opt.disabledReason" :content="opt.disabledReason" placement="right">
-            <el-icon style="margin-left: 4px; color: #909399;"><InfoFilled /></el-icon>
+            <el-icon style="margin-left: 4px; color: var(--text-3);"><InfoFilled /></el-icon>
           </el-tooltip>
         </el-option>
       </el-select>
@@ -152,7 +152,7 @@
       <template #label>
         <span>商業內容揭露</span>
         <el-tooltip content="您需要說明您的內容是推廣自己、第三方，或兩者皆是。" placement="top">
-          <el-icon style="margin-left: 4px; vertical-align: middle; color: #909399;"><InfoFilled /></el-icon>
+          <el-icon style="margin-left: 4px; vertical-align: middle; color: var(--text-3);"><InfoFilled /></el-icon>
         </el-tooltip>
       </template>
       <el-switch
@@ -396,10 +396,10 @@ const canPublish = computed(() => {
   align-items: center;
   gap: 8px;
   padding: 16px;
-  background: #f5f7fa;
+  background: var(--panel-2);
   border-radius: 8px;
   margin-bottom: 16px;
-  color: #909399;
+  color: var(--text-3);
 }
 
 .trm-creator {
@@ -408,7 +408,7 @@ const canPublish = computed(() => {
   gap: 12px;
   margin-bottom: 16px;
   padding: 12px;
-  background: #f5f7fa;
+  background: var(--panel-2);
   border-radius: 8px;
 }
 
@@ -430,7 +430,7 @@ const canPublish = computed(() => {
 
 .trm-creator-handle {
   font-size: 13px;
-  color: #909399;
+  color: var(--text-3);
 }
 
 .trm-preview {
@@ -460,7 +460,7 @@ const canPublish = computed(() => {
 }
 
 .trm-disclosure-hint {
-  color: #909399;
+  color: var(--text-3);
   font-size: 12px;
   margin-left: 4px;
 }
@@ -468,7 +468,7 @@ const canPublish = computed(() => {
 .trm-declaration {
   margin-top: 16px;
   padding: 12px;
-  background: #f0f9eb;
+  background: var(--color-success-light);
   border-radius: 4px;
   border-left: 3px solid #67c23a;
 }

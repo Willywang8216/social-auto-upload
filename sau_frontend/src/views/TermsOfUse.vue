@@ -303,14 +303,14 @@
 <style lang="scss" scoped>
 .legal-page {
   min-height: 100vh;
-  background: #f5f7fa;
+  background: var(--bg);
   padding: 32px 16px;
 }
 
 .legal-card {
   max-width: 920px;
   margin: 0 auto;
-  background: #fff;
+  background: var(--panel);
   border-radius: 12px;
   padding: 32px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
@@ -321,18 +321,18 @@
     h1 {
       margin: 0 0 8px;
       font-size: 30px;
-      color: #303133;
+      color: var(--text);
     }
 
     .meta {
       margin: 0 0 12px;
-      color: #909399;
+      color: var(--text-3);
       font-size: 13px;
     }
 
     .summary {
       margin: 0;
-      color: #606266;
+      color: var(--text-2);
       line-height: 1.8;
     }
   }
@@ -343,12 +343,12 @@
     h2 {
       margin: 0 0 10px;
       font-size: 18px;
-      color: #303133;
+      color: var(--text);
     }
 
     p,
     li {
-      color: #606266;
+      color: var(--text-2);
       line-height: 1.85;
       font-size: 15px;
     }
@@ -362,10 +362,10 @@
   .legal-links {
     margin-top: 24px;
     padding-top: 20px;
-    border-top: 1px solid #ebeef5;
+    border-top: 1px solid var(--line);
 
     a {
-      color: #409eff;
+      color: var(--accent);
       text-decoration: none;
       font-weight: 500;
     }

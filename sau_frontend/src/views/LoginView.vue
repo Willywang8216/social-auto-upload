@@ -237,12 +237,12 @@ async function onSubmit() {
 
   &.error {
     background: var(--color-danger-light);
-    color: #b91c1c;
+    color: var(--color-danger);
   }
 
   &.info {
     background: var(--color-info-light);
-    color: #4338ca;
+    color: var(--color-info);
   }
 
   code {

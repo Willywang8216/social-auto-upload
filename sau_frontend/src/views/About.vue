@@ -579,7 +579,7 @@ const activeSections = ref([])
         line-height: 1.6;
       }
       code {
-        background: #f5f7fa;
+        background: var(--panel-2);
         padding: 2px 6px;
         border-radius: 3px;
         font-size: 12px;
@@ -598,7 +598,7 @@ const activeSections = ref([])
         align-items: center;
         gap: 10px;
         padding: 6px 0;
-        border-bottom: 1px solid #f0f0f0;
+        border-bottom: 1px solid var(--line);
 
         &:last-of-type {
           border-bottom: none;
@@ -623,8 +623,8 @@ const activeSections = ref([])
 
         code {
           font-size: 13px;
-          color: #303133;
-          background: #f5f7fa;
+          color: var(--text);
+          background: var(--panel-2);
           padding: 2px 6px;
           border-radius: 3px;
           white-space: nowrap;

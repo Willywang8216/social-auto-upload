@@ -214,7 +214,7 @@ function useTemplate(template) {
   margin: 2px 4px 2px 0;
 }
 .tm-subtle {
-  color: #888;
+  color: var(--text-3);
   font-size: 12px;
 }
 </style>

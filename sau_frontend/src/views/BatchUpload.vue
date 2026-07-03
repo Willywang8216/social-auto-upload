@@ -343,7 +343,7 @@ function processingTagType(status) {
   gap: 16px;
 }
 .asset-card {
-  border: 2px solid #e4e7ed;
+  border: 2px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
   cursor: pointer;
@@ -355,7 +355,7 @@ function processingTagType(status) {
 .asset-preview {
   position: relative;
   height: 150px;
-  background: #f5f7fa;
+  background: var(--panel-2);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -369,7 +369,7 @@ function processingTagType(status) {
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  color: #909399;
+  color: var(--text-3);
 }
 .select-checkbox {
   position: absolute;
@@ -393,7 +393,7 @@ function processingTagType(status) {
 }
 .asset-size {
   font-size: 11px;
-  color: #909399;
+  color: var(--text-3);
 }
 .actions {
   display: flex;

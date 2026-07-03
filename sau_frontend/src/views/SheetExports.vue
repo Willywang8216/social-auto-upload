@@ -88,6 +88,6 @@ function showError(row) {
 .empty-state {
   text-align: center;
   padding: 40px;
-  color: #909399;
+  color: var(--text-3);
 }
 </style>

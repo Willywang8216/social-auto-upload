@@ -478,7 +478,7 @@ watch([platform, accountId], () => {
 
     span {
       width: 110px;
-      color: #909399;
+      color: var(--text-3);
       flex-shrink: 0;
     }
 
