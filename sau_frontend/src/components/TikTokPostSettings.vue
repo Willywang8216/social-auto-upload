@@ -388,7 +388,7 @@ const videoDurationError = computed(() => {
   if (!maxVideoDurationSec.value || !props.mediaFiles?.length) return ''
   const maxSec = maxVideoDurationSec.value
   for (const f of props.mediaFiles) {
-    const path = f.filePath || f.file_path || f.name
+    const path = f.path || f.filePath || f.file_path || f.name
     const dur = videoDurations.value[path]
     if (dur !== undefined && dur !== null && dur > maxSec) {
       return `影片時長 ${Math.round(dur)} 秒，超過 TikTok 限制的 ${maxSec} 秒`

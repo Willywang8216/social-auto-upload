@@ -2706,33 +2706,58 @@ def _upload_file_to_storage(file_path: Path, final_filename: str, file_record_id
 
 
 def _download_file_from_storage(file_path: str, *, db_path: Path) -> Path | None:
-    """Download a file from storage if it has a storage_key. Returns local path or None."""
+    """Download a file from storage if it has a storage_key or CDN URL. Returns local path or None."""
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT storage_key, storage_backend_id FROM file_records WHERE file_path = ? AND storage_key IS NOT NULL",
+            "SELECT storage_key, storage_backend_id, storage_cdn_url FROM file_records WHERE file_path = ?",
             (file_path,),
         ).fetchone()
     if not row:
         return None
-    backend_row = _load_storage_backend_by_id(row["storage_backend_id"], db_path=db_path)
-    if not backend_row:
-        return None
-    from myUtils.do_spaces import client_from_row
-    client = client_from_row(backend_row)
+
     local_path = _resolve_video_file_path_safely(file_path)
+    if not local_path:
+        # Try resolving under uploads/ directory for DO Spaces keys
+        uploads_base = (Path(BASE_DIR) / "uploads").resolve()
+        try:
+            resolved = (uploads_base / Path(file_path).name).resolve()
+            if resolved.is_relative_to(uploads_base):
+                local_path = resolved
+        except (ValueError, OSError):
+            pass
     if not local_path:
         logger.warning("Refusing to download to unsafe path: %s", file_path)
         return None
     if local_path.exists():
         return local_path
-    try:
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        client.download_file(row["storage_key"], local_path)
-        return local_path
-    except Exception:
-        logger.exception("Failed to download %s from storage", file_path)
-        return None
+
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Try 1: Download via storage backend client
+    if row["storage_key"] and row["storage_backend_id"]:
+        try:
+            backend_row = _load_storage_backend_by_id(row["storage_backend_id"], db_path=db_path)
+            if backend_row:
+                from myUtils.do_spaces import client_from_row
+                client = client_from_row(backend_row)
+                client.download_file(row["storage_key"], local_path)
+                return local_path
+        except Exception:
+            logger.exception("Failed to download %s from storage backend", file_path)
+
+    # Try 2: Download via public CDN URL
+    if row["storage_cdn_url"]:
+        try:
+            import requests as _requests
+            resp = _requests.get(row["storage_cdn_url"], timeout=60)
+            resp.raise_for_status()
+            local_path.write_bytes(resp.content)
+            return local_path
+        except Exception:
+            logger.exception("Failed to download %s from CDN", file_path)
+
+    return None
 
 
 def _delete_file_from_storage(storage_key: str, backend_id: int, *, db_path: Path) -> None:

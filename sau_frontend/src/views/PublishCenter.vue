@@ -1169,6 +1169,8 @@ function addMaterialsFromLibrary() {
       name: material.filename,
       size: material.filesize ? material.filesize * 1024 * 1024 : 0,
     })
+    // Fetch video duration for TikTok validation
+    if (isVideo(material.filename)) fetchVideoDuration(path)
     existingPaths.add(path)
   }
   if (skipped > 0) {
