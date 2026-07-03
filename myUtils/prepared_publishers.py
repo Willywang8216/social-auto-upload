@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -15,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus, urlparse
+
+logger = logging.getLogger(__name__)
 
 from myUtils import media_pipeline
 from myUtils import tiktok_auth
@@ -1228,16 +1231,16 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
                 resp_json = response.json()
                 error_obj = resp_json.get("error", {}) or {}
                 error_code = str(error_obj.get("code") or "").strip()
-                log.info("TikTok PULL_FROM_URL error: code=%s, status=%s, body=%s",
+                logger.info("TikTok PULL_FROM_URL error: code=%s, status=%s, body=%s",
                          error_code, response.status_code, resp_json)
                 if error_code == "url_ownership_unverified":
-                    log.warning("TikTok PULL_FROM_URL failed (domain not verified), falling back to FILE_UPLOAD")
+                    logger.warning("TikTok PULL_FROM_URL failed (domain not verified), falling back to FILE_UPLOAD")
                 else:
                     _raise_tiktok_error(response)
             except PreparedPublishError:
                 raise
             except Exception as e:
-                log.warning("Failed to parse TikTok error response: %s", e)
+                logger.warning("Failed to parse TikTok error response: %s", e)
                 _raise_tiktok_error(response)
 
         if local_path and Path(local_path).expanduser().resolve().is_file():
