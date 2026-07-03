@@ -402,6 +402,13 @@
             <el-tag v-if="tiktokJobStatuses[job.id]" :type="tiktokJobStatuses[job.id].type" size="small" style="margin-left: 8px;">
               {{ tiktokJobStatuses[job.id].label }}
             </el-tag>
+            <a
+              v-if="tiktokJobStatuses[job.id]?.url"
+              :href="tiktokJobStatuses[job.id].url"
+              target="_blank"
+              class="pc-link"
+              style="margin-left: 8px;"
+            >查看貼文</a>
           </div>
         </div>
       </div>
@@ -672,7 +679,7 @@ function getNextUnreviewedTiktokAccount() {
 }
 
 // TikTok publish status polling
-const tiktokJobStatuses = reactive({}) // jobId -> { type, label }
+const tiktokJobStatuses = reactive({}) // jobId -> { type, label, url }
 let statusPollInterval = null
 
 async function pollTiktokStatuses() {
@@ -685,14 +692,15 @@ async function pollTiktokStatuses() {
       if (statuses.length > 0) {
         const latest = statuses[statuses.length - 1]
         const status = latest.status || latest.publish_status || ''
-        if (status === 'success' || status === 'published') {
-          tiktokJobStatuses[job.id] = { type: 'success', label: '已發佈' }
+        const postUrl = latest.platform_url || latest.public_url || latest.share_url || ''
+        if (status === 'success' || status === 'published' || status === 'publish_complete') {
+          tiktokJobStatuses[job.id] = { type: 'success', label: '已發佈', url: postUrl }
         } else if (status === 'failed' || status === 'error') {
-          tiktokJobStatuses[job.id] = { type: 'danger', label: '發佈失敗' }
+          tiktokJobStatuses[job.id] = { type: 'danger', label: '發佈失敗', url: '' }
         } else if (status === 'processing' || status === 'uploading') {
-          tiktokJobStatuses[job.id] = { type: 'warning', label: '處理中...' }
+          tiktokJobStatuses[job.id] = { type: 'warning', label: '處理中...', url: '' }
         } else {
-          tiktokJobStatuses[job.id] = { type: 'info', label: status || '已送出' }
+          tiktokJobStatuses[job.id] = { type: 'info', label: status || '已送出', url: '' }
         }
       }
     } catch {

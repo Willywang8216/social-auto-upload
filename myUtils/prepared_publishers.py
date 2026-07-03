@@ -1229,10 +1229,10 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             # FILE_UPLOAD for local files (non-Direct-Post or no public URL)
             video_path = Path(local_path).expanduser().resolve()
             file_size = video_path.stat().st_size
-            # Use proper chunking: 5MB min, 64MB max, or file size if smaller
+            # Use proper chunking: 5MB min, 64MB max
             chunk_size = min(file_size, TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE)
             if chunk_size < TIKTOK_FILE_UPLOAD_CHUNK_SIZE:
-                chunk_size = file_size  # Small file, single chunk
+                chunk_size = TIKTOK_FILE_UPLOAD_CHUNK_SIZE  # Enforce 5MB minimum for TikTok API
             total_chunks = max(1, -(-file_size // chunk_size))  # ceil division
             request_body = {
                 "post_info": post_info,
