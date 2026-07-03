@@ -98,7 +98,7 @@ def list_page_videos(
     videos = []
     url = f"{META_GRAPH_ROOT}/{page_id}/videos"
     params = {
-        "fields": "id,name,description,created_time,picture,permalink",
+        "fields": "id,title,description,created_time,picture,permalink",
         "access_token": access_token,
         "limit": min(max_results, 100),
     }
@@ -215,7 +215,7 @@ def sync_facebook_account(
     videos = []
     for m in metrics:
         raw = raw_lookup.get(m["platform_video_id"], {})
-        title = raw.get("name") or raw.get("description", "")[:100] or ""
+        title = raw.get("title") or raw.get("name") or raw.get("description", "")[:100] or ""
         description = (raw.get("description") or "")[:500]
 
         # Thumbnail is the "picture" field (a URL string)
