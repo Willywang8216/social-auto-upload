@@ -1192,13 +1192,12 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             post_info["brand_content_toggle"] = bool(content_disclosure.get("brandedContent"))
             post_info["brand_organic_toggle"] = bool(content_disclosure.get("yourBrand"))
 
-        # For Direct Post, prefer PULL_FROM_URL when we have a verified public URL.
-        # TikTok requires domain ownership verification for PULL_FROM_URL.
-        # For Publish Center flow, media is uploaded to server/storage first,
-        # so PULL_FROM_URL is the correct mode.
-        if post_mode == "DIRECT_POST" and public_url:
-            # Validate URL is under a verified prefix
-            _tiktok_validate_pull_from_url(public_url)
+        # Prefer PULL_FROM_URL when we have a public URL — avoids chunk-size
+        # issues with small files and is more reliable than FILE_UPLOAD.
+        if public_url:
+            # Validate URL is under a verified prefix if in DIRECT_POST mode
+            if post_mode == "DIRECT_POST":
+                _tiktok_validate_pull_from_url(public_url)
             request_body = {
                 "post_info": post_info,
                 "source_info": {
@@ -1229,11 +1228,20 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             # FILE_UPLOAD for local files (non-Direct-Post or no public URL)
             video_path = Path(local_path).expanduser().resolve()
             file_size = video_path.stat().st_size
-            # Use proper chunking: 5MB min, 64MB max
-            chunk_size = min(file_size, TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE)
-            if chunk_size < TIKTOK_FILE_UPLOAD_CHUNK_SIZE:
-                chunk_size = TIKTOK_FILE_UPLOAD_CHUNK_SIZE  # Enforce 5MB minimum for TikTok API
-            total_chunks = max(1, -(-file_size // chunk_size))  # ceil division
+            # TikTok requires chunk_size between 5MB-64MB, but for small files
+            # we must use file_size as chunk_size with total_chunk_count=1
+            if file_size <= TIKTOK_FILE_UPLOAD_CHUNK_SIZE:
+                # Small file: single chunk, use actual file size
+                chunk_size = file_size
+                total_chunks = 1
+            elif file_size <= TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE:
+                # Medium file: single chunk
+                chunk_size = file_size
+                total_chunks = 1
+            else:
+                # Large file: multiple chunks
+                chunk_size = TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE
+                total_chunks = -(-file_size // chunk_size)  # ceil division
             request_body = {
                 "post_info": post_info,
                 "source_info": {
