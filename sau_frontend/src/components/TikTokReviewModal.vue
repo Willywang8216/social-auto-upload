@@ -280,11 +280,19 @@ const creatorUsername = computed(() => {
 })
 
 const remainingPostCount = computed(() => {
+  // Simulate limit for demo/recording
+  if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('simulate_limit') === '1') {
+    return 0
+  }
   const info = props.creatorInfo
   return info?.remaining_post_count ?? info?.data?.remaining_post_count ?? null
 })
 
 const postLimitReached = computed(() => {
+  // Simulate limit for demo/recording
+  if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('simulate_limit') === '1') {
+    return true
+  }
   return remainingPostCount.value !== null && remainingPostCount.value <= 0
 })
 

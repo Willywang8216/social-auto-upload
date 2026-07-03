@@ -274,6 +274,10 @@ const creatorNickname = computed(() => {
 })
 
 const remainingPostCount = computed(() => {
+  // Simulate limit for demo/recording
+  if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('simulate_limit') === '1') {
+    return 0
+  }
   const info = props.creatorInfo
   if (!info) return null
   const remaining = info?.remaining_post_count ?? info?.data?.remaining_post_count
@@ -294,6 +298,10 @@ const privacyLevelOptions = computed(() => {
 })
 
 const postLimitReached = computed(() => {
+  // Simulate limit for demo/recording: add ?simulate_limit=1 to URL
+  if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('simulate_limit') === '1') {
+    return true
+  }
   const info = props.creatorInfo
   if (!info) return false
   // TikTok may return remaining_post_count or a boolean flag
