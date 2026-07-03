@@ -1226,14 +1226,18 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             # Check if it's a domain verification error — fall through to FILE_UPLOAD
             try:
                 resp_json = response.json()
-                error_code = (resp_json.get("error", {}) or {}).get("code", "")
+                error_obj = resp_json.get("error", {}) or {}
+                error_code = str(error_obj.get("code") or "").strip()
+                log.info("TikTok PULL_FROM_URL error: code=%s, status=%s, body=%s",
+                         error_code, response.status_code, resp_json)
                 if error_code == "url_ownership_unverified":
                     log.warning("TikTok PULL_FROM_URL failed (domain not verified), falling back to FILE_UPLOAD")
                 else:
                     _raise_tiktok_error(response)
             except PreparedPublishError:
                 raise
-            except Exception:
+            except Exception as e:
+                log.warning("Failed to parse TikTok error response: %s", e)
                 _raise_tiktok_error(response)
 
         if local_path and Path(local_path).expanduser().resolve().is_file():
