@@ -1194,10 +1194,10 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
 
         # Prefer PULL_FROM_URL when we have a public URL — avoids chunk-size
         # issues with small files and is more reliable than FILE_UPLOAD.
+        # Fall back to FILE_UPLOAD if domain ownership is not verified.
+        pull_from_url_attempted = False
         if public_url:
-            # Validate URL is under a verified prefix if in DIRECT_POST mode
-            if post_mode == "DIRECT_POST":
-                _tiktok_validate_pull_from_url(public_url)
+            pull_from_url_attempted = True
             request_body = {
                 "post_info": post_info,
                 "source_info": {
@@ -1215,16 +1215,28 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
                 json=request_body,
                 timeout=120,
             )
-            if response.status_code != 200:
+            if response.status_code == 200:
+                return {
+                    "creator_info": creator_info,
+                    "publish": _response_payload(response),
+                    "request": request_body,
+                    "updated_config": updated_config,
+                    "access_token": access_token,
+                }
+            # Check if it's a domain verification error — fall through to FILE_UPLOAD
+            try:
+                resp_json = response.json()
+                error_code = (resp_json.get("error", {}) or {}).get("code", "")
+                if error_code == "url_ownership_unverified":
+                    log.warning("TikTok PULL_FROM_URL failed (domain not verified), falling back to FILE_UPLOAD")
+                else:
+                    _raise_tiktok_error(response)
+            except PreparedPublishError:
+                raise
+            except Exception:
                 _raise_tiktok_error(response)
-            return {
-                "creator_info": creator_info,
-                "publish": _response_payload(response),
-                "request": request_body,
-                "updated_config": updated_config,
-                "access_token": access_token,
-            }
-        elif local_path and Path(local_path).expanduser().resolve().is_file():
+
+        if local_path and Path(local_path).expanduser().resolve().is_file():
             # FILE_UPLOAD for local files (non-Direct-Post or no public URL)
             video_path = Path(local_path).expanduser().resolve()
             file_size = video_path.stat().st_size
