@@ -1086,6 +1086,7 @@ def _validate_tiktok_photo_payload(public_urls: list[str], *, message: str) -> N
         raise PreparedPublishError("TikTok photo publish supports up to 35 images")
 
 TIKTOK_FILE_UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024  # 5 MB minimum per TikTok docs
+TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE = 64 * 1024 * 1024  # 64 MB maximum per TikTok docs
 
 
 def _tiktok_file_upload(http, video_path: Path, upload_url: str, chunk_size: int) -> None:
@@ -1228,11 +1229,11 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             # FILE_UPLOAD for local files (non-Direct-Post or no public URL)
             video_path = Path(local_path).expanduser().resolve()
             file_size = video_path.stat().st_size
-            # TikTok sandbox requires total_chunk_count=1. The upload function
-            # MUST use the same chunk_size declared here, or the presigned URL
-            # rejects the PUT with 416 Range Not Satisfiable.
-            chunk_size = file_size
-            total_chunks = 1
+            # Use proper chunking: 5MB min, 64MB max, or file size if smaller
+            chunk_size = min(file_size, TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE)
+            if chunk_size < TIKTOK_FILE_UPLOAD_CHUNK_SIZE:
+                chunk_size = file_size  # Small file, single chunk
+            total_chunks = max(1, -(-file_size // chunk_size))  # ceil division
             request_body = {
                 "post_info": post_info,
                 "source_info": {
