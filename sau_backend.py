@@ -7612,6 +7612,12 @@ def api_accounts():
                             expires_human = f"in {d} days"
             except Exception:
                 pass
+        elif is_meta and config.get("accessToken"):
+            # Meta tokens ALWAYS have an expiry. If there's no expiry timestamp
+            # but there IS an access token, the token is from an old format
+            # that predates proper OAuth — mark as expired to force re-auth.
+            cookie_status = "expired"
+            expires_human = "reauth needed"
 
         # Extract avatar URL from config (stored by OAuth callbacks / token refreshes)
         avatar_url = config.get("avatarUrl") or config.get("avatar_url") or config.get("profileImageUrl") or ""
