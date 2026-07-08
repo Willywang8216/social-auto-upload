@@ -167,6 +167,7 @@ TikTok 使用 Content Posting API：
 - [更新說明](./docs/update.md)
 - [CLI 使用說明](./docs/CLI.md)
 - [Agent Bootstrap Prompt](./docs/agent-bootstrap.md)
+- [API 速率限制與配額](./docs/api-rate-limits.md)
 
 ## 交流與支援
 
