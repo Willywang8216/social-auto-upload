@@ -14,6 +14,9 @@ from unittest.mock import patch
 if "conf" not in sys.modules:
     conf_module = types.ModuleType("conf")
     conf_module.BASE_DIR = str(Path(__file__).resolve().parent.parent)
+    conf_module.DEBUG_MODE = True
+    conf_module.LOCAL_CHROME_HEADLESS = True
+    conf_module.LOCAL_CHROME_PATH = ""
     sys.modules["conf"] = conf_module
 
 from sau_backend import (
