@@ -47,7 +47,7 @@ rm -f "/tmp/${BACKUP_NAME}"
 
 # 3. Upload to share.iamwillywang.com (R2 storage via tgstate)
 SHARE_URL="http://localhost:8001"
-SHARE_PASSWORD="sau-backup-2026"
+SHARE_PASSWORD="3QFzsZhbMIMqkVbYSlXwOtIzkRx407I31ISSfEtR"
 SHARE_COOKIE="/tmp/sau-share-cookie.txt"
 
 # Login to get session cookie

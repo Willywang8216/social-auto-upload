@@ -1,12 +1,10 @@
 # social-auto-upload
 
-`social-auto-upload` 是一个强大的自动化工具，旨在帮助内容创作者和运营者高效地将视频内容一键发布到多个国内外主流社交媒体平台。
-项目实现了对 `抖音`、`Bilibili`、`小红书`、`快手`、`视频号`、`百家号`、`TikTok` 以及 `YouTube` 等平台的视频上传、定时发布等功能。
-结合各平台 `uploader` 模块，您可以轻松配置和扩展支持的平台，并通过示例脚本快速上手。
+`social-auto-upload` 是一個強大的自動化工具，旨在幫助內容創作者和運營者高效地將影片內容一鍵發佈到多個國內外主流社交媒體平台。
+項目實現了對 `抖音`、`Bilibili`、`小紅書`、`快手`、`視頻號`、`百家號`、`TikTok`、`YouTube`、`Reddit`、`Twitter`、`Facebook`、`Instagram`、`Threads` 等平台的影片上傳、定時發佈等功能。
+結合各平台 `uploader` 模組，您可以輕鬆配置和擴展支援的平台，並通過範例腳本快速上手。
 
-<img src="media/show/tkupload.gif" alt="tiktok show" width="800"/>
-
-## 💎 赞助商
+## 💎 贊助商
 
 <table width="100%">
  <tr>
@@ -16,407 +14,172 @@
       </a>
     </td>
     <td width="75%" align="left" valign="middle">
-      感谢 <a href="https://doloffer.com/" target="_blank">DolOffer</a> 对本项目的支持！对于做内容矩阵、多平台分发和 AI 自动化运营的创作者来说，ChatGPT、Claude、YouTube Premium、Spotify、Apple Music、Notion、Office 等数字工具往往是长期成本。DolOffer 提供 AI、视频、音乐和效率工具相关的订阅与充值服务，帮助用户更低成本地配置常用数字产品。更多说明可查看 <a href="https://github.com/Doloffer-g/guide" target="_blank">DolOffer Guide</a>。使用优惠码 <code>AI8888</code> 可额外享受 9 折优惠，具体价格和服务规则以官网为准。  
-    </td>
-  </tr>
-  <tr>
-    <td width="25%" align="center" valign="middle">
-      <a href="https://chilltion.com/?ref=1y5k5k">
-        <img src="static/chilltion.png" alt="chilltion Sponsor" width="180">
-      </a>
-    </td>
-    <td width="75%" align="left" valign="middle">
-      轻视AI：一句话生产MG动画，适合知识，科普，讲解，教程，介绍等类型视频的低成本制作，视频矩阵，养号等，成本只有seedance等1%。现在<a href="https://chilltion.com/?ref=1y5k5k">注册</a>送1500积分
-    </td>
-  </tr>
-    <tr>
-        <td width="25%" align="center" valign="middle">
-          <a href="http://t.clawpower.vip/1005">
-            <img src="static/clawpower.png" alt="ClawPower Sponsor" width="180">
-          </a>
-        </td>
-        <td width="75%" align="left" valign="middle">
-          ClawPower 是一家稳定可靠 AI 大模型中转服务商，提供 Claude、GPT、Gemini 60+ 大模型接入。无论是 OpenClaw、Hermes 智能体自动化场景，Claude Code、Codex 编程工具接入，还是公众号、小红书内容创作；都能获得稳定、顺滑、可长期使用的模型服务体验。低至官方价格的 30%，点击<a href="http://t.clawpower.vip/1005">免费领取 5 刀现金</a>体验券
-        </td>
-      </tr>
-  <tr>
-    <td width="25%" align="center" valign="middle">
-      <img src="static/wechat.png" alt="Sponsor Contact" width="150">
-    </td>
-    <td width="75%" align="left" valign="middle">
-      <strong>成为赞助商</strong><br>
-      如果您有意赞助本项目，请扫描左侧微信二维码（添加时请注明来意：<strong>赞助</strong>）。
+      感謝 <a href="https://doloffer.com/" target="_blank">DolOffer</a> 對本項目的支援！對於做內容矩陣、多平台分發和 AI 自動化運營的創作者來說，ChatGPT、Claude、YouTube Premium、Spotify、Apple Music、Notion、Office 等數位工具往往是長期成本。DolOffer 提供 AI、影片、音樂和效率工具相關的訂閱與充值服務，幫助用戶更低成本地配置常用數位產品。更多說明可查看 <a href="https://github.com/Doloffer-g/guide" target="_blank">DolOffer Guide</a>。使用優惠碼 <code>AI8888</code> 可額外享受 9 折優惠，具體價格和服務規則以官網為準。
     </td>
   </tr>
 </table>
 
 ---
 
+## 目錄
 
-## 目录
+- [💡 功能特性](#功能特性)
+- [💾 安裝指南](#安裝指南)
+- [🏁 快速開始](#快速開始)
+- [🌐 支援平台](#支援平台)
+- [📖 詳細文件](#詳細文件)
+- [🐾 交流與支援](#交流與支援)
+- [🤝 貢獻指南](#貢獻指南)
+- [📜 許可證](#許可證)
 
-- [💡 功能特性](#💡功能特性)
-- [💾 安装指南](#💾安装指南)
-- [🤖 AI Agent](#🤖ai-agent)
-- [🏁 快速开始](#🏁快速开始)
-- [🗂️ 重构计划](#🗂️重构计划)
-- [📣 近况说明](#📣近况说明)
-- [🐇 项目背景](#🐇项目背景)
-- [📃 详细文档](#📃详细文档)
-- [🐾 交流与支持](#🐾交流与支持)
-- [🤝 贡献指南](#🤝贡献指南)
-- [📜 许可证](#📜许可证)
-- [⭐ Star History](#⭐Star-History)
+## 功能特性
 
-## 💡功能特性
-
-| 平台 | 登录/账号准备 | 视频上传 | 图文上传 | 长文 / Post | 定时发布 | CLI | Skill | 说明 |
+| 平台 | 登入/帳號準備 | 影片上傳 | 圖文上傳 | 長文 / Post | 定時發佈 | CLI | API 發佈 | 說明 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 抖音 | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | 当前主线重构最完整 |
-| Bilibili | ✅ | ✅ | ❌ | — | ✅ | ✅ | ✅ | 运行时自动准备 `biliup` |
-| 小红书（浏览器版） | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | 浏览器自动化，CLI/Skill 已接入 |
-| 快手 | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | 浏览器自动化，CLI/Skill 初版已接入 |
-| 视频号 | ✅ | ✅ | ❌ | — | ✅ | ❌ | ❌ | 对应 `tencent_uploader` |
-| 百家号 | ✅ | ✅ | ❌ | — | ✅ | ❌ | ❌ | 浏览器自动化 |
-| TikTok | ✅ | ✅ | ❌ | — | ✅ | ❌ | ❌ | 当前示例走 Chrome 版实现 |
-| YouTube | ✅ | ✅ | ❌ | — | ❌ | ✅ | ❌ | 浏览器自动化（Studio），支持加入播放列表/可见性 |
-| Medium | ✅ | — | — | ✅ | ❌ (草稿/立即) | ✅ | 🚧 | 浏览器自动化，Medium API 已弃用 |
-| Substack | ✅ | — | — | ✅ | ✅ (定时) | ✅ | 🚧 | 浏览器自动化，每写手一个 publication 子域名 |
+| 抖音 | ✅ | ✅ | ✅ | — | ✅ | ✅ | — | 當前主線重構最完整 |
+| Bilibili | ✅ | ✅ | ❌ | — | ✅ | ✅ | — | 運行時自動準備 `biliup` |
+| 小紅書（瀏覽器版） | ✅ | ✅ | ✅ | — | ✅ | ✅ | — | 瀏覽器自動化，CLI/Skill 已接入 |
+| 快手 | ✅ | ✅ | ✅ | — | ✅ | ✅ | — | 瀏覽器自動化，CLI/Skill 初版已接入 |
+| 視頻號 | ✅ | ✅ | ❌ | — | ✅ | ❌ | — | 對應 `tencent_uploader` |
+| 百家號 | ✅ | ✅ | ❌ | — | ✅ | ❌ | — | 瀏覽器自動化 |
+| TikTok | ✅ | ✅ | ❌ | — | ✅ | ❌ | ✅ | Content Posting API，支援 Direct Post |
+| YouTube | ✅ | ✅ | ❌ | — | ❌ | ✅ | — | 瀏覽器自動化（Studio），支援播放清單/可見性 |
+| Reddit | ✅ | ✅ | — | — | ✅ | ❌ | ✅ | OAuth API，支援圖片/連結/文字發文 |
+| Twitter | ✅ | ✅ | — | — | ✅ | ❌ | ✅ | OAuth API |
+| Facebook | ✅ | ✅ | — | — | ✅ | ❌ | ✅ | Graph API，自動延長 token |
+| Instagram | ✅ | ✅ | ✅ | — | ✅ | ❌ | ✅ | Graph API，支援圖片/影片 |
+| Threads | ✅ | ✅ | — | — | ✅ | ❌ | ✅ | Threads API |
+| Medium | ✅ | — | — | ✅ | ❌ (草稿/立即) | ✅ | — | 瀏覽器自動化 |
+| Substack | ✅ | — | — | ✅ | ✅ (定時) | ✅ | — | 瀏覽器自動化 |
 
-### Profile 模型（多账号管理）
+### Profile 模型（多帳號管理）
 
-每个 **Profile** 代表一个人或品牌，可拥有多个 **Account**。同一个 Profile 可以在同一个平台上持有多个账号
-（例如一个 Profile 下挂两个 Medium 账号），系统按 `(profile, platform, account_name)` 三元组解析 cookie 文件路径。
+每個 **Profile** 代表一個人或品牌，可擁有多個 **Account**。同一個 Profile 可以在同一個平台上持有多個帳號。
 
 ```bash
 sau profile create --name "Acme Corp"
 sau profile list
-sau profile show --profile acme-corp
-sau medium login --account alice --profile acme-corp
-sau medium login --account bob   --profile acme-corp
-sau medium upload-post --account alice --profile acme-corp \
-    --file post.md --title "Hello world" --tags ai,python
+sau douyin login --account <account_name> --profile acme-corp
+sau douyin upload-video --account <account_name> --file videos/demo.mp4 --title "標題"
 ```
 
-不传 `--profile` 时，CLI 仍然走旧的扁平 cookie 文件布局，向后兼容现有脚本。
-
-### AI这么强，为什么还需要这个项目
-在你使用AI的能力，browser agent等等，每次都让 agent 重新解析网页、截图理解, 临场判断
-该项目经过大量验证，上传这种 高频，重复，无聊的工作交给脚本和程序去执行
-
-
-## 💾安装指南
+## 安裝指南
 
 ### 自己上手使用
-如果你只是普通用户，不准备借助 agent 客户端，直接看
 
-安装、更新、环境准备已经统一收敛到文档：
+安裝、更新、環境準備已經統一收斂到文件：
 
-- [安装说明](./docs/install.md)
-- [更新说明](./docs/update.md)
+- [安裝說明](./docs/install.md)
+- [更新說明](./docs/update.md)
 
-
-### AGENT 
-
-```
-AI的发展毋庸置疑，希望你遇到这种安装和使用，不要再怯场，而是交给各种AI Agent来协助你
-```
-
-如果你准备把这个仓库直接交给 `OpenClaw`、`Codex`、`Claude Code` 来安装和使用
-
-先把仓库给 agent，再把这份启动提示词一起发给它：
-
-- [Agent Bootstrap Prompt](./docs/agent-bootstrap.md)
-
-这份提示词会引导 agent：
-
-- 优先按当前主线安装项目
-- 优先使用 `uv`、`sau` CLI 和 `skills/`
-- 先验证 `bilibili`、`douyin`、`kuaishou`、`xiaohongshu` 四个平台入口是否可用
-
-
-### 补充说明：
-
-- CLI 使用请看：[CLI 使用说明](./docs/CLI.md)
-- 如果你准备在 `OpenClaw`、`Codex`、`Claude Code / cc` 里使用本项目，先看：[Agent Bootstrap Prompt](./docs/agent-bootstrap.md)
-- agent / skill 请看：[Douyin Upload Skill](./skills/douyin-upload/SKILL.md)
-- agent / skill 请看：[Kuaishou Upload Skill](./skills/kuaishou-upload/SKILL.md)
-- agent / skill 请看：[Xiaohongshu Upload Skill](./skills/xiaohongshu-upload/SKILL.md)
-- agent / skill 请看：[Bilibili Upload Skill](./skills/bilibili-upload/SKILL.md)
-- 历史 Web 说明请看：[历史 Web 版本说明](./docs/legacy-web.md)
-- 其他单平台 skill 与整合型 skill 仍在开发中
-- Python 主线安装元数据以 `pyproject.toml` 为准（`uv sync` / `pip install -e .`）
-- `requirements.txt` 目前主要用于 Docker / 历史兼容路径，普通用户不需要优先使用它；但后端运行时依赖仍需与 `pyproject.toml` 保持一致
-
-
-## 📣近况说明
-
-`2026.03.24`
-
-最近我的重心一直都在创业上，而且手里还有一些项目没完全跑通，所以这个仓库前面有很长一段时间，我确实没有办法投入特别多精力去持续维护。
-
-这个项目不知不觉已经 `9k+ star` 了，社群里也已经有 `2000+` 小伙伴了。看到它真的在持续帮到大家，我心里还是挺开心的，也是真的很感谢大家一直以来的支持、反馈。
-
-所以我想，决定先停一下，抽一段时间出来，把这个项目好好重构和优化一轮。
-
-接下来这段时间，这个仓库应该会进入一个相对密集更新的阶段。我现在最想先做的事情主要有这几件：
-
-1. 使用更隐蔽、更稳定的自动化方案，尽量降低平台检测风险
-2. 补齐一些常用平台的图文能力，并逐步完成 CLI 化、Skill 化
-3. 陆续测试并上架到更多 skill 平台，让大家的龙虾、螃蟹、毛毛虫都能打通 AI 自媒体的最后一道关
-
-所以如果你之前觉得这个项目更新有点慢，哈哈哈，后面大概率会快很多。也欢迎大家继续关注，最近应该会是一段持续修、持续更、持续重构的阶段。
-
-## 🗂️重构计划
-
-项目正在进行一轮整体重构，当前重构重点是：
-
-- 各平台 uploader 的结构收敛
-- CLI 统一接入
-- 面向 OpenClaw、Codex、 Claude Code 等工具的 skill 化
-- 更换为 `patchright` 驱动，提升兼容性与隐蔽性
-- 主线优先围绕无头模式推进
-
-“无头模式（headless）”，指的是浏览器在后台运行，不弹出可见窗口，但自动化流程仍然会照常执行。这样更适合 CLI、服务端、自动任务和 agent 场景。
-
-Web 端相关代码仍然保留，但已经不是当前主线，不保证可直接运行，也不保证与当前 uploader/CLI 完全同步。
-
-### Web 后端 / 任务运行时
-
-新版 Web 后端已经从同步 `/postVideo` 切换到一套基于 `publish_jobs` 表的异步任务运行时：
-
-- `POST /jobs` 入队任务（幂等），立即返回 job id
-- `GET /jobs/<id>` 查看进度与每个 target 的状态、重试次数、错误信息
-- `POST /jobs/<id>/cancel` 取消任务
-- 老的 `/postVideo` 仍然在线，方便与现有前端逐步迁移
-
-推荐生产部署里把 Flask 当成无状态服务，把任务消费跑在独立进程里：
+### Docker 部署
 
 ```bash
-# Flask（任务入队 + 查询）
-SAU_API_TOKENS=your-strong-token python sau_backend.py
+# 複製配置
+cp conf.example.py conf.py
+cp .env.example .env
 
-# Worker（任务消费）
-SAU_API_TOKENS=ignored python -m myUtils.worker \
-    --max-concurrent 3 --max-attempts 3
+# 啟動服務
+docker compose up -d
+
+# 存取 Web UI
+open http://localhost:5409
 ```
 
-`python -m myUtils.worker` 会一直跑直到收到 `SIGINT`/`SIGTERM`，然后把已经在跑的 target 排空再退出。
-传 `--once` 可以只跑一轮排空，适合在 cron / one-shot 场景。
-
-每个 job 的日志会落到 `logs/jobs/job-<id>.log`，包含 `job_id`/`target_id`/`platform`/`account_ref`/`attempt`
-等结构化字段；想要 JSON 行格式可以设置 `SAU_JSON_LOGS=1`。
-
-安全相关的环境变量见 [Phase 3 Security](./docs/install.md)：
-- `SAU_API_TOKENS` — 接受的 bearer token 集合，留空表示开放模式
-- `SAU_CORS_ORIGINS` — 允许的浏览器来源列表，默认是 Vite 的 dev/preview 端口
-- `SAU_COOKIE_ENCRYPTION_KEY` — base64 编码的 16/24/32 字节 AES 密钥；
-  设置后所有 cookie 文件以 AES-GCM 加密落盘，`worker` 会在调用上传器之前解密到一个
-  `0o600` 临时文件、上传完成后再加密回原位
-
-生成一个 32-byte 的随机密钥：
+### CLI 使用
 
 ```bash
-python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+# 安裝
+uv sync --extra web
+
+# 抖音
+sau douyin login --account <account_name>
+sau douyin upload-video --account <account_name> --file videos/demo.mp4 --title "標題"
+
+# Reddit
+sau reddit login --account <account_name>
+sau reddit check --account <account_name>
+
+# TikTok
+sau tiktok login --account <account_name>
 ```
 
-把现有的明文 cookie 一次性加密：
-
-```bash
-SAU_COOKIE_ENCRYPTION_KEY=... sau cookies status   # 看一下现状
-SAU_COOKIE_ENCRYPTION_KEY=... sau cookies encrypt  # 实际执行
-```
-
-`sau cookies encrypt` 是幂等的，已经加密过的文件会被跳过；磁盘上未加密的文件如果
-没设置 key，启动时也会按以前的明文路径继续工作，不影响向后兼容。
-
-### 数据库迁移（Alembic）
-
-数据库 schema 现在由 Alembic 管理，迁移脚本位于 `migrations/versions/`。
-普通用户继续用：
-
-```bash
-python db/createTable.py
-```
-
-这条命令现在会调用 `alembic upgrade head`，把 `db/database.db` 升级到最新 schema。
-新加表 / 加列就在 `migrations/versions/` 下加一个新的迁移脚本，不要再直接改
-`db/createTable.py` 里的 `CREATE TABLE` 语句。
-
-要在自定义路径上运行迁移：
-
-```bash
-SAU_DB_PATH=/path/to/database.db python db/createTable.py
-# 或者直接调 alembic：
-alembic -x url=sqlite:///path/to/database.db upgrade head
-```
-
-
-## 🏁快速开始
+## 快速開始
 
 ### 方式 1：使用 CLI
 
-当前抖音、快手、小红书、Bilibili 已经接入 CLI：
-
 ```bash
+# 抖音
 sau douyin login --account <account_name>
-sau douyin check --account <account_name>
-sau douyin upload-video --account <account_name> --file videos/demo.mp4 --title "示例标题" --desc "示例简介"
-sau douyin upload-note --account <account_name> --images videos/1.png videos/2.png --title "图文标题" --note "图文正文"
+sau douyin upload-video --account <account_name> --file videos/demo.mp4 --title "標題" --desc "描述"
 
-sau kuaishou login --account <account_name>
-sau kuaishou check --account <account_name>
-sau kuaishou upload-video --account <account_name> --file videos/demo.mp4 --title "示例标题" --desc "示例简介"
-sau kuaishou upload-note --account <account_name> --images videos/1.png videos/2.png videos/3.png --title "图文标题" --note "图文正文"
-
+# 小紅書
 sau xiaohongshu login --account <account_name>
-sau xiaohongshu check --account <account_name>
-sau xiaohongshu upload-video --account <account_name> --file videos/demo.mp4 --title "示例标题" --desc "示例简介"
-sau xiaohongshu upload-note --account <account_name> --images videos/1.png videos/2.png videos/3.png --title "图文标题" --note "图文正文"
+sau xiaohongshu upload-video --account <account_name> --file videos/demo.mp4 --title "標題"
 
+# Bilibili
 sau bilibili login --account <account_name>
-sau bilibili check --account <account_name>
-sau bilibili upload-video --account <account_name> --file videos/demo.mp4 --title "示例标题" --desc "示例简介" --tid 249
+sau bilibili upload-video --account <account_name> --file videos/demo.mp4 --title "標題" --tid 249
 
-sau medium login --account <account_name> [--profile <slug>] --headed
-sau medium check --account <account_name> [--profile <slug>]
-sau medium upload-post --account <account_name> [--profile <slug>] \
-    --file post.md --title "Hello world" --subtitle "可选副标题" --tags ai,python
-
-sau substack login --account <account_name> [--profile <slug>] --headed
-sau substack check --account <account_name> [--profile <slug>]
-sau substack upload-post --account <account_name> [--profile <slug>] \
-    --publication acme --file post.md --title "Hello world" --tags ai,python
-
+# YouTube
 sau youtube login --account <account_name>
-sau youtube check --account <account_name>
-sau youtube upload-video --account <account_name> --file videos/demo.mp4 --title "示例标题" --desc "示例简介" --tags tag1,tag2 --playlist "我的系列" --visibility public
+sau youtube upload-video --account <account_name> --file videos/demo.mp4 --title "標題" --visibility public
 ```
 
-> YouTube 说明：登录是交互式的（Google 账号，浏览器里完成，无二维码）。这里走浏览器自动化而不是官方 API，
-> 是因为**未通过 Google 合规审核的 API 项目上传的视频会被强制锁为私享、无法改公开**，对个人/单频道不实用；
-> 浏览器自动化没有此限制，可直接发布公开视频，也与本项目其它平台的 cookie 方案一致。
-> `--playlist` 适合连载/系列追更；`--visibility` 可选 `public`/`unlisted`/`private`。
-> 上传会**等进度到 100% 再点发布**（浏览器上传靠窗口开着传，传一半就发布会被掐断卡在中途）。
-> youtube.com 被墙的地区：在 `conf.py` 设 `YT_PROXY = "http://127.0.0.1:7890"`（chromium 不吃系统代理，需显式指定）。
+### 方式 2：使用 Web UI
 
-补充说明：
+1. 啟動服務：`docker compose up -d`
+2. 開啟瀏覽器：`http://localhost:5409`
+3. 新增帳號並登入
+4. 上傳影片並發佈
 
-- `creator` 之类的名字只是示例值，真正含义是 `account_name`
-- 一个 `account_name` 对应一个账号文件，可以准备多个账号，也可以按账号名并发执行任务
-- 浏览器平台统一约定：
-- 视频使用 `title + desc + tags`
-- 图文使用 `title + note + tags`
-- Bilibili CLI 不要求用户手动安装 `biliup`
-- 首次运行相关命令时，程序会自动下载 `biliup`
-- 后续运行会自动检查上游 release 并更新
-- Bilibili 登录建议由用户自己在本地真实终端里执行；如果终端二维码显示不完整，可以直接打开当前目录下的 `qrcode.png` 扫码
+## 支援平台
 
-### 方式 2：使用 examples
+### Reddit
 
-`examples/` 目录里同时存在两类脚本：
+Reddit 支援兩種認證模式：
 
-- 当前主线 CLI 包装示例
-- 历史直连 uploader 示例
+- **OAuth API**（推薦）：使用 Reddit 官方 API，需要申請 App
+- **Cookie 模式**：使用瀏覽器 cookie，透過代理伺服器繞過 IP 封鎖
 
-对抖音、快手、小红书、Bilibili 来说，当前主线优先使用上面的 `sau ...` CLI。
-下面这些脚本主要是历史直连 uploader 示例或调试入口：
+Reddit 封鎖資料中心 IP，需要使用住宅代理或 SSH 隧道。
 
-- `examples/upload_to_douyin.py`
-- `examples/upload_video_to_bilibili.py`
-- `examples/upload_to_kuaishou.py`
-- `examples/upload_video_to_tencent.py`
-- `examples/upload_video_to_baijiahao.py`
-- `examples/upload_video_to_tiktok.py`
-- `examples/upload_video_to_xiaohongshu.py`
+### TikTok
 
-## 🐇项目背景
+TikTok 使用 Content Posting API：
 
-该项目最初是我个人用于自动化管理社交媒体视频发布的工具。我的主要发布策略是提前一天设置定时发布，因此项目中很多定时发布相关的逻辑是基于“第二天”的时间进行计算的。
+- 支援 Direct Post 和 FILE_UPLOAD 模式
+- 自動處理 chunk 上傳（5MB-64MB）
+- 支援影片長度驗證、隱私設定、互動設定
+- 商業內容揭露和品牌合作內容標記
 
-如果您需要立即发布或其他定制化的发布策略，欢迎研究源码或在社区提问。
+### Facebook / Instagram / Threads
 
-## 📃详细文档
+使用 Meta Graph API：
 
-已落后，目前在快速重构该项目，当下，你需要做的是把这个仓库，发给你的AI agent：qwen code，codex cc，openclaw等等，让他们帮你安装和使用
+- 長效 token 自動延長（60天）
+- 支援圖片和影片上傳
+- 自動 token 過期檢測和重新授權提示
 
-更详细的文档和说明，请查看：[social-auto-upload 官方文档](https://sap-doc.nasdaddy.com/)
+## 詳細文件
 
-## 🐾交流与支持
+- [安裝說明](./docs/install.md)
+- [更新說明](./docs/update.md)
+- [CLI 使用說明](./docs/CLI.md)
+- [Agent Bootstrap Prompt](./docs/agent-bootstrap.md)
 
-[☕ Donate as u like](https://www.buymeacoffee.com/hysn2001m) - 如果您觉得这个项目对您有帮助，可以考虑赞助。
+## 交流與支援
 
-如果您也是独立开发者、技术爱好者，对 #技术变现 #AI创业 #跨境电商 #自动化工具 #视频创作 等话题感兴趣，欢迎加入社群交流。
+如果您也是獨立開發者、技術愛好者，對 #技術變現 #AI創業 #跨境電商 #自動化工具 #影片創作 等話題感興趣，歡迎加入社群交流。
 
-### Creator
+## 貢獻指南
 
-<table>
-    <td align="center">
-        <a href="https://sap-doc.nasdaddy.com/">
-            <img src="media/mp.jpg" width="200px" alt="NasDaddy公众号"/>
-            <br />
-            <sub><b>微信公众号</b></sub>
-        </a>
-        <br />
-        <a href="https://github.com/dreammis/social-auto-upload/commits?author=dreammis" title="Code">💻</a>
-        <br />
-        关注公众号，后台回复 `上传` 获取加群方式
-    </td>
-    <td align="center">
-        <a href="https://sap-doc.nasdaddy.com/">
-            <img src="media/QR.png" width="200px" alt="赞赏码/入群引导"/>
-            <br />
-            <sub><b>交流群 (通过公众号获取)</b></sub>
-        </a>
-        <br />
-        <a href="https://sap-doc.nasdaddy.com/" title="Documentation">📖</a>
-        <br />
-        如果您觉得项目有用，可以考虑打赏支持一下
-    </td>
-</table>
+歡迎各種形式的貢獻，包括但不限於：
 
+- 提交 Bug報告 和 Feature請求
+- 改進程式碼、文件
+- 分享使用經驗和教程
 
+## 許可證
 
-
-## 🤝贡献指南
-
-欢迎各种形式的贡献，包括但不限于：
-
--   提交 Bug报告 和 Feature请求。
--   改进代码、文档。
--   分享使用经验和教程。
-
-如果您希望贡献代码，请遵循以下步骤：
-
-1.  Fork 本仓库。
-2.  创建一个新的分支 (`git checkout -b feature/YourFeature` 或 `bugfix/YourBugfix`)。
-3.  提交您的更改 (`git commit -m 'Add some feature'`)。
-4.  Push到您的分支 (`git push origin feature/YourFeature`)。
-5.  创建一个 Pull Request。
-
-## 主要贡献者
-
-<a href="https://github.com/dreammis/social-auto-upload/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=dreammis/social-auto-upload" />
-</a>
-
-
-## 🙏致谢
-
-本项目的 Bilibili 上传能力基于开源项目 `biliup` 的能力进行接入与封装。
-感谢 `biliup` 项目及其贡献者提供的基础能力：
-
-- https://github.com/biliup/biliup
-
-## 📜许可证
-
-本项目暂时采用 [MIT License](LICENSE) 开源许可证。
-
-## ⭐Star-History
-
-> 如果这个项目对您有帮助，请给一个 ⭐ Star 以表示支持！
-
-
-
-
-[![Star History Chart](https://api.star-history.com/svg?repos=dreammis/social-auto-upload&type=Date)](https://star-history.com/#dreammis/social-auto-upload&Date)
+本項目暫時採用 [MIT License](LICENSE) 開源許可證。

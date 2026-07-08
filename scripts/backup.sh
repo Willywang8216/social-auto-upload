@@ -204,17 +204,17 @@ else
     log "Uploading to remote: ${REMOTE}"
     if rclone copy "$ARCHIVE_PATH" "$REMOTE" 2>&1; then
         log "Upload complete"
+        # Purge local archive after successful upload
+        log "Removing local archive: ${ARCHIVE_NAME}"
+        rm -f "$ARCHIVE_PATH"
     else
         die "rclone upload failed"
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Rotation
+# Rotation (remote only — local archives are deleted after upload)
 # ---------------------------------------------------------------------------
-log "Rotating local backups (keeping ${KEEP} most recent)..."
-rotate_backups "local"
-
 log "Rotating remote backups (keeping ${KEEP} most recent)..."
 rotate_backups "remote"
 
@@ -222,11 +222,11 @@ rotate_backups "remote"
 # Summary
 # ---------------------------------------------------------------------------
 if [[ "$DRY_RUN" == true ]]; then
-    log "[dry-run] Would keep ${KEEP} most recent backups locally and on remote"
+    log "[dry-run] Would keep ${KEEP} most recent backups on remote"
     log "=== DRY RUN COMPLETE - no changes were made ==="
 else
     local_count=$(find "$BACKUP_DIR" -maxdepth 1 -name 'socialupload-backup-*.tar.gz' -type f 2>/dev/null | wc -l)
-    log "Local backups: ${local_count}/${KEEP}"
+    log "Local backups remaining: ${local_count}"
 fi
 
 log "Backup finished successfully"

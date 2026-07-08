@@ -14,8 +14,7 @@ services:
       - ./data:/app/data
       - ./db:/app/db
     networks:
-      1panel-network:
-        ipv4_address: 172.18.0.46
+      - 1panel-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:

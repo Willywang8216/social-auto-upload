@@ -4,7 +4,7 @@ services:
     container_name: xray-proxy
     restart: always
     volumes:
-      - ~/xray/docker-config.json:/etc/xray/config.json
+      - /home/will/xray/docker-config.json:/etc/xray/config.json
     networks:
       - 1panel-network
 
