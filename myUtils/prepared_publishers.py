@@ -1914,11 +1914,18 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
     http = _get_session(session)
     access_token = _google_access_token(config, session=http)
     headers = {"Authorization": f"Bearer {access_token}"}
-    title = _message_title(payload)
-    description = _payload_message(payload)
+
+    # Extract metadata from draft/payload
+    draft = payload.get("draft") or {}
+    title = str(draft.get("title") or _message_title(payload)).strip()[:100]
+    description = str(draft.get("message") or draft.get("description") or _payload_message(payload)).strip()
+    tags = draft.get("hashtags") or draft.get("tags") or []
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+
     metadata = {
         "snippet": {
-            "title": title[:100],
+            "title": title,
             "description": description,
             "channelId": channel_id,
             "categoryId": str(config.get("categoryId") or "22"),
@@ -1928,6 +1935,9 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
             "selfDeclaredMadeForKids": bool(config.get("madeForKids", False)),
         },
     }
+    if tags:
+        metadata["snippet"]["tags"] = tags[:500]  # YouTube limit
+
     init_response = http.post(
         YOUTUBE_RESUMABLE_UPLOAD_URL,
         headers={
@@ -1957,6 +1967,14 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
     _raise_for_status(upload_response)
     result = upload_response.json()
 
+    # Upload thumbnail if available
+    thumbnail_path = _find_thumbnail(media, video_path)
+    if thumbnail_path and result.get("id"):
+        try:
+            _upload_youtube_thumbnail(http, access_token, result["id"], thumbnail_path)
+        except Exception as exc:
+            logger.warning("YouTube thumbnail upload failed: %s", exc)
+
     playlist_id = str(config.get("playlistId") or "").strip()
     if playlist_id and result.get("id"):
         playlist_response = http.post(
@@ -1980,6 +1998,38 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
         )
         _raise_for_status(playlist_response)
     return result
+
+
+def _find_thumbnail(media: dict, video_path: Path) -> Path | None:
+    """Find a thumbnail image for the video."""
+    # Check if there's an image artifact
+    for img in media.get("images", []):
+        if img.get("local_path"):
+            p = Path(img["local_path"])
+            if p.exists():
+                return p
+    # Check for thumbnail with same name as video
+    for ext in [".png", ".jpg", ".jpeg"]:
+        thumb = video_path.with_suffix(ext)
+        if thumb.exists():
+            return thumb
+    return None
+
+
+def _upload_youtube_thumbnail(http, access_token: str, video_id: str, thumbnail_path: Path) -> None:
+    """Upload a thumbnail for a YouTube video."""
+    url = f"https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId={video_id}&uploadType=media"
+    with thumbnail_path.open("rb") as f:
+        response = http.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "image/png",
+            },
+            data=f.read(),
+            timeout=60,
+        )
+    _raise_for_status(response)
 
 
 # ---- Patreon ----
