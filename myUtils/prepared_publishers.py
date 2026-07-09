@@ -1915,18 +1915,48 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
     access_token = _google_access_token(config, session=http)
     headers = {"Authorization": f"Bearer {access_token}"}
 
-    # Extract metadata from draft/payload
+    # Extract metadata from draft
     draft = payload.get("draft") or {}
-    title = str(draft.get("title") or _message_title(payload)).strip()[:100]
-    description = str(draft.get("message") or draft.get("description") or _payload_message(payload)).strip()
+
+    # Title: use draft.title if set, otherwise first line of message
+    raw_title = str(draft.get("title") or "").strip()
+    if not raw_title:
+        raw_message = str(draft.get("message") or payload.get("message", "")).strip()
+        # Skip campaign name prefix (e.g., "publish-center-20260709-190829")
+        lines = [l.strip() for l in raw_message.split("\n") if l.strip()]
+        # Find first line that looks like a real title (not a campaign name)
+        for line in lines:
+            if not line.startswith("publish-center") and not line.startswith("campaign"):
+                raw_title = line
+                break
+        if not raw_title and lines:
+            raw_title = lines[0]
+    title = raw_title[:100] or "Untitled"
+
+    # Description: use remaining message lines
+    raw_message = str(draft.get("message") or payload.get("message", "")).strip()
+    message_lines = raw_message.split("\n")
+    # Skip the title line if it's the first line
+    if message_lines and message_lines[0].strip() == raw_title:
+        description = "\n".join(message_lines[1:]).strip()
+    else:
+        description = raw_message
+    # Add first comment if present
+    first_comment = str(draft.get("firstComment") or "").strip()
+    if first_comment and first_comment not in description:
+        description = f"{description}\n\n{first_comment}" if description else first_comment
+
+    # Tags from hashtags
     tags = draft.get("hashtags") or draft.get("tags") or []
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",") if t.strip()]
+    # Clean tags (remove # prefix)
+    tags = [t.lstrip("#") for t in tags if t]
 
     metadata = {
         "snippet": {
             "title": title,
-            "description": description,
+            "description": description[:5000],
             "channelId": channel_id,
             "categoryId": str(config.get("categoryId") or "22"),
         },
@@ -1936,7 +1966,9 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
         },
     }
     if tags:
-        metadata["snippet"]["tags"] = tags[:500]  # YouTube limit
+        metadata["snippet"]["tags"] = tags[:500]
+
+    logger.info("YouTube upload: title=%r, tags=%d, description=%d chars", title, len(tags), len(description))
 
     init_response = http.post(
         YOUTUBE_RESUMABLE_UPLOAD_URL,
@@ -1972,6 +2004,7 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
     if thumbnail_path and result.get("id"):
         try:
             _upload_youtube_thumbnail(http, access_token, result["id"], thumbnail_path)
+            logger.info("YouTube thumbnail uploaded: %s", thumbnail_path.name)
         except Exception as exc:
             logger.warning("YouTube thumbnail upload failed: %s", exc)
 
