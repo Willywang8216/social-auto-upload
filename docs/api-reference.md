@@ -161,6 +161,48 @@ curl -X POST https://socialupload.iamwillywang.com/publish-center/submit \
 | POST | `/oauth/youtube/start` | Start YouTube OAuth |
 | GET | `/oauth/youtube/callback` | YouTube callback |
 
+#### YouTube Upload Fields
+
+YouTube uploads support all API fields via the account config or draft:
+
+**Snippet fields:**
+- `title` — Video title (max 100 chars)
+- `description` — Video description (max 5000 chars)
+- `tags` — List of keyword tags
+- `categoryId` — YouTube category ID (default: "22" for People & Blogs)
+- `defaultLanguage` — Language code (e.g., "en")
+- `defaultAudioLanguage` — Audio language code
+
+**Status fields:**
+- `privacyStatus` — "public", "private", or "unlisted"
+- `publishAt` — Scheduled publish time (ISO 8601, requires privacyStatus="private")
+- `license` — "youtube" or "creativeCommon"
+- `embeddable` — Whether video can be embedded (default: true)
+- `publicStatsViewable` — Whether stats are publicly visible (default: true)
+- `madeForKids` — Whether video is made for kids
+- `containsSyntheticMedia` — Flag for AI-generated content
+
+**Recording details:**
+- `recordingDate` — When video was recorded (ISO 8601)
+- `locationDescription` — Text description of location
+- `latitude` / `longitude` — Geographical coordinates
+
+**Thumbnails:**
+- Auto-uploaded from image artifacts or same-name .png/.jpg files
+
+**Example config:**
+```json
+{
+  "channelId": "UC_xxx",
+  "privacyStatus": "public",
+  "categoryId": "22",
+  "defaultLanguage": "en",
+  "embeddable": true,
+  "publicStatsViewable": true,
+  "license": "youtube"
+}
+```
+
 ### TikTok
 | Method | Path | Description |
 |--------|------|-------------|

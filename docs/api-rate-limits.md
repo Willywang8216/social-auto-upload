@@ -52,6 +52,7 @@ This document covers the API rate limits, quotas, and upload constraints for eve
 - Token auto-refresh via `refresh_token` (never expires)
 - Worker refreshes before each publish
 - Quota errors surface as `PreparedPublishError`
+- Supports all YouTube API fields: title, description, tags, privacy, scheduling, thumbnails, etc.
 
 ---
 
