@@ -1367,7 +1367,12 @@ async function regenerateAccount(profile, account) {
     })
     const draft = response?.data?.draft
     if (draft) {
-      account.draft = { ...account.draft, ...draft }
+      // Preserve user-edited fields when merging AI draft
+      const preserved = {}
+      if (account.draft?.title) preserved.title = account.draft.title
+      if (account.draft?.firstComment) preserved.firstComment = account.draft.firstComment
+      if (account.draft?.subreddits) preserved.subreddits = account.draft.subreddits
+      account.draft = { ...draft, ...preserved }
     }
   } finally {
     regeneratingKey.value = null
