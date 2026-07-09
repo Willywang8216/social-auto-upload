@@ -133,16 +133,37 @@ sau youtube upload-video --account <account_name> --file videos/demo.mp4 --title
 3. 新增帳號並登入
 4. 上傳影片並發佈
 
+### 方式 3：使用 API
+
+所有功能都可以透過 REST API 存取。詳見 [API 參考文件](./docs/api-reference.md)。
+
+```bash
+# 上傳檔案
+curl -X POST https://socialupload.iamwillywang.com/upload \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "file=@video.mp4"
+
+# 列出帳號
+curl -H "Authorization: Bearer YOUR_TOKEN" \
+  https://socialupload.iamwillywang.com/api/accounts
+
+# 提交發佈任務
+curl -X POST https://socialupload.iamwillywang.com/publish-center/submit \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"profileIds":[3],"selectedAccountIds":[77],"mediaFilePaths":["uploads/uuid_video.mp4"],"brief":"My post"}'
+```
+
 ## 支援平台
 
 ### Reddit
 
 Reddit 支援兩種認證模式：
 
-- **OAuth API**（推薦）：使用 Reddit 官方 API，需要申請 App
-- **Cookie 模式**：使用瀏覽器 cookie，透過代理伺服器繞過 IP 封鎖
+- **OAuth API**（推薦）：使用 Reddit 官方 API，透過 OAuth 2.0 授權。支援自動 token 刷新。
+- **Cookie 模式**：使用瀏覽器 cookie，透過代理伺服器繞過 IP 封鎖。
 
-Reddit 封鎖資料中心 IP，需要使用住宅代理或 SSH 隧道。
+Reddit 封鎖資料中心 IP，需要使用住宅代理或 SSH 隧道。OAuth API 模式不需要代理。
 
 ### TikTok
 
@@ -167,6 +188,7 @@ TikTok 使用 Content Posting API：
 - [更新說明](./docs/update.md)
 - [CLI 使用說明](./docs/CLI.md)
 - [Agent Bootstrap Prompt](./docs/agent-bootstrap.md)
+- [API 參考文件](./docs/api-reference.md)
 - [API 速率限制與配額](./docs/api-rate-limits.md)
 
 ## 交流與支援
