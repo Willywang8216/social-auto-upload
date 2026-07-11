@@ -276,7 +276,10 @@ limits, quotas, structured logs, audit logs.
 - 2026-07-11 — Phase 2 foundation complete. D-8 fixed (schema-authority
   convergence); SQLAlchemy 2.x models/engine/repositories (`sau_app/db/`);
   PostgreSQL extra + compose service + `postgres-tests` CI job. 546 backend tests
-  pass (11 new). Domain-by-domain cutover of live routes is incremental
+  pass (11 new). Commits `f04cc98`, `40e2467`. CI green on head `40e2467`
+  ([run 29159310813](https://github.com/Willywang8216/social-auto-upload/actions/runs/29159310813))
+  — backend-tests ✅, **postgres-tests ✅ (real PostgreSQL 16)**, frontend-build
+  ✅, dependency-guard ✅. Domain-by-domain cutover of live routes is incremental
   follow-up work.
 
 ## Next incomplete task
