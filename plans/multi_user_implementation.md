@@ -314,9 +314,12 @@ limits, quotas, structured logs, audit logs.
 - 2026-07-11 — Phase 3 identity/workspace foundation. Migration 0015 (identity/
   workspace/session tables, portable; applied via the D-8 path), identity models
   + `IdentityRepository.upsert_google_login()` (first-login workspace
-  provisioning keyed by Google `sub`). 551 backend tests pass (5 new). OIDC
-  transport (Authlib routes, sessions, CSRF) is the next increment; the live
-  path needs a Google OAuth client from the user.
+  provisioning keyed by Google `sub`). 551 backend tests pass (5 new). Commit
+  `305a4b0`. CI on head `305a4b0`
+  ([run 29159600015](https://github.com/Willywang8216/social-auto-upload/actions/runs/29159600015)):
+  postgres-tests ✅ (identity provisioning on real PostgreSQL), frontend-build ✅,
+  dependency-guard ✅, backend-tests ✅. OIDC transport (Authlib routes, sessions,
+  CSRF) is the next increment; the live path needs a Google OAuth client.
 
 ## Next incomplete task
 
