@@ -44,6 +44,14 @@ web = [
   # Production WSGI server. The dev server (app.run) remains the local path;
   # production serves the app via `gunicorn wsgi:app`.
   "gunicorn>=21.2",
+  # SQLAlchemy 2.x is the ORM for the repository layer (sau_app/db). It is
+  # already an Alembic dependency; pin it explicitly for the app.
+  "SQLAlchemy>=2.0",
+]
+# PostgreSQL driver for the production database target. The repository layer
+# (sau_app/db) is dialect-agnostic; install this extra to run against Postgres.
+postgres = [
+  "psycopg[binary]>=3.1",
 ]
 
 [tool.uv]

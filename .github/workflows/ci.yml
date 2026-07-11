@@ -32,6 +32,44 @@ jobs:
       - name: Run backend tests
         run: uv run pytest tests/ --ignore=tests/test_security_http.py -q
 
+  postgres-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sau
+          POSTGRES_PASSWORD: sau
+          POSTGRES_DB: sautest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sau"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://sau:sau@localhost:5432/sautest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies (with postgres extra)
+        run: uv sync --extra web --extra postgres --group dev
+
+      - name: Create conf.py from example
+        run: cp conf.example.py conf.py
+
+      - name: Run repository + migration tests against PostgreSQL
+        run: uv run pytest tests/test_db_repositories.py tests/test_alembic.py -q
+
   frontend-build:
     runs-on: ubuntu-latest
     steps:

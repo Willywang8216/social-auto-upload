@@ -25,7 +25,7 @@ to command output, test results, migration reports, or screenshots.
 |----|-------|-------|--------|
 | 1 | 0 | Audit documents and baseline tests | ✅ complete |
 | 2 | 1 | Application factory and production server (Gunicorn) | ✅ complete |
-| 3 | 2 | PostgreSQL and repository foundation | ⬜ |
+| 3 | 2 | PostgreSQL and repository foundation | ✅ foundation complete |
 | 4 | 3 | Google OIDC and sessions | ⬜ |
 | 5 | 4 | CSRF and authorization (AuthContext, roles) | ⬜ |
 | 6 | 5 | Workspace schema and legacy backfill | ⬜ |
@@ -123,13 +123,48 @@ endpoints, Gunicorn entrypoint — **without changing existing route behavior**.
 **Rollback:** revert the Dockerfile CMD to `python sau_backend.py`; the factory
 is otherwise additive.
 
-## Phase 2 — PostgreSQL and repository foundation ⬜
+## Phase 2 — PostgreSQL and repository foundation ✅ (foundation)
 
 **Goal:** SQLAlchemy 2.x models + workspace-scoped repositories; Postgres in
-dev/test compose; Alembic as the only schema authority (converge D-8); migrate
-one domain at a time from raw SQLite. **Exit evidence (planned):** empty-DB
-upgrade, legacy-fixture upgrade, and current-shape upgrade all pass; repository
-integration tests green on Postgres. **Rollback:** `SAU_DATABASE_MODE=sqlite`.
+dev/test compose; Alembic as the only schema authority (converge D-8).
+
+**Delivered:**
+- **D-8 fixed** (`db/createTable.py`): `bootstrap()` now stamps the revision the
+  raw `CREATE TABLE` block implements (`RAW_SCHEMA_REVISION = 0014`) and then
+  runs `alembic upgrade head`, so any migration newer than the raw block is
+  **applied** rather than silently skipped by a blind head-stamp. Byte-identical
+  today (head == 0014 → upgrade is a no-op); the future path is proven by a
+  simulation (stamp 0013 → upgrade applies 0014) and 2 new `test_alembic.py`
+  tests.
+- **SQLAlchemy 2.x layer** (`sau_app/db/`): `base.py` (DeclarativeBase + naming
+  convention), `models.py` (dialect-agnostic `Profile`/`Account` mapping the
+  real columns), `engine.py` (`resolve_database_url` — `DATABASE_URL` wins, else
+  the legacy SQLite file; `make_engine`/`get_sessionmaker`/`session_scope`;
+  SQLite FK pragma).
+- **Repository layer** (`sau_app/db/repositories/`): `WorkspaceScopedRepository`
+  base (workspace scope is a threaded-through no-op until the `workspace_id`
+  column exists, then it becomes the enforced filter for all subclasses at once)
+  + `ProfileRepository`. Parallel to the raw `myUtils/profiles.py`; **no cutover
+  yet** (domains migrate one at a time in later work).
+- **PostgreSQL**: `postgres` extra (`psycopg[binary]`), a `postgres` service in
+  `docker-compose.yml` (opt-in `--profile dev`, prod stack unchanged), and a new
+  CI job `postgres-tests` with a `postgres:16` service running the repository +
+  migration tests against real PostgreSQL.
+
+**Exit evidence:**
+- **546 passed, 1 skipped, 22 subtests** (11 new: `test_db_repositories.py`,
+  extra `test_alembic.py`). The skip is the Postgres materialization test, which
+  runs in CI where `TEST_DATABASE_URL` is set.
+- Legacy interop proven both directions: a profile written via the SQLAlchemy
+  repo is read identically by `myUtils.profiles` (raw sqlite), and vice versa.
+- Models materialize via `metadata.create_all` on SQLite (local) and PostgreSQL
+  (CI job).
+
+**Not done here (incremental follow-ups):** cutting the live backend routes over
+from raw `sqlite3` to the repositories (one domain at a time), modelling the
+remaining ~27 tables, and making the 14 legacy SQLite-raw migrations
+Postgres-compatible (the sqlite→postgres data cutover, per the rollout doc).
+**Rollback:** `DATABASE_URL` unset → SQLite; the ORM layer is parallel/additive.
 
 ## Phase 3 — Google OIDC and sessions ⬜
 
@@ -238,9 +273,18 @@ limits, quotas, structured logs, audit logs.
   `3481c0b`. CI green on head `3481c0b`
   ([run 29154548808](https://github.com/Willywang8216/social-auto-upload/actions/runs/29154548808))
   — backend-tests ✅, frontend-build ✅, dependency-guard ✅.
+- 2026-07-11 — Phase 2 foundation complete. D-8 fixed (schema-authority
+  convergence); SQLAlchemy 2.x models/engine/repositories (`sau_app/db/`);
+  PostgreSQL extra + compose service + `postgres-tests` CI job. 546 backend tests
+  pass (11 new). Domain-by-domain cutover of live routes is incremental
+  follow-up work.
 
 ## Next incomplete task
 
-Phase 2 — SQLAlchemy 2.x models + workspace-scoped repositories, PostgreSQL in
-dev/test compose, and converging the dual schema paths (fix `bootstrap()`
-head-stamping, D-8) so Alembic is the single schema authority.
+Phase 3 — Google OIDC application login (Authlib, `openid email profile` only,
+kept separate from the YouTube connection flow) + `users`/`auth_identities`/
+`workspaces`/`workspace_members`/`sessions` and first-login workspace creation.
+**Blocker to flag to the user:** the live end-to-end login path needs real
+`GOOGLE_LOGIN_CLIENT_ID`/`SECRET` + a registered redirect URI; the code and its
+tests (mocked OIDC discovery/token) can be built and verified without them, but
+a real Google login can't be exercised in CI without those secrets.

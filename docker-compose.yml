@@ -41,6 +41,32 @@ services:
       # verified in the TikTok developer console before DIRECT_POST works.
       - SAU_TIKTOK_VERIFIED_URL_PREFIXES=https://pub-9915b1494003455c9ab872fd7094e64e.r2.dev/,https://share.iamwillywang.com/
 
+  # Local development PostgreSQL for the multi-tenant migration (Phase 2+).
+  # Opt-in: it only starts with `docker compose --profile dev up`, so the
+  # production single-service stack is unchanged. Point the app/tests at it via
+  #   DATABASE_URL=postgresql+psycopg://sau:sau@postgres:5432/sau
+  #   TEST_DATABASE_URL=postgresql+psycopg://sau:sau@localhost:5433/sau
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["dev"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sau
+      POSTGRES_PASSWORD: sau
+      POSTGRES_DB: sau
+    ports:
+      - "5433:5432"
+    volumes:
+      - sau_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sau"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  sau_pgdata:
+
 networks:
   1panel-network:
     external: true
