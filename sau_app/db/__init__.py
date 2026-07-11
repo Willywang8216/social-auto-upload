@@ -9,6 +9,9 @@ the existing backend yet.
 from __future__ import annotations
 
 from .base import Base
+# Import the model modules so every table is registered on ``Base.metadata``
+# (needed for metadata.create_all and future Alembic autogenerate).
+from . import identity_models, models  # noqa: F401
 from .engine import (
     get_engine,
     get_sessionmaker,

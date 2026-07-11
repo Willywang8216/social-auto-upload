@@ -26,7 +26,7 @@ to command output, test results, migration reports, or screenshots.
 | 1 | 0 | Audit documents and baseline tests | ✅ complete |
 | 2 | 1 | Application factory and production server (Gunicorn) | ✅ complete |
 | 3 | 2 | PostgreSQL and repository foundation | ✅ foundation complete |
-| 4 | 3 | Google OIDC and sessions | ⬜ |
+| 4 | 3 | Google OIDC and sessions | 🚧 identity foundation done; OIDC transport next |
 | 5 | 4 | CSRF and authorization (AuthContext, roles) | ⬜ |
 | 6 | 5 | Workspace schema and legacy backfill | ⬜ |
 | 7 | 6 | Route-by-route tenant isolation | ⬜ |
@@ -166,7 +166,37 @@ remaining ~27 tables, and making the 14 legacy SQLite-raw migrations
 Postgres-compatible (the sqlite→postgres data cutover, per the rollout doc).
 **Rollback:** `DATABASE_URL` unset → SQLite; the ORM layer is parallel/additive.
 
-## Phase 3 — Google OIDC and sessions ⬜
+## Phase 3 — Google OIDC and sessions 🚧
+
+**Identity/workspace foundation — done (this session):**
+- **Migration `0015_identity_and_workspaces`** (portable `op.create_table`, runs
+  on SQLite + PostgreSQL): `users`, `auth_identities` (unique on
+  `provider, provider_subject`), `workspaces`, `workspace_members`, `sessions`.
+  It is the first migration past the raw block, so it is applied by
+  `bootstrap()` via the D-8 fix — verified end-to-end.
+- **ORM models** (`sau_app/db/identity_models.py`) + **`IdentityRepository`**
+  with `upsert_google_login()`: on first login, transactionally creates
+  user + Google identity + personal workspace + owner membership; on repeat
+  login, refreshes email/claims/profile and returns the same user + workspace.
+  **Keyed by Google `sub`, never email** (changing email keeps the same user).
+- **Tests** (`tests/test_identity_provisioning.py`, 5): first-login provisioning,
+  repeat-login reuse, sub-not-email keying, per-user workspace isolation with
+  unique slugs, missing-`sub` rejection. Run on SQLite + PostgreSQL (CI).
+
+**Remaining Phase 3 (OIDC transport — next increment):** Authlib Google OIDC
+client (`openid email profile` only, PKCE + nonce + state, exact server-derived
+redirect), server-side session store + secure `__Host-` cookie + CSRF, and the
+routes `/auth/google/start`, `/auth/google/callback`, `/api/v1/session`,
+`/api/v1/logout` — all flag-gated (`SAU_GOOGLE_LOGIN_ENABLED`, default off) and
+testable against **mocked** OIDC discovery/token, with the legacy bearer token
+still working (`SAU_AUTH_MODE=hybrid`).
+
+> **Needs the user for the *live* path:** a real Google OAuth client
+> (`GOOGLE_LOGIN_CLIENT_ID`/`SECRET`) and a registered redirect URI. The code and
+> its mocked tests can be built and CI-verified without them; only enabling a
+> real Google login in production requires the credentials.
+
+### (original Phase 3 goal, for reference)
 
 **Goal:** Authlib Google OIDC (`openid email profile` only), separate from
 YouTube; `users`/`auth_identities`/`workspaces`/`workspace_members`/`sessions`;
@@ -281,6 +311,12 @@ limits, quotas, structured logs, audit logs.
   — backend-tests ✅, **postgres-tests ✅ (real PostgreSQL 16)**, frontend-build
   ✅, dependency-guard ✅. Domain-by-domain cutover of live routes is incremental
   follow-up work.
+- 2026-07-11 — Phase 3 identity/workspace foundation. Migration 0015 (identity/
+  workspace/session tables, portable; applied via the D-8 path), identity models
+  + `IdentityRepository.upsert_google_login()` (first-login workspace
+  provisioning keyed by Google `sub`). 551 backend tests pass (5 new). OIDC
+  transport (Authlib routes, sessions, CSRF) is the next increment; the live
+  path needs a Google OAuth client from the user.
 
 ## Next incomplete task
 

@@ -67,8 +67,8 @@ jobs:
       - name: Create conf.py from example
         run: cp conf.example.py conf.py
 
-      - name: Run repository + migration tests against PostgreSQL
-        run: uv run pytest tests/test_db_repositories.py tests/test_alembic.py -q
+      - name: Run repository + identity + migration tests against PostgreSQL
+        run: uv run pytest tests/test_db_repositories.py tests/test_identity_provisioning.py tests/test_alembic.py -q
 
   frontend-build:
     runs-on: ubuntu-latest
