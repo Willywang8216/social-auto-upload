@@ -71,7 +71,11 @@ uv run python scripts/audit/check_csvs.py                        # all report CS
 ```
 
 **Commits:** `9b661d3` (audit scripts), `1ab974a` (inventories + baseline),
-`fe63434` (docs), plus this plan.
+`fe63434` (docs), `75f4faf` (this plan).
+
+**Pull request:** [#27 (draft)](https://github.com/Willywang8216/social-auto-upload/pull/27)
+— opens the required PR sequence; kept draft (Phase 0 is docs/tooling only).
+CI runs on the PR (the branch alone does not trigger it).
 
 **Flags flipped:** none. **Rollback:** documentation/tooling only; deleting the
 new files fully reverts.
