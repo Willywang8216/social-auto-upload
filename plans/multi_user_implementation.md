@@ -234,7 +234,10 @@ limits, quotas, structured logs, audit logs.
   this plan.
 - 2026-07-11 — Phase 1 complete. `sau_app/` factory package, `wsgi.py`, Gunicorn
   entrypoint, health/readiness endpoints, request IDs, config validation. 535
-  backend tests pass (18 new); real Gunicorn boot verified.
+  backend tests pass (18 new); real Gunicorn boot verified. Commits `31b28dd`,
+  `3481c0b`. CI green on head `3481c0b`
+  ([run 29154548808](https://github.com/Willywang8216/social-auto-upload/actions/runs/29154548808))
+  — backend-tests ✅, frontend-build ✅, dependency-guard ✅.
 
 ## Next incomplete task
 
