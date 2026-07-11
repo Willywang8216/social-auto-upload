@@ -24,7 +24,7 @@ to command output, test results, migration reports, or screenshots.
 | PR | Phase | Title | Status |
 |----|-------|-------|--------|
 | 1 | 0 | Audit documents and baseline tests | ✅ complete |
-| 2 | 1 | Application factory and production server (Gunicorn) | ⬜ |
+| 2 | 1 | Application factory and production server (Gunicorn) | ✅ complete |
 | 3 | 2 | PostgreSQL and repository foundation | ⬜ |
 | 4 | 3 | Google OIDC and sessions | ⬜ |
 | 5 | 4 | CSRF and authorization (AuthContext, roles) | ⬜ |
@@ -84,16 +84,44 @@ CI runs on the PR (the branch alone does not trigger it).
 **Flags flipped:** none. **Rollback:** documentation/tooling only; deleting the
 new files fully reverts.
 
-## Phase 1 — Application factory and production server ⬜
+## Phase 1 — Application factory and production server ✅
 
-**Goal:** `create_app()`, validated config, extensions module, domain
-blueprints (no behavior change), standard error schema, request/correlation
-ids, structured logging, readiness/liveness endpoints, Gunicorn entrypoint.
-`sau_backend.py` becomes a thin compatibility wrapper; no long-running publish
-runs inline in the API after the worker phase.
-**Exit evidence (planned):** existing tests green under the factory; gunicorn
-boots; health endpoints return 200. **Rollback:** keep `app.run` path behind a
-flag until gunicorn is proven.
+**Goal:** `create_app()`, validated config, extensions module, standard error
+schema, request/correlation ids, structured logging, readiness/liveness
+endpoints, Gunicorn entrypoint — **without changing existing route behavior**.
+
+**Delivered (new `sau_app/` package + `wsgi.py`):**
+- `sau_app/config.py` — `AppConfig` + `load_config()` that **fails closed in
+  production** (missing `SECRET_KEY`, open mode, or `DEBUG_MODE` on) and only
+  warns in dev/test.
+- `sau_app/observability.py` — request/correlation IDs (`X-Request-ID`, reused
+  inbound or generated), a per-request structured log line, and a standard JSON
+  error schema (`{code,msg,data,requestId}`) for unmatched 404 / 405 / uncaught
+  500 (guarded to re-raise under TESTING so tests are unaffected).
+- `sau_app/health.py` — `GET /healthz` (liveness) and `GET /readyz` (readiness,
+  runs registered checks incl. a DB ping) blueprint.
+- `sau_app/extensions.py` — idempotent `init_extensions(app)` +
+  `register_readiness_check()`.
+- `sau_app/__init__.py::create_app()` — wraps the monolith app for Gunicorn;
+  `wsgi.py` exposes `app`. Dockerfile CMD now
+  `gunicorn wsgi:app --workers 1 --threads 8` (single worker until Phase 9
+  splits the in-process publishing threads). `python sau_backend.py` still works.
+- `sau_backend.py` wiring is purely additive: `init_extensions(app)` after CORS
+  (so request-id runs before the auth gate) + a `database` readiness probe.
+  `/healthz` + `/readyz` added to `PUBLIC_PATHS` so they bypass the token gate.
+
+**Exit evidence:**
+- Full suite green: **535 passed, 22 subtests** (517 prior + 18 new
+  `tests/test_app_factory.py`); no regressions. `test_security_http.py`: 12 passed.
+- **Real Gunicorn boot** (protected mode): `/healthz`→200 (+`X-Request-ID`),
+  `/readyz`→`{database:ok}` 200, `/whoami` 401 without token / 200 with token,
+  inbound request-id echoed; zero tracebacks in the server log.
+- Route matrix regenerated to **139** routes (`dump_route_matrix.py --check`
+  exit 0); `check_csvs.py` exit 0.
+
+**Flags flipped:** none (config validation only bites when `APP_ENV=production`).
+**Rollback:** revert the Dockerfile CMD to `python sau_backend.py`; the factory
+is otherwise additive.
 
 ## Phase 2 — PostgreSQL and repository foundation ⬜
 
@@ -180,6 +208,16 @@ limits, quotas, structured logs, audit logs.
 - Identity keyed by Google `sub`, not email (see target design §15).
 - Compatibility-first: current install = tenant zero via a claim flow; three
   orthogonal mode flags (auth/tenancy/database).
+- 2026-07-11 — Phase 1 uses a **wrapping factory** rather than rewriting the
+  7.7k-line monolith into blueprints in one step: `create_app()` returns the
+  existing module-global `app` after idempotent `init_extensions()`. This keeps
+  all 137 routes byte-identical while adding the production server, health,
+  request-ids, and config validation. Blueprint decomposition of existing routes
+  is deferred to later phases (moved incrementally, per the original plan).
+- 2026-07-11 — Phase 1 committed to the **same** designated branch (PR #27) — the
+  harness mandates development on `claude/multi-user-google-auth-kaj0of`, so the
+  intended "separate PR per phase" is realized as clearly-labeled separate
+  commits on the one branch rather than distinct PRs.
 
 ## Remaining risks / open items
 
@@ -194,8 +232,12 @@ limits, quotas, structured logs, audit logs.
 
 - 2026-07-10 — Phase 0 complete. Commits `9b661d3`, `1ab974a`, `fe63434` +
   this plan.
+- 2026-07-11 — Phase 1 complete. `sau_app/` factory package, `wsgi.py`, Gunicorn
+  entrypoint, health/readiness endpoints, request IDs, config validation. 535
+  backend tests pass (18 new); real Gunicorn boot verified.
 
 ## Next incomplete task
 
-Phase 1 — introduce `create_app()` and a Gunicorn entrypoint without changing
-API behavior, keeping `sau_backend.py` importable as a thin wrapper.
+Phase 2 — SQLAlchemy 2.x models + workspace-scoped repositories, PostgreSQL in
+dev/test compose, and converging the dual schema paths (fix `bootstrap()`
+head-stamping, D-8) so Alembic is the single schema authority.

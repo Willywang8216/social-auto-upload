@@ -1,5 +1,7 @@
 path_or_prefix,match_type,handler_endpoint,reason_public,data_exposed,abuse_risk,keep_public_in_target,mitigation,notes
 /,exact,index,serves SPA index.html,none (static shell),low,y,none,
+/healthz,exact,sau_health.healthz,orchestrator liveness probe,none,low,y,none,Phase 1 health blueprint; always 200 if process is up
+/readyz,exact,sau_health.readyz,orchestrator readiness probe,none (status + check names only),low,y,none,Phase 1 health blueprint; runs DB connectivity check
 /getFile,exact,get_file,SPA/CDN media fetch without a token,any uploaded media file by filename,high,n,replace with authorized download or short-lived presigned URL scoped to workspace,path-traversal-guarded only; no per-tenant ACL (route matrix P1)
 /privacy,exact,privacy_page,legal page,none,low,y,none,
 /privacy/,exact,privacy_page,legal page,none,low,y,none,

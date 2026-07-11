@@ -146,9 +146,23 @@ def _tables_detected(view_func) -> str:
     return ";".join(sorted(found))
 
 
+# Files whose route decorators contribute to the live url_map. sau_backend.py
+# holds the 137 monolith routes (@app.route); the Phase 1 health blueprint adds
+# a couple more (@health_bp.route) that are registered via init_extensions.
+ROUTE_DECORATOR_SOURCES = (
+    REPO_ROOT / "sau_backend.py",
+    REPO_ROOT / "sau_app" / "health.py",
+)
+
+
 def _count_route_decorators() -> int:
-    source = (REPO_ROOT / "sau_backend.py").read_text(encoding="utf-8")
-    return len(re.findall(r"^@app\.route\(", source, re.MULTILINE))
+    total = 0
+    for path in ROUTE_DECORATOR_SOURCES:
+        if not path.exists():
+            continue
+        source = path.read_text(encoding="utf-8")
+        total += len(re.findall(r"^@\w+\.route\(", source, re.MULTILINE))
+    return total
 
 
 def enumerate_routes() -> list[dict[str, str]]:

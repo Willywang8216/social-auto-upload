@@ -79,8 +79,13 @@ def check_coverage(name: str, rows: list[dict[str, str]], needles: list[str]) ->
 
 
 def count_route_decorators() -> int:
-    source = (REPO_ROOT / "sau_backend.py").read_text(encoding="utf-8")
-    return len(re.findall(r"^@app\.route\(", source, re.MULTILINE))
+    total = 0
+    for rel in ("sau_backend.py", "sau_app/health.py"):
+        path = REPO_ROOT / rel
+        if not path.exists():
+            continue
+        total += len(re.findall(r"^@\w+\.route\(", path.read_text(encoding="utf-8"), re.MULTILINE))
+    return total
 
 
 def main() -> int:
