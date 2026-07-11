@@ -124,7 +124,13 @@ the baseline run, all gitignored: `.venv/`, `conf.py`, `db/database.db`,
 
 ## No-drift confirmation (filled at end of Phase 0)
 
-Re-run of step 6 after the final Phase 0 commit:
+Re-run of step 6 after the Phase 0 docs/inventories commits:
 
 - Command: `uv run pytest tests/ --ignore=tests/test_security_http.py -q`
-- Result: _pending — recorded in the final Phase 0 commit_
+- Result: **517 passed, 22 subtests passed in 78.94s** — identical pass/fail
+  set to the baseline run (step 6). Phase 0 introduced no behavior drift.
+- Corroborating checks (exit 0): `dump_route_matrix.py --check`
+  ("route matrix OK: 137 routes"), `check_csvs.py` ("all report CSVs valid").
+- `git diff main --name-status` shows only added (`A`) files under
+  `scripts/audit/`, `reports/`, `docs/`, `plans/` — zero existing files
+  modified or deleted.
