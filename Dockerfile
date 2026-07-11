@@ -39,4 +39,9 @@ RUN mkdir -p /app/cookiesFile
 
 EXPOSE 5409
 
-CMD ["python", "sau_backend.py"]
+# Production WSGI server. A single worker (with threads for concurrency) is
+# used deliberately: until the publishing worker is split into its own process
+# (Phase 9), the app starts in-process drain/maintenance threads, and running
+# multiple Gunicorn workers would drain the job queue more than once. The
+# legacy dev-server path (`python sau_backend.py`) still works for local use.
+CMD ["gunicorn", "wsgi:app", "--workers", "1", "--threads", "8", "--timeout", "120", "--bind", "0.0.0.0:5409"]

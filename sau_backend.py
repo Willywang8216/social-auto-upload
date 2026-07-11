@@ -137,6 +137,16 @@ CORS(
     supports_credentials=False,
 )
 
+# Phase 1 factory extensions: request/correlation IDs, structured request
+# logging, a standard JSON error schema, config validation, and the health
+# blueprint (/healthz, /readyz). Registered here — before the auth gate below —
+# so the request-id middleware runs first. Idempotent, so sau_app.create_app()
+# (the Gunicorn entrypoint) can call it again safely. The database readiness
+# probe is registered near the end of this module, once _get_legacy_db_path is
+# defined.
+from sau_app import init_extensions, register_readiness_check  # noqa: E402
+init_extensions(app)
+
 LEGACY_DB_REQUIRED_TABLES = frozenset({"user_info", "file_records"})
 
 
@@ -7773,6 +7783,28 @@ def api_cookies_import():
         return jsonify({"code": 200, "data": result, "msg": "ok"})
     except Exception as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+def _database_readiness_check():
+    """Readiness probe: confirm the legacy SQLite database is reachable.
+
+    Side-effect-free — if the database file does not exist yet (fresh install,
+    bootstrapped lazily on the first request) the instance is still considered
+    ready. When the file exists we open it and run a trivial query.
+    """
+
+    path = _get_legacy_db_path()
+    if not path.exists():
+        return ("uninitialized", True)
+    conn = sqlite3.connect(str(path), timeout=2)
+    try:
+        conn.execute("SELECT 1")
+    finally:
+        conn.close()
+    return ("ok", True)
+
+
+register_readiness_check(app, "database", _database_readiness_check)
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5409, threaded=True)

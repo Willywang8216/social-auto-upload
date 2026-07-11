@@ -39,6 +39,8 @@ from typing import Iterable
 # auth token via query string instead.
 PUBLIC_PATHS: frozenset[str] = frozenset({
     "/",
+    "/healthz",
+    "/readyz",
     "/getFile",
     "/privacy",
     "/privacy/",
