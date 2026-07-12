@@ -50,6 +50,11 @@ def init_extensions(app: Flask, *, environ: Mapping[str, str] | None = None) -> 
     if "sau_health" not in app.blueprints:
         app.register_blueprint(health_bp)
 
+    # Google login blueprint — a no-op unless SAU_GOOGLE_LOGIN_ENABLED is set.
+    from .auth import register_auth  # local import: pulls in SQLAlchemy/auth stack
+
+    register_auth(app, config)
+
     app.config[_INIT_FLAG] = True
     return config
 

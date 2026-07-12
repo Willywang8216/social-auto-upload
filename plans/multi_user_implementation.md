@@ -26,7 +26,7 @@ to command output, test results, migration reports, or screenshots.
 | 1 | 0 | Audit documents and baseline tests | ✅ complete |
 | 2 | 1 | Application factory and production server (Gunicorn) | ✅ complete |
 | 3 | 2 | PostgreSQL and repository foundation | ✅ foundation complete |
-| 4 | 3 | Google OIDC and sessions | 🚧 identity foundation done; OIDC transport next |
+| 4 | 3 | Google OIDC and sessions | ✅ complete (flag-gated; live path needs a Google client) |
 | 5 | 4 | CSRF and authorization (AuthContext, roles) | ⬜ |
 | 6 | 5 | Workspace schema and legacy backfill | ⬜ |
 | 7 | 6 | Route-by-route tenant isolation | ⬜ |
@@ -183,13 +183,36 @@ Postgres-compatible (the sqlite→postgres data cutover, per the rollout doc).
   repeat-login reuse, sub-not-email keying, per-user workspace isolation with
   unique slugs, missing-`sub` rejection. Run on SQLite + PostgreSQL (CI).
 
-**Remaining Phase 3 (OIDC transport — next increment):** Authlib Google OIDC
-client (`openid email profile` only, PKCE + nonce + state, exact server-derived
-redirect), server-side session store + secure `__Host-` cookie + CSRF, and the
-routes `/auth/google/start`, `/auth/google/callback`, `/api/v1/session`,
-`/api/v1/logout` — all flag-gated (`SAU_GOOGLE_LOGIN_ENABLED`, default off) and
-testable against **mocked** OIDC discovery/token, with the legacy bearer token
-still working (`SAU_AUTH_MODE=hybrid`).
+**OIDC transport — done (flag-gated, `SAU_GOOGLE_LOGIN_ENABLED`, default off):**
+- `sau_app/auth/oidc.py` — `GoogleOIDCClient` (Authorization Code + PKCE +
+  nonce + state; `openid email profile` only; ID-token verified via Google JWKS
+  with iss/aud/exp/nonce checks) behind an injectable seam
+  (`app.config['SAU_OIDC_CLIENT']`) so the flow is testable without Google.
+- `sau_app/auth/transactions.py` — server-side login-transaction store
+  (migration 0016 `oauth_login_transactions`): only a **hash** of `state`,
+  single-use, 10-min TTL — defeats replay/CSRF; survives multi-process
+  (unlike the legacy in-memory patreon state).
+- `sau_app/auth/sessions.py` — server-side sessions (table from 0015), opaque
+  high-entropy cookie, `Secure`+`HttpOnly`+`SameSite=Lax`+`__Host-`, idle +
+  absolute expiry, per-session CSRF secret.
+- `sau_app/auth/permissions.py` — role→permission map for the session response.
+- `sau_app/auth/routes.py` — `/auth/google/start`, `/auth/google/callback`,
+  `/api/v1/session`, `/api/v1/logout` (CSRF-protected). Registered by
+  `init_extensions` only when the flag is on; the four paths bypass the legacy
+  bearer gate (added to `PUBLIC_PATHS`) and enforce their own session auth. The
+  redirect URI is **server-derived** from `SAU_PUBLIC_BASE_URL`, never the
+  client. Config fails closed if the flag is on but client id/secret/base URL
+  are missing.
+- Tests: `tests/test_google_login_flow.py` (7) drive the whole flow against a
+  fake Google client — first-login provisioning, secure session cookie, session
+  introspection with permissions + CSRF, CSRF-protected logout + revocation,
+  state replay/`error` rejection, and the flag-off no-op. Production wiring
+  (flag set in env before import → 4 routes + real client registered) verified.
+
+> **Live path needs the user:** create a dedicated Google Cloud OAuth 2.0 "Web"
+> client (separate from YouTube), set `GOOGLE_LOGIN_CLIENT_ID/SECRET` +
+> `SAU_PUBLIC_BASE_URL`, register `<base>/auth/google/callback`, and flip
+> `SAU_GOOGLE_LOGIN_ENABLED=true`. Documented in `.env.example`.
 
 > **Needs the user for the *live* path:** a real Google OAuth client
 > (`GOOGLE_LOGIN_CLIENT_ID`/`SECRET`) and a registered redirect URI. The code and
@@ -318,15 +341,24 @@ limits, quotas, structured logs, audit logs.
   `305a4b0`. CI on head `305a4b0`
   ([run 29159600015](https://github.com/Willywang8216/social-auto-upload/actions/runs/29159600015)):
   postgres-tests ✅ (identity provisioning on real PostgreSQL), frontend-build ✅,
-  dependency-guard ✅, backend-tests ✅. OIDC transport (Authlib routes, sessions,
-  CSRF) is the next increment; the live path needs a Google OAuth client.
+  dependency-guard ✅, backend-tests ✅.
+- 2026-07-11 — Phase 3 OIDC transport complete (flag-gated). Authlib Google
+  client + server-side login transactions (migration 0016) + server-side
+  sessions + CSRF + the four `/auth/google/*` and `/api/v1/*` routes, all off by
+  default. 558 backend tests pass (7 new, whole flow against a mocked Google
+  client). Legacy bearer auth untouched. Live path needs the user's Google
+  OAuth client (documented in `.env.example`).
 
 ## Next incomplete task
 
-Phase 3 — Google OIDC application login (Authlib, `openid email profile` only,
-kept separate from the YouTube connection flow) + `users`/`auth_identities`/
-`workspaces`/`workspace_members`/`sessions` and first-login workspace creation.
-**Blocker to flag to the user:** the live end-to-end login path needs real
-`GOOGLE_LOGIN_CLIENT_ID`/`SECRET` + a registered redirect URI; the code and its
-tests (mocked OIDC discovery/token) can be built and verified without them, but
-a real Google login can't be exercised in CI without those secrets.
+Phase 4 — CSRF/authorization middleware and the `AuthContext`: resolve the
+authenticated user+workspace+role+permissions once per request (from the
+session in oidc/hybrid mode, or the legacy token → legacy workspace in hybrid),
+add permission decorators + role checks, enforce CSRF/Origin on unsafe browser
+requests app-wide, and adopt the 401/403/404 discipline. This unlocks Phase 6
+(route-by-route tenant isolation with the two-user test matrix).
+
+**Standing user input still needed** (does not block Phase 4 build): a Google
+OAuth client to exercise a real login (Phase 3 live path), and — for Phase 5's
+data migration — access to run the expand/backfill against the production
+database. Both are flagged in their phase sections.

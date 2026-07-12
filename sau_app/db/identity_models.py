@@ -113,6 +113,19 @@ class WorkspaceMember(Base):
     user: Mapped[User] = relationship(back_populates="memberships")
 
 
+class OAuthLoginTransaction(Base):
+    __tablename__ = "oauth_login_transactions"
+
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    nonce: Mapped[str] = mapped_column(Text, nullable=False)
+    code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    next_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, server_default=func.current_timestamp())
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class Session(Base):
     __tablename__ = "sessions"
 

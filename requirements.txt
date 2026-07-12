@@ -2,6 +2,7 @@
 # Keep backend runtime deps mirrored with pyproject.toml because Docker still installs from this file.
 aiofiles==24.1.0
 aiohttp==3.9.5
+Authlib==1.7.2
 aiohttp-cors==0.8.1
 aiosignal==1.3.2
 alembic==1.16.1

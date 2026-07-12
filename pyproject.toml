@@ -47,6 +47,9 @@ web = [
   # SQLAlchemy 2.x is the ORM for the repository layer (sau_app/db). It is
   # already an Alembic dependency; pin it explicitly for the app.
   "SQLAlchemy>=2.0",
+  # Authlib powers the Google OpenID Connect application-login flow
+  # (separate from the YouTube account-connection OAuth).
+  "Authlib>=1.3",
 ]
 # PostgreSQL driver for the production database target. The repository layer
 # (sau_app/db) is dialect-agnostic; install this extra to run against Postgres.

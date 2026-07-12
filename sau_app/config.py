@@ -31,6 +31,16 @@ class AppConfig:
     secret_key: str | None
     api_tokens_configured: bool
     request_id_header: str
+    # Google OpenID Connect application login (Phase 3). Disabled by default so
+    # the legacy bearer-token flow is untouched until an operator opts in.
+    google_login_enabled: bool = False
+    google_login_client_id: str | None = None
+    google_login_client_secret: str | None = None
+    public_base_url: str | None = None
+    frontend_origin: str | None = None
+    session_cookie_name: str = "__Host-sau_session"
+    session_idle_seconds: int = 60 * 60 * 12
+    session_absolute_seconds: int = 60 * 60 * 24 * 14
     warnings: tuple[str, ...] = ()
 
     @property
@@ -40,6 +50,13 @@ class AppConfig:
     @property
     def is_testing(self) -> bool:
         return self.env == "testing"
+
+    @property
+    def google_login_redirect_uri(self) -> str | None:
+        """Server-derived callback URI — never taken from the client."""
+        if not self.public_base_url:
+            return None
+        return self.public_base_url.rstrip("/") + "/auth/google/callback"
 
 
 def _clean(value: str | None) -> str | None:
@@ -53,6 +70,15 @@ def _as_bool(value: str | None, *, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _as_int(value: str | None, *, default: int) -> int:
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value.strip())
+    except ValueError:
+        return default
 
 
 def load_config(environ: Mapping[str, str] | None = None) -> AppConfig:
@@ -72,6 +98,17 @@ def load_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     debug = _as_bool(env_map.get("DEBUG_MODE"), default=(env != "production"))
     request_id_header = _clean(env_map.get("SAU_REQUEST_ID_HEADER")) or DEFAULT_REQUEST_ID_HEADER
 
+    google_login_enabled = _as_bool(env_map.get("SAU_GOOGLE_LOGIN_ENABLED"), default=False)
+    google_login_client_id = _clean(env_map.get("GOOGLE_LOGIN_CLIENT_ID"))
+    google_login_client_secret = _clean(env_map.get("GOOGLE_LOGIN_CLIENT_SECRET"))
+    public_base_url = _clean(env_map.get("SAU_PUBLIC_BASE_URL"))
+    frontend_origin = _clean(env_map.get("SAU_FRONTEND_ORIGIN")) or public_base_url
+    session_cookie_name = _clean(env_map.get("SESSION_COOKIE_NAME")) or "__Host-sau_session"
+    session_idle_seconds = _as_int(env_map.get("SESSION_IDLE_SECONDS"), default=60 * 60 * 12)
+    session_absolute_seconds = _as_int(
+        env_map.get("SESSION_ABSOLUTE_SECONDS"), default=60 * 60 * 24 * 14
+    )
+
     # Fail-closed rules that only bite in production.
     problems: list[str] = []
     if secret_key is None:
@@ -81,10 +118,25 @@ def load_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     if debug:
         problems.append("DEBUG_MODE is enabled")
 
-    if env == "production" and problems:
+    # When Google login is switched on, its settings become mandatory.
+    if google_login_enabled:
+        if not google_login_client_id:
+            problems.append("SAU_GOOGLE_LOGIN_ENABLED is on but GOOGLE_LOGIN_CLIENT_ID is not set")
+        if not google_login_client_secret:
+            problems.append("SAU_GOOGLE_LOGIN_ENABLED is on but GOOGLE_LOGIN_CLIENT_SECRET is not set")
+        if not public_base_url:
+            problems.append("SAU_GOOGLE_LOGIN_ENABLED is on but SAU_PUBLIC_BASE_URL is not set")
+        if not secret_key:
+            problems.append("SAU_GOOGLE_LOGIN_ENABLED is on but SECRET_KEY is not set (needed to sign sessions)")
+
+    # Google-login misconfiguration fails closed whenever it is enabled — even
+    # outside production — because a half-configured login flow is unsafe.
+    fatal = (env == "production" and problems) or (
+        google_login_enabled and any("GOOGLE_LOGIN" in p or "PUBLIC_BASE_URL" in p for p in problems)
+    )
+    if fatal:
         raise ConfigError(
-            "refusing to start in production with unsafe configuration: "
-            + "; ".join(problems)
+            "refusing to start with unsafe configuration: " + "; ".join(problems)
         )
 
     return AppConfig(
@@ -93,5 +145,13 @@ def load_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         secret_key=secret_key,
         api_tokens_configured=api_tokens_configured,
         request_id_header=request_id_header,
+        google_login_enabled=google_login_enabled,
+        google_login_client_id=google_login_client_id,
+        google_login_client_secret=google_login_client_secret,
+        public_base_url=public_base_url,
+        frontend_origin=frontend_origin,
+        session_cookie_name=session_cookie_name,
+        session_idle_seconds=session_idle_seconds,
+        session_absolute_seconds=session_absolute_seconds,
         warnings=tuple(problems),
     )
