@@ -421,6 +421,9 @@ limits, quotas, structured logs, audit logs.
   and the idempotent legacy-workspace backfill engine + CLI with orphan
   reporting. 577 backend tests pass (5 new). Constrain step + the real
   production backfill remain (the latter is an operator step on the live DB).
+  Commit `4e4032b`. CI on head `4e4032b`
+  ([run 29204422479](https://github.com/Willywang8216/social-auto-upload/actions/runs/29204422479)):
+  postgres-tests ✅, frontend-build ✅, dependency-guard ✅, backend-tests ✅.
 
 ## Next incomplete task
 
