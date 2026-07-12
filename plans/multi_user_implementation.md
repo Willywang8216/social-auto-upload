@@ -383,7 +383,9 @@ limits, quotas, structured logs, audit logs.
   SAU_TENANCY_MODE), `AuthContext`, tenancy middleware (session resolution +
   CSRF/Origin, inert in legacy mode), session-aware legacy gate, and
   require_auth/require_permission decorators. 572 backend tests pass (14 new).
-  Default behavior unchanged.
+  Default behavior unchanged. Commit `3830753`. CI on head `3830753`
+  ([run 29185712375](https://github.com/Willywang8216/social-auto-upload/actions/runs/29185712375)):
+  backend-tests ✅, postgres-tests ✅, frontend-build ✅, dependency-guard ✅.
 
 ## Next incomplete task
 
