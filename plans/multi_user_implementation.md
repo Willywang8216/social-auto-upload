@@ -347,7 +347,10 @@ limits, quotas, structured logs, audit logs.
   sessions + CSRF + the four `/auth/google/*` and `/api/v1/*` routes, all off by
   default. 558 backend tests pass (7 new, whole flow against a mocked Google
   client). Legacy bearer auth untouched. Live path needs the user's Google
-  OAuth client (documented in `.env.example`).
+  OAuth client (documented in `.env.example`). Commit `950cd96`. CI on head
+  `950cd96`
+  ([run 29173550355](https://github.com/Willywang8216/social-auto-upload/actions/runs/29173550355)):
+  postgres-tests ✅, frontend-build ✅, dependency-guard ✅, backend-tests ✅.
 
 ## Next incomplete task
 
