@@ -47,6 +47,14 @@ def init_extensions(app: Flask, *, environ: Mapping[str, str] | None = None) -> 
 
     observability.install(app, header_name=config.request_id_header)
 
+    # Tenancy middleware resolves the per-request AuthContext and (only for
+    # session-cookie requests) enforces CSRF/Origin. Inert under the default
+    # legacy mode. Registered after request-id so its before_request runs early,
+    # before the legacy auth gate.
+    from .tenancy import install_tenancy  # local import: pulls in the SQLAlchemy stack
+
+    install_tenancy(app)
+
     if "sau_health" not in app.blueprints:
         app.register_blueprint(health_bp)
 

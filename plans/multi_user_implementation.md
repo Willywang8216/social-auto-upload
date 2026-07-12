@@ -27,7 +27,7 @@ to command output, test results, migration reports, or screenshots.
 | 2 | 1 | Application factory and production server (Gunicorn) | ✅ complete |
 | 3 | 2 | PostgreSQL and repository foundation | ✅ foundation complete |
 | 4 | 3 | Google OIDC and sessions | ✅ complete (flag-gated; live path needs a Google client) |
-| 5 | 4 | CSRF and authorization (AuthContext, roles) | ⬜ |
+| 5 | 4 | CSRF and authorization (AuthContext, roles) | ✅ complete |
 | 6 | 5 | Workspace schema and legacy backfill | ⬜ |
 | 7 | 6 | Route-by-route tenant isolation | ⬜ |
 | 8 | 7 | Credential encryption and response redaction | ⬜ |
@@ -227,12 +227,40 @@ first-login transactional workspace creation keyed by `sub`; `/auth/google/*`,
 `/api/v1/session`, `/api/v1/logout`; HttpOnly session cookie; session-id
 rotation. **Rollback:** `SAU_AUTH_MODE=legacy`.
 
-## Phase 4 — CSRF and authorization ⬜
+## Phase 4 — CSRF and authorization ✅
 
 **Goal:** auth middleware + `AuthContext`, permission decorators, role checks,
-CSRF + Origin validation, secure cookie config, session expiry/revocation;
-401/403/404 discipline (do not clear session on a normal 403). **Rollback:**
-`SAU_TENANCY_MODE=shadow`.
+CSRF + Origin validation, 401/403/404 discipline — **inert under the default
+legacy mode**.
+
+**Delivered:**
+- **Mode flags** (`AppConfig`): `SAU_AUTH_MODE` (legacy→hybrid→oidc, default
+  legacy) and `SAU_TENANCY_MODE` (single→shadow→enforced, default single), with
+  validation (invalid → warn + fall back; hybrid/oidc without Google login →
+  warn). `sessions_honored_by_gate` is true only in hybrid/oidc.
+- `sau_app/tenancy/context.py` — immutable `AuthContext`
+  (user/workspace/role/permissions/auth_method) on `flask.g`, `current_auth()`.
+- `sau_app/tenancy/middleware.py` — `before_request` that resolves the session
+  **only when Google login is on** (skips all DB work otherwise), sets
+  `g.sau_session_authenticated` **only in hybrid/oidc**, and enforces
+  CSRF + Origin **only for session-cookie unsafe requests** (never bearer/
+  webhooks). Fails open to anonymous on any resolution error.
+- `sau_backend.py::_enforce_auth` — additively accepts a valid session
+  (`g.sau_session_authenticated`); only ever set when Google login is on, so
+  legacy-mode behavior is byte-identical.
+- `sau_app/tenancy/decorators.py` — `require_auth` (401) and
+  `require_permission` (401 anonymous / 403 authenticated-but-forbidden), not
+  clearing the session on a 403.
+- Roles→permissions from Phase 3's `permissions.py`.
+
+**Exit evidence:** **572 passed** (14 new `tests/test_tenancy_middleware.py`):
+config-mode defaults/validation, decorator 401/403, session context resolution,
+CSRF 403-without/200-with, bad-Origin 403, viewer-403/editor-200 permission
+checks, legacy-mode inertness, and the **real `sau_backend` gate** — anonymous
+401, legacy token still works in hybrid, valid session satisfies the gate.
+Security suite (71) green; route matrix + CSVs green.
+
+**Rollback:** `SAU_AUTH_MODE=legacy` (the default) disables all of it.
 
 ## Phase 5 — Workspace schema and legacy backfill ⬜
 
@@ -351,17 +379,23 @@ limits, quotas, structured logs, audit logs.
   `950cd96`
   ([run 29173550355](https://github.com/Willywang8216/social-auto-upload/actions/runs/29173550355)):
   postgres-tests ✅, frontend-build ✅, dependency-guard ✅, backend-tests ✅.
+- 2026-07-12 — Phase 4 complete. Compatibility mode flags (SAU_AUTH_MODE /
+  SAU_TENANCY_MODE), `AuthContext`, tenancy middleware (session resolution +
+  CSRF/Origin, inert in legacy mode), session-aware legacy gate, and
+  require_auth/require_permission decorators. 572 backend tests pass (14 new).
+  Default behavior unchanged.
 
 ## Next incomplete task
 
-Phase 4 — CSRF/authorization middleware and the `AuthContext`: resolve the
-authenticated user+workspace+role+permissions once per request (from the
-session in oidc/hybrid mode, or the legacy token → legacy workspace in hybrid),
-add permission decorators + role checks, enforce CSRF/Origin on unsafe browser
-requests app-wide, and adopt the 401/403/404 discipline. This unlocks Phase 6
-(route-by-route tenant isolation with the two-user test matrix).
+Phase 5 — tenant schema expansion + legacy backfill: add nullable `workspace_id`
+to the tenant-owned tables (a portable migration 0017, applied via the D-8
+path), create the legacy owner + legacy workspace from deployment config, and
+backfill existing rows into it (top-level direct, children via parents) with an
+orphan report that halts on any unexplained record. Then Phase 6 wires the
+workspace-scoped repositories into the live routes with the two-user isolation
+test matrix.
 
-**Standing user input still needed** (does not block Phase 4 build): a Google
-OAuth client to exercise a real login (Phase 3 live path), and — for Phase 5's
-data migration — access to run the expand/backfill against the production
-database. Both are flagged in their phase sections.
+**Standing user input still needed** (does not block the code build): a Google
+OAuth client to exercise a *real* login (Phase 3 live path), and access to run
+the Phase 5 backfill against the *production* database. Both are flagged in
+their phase sections.

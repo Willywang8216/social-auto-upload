@@ -31,6 +31,15 @@ class AppConfig:
     secret_key: str | None
     api_tokens_configured: bool
     request_id_header: str
+    # Compatibility mode flags (Phase 4). Defaults preserve today's behavior:
+    #   auth_mode=legacy   -> only the SAU_API_TOKENS bearer gate; sessions are
+    #                         ignored by the gate even if a cookie is present.
+    #   auth_mode=hybrid   -> bearer token OR a valid Google session.
+    #   auth_mode=oidc     -> Google session is the normal browser auth.
+    #   tenancy_mode=single/shadow/enforced -> how strictly workspace scope is
+    #                         applied (enforcement arrives with the tenant schema).
+    auth_mode: str = "legacy"
+    tenancy_mode: str = "single"
     # Google OpenID Connect application login (Phase 3). Disabled by default so
     # the legacy bearer-token flow is untouched until an operator opts in.
     google_login_enabled: bool = False
@@ -50,6 +59,11 @@ class AppConfig:
     @property
     def is_testing(self) -> bool:
         return self.env == "testing"
+
+    @property
+    def sessions_honored_by_gate(self) -> bool:
+        """Whether a valid session may satisfy the auth gate (hybrid/oidc)."""
+        return self.auth_mode in {"hybrid", "oidc"}
 
     @property
     def google_login_redirect_uri(self) -> str | None:
@@ -98,6 +112,8 @@ def load_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     debug = _as_bool(env_map.get("DEBUG_MODE"), default=(env != "production"))
     request_id_header = _clean(env_map.get("SAU_REQUEST_ID_HEADER")) or DEFAULT_REQUEST_ID_HEADER
 
+    auth_mode = (_clean(env_map.get("SAU_AUTH_MODE")) or "legacy").lower()
+    tenancy_mode = (_clean(env_map.get("SAU_TENANCY_MODE")) or "single").lower()
     google_login_enabled = _as_bool(env_map.get("SAU_GOOGLE_LOGIN_ENABLED"), default=False)
     google_login_client_id = _clean(env_map.get("GOOGLE_LOGIN_CLIENT_ID"))
     google_login_client_secret = _clean(env_map.get("GOOGLE_LOGIN_CLIENT_SECRET"))
@@ -117,6 +133,18 @@ def load_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         problems.append("SAU_API_TOKENS is empty — the API would run in open (unauthenticated) mode")
     if debug:
         problems.append("DEBUG_MODE is enabled")
+
+    if auth_mode not in {"legacy", "hybrid", "oidc"}:
+        problems.append(f"SAU_AUTH_MODE has an invalid value {auth_mode!r}")
+        auth_mode = "legacy"
+    if tenancy_mode not in {"single", "shadow", "enforced"}:
+        problems.append(f"SAU_TENANCY_MODE has an invalid value {tenancy_mode!r}")
+        tenancy_mode = "single"
+    # Honouring sessions at the gate is meaningless without the login flow.
+    if auth_mode in {"hybrid", "oidc"} and not google_login_enabled:
+        problems.append(
+            f"SAU_AUTH_MODE={auth_mode} requires SAU_GOOGLE_LOGIN_ENABLED (no session source otherwise)"
+        )
 
     # When Google login is switched on, its settings become mandatory.
     if google_login_enabled:
@@ -145,6 +173,8 @@ def load_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         secret_key=secret_key,
         api_tokens_configured=api_tokens_configured,
         request_id_header=request_id_header,
+        auth_mode=auth_mode,
+        tenancy_mode=tenancy_mode,
         google_login_enabled=google_login_enabled,
         google_login_client_id=google_login_client_id,
         google_login_client_secret=google_login_client_secret,

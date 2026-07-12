@@ -20,7 +20,7 @@ install_browserless_patch()
 from flask_cors import CORS
 from myUtils.auth import check_cookie
 from myUtils import account_validation
-from flask import Flask, request, jsonify, Response, render_template, send_from_directory, current_app, url_for, redirect
+from flask import Flask, request, jsonify, Response, render_template, send_from_directory, current_app, url_for, redirect, g
 from utils.conf_defaults import BASE_DIR
 from myUtils import campaigns as campaign_store
 from myUtils import content_rules
@@ -375,6 +375,12 @@ def _enforce_auth():
     if request.method == "OPTIONS":
         return None  # let the CORS layer answer preflight
     if policy.is_public_path(request.path):
+        return None
+
+    # Hybrid/oidc: a valid Google session (resolved by the tenancy middleware,
+    # which runs before this hook) satisfies the gate. This flag is only ever
+    # set when Google login is enabled, so legacy-mode behavior is unchanged.
+    if getattr(g, "sau_session_authenticated", False):
         return None
 
     is_sse = request.path == "/login"
