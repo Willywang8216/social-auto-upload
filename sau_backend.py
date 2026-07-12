@@ -1911,6 +1911,24 @@ def _current_db_path() -> Path:
     return _ensure_legacy_db_ready()
 
 
+def _workspace_scope() -> str | None:
+    """Workspace id to scope tenant queries by, or ``None`` for no scoping.
+
+    Returns ``None`` in the default ``single``/``shadow`` tenancy modes and for
+    legacy-token callers (single-tenant/admin path). In ``enforced`` mode a
+    Google-session caller is scoped to their active workspace, so cross-workspace
+    resources resolve as 404. Wired route-by-route (Phase 6); unscoped by default
+    so existing behavior is unchanged.
+    """
+    config = app.config.get("SAU_APP_CONFIG")
+    if config is None or getattr(config, "tenancy_mode", "single") != "enforced":
+        return None
+    ctx = getattr(g, "auth_ctx", None)
+    if ctx is None or getattr(ctx, "auth_method", None) != "google_session":
+        return None
+    return getattr(ctx, "workspace_id", None)
+
+
 def _profile_payload(profile: profile_registry.Profile) -> dict:
     return profile.to_dict()
 
@@ -5118,7 +5136,7 @@ def tiktok_publish_status(job_id):
 @app.route("/profiles", methods=["GET"])
 def profiles_list():
     db_path = _current_db_path()
-    items = profile_registry.list_profiles(db_path=db_path)
+    items = profile_registry.list_profiles(workspace_id=_workspace_scope(), db_path=db_path)
     return jsonify(
         {"code": 200, "msg": "ok", "data": [_profile_payload(item) for item in items]}
     ), 200
@@ -5135,6 +5153,7 @@ def profiles_create():
             name,
             description=str(data.get("description", "") or ""),
             settings=data.get("settings") if isinstance(data.get("settings"), dict) else None,
+            workspace_id=_workspace_scope(),
             db_path=_current_db_path(),
         )
     except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
@@ -5145,7 +5164,9 @@ def profiles_create():
 @app.route("/profiles/<int:profile_id>", methods=["GET"])
 def profiles_get(profile_id):
     try:
-        profile = profile_registry.get_profile(profile_id, db_path=_current_db_path())
+        profile = profile_registry.get_profile(
+            profile_id, workspace_id=_workspace_scope(), db_path=_current_db_path()
+        )
     except LookupError:
         return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
     return jsonify({"code": 200, "msg": "ok", "data": _profile_payload(profile)}), 200
@@ -5160,6 +5181,7 @@ def profiles_patch(profile_id):
             name=data.get("name"),
             description=data.get("description"),
             settings=data.get("settings") if isinstance(data.get("settings"), dict) else None,
+            workspace_id=_workspace_scope(),
             db_path=_current_db_path(),
         )
     except LookupError:
@@ -5172,7 +5194,9 @@ def profiles_patch(profile_id):
 @app.route("/profiles/<int:profile_id>", methods=["DELETE"])
 def profiles_delete(profile_id):
     try:
-        profile_registry.delete_profile(profile_id, db_path=_current_db_path())
+        profile_registry.delete_profile(
+            profile_id, workspace_id=_workspace_scope(), db_path=_current_db_path()
+        )
     except LookupError:
         return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
     except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
@@ -5184,7 +5208,7 @@ def profiles_delete(profile_id):
 def profile_accounts_list(profile_id):
     db_path = _current_db_path()
     try:
-        profile_registry.get_profile(profile_id, db_path=db_path)
+        profile_registry.get_profile(profile_id, workspace_id=_workspace_scope(), db_path=db_path)
     except LookupError:
         return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
 
@@ -5230,6 +5254,8 @@ def profile_accounts_create(profile_id):
             raise ValueError("accountName is required")
         if not platform:
             raise ValueError("platform is required")
+        # Reject creating an account under a profile owned by another workspace.
+        profile_registry.get_profile(profile_id, workspace_id=_workspace_scope(), db_path=_current_db_path())
         validation = _validate_account_payload(data, db_path=_current_db_path(), profile_id=profile_id)
         if not validation.valid:
             raise ValueError("; ".join(validation.errors))

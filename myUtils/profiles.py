@@ -283,30 +283,56 @@ def create_profile(
     description: str = "",
     *,
     settings: dict | None = None,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> Profile:
     slug = slugify(name)
     with _connect(db_path) as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO profiles (name, slug, description, settings_json)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                name.strip(),
-                slug,
-                description.strip(),
-                json.dumps(settings or {}, ensure_ascii=False),
-            ),
-        )
+        if workspace_id is not None:
+            cursor = conn.execute(
+                """
+                INSERT INTO profiles (name, slug, description, settings_json, workspace_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    name.strip(),
+                    slug,
+                    description.strip(),
+                    json.dumps(settings or {}, ensure_ascii=False),
+                    workspace_id,
+                ),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO profiles (name, slug, description, settings_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    name.strip(),
+                    slug,
+                    description.strip(),
+                    json.dumps(settings or {}, ensure_ascii=False),
+                ),
+            )
         conn.commit()
         profile_id = cursor.lastrowid
-    return get_profile(profile_id, db_path=db_path)
+    return get_profile(profile_id, workspace_id=workspace_id, db_path=db_path)
 
 
-def get_profile(profile_id: int, *, db_path: Path = DB_PATH) -> Profile:
+def get_profile(profile_id: int, *, workspace_id: str | None = None, db_path: Path = DB_PATH) -> Profile:
+    """Fetch a profile. When ``workspace_id`` is given, a profile that belongs to
+    another workspace is treated as not found (tenant isolation)."""
     with _connect(db_path) as conn:
-        row = conn.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,)).fetchone()
+        if workspace_id is not None:
+            row = conn.execute(
+                "SELECT * FROM profiles WHERE id = ? AND workspace_id = ?",
+                (profile_id, workspace_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
     if row is None:
         raise LookupError(f"Profile not found: id={profile_id}")
     return _row_to_profile(row)
@@ -320,9 +346,15 @@ def get_profile_by_slug(slug: str, *, db_path: Path = DB_PATH) -> Profile:
     return _row_to_profile(row)
 
 
-def list_profiles(*, db_path: Path = DB_PATH) -> list[Profile]:
+def list_profiles(*, workspace_id: str | None = None, db_path: Path = DB_PATH) -> list[Profile]:
     with _connect(db_path) as conn:
-        rows = conn.execute("SELECT * FROM profiles ORDER BY name").fetchall()
+        if workspace_id is not None:
+            rows = conn.execute(
+                "SELECT * FROM profiles WHERE workspace_id = ? ORDER BY name",
+                (workspace_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM profiles ORDER BY name").fetchall()
     return [_row_to_profile(row) for row in rows]
 
 
@@ -332,16 +364,20 @@ def update_profile(
     name: str | None = None,
     description: str | None = None,
     settings: dict | None = None,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
     **extra_fields,
 ) -> Profile:
-    """Update a profile. Supports name, description, settings, and any extended column."""
+    """Update a profile. Supports name, description, settings, and any extended column.
+
+    When ``workspace_id`` is given, a profile owned by another workspace raises
+    ``LookupError`` and is left untouched (tenant isolation)."""
     _EXTENDED_FIELDS = {
         "default_language", "timezone", "system_prompt", "writing_style_prompt",
         "contact_details", "default_cta", "default_hashtags", "default_link",
         "watermark_config_id", "google_sheet_folder_id",
     }
-    current = get_profile(profile_id, db_path=db_path)
+    current = get_profile(profile_id, workspace_id=workspace_id, db_path=db_path)
     next_name = current.name if name is None else name.strip()
     next_description = current.description if description is None else description.strip()
     next_settings = current.settings if settings is None else settings
@@ -363,10 +399,15 @@ def update_profile(
             values,
         )
         conn.commit()
-    return get_profile(profile_id, db_path=db_path)
+    return get_profile(profile_id, workspace_id=workspace_id, db_path=db_path)
 
 
-def delete_profile(profile_id: int, *, db_path: Path = DB_PATH) -> None:
+def delete_profile(profile_id: int, *, workspace_id: str | None = None, db_path: Path = DB_PATH) -> None:
+    """Delete a profile. When ``workspace_id`` is given, a profile owned by
+    another workspace raises ``LookupError`` and is left intact."""
+    if workspace_id is not None:
+        # Confirm ownership before deleting (foreign profile -> LookupError -> 404).
+        get_profile(profile_id, workspace_id=workspace_id, db_path=db_path)
     with _connect(db_path) as conn:
         conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
         conn.commit()

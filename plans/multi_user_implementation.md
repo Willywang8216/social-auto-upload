@@ -29,7 +29,7 @@ to command output, test results, migration reports, or screenshots.
 | 4 | 3 | Google OIDC and sessions | ✅ complete (flag-gated; live path needs a Google client) |
 | 5 | 4 | CSRF and authorization (AuthContext, roles) | ✅ complete |
 | 6 | 5 | Workspace schema and legacy backfill | ✅ expand + backfill tool (constrain + prod run pending) |
-| 7 | 6 | Route-by-route tenant isolation | ⬜ |
+| 7 | 6 | Route-by-route tenant isolation | 🚧 profile domain scoped + two-user matrix; other domains incremental |
 | 8 | 7 | Credential encryption and response redaction | ⬜ |
 | 9 | 8 | Tenant-aware object storage | ⬜ |
 | 10 | 9 | Redis queues and separate workers | ⬜ |
@@ -299,13 +299,35 @@ against the real database (backup first, then `python -m sau_app.tenancy.backfil
 **Rollback:** `alembic downgrade` 0017 (drops the columns); the backfill only
 writes NULL rows so it is re-runnable.
 
-## Phase 6 — Route-by-route tenant isolation ⬜
+## Phase 6 — Route-by-route tenant isolation 🚧 (profile domain proven)
 
-**Goal:** replace unscoped `list_*`/`get_*` with workspace-scoped repositories
-across all 137 routes (matrix `planned_workspace_scope`). **Exit evidence
-(planned):** the two-user isolation matrix (A can/cannot reach B by known id;
-unauth denied; role denials) passes for profiles, accounts, media, campaigns,
-templates, jobs, logs, analytics, storage, OAuth status, exports.
+**Goal:** replace unscoped `list_*`/`get_*` with workspace-scoped access across
+the routes, driven by `AuthContext`, 404 on foreign-workspace. Enforcement is
+gated by `SAU_TENANCY_MODE` (default `single` = unscoped, unchanged).
+
+**Delivered (the pattern, proven on the tenant-root domain):**
+- `_workspace_scope()` (`sau_backend.py`): returns the session's workspace in
+  `enforced` mode, else `None` (single/shadow, or legacy-token admin path).
+- `myUtils/profiles.py`: `create/get/list/update/delete_profile` take an optional
+  `workspace_id` (default `None` = today's unscoped SQL); when set, reads/writes
+  are scoped and a foreign-workspace profile raises `LookupError` → 404.
+- The five `/profiles*` routes + the account-create parent check pass
+  `_workspace_scope()`.
+- **Two-user isolation matrix** (`tests/test_tenant_isolation.py`, 8) in
+  `enforced` mode against the real app: anonymous 401; each user lists only their
+  own; A gets 404 reading/patching/deleting B's profile by known id (B intact);
+  A cannot create an account under B's profile; A fully manages its own; a
+  created profile is scoped to the caller's workspace; and the legacy token stays
+  unscoped (admin path).
+
+**Exit evidence:** **585 backend tests pass** (8 new). Default (`single`) mode
+unchanged — 577 prior tests still green, `test_profiles.py` green.
+
+**Remaining (same helper + pattern, incremental):** accounts, media/media-groups,
+campaigns/templates, jobs + job logs, analytics, OAuth status, exports — each
+threads `workspace_id` through its registry calls and adds its slice of the
+two-user matrix. Then flip `SAU_TENANCY_MODE` `single`→`shadow`→`enforced` once
+the production backfill (Phase 5) has run. **Rollback:** `SAU_TENANCY_MODE=single`.
 
 ## Phase 7 — Credential encryption and response redaction ⬜
 
@@ -424,16 +446,23 @@ limits, quotas, structured logs, audit logs.
   Commit `4e4032b`. CI on head `4e4032b`
   ([run 29204422479](https://github.com/Willywang8216/social-auto-upload/actions/runs/29204422479)):
   postgres-tests ✅, frontend-build ✅, dependency-guard ✅, backend-tests ✅.
+- 2026-07-12 — Phase 6 profile-domain isolation. `_workspace_scope()` helper +
+  workspace_id scoping through the profile registry + the five /profiles routes,
+  gated by SAU_TENANCY_MODE (default single = unscoped). Two-user isolation
+  matrix (8 tests) proves A cannot list/read/modify/delete B's profile in
+  enforced mode. 585 backend tests pass (8 new). Other domains follow the same
+  pattern incrementally.
 
 ## Next incomplete task
 
-Phase 6 — route-by-route tenant isolation: give the workspace-scoped
-repositories `workspace_id`-aware methods for accounts/media/campaigns/jobs
-(the pattern is already in `WorkspaceScopedRepository`), then migrate the live
-routes to resolve the workspace from `AuthContext` and 404 on foreign-workspace
-resources, with the two-user A-cannot-touch-B isolation test matrix. Runs in
-`shadow` tenancy mode first (compute + log), then `enforced`.
+Phase 6 (continued) — extend the proven `_workspace_scope()` pattern to the
+remaining domains: accounts (`/accounts/*`, `/api/accounts`), media +
+media-groups, campaigns + templates, jobs + job logs, analytics, OAuth status,
+and exports — each threading `workspace_id` through its registry calls and
+adding its slice of the two-user matrix. Then Phase 7 (credential encryption)
+and the frontend (Phase 10).
 
 **Standing user input still needed** (does not block the code build): a Google
 OAuth client to exercise a *real* login (Phase 3 live path), and access to run
-the Phase 5 backfill + Phase 6 enforcement against the *production* database.
+the Phase 5 backfill + flip `SAU_TENANCY_MODE=enforced` against the *production*
+database.
