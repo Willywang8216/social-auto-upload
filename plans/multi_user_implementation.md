@@ -28,7 +28,7 @@ to command output, test results, migration reports, or screenshots.
 | 3 | 2 | PostgreSQL and repository foundation | ✅ foundation complete |
 | 4 | 3 | Google OIDC and sessions | ✅ complete (flag-gated; live path needs a Google client) |
 | 5 | 4 | CSRF and authorization (AuthContext, roles) | ✅ complete |
-| 6 | 5 | Workspace schema and legacy backfill | ⬜ |
+| 6 | 5 | Workspace schema and legacy backfill | ✅ expand + backfill tool (constrain + prod run pending) |
 | 7 | 6 | Route-by-route tenant isolation | ⬜ |
 | 8 | 7 | Credential encryption and response redaction | ⬜ |
 | 9 | 8 | Tenant-aware object storage | ⬜ |
@@ -262,12 +262,42 @@ Security suite (71) green; route matrix + CSVs green.
 
 **Rollback:** `SAU_AUTH_MODE=legacy` (the default) disables all of it.
 
-## Phase 5 — Workspace schema and legacy backfill ⬜
+## Phase 5 — Workspace schema and legacy backfill ✅ (expand + backfill tool)
 
-**Goal:** expand→backfill→constrain per the rollout doc; legacy workspace +
-claim flow; orphan/count reports; workspace-scoped uniqueness; optional RLS.
-**Exit evidence (planned):** zero orphans; pre/post counts equal; rollback
-tested. **Rollback:** downgrade revisions; re-run idempotent backfill.
+**Goal:** expand→backfill→constrain per the rollout doc; legacy workspace;
+orphan/count reports.
+
+**Delivered:**
+- **Mapper hardening** (`myUtils/profiles.py`, `myUtils/media_groups.py`): the
+  four unfiltered `Model(**payload)` mappers now filter to declared dataclass
+  fields (the precedent already used by `sheet_export_service` et al.), so a new
+  `workspace_id` column doesn't break the legacy data layer. (`campaigns.py`/
+  `jobs.py` build by explicit column name and were already safe.)
+- **Migration 0017** (`workspace_id_expand`): adds a nullable `workspace_id`
+  (String 36) to the 28 tenant-owned tables, indexed on the hot ones. Portable
+  (SQLite + PostgreSQL), guarded (skips existing columns), applied via the D-8
+  path — verified end-to-end (bootstrap reaches head 0017; profile/account/
+  media-group round-trips still pass).
+- **Backfill engine** (`sau_app/tenancy/backfill.py` + `tables.py`): ensures the
+  legacy user + legacy workspace + owner membership (idempotent, from
+  `SAU_LEGACY_OWNER_EMAIL`/`SAU_LEGACY_WORKSPACE_NAME`), assigns every existing
+  tenant row to it (`UPDATE ... WHERE workspace_id IS NULL`, only touching NULLs
+  so a re-run/partial state is safe), and emits pre/post counts + an orphan
+  report. CLI: `python -m sau_app.tenancy.backfill [--dry-run]`, exits non-zero
+  if any orphan remains. `TENANT_TABLES` is a single source of truth shared with
+  the migration (drift-guarded by a test).
+
+**Exit evidence:** **577 passed** (5 new `tests/test_backfill.py`: table-list
+drift guard, full assignment + legacy-workspace creation, idempotency, dry-run
+writes nothing + reports orphans, only-touches-NULL). CLI smoke-tested
+(dry-run + real run exit 0). 112 data-layer tests green after the mapper change.
+
+**Not done here:** the **constrain** step (NOT NULL, workspace-scoped composite
+uniques, FKs, optional PostgreSQL RLS) — a follow-up revision once the backfill
+has run — and the **actual production backfill**, which is an operator step
+against the real database (backup first, then `python -m sau_app.tenancy.backfill`).
+**Rollback:** `alembic downgrade` 0017 (drops the columns); the backfill only
+writes NULL rows so it is re-runnable.
 
 ## Phase 6 — Route-by-route tenant isolation ⬜
 
@@ -386,18 +416,21 @@ limits, quotas, structured logs, audit logs.
   Default behavior unchanged. Commit `3830753`. CI on head `3830753`
   ([run 29185712375](https://github.com/Willywang8216/social-auto-upload/actions/runs/29185712375)):
   backend-tests ✅, postgres-tests ✅, frontend-build ✅, dependency-guard ✅.
+- 2026-07-12 — Phase 5 expand + backfill tool. Hardened the legacy row-mappers,
+  migration 0017 (nullable workspace_id on 28 tenant tables, applied via D-8),
+  and the idempotent legacy-workspace backfill engine + CLI with orphan
+  reporting. 577 backend tests pass (5 new). Constrain step + the real
+  production backfill remain (the latter is an operator step on the live DB).
 
 ## Next incomplete task
 
-Phase 5 — tenant schema expansion + legacy backfill: add nullable `workspace_id`
-to the tenant-owned tables (a portable migration 0017, applied via the D-8
-path), create the legacy owner + legacy workspace from deployment config, and
-backfill existing rows into it (top-level direct, children via parents) with an
-orphan report that halts on any unexplained record. Then Phase 6 wires the
-workspace-scoped repositories into the live routes with the two-user isolation
-test matrix.
+Phase 6 — route-by-route tenant isolation: give the workspace-scoped
+repositories `workspace_id`-aware methods for accounts/media/campaigns/jobs
+(the pattern is already in `WorkspaceScopedRepository`), then migrate the live
+routes to resolve the workspace from `AuthContext` and 404 on foreign-workspace
+resources, with the two-user A-cannot-touch-B isolation test matrix. Runs in
+`shadow` tenancy mode first (compute + log), then `enforced`.
 
 **Standing user input still needed** (does not block the code build): a Google
 OAuth client to exercise a *real* login (Phase 3 live path), and access to run
-the Phase 5 backfill against the *production* database. Both are flagged in
-their phase sections.
+the Phase 5 backfill + Phase 6 enforcement against the *production* database.

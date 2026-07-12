@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
@@ -89,12 +89,18 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
+_MEDIA_GROUP_FIELDS = {f.name for f in fields(MediaGroup)}
+_MEDIA_GROUP_ITEM_FIELDS = {f.name for f in fields(MediaGroupItem)}
+
+
 def _row_to_media_group(row: sqlite3.Row) -> MediaGroup:
-    return MediaGroup(**{key: row[key] for key in row.keys()})
+    # Filter to declared fields so schema additions (e.g. workspace_id) don't
+    # break construction — the tenancy columns are handled by the ORM layer.
+    return MediaGroup(**{k: row[k] for k in row.keys() if k in _MEDIA_GROUP_FIELDS})
 
 
 def _row_to_media_group_item(row: sqlite3.Row) -> MediaGroupItem:
-    return MediaGroupItem(**{key: row[key] for key in row.keys()})
+    return MediaGroupItem(**{k: row[k] for k in row.keys() if k in _MEDIA_GROUP_ITEM_FIELDS})
 
 
 def _assert_role(role: str) -> None:

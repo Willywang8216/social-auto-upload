@@ -18,7 +18,7 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -154,9 +154,16 @@ def _connect(db_path: Path = DB_PATH) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+_PROFILE_FIELDS = {f.name for f in fields(Profile)}
+_ACCOUNT_FIELDS = {f.name for f in fields(Account)}
+
+
 def _row_to_profile(row: sqlite3.Row) -> Profile:
     payload = {key: row[key] for key in row.keys()}
     payload["settings"] = json.loads(payload.pop("settings_json", "{}") or "{}")
+    # Filter to declared fields so schema additions (e.g. workspace_id) don't
+    # break construction — the tenancy columns are handled by the ORM layer.
+    payload = {k: v for k, v in payload.items() if k in _PROFILE_FIELDS}
     return Profile(**payload)
 
 
@@ -164,6 +171,7 @@ def _row_to_account(row: sqlite3.Row) -> Account:
     payload = {key: row[key] for key in row.keys()}
     payload["config"] = json.loads(payload.pop("config_json", "{}") or "{}")
     payload["enabled"] = bool(payload.get("enabled", 1))
+    payload = {k: v for k, v in payload.items() if k in _ACCOUNT_FIELDS}
     return Account(**payload)
 
 
