@@ -451,7 +451,9 @@ limits, quotas, structured logs, audit logs.
   gated by SAU_TENANCY_MODE (default single = unscoped). Two-user isolation
   matrix (8 tests) proves A cannot list/read/modify/delete B's profile in
   enforced mode. 585 backend tests pass (8 new). Other domains follow the same
-  pattern incrementally.
+  pattern incrementally. Commit `1bdc8b3`. CI on head `1bdc8b3`
+  ([run 29205390492](https://github.com/Willywang8216/social-auto-upload/actions/runs/29205390492)):
+  postgres-tests ✅, frontend-build ✅, dependency-guard ✅, backend-tests ✅.
 
 ## Next incomplete task
 
