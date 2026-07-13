@@ -591,6 +591,46 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         self.assertEqual(stored.config["accessToken"], "SUPER-SECRET-TOKEN")  # preserved
         self.assertEqual(stored.config["channelTitle"], "NewChan")  # updated
 
+    # --- cookie export / download hardening (Phase 7b) ---------------------
+
+    def test_own_cookie_export_decrypts_encrypted_file(self) -> None:
+        # Regression: the export route called a nonexistent read_cookie_file and
+        # fell back to a raw read, which broke once cookies were encrypted.
+        import base64
+        import json as _json
+        import secrets
+        from myUtils import cookie_storage
+        key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
+        with patch.dict(os.environ, {"SAU_COOKIE_ENCRYPTION_KEY": key}):
+            p = prof.create_profile(name=uuid.uuid4().hex, workspace_id=self.ws_a, db_path=self.db_path)
+            cookie_file = Path(self._tmp.name) / "enc_cookies.json"
+            cookie_storage.write_cookie(
+                cookie_file,
+                _json.dumps({"cookies": [{"name": "sid", "value": "xyz"}]}).encode("utf-8"),
+            )
+            self.assertTrue(cookie_storage.looks_encrypted(cookie_file.read_bytes()))
+            acct = prof.add_account(
+                p.id, "douyin", "acct1", cookie_path=str(cookie_file), db_path=self.db_path
+            )
+            resp = self._get(self._client(self.sid_a), f"/api/auth/cookies/{acct.id}/export")
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.get_json()["data"]["cookies"][0]["value"], "xyz")
+
+    def test_downloadcookie_scoped_to_workspace(self) -> None:
+        import json as _json
+        cookie_root = Path(self._tmp.name) / "cookiesFile"
+        cookie_root.mkdir(exist_ok=True)
+        b_file = cookie_root / "b.json"
+        b_file.write_text(_json.dumps({"cookies": []}), encoding="utf-8")
+        pb = prof.create_profile(name=uuid.uuid4().hex, workspace_id=self.ws_b, db_path=self.db_path)
+        prof.add_account(pb.id, "douyin", "bacct", cookie_path=str(b_file), db_path=self.db_path)
+        with patch.object(self.sau_backend, "_allowed_cookie_roots", return_value=(cookie_root.resolve(),)):
+            qs = {"filePath": str(b_file)}
+            ra = self._client(self.sid_a).get("/downloadCookie", base_url="https://localhost", query_string=qs)
+            self.assertEqual(ra.status_code, 404)
+            rb = self._client(self.sid_b).get("/downloadCookie", base_url="https://localhost", query_string=qs)
+            self.assertEqual(rb.status_code, 200)
+
     def test_legacy_token_is_unscoped_admin_path(self) -> None:
         # A legacy bearer token (no session) is not workspace-scoped: it sees all
         # profiles. This is the documented single-tenant/admin compatibility path.

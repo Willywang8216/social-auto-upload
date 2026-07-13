@@ -944,6 +944,46 @@ def _lookup_account_cookie_path(account_id: int) -> tuple[Path, str] | None:
     return None
 
 
+def _cookie_path_owned_by_workspace(cookie_path: Path, workspace_id: str, db_path: Path) -> bool:
+    """True when some account in ``workspace_id`` owns ``cookie_path``.
+
+    Cookie files are addressed by filesystem path, so ``/downloadCookie`` cannot
+    rely on an account-id scope. Ownership is resolved by matching the requested
+    path against the resolved ``cookie_path`` of every account (structured and
+    legacy) the workspace owns.
+    """
+    target = cookie_path.resolve()
+    for account in profile_registry.list_accounts(workspace_id=workspace_id, db_path=db_path):
+        if not account.cookie_path:
+            continue
+        try:
+            if _resolve_cookie_path(account.cookie_path) == target:
+                return True
+        except Exception:
+            continue
+    # Legacy cookie accounts live in user_info, which carries workspace_id after
+    # the tenant backfill.
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT filePath FROM user_info WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    for row in rows:
+        file_path = row["filePath"]
+        if not file_path:
+            continue
+        try:
+            if _resolve_cookie_path(file_path) == target:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 @app.route('/uploadSave', methods=['POST'])
 def upload_save():
     if 'file' not in request.files:
@@ -1778,6 +1818,19 @@ def download_cookie():
             }), 400
 
         if not cookie_file_path.exists():
+            return jsonify({
+                "code": 404,
+                "msg": "Cookie文件不存在",
+                "data": None
+            }), 404
+
+        # Tenant isolation: a cookie file may only be downloaded by the workspace
+        # that owns the account it belongs to. Reported as 404 (not 403) so a
+        # foreign path is indistinguishable from a missing one.
+        _download_workspace = _workspace_scope()
+        if _download_workspace is not None and not _cookie_path_owned_by_workspace(
+            cookie_file_path, _download_workspace, _current_db_path()
+        ):
             return jsonify({
                 "code": 404,
                 "msg": "Cookie文件不存在",
@@ -7843,11 +7896,15 @@ def api_cookies_export(account_id):
     cookie_path = Path(account.cookie_path) if account.cookie_path else None
     if not cookie_path or not cookie_path.exists():
         return jsonify(error="No cookie file on record"), 404
+    # ``read_cookie`` transparently decrypts when SAU_COOKIE_ENCRYPTION_KEY is
+    # set and returns a legacy plaintext file verbatim otherwise. (The previous
+    # ``read_cookie_file`` name did not exist, so this always fell back to a raw
+    # read that returned ciphertext / 500'd once encryption was enabled.)
+    from myUtils import cookie_storage
     try:
-        from myUtils import cookie_storage
-        data = cookie_storage.read_cookie_file(cookie_path)
+        data = json.loads(cookie_storage.read_cookie(cookie_path).decode("utf-8"))
     except Exception:
-        data = json.loads(cookie_path.read_text(encoding="utf-8"))
+        return jsonify(error="Cookie file is unreadable"), 500
     return jsonify({"code": 200, "data": data, "msg": "ok"})
 
 

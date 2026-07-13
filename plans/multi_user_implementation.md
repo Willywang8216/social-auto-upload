@@ -564,14 +564,25 @@ limits, quotas, structured logs, audit logs.
   preserves the stored token). Two-user matrix now **42 tests**. Route matrix
   re-derived (139 routes, source_line only), `check_csvs` green.
 
+- 2026-07-13 — Phase 7b cookie-export hardening (stacked on PR #29). Fixed a real
+  bug in `GET /api/auth/cookies/<id>/export`: it called a **nonexistent**
+  `cookie_storage.read_cookie_file` and fell back to a raw `read_text`, so once
+  `SAU_COOKIE_ENCRYPTION_KEY` was set the export returned ciphertext / 500'd.
+  Now uses `cookie_storage.read_cookie` (transparently decrypts; returns legacy
+  plaintext verbatim). Added tenant scoping to `GET /downloadCookie`, which is
+  path-addressed and had **no ownership check** — a new
+  `_cookie_path_owned_by_workspace` resolves the requested path against the
+  caller's structured accounts and legacy `user_info` rows and 404s a foreign
+  path. Two-user matrix now **44 tests** (encrypted-export decrypts for the
+  owner; foreign `/downloadCookie` → 404, own → 200). Route matrix re-derived
+  (139 routes, source_line only), `check_csvs` green.
+
 ## Next incomplete task
 
-Phase 6 read-isolation is complete across all user-data domains; Phase 7 response
-redaction closes the `_account_payload` plaintext-token leak. Remaining:
-- **Phase 7 (part 2)** — the two cookie-export surfaces (`GET /api/auth/cookies/
-  <id>/export`, `GET /downloadCookie`) and optional at-rest encryption of
-  `config_json` OAuth tokens (reuse the AES-GCM envelope from
-  `myUtils.cookie_storage`); `storage_backends` key redaction.
+Read-isolation and the credential-response leaks are closed. Remaining:
+- **Phase 7 (part 3, optional)** — at-rest encryption of `config_json` OAuth
+  tokens (reuse the AES-GCM envelope from `myUtils.cookie_storage`) and
+  `storage_backends` key redaction.
 - Phase 6 tail — per-platform OAuth status/review tables (transient state).
 - **Phase 10** — frontend Google login screen.
 Operator steps still pending: run the Phase 5 backfill on the production DB, then
