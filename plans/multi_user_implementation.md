@@ -576,17 +576,38 @@ limits, quotas, structured logs, audit logs.
   path. Two-user matrix now **44 tests** (encrypted-export decrypts for the
   owner; foreign `/downloadCookie` → 404, own → 200). Route matrix re-derived
   (139 routes, source_line only), `check_csvs` green.
+- 2026-07-13 — Phase 6i (merged in PR #29). `/tiktok/creator-info/<account_id>`
+  scopes `get_account` by workspace (it had refreshed/persisted tokens for any
+  account); `/tiktok/publish-status/<job_id>` guards on parent-job ownership.
+- 2026-07-13 — Phase 7c at-rest encryption of account config secrets (fresh
+  follow-up off the merged main; **new PR**). New `myUtils/config_crypto.py`:
+  opt-in via `SAU_CONFIG_ENCRYPTION_KEY` (independent of the cookie key; same
+  base64 16/24/32-byte format). `encrypt_config_secrets`/`decrypt_config_secrets`
+  walk config recursively and encrypt only the **secret string values**
+  (`secret_redaction.is_secret_key`) using the `cookie_storage` AES-GCM envelope
+  with the secret's field name as AAD (so a ciphertext can't move between
+  fields), marker prefix `sau:enc:v1:`, idempotent on re-save. Wired at the
+  single `myUtils.profiles` choke point: encrypt in `add_account`/
+  `update_account`, decrypt in `_row_to_account` — every consumer still sees
+  plaintext. **Zero-risk default:** with the key unset the stored `config_json`
+  is byte-identical to before. 10 new tests (7 unit incl. field-binding + wrong-
+  key rejection; 3 profiles-integration proving ciphertext at rest, plaintext via
+  the store, plaintext-by-default, and partial-update preservation). Full suite
+  **643 passed, 1 skipped**; route matrix + CSVs unchanged (no `sau_backend.py`
+  edits). Documented in `.env.example` + `CLAUDE.md`.
 
 ## Next incomplete task
 
-Read-isolation and the credential-response leaks are closed. Remaining:
-- **Phase 7 (part 3, optional)** — at-rest encryption of `config_json` OAuth
-  tokens (reuse the AES-GCM envelope from `myUtils.cookie_storage`) and
-  `storage_backends` key redaction.
-- Phase 6 tail — per-platform OAuth status/review tables (transient state).
+Read-isolation and the credential leaks (in-transit **and** at-rest) are closed.
+Remaining:
+- `storage_backends` S3-key at-rest encryption (internal-only today — no response
+  leak — so lower priority; same envelope applies).
+- Phase 6 tail — per-platform OAuth status/review tables (transient state);
+  role-gating for the `/admin/*` OAuth-status routes.
 - **Phase 10** — frontend Google login screen.
 Operator steps still pending: run the Phase 5 backfill on the production DB, then
-flip `SAU_TENANCY_MODE=single→shadow→enforced`.
+flip `SAU_TENANCY_MODE=single→shadow→enforced`. To enable config encryption in
+prod, set `SAU_CONFIG_ENCRYPTION_KEY` then re-save accounts (a save re-encrypts).
 
 **Standing user input still needed** (does not block the code build): a Google
 OAuth client to exercise a *real* login (Phase 3 live path), and access to run

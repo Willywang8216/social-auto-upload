@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from utils.conf_defaults import BASE_DIR
+from myUtils import config_crypto
 
 DB_PATH = Path(BASE_DIR) / "db" / "database.db"
 COOKIE_ROOT = Path(BASE_DIR) / "cookies"
@@ -169,7 +170,11 @@ def _row_to_profile(row: sqlite3.Row) -> Profile:
 
 def _row_to_account(row: sqlite3.Row) -> Account:
     payload = {key: row[key] for key in row.keys()}
-    payload["config"] = json.loads(payload.pop("config_json", "{}") or "{}")
+    # Decrypt any at-rest-encrypted secret values (no-op unless
+    # SAU_CONFIG_ENCRYPTION_KEY is set) so consumers always see plaintext.
+    payload["config"] = config_crypto.decrypt_config_secrets(
+        json.loads(payload.pop("config_json", "{}") or "{}")
+    )
     payload["enabled"] = bool(payload.get("enabled", 1))
     payload = {k: v for k, v in payload.items() if k in _ACCOUNT_FIELDS}
     return Account(**payload)
@@ -468,7 +473,7 @@ def add_account(
                 account_name.strip(),
                 resolved_path,
                 auth_type,
-                json.dumps(config or {}, ensure_ascii=False),
+                json.dumps(config_crypto.encrypt_config_secrets(config or {}), ensure_ascii=False),
                 int(enabled),
                 status,
                 parent_workspace_id,
@@ -600,7 +605,7 @@ def update_account(
                 next_account_name,
                 next_cookie_path,
                 next_auth_type,
-                json.dumps(next_config or {}, ensure_ascii=False),
+                json.dumps(config_crypto.encrypt_config_secrets(next_config or {}), ensure_ascii=False),
                 int(next_enabled),
                 next_status,
                 account_id,
