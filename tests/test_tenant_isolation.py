@@ -491,6 +491,48 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         self.assertIn("OwnedByA", a)
         self.assertNotIn("OwnedByA", b)
 
+    # --- analytics domain (account-anchored) -------------------------------
+
+    def _seed_analytics(self, workspace_id: str, platform_video_id: str) -> int:
+        """Create an account in the workspace and one analytics snapshot +
+        sync-log row for it. Returns the account id."""
+        from myUtils import analytics_store
+        acct_id = self._seed_account(workspace_id, uuid.uuid4().hex)
+        analytics_store.record_snapshot(
+            account_id=acct_id, platform="tiktok",
+            platform_video_id=platform_video_id, views=100,
+            db_path=self.db_path,
+        )
+        analytics_store.record_sync_start(acct_id, "tiktok", db_path=self.db_path)
+        return acct_id
+
+    def test_analytics_overview_scoped_to_workspace(self) -> None:
+        self._seed_analytics(self.ws_b, "vidB")
+        a = self._get(self._client(self.sid_a), "/analytics/overview").get_json()["data"]
+        self.assertEqual(a["video_count"], 0)
+        b = self._get(self._client(self.sid_b), "/analytics/overview").get_json()["data"]
+        self.assertEqual(b["video_count"], 1)
+
+    def test_analytics_videos_list_scoped(self) -> None:
+        self._seed_analytics(self.ws_a, "vidA")
+        self._seed_analytics(self.ws_b, "vidB2")
+        a = self._get(self._client(self.sid_a), "/analytics/videos").get_json()["data"]
+        self.assertEqual(len(a), 1)
+
+    def test_analytics_sync_log_scoped(self) -> None:
+        self._seed_analytics(self.ws_b, "vidB3")
+        a = self._get(self._client(self.sid_a), "/analytics/sync/status").get_json()["data"]
+        self.assertEqual(a, [])
+        b = self._get(self._client(self.sid_b), "/analytics/sync/status").get_json()["data"]
+        self.assertEqual(len(b), 1)
+
+    def test_cannot_trigger_sync_for_foreign_account(self) -> None:
+        b_acct = self._seed_account(self.ws_b, "B-sync")
+        resp = self._post(
+            self._client(self.sid_a), "/analytics/sync", self.csrf_a, accountId=b_acct
+        )
+        self.assertEqual(resp.status_code, 404)
+
     def test_legacy_token_is_unscoped_admin_path(self) -> None:
         # A legacy bearer token (no session) is not workspace-scoped: it sees all
         # profiles. This is the documented single-tenant/admin compatibility path.

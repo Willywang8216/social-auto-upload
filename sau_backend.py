@@ -6751,6 +6751,16 @@ def analytics_sync_route():
     body = request.get_json(silent=True) or {}
     account_id = body.get('accountId')
 
+    # A specific-account sync must target one of the caller's own accounts.
+    workspace_id = _workspace_scope()
+    if account_id is not None and workspace_id is not None:
+        try:
+            profile_registry.get_account(
+                int(account_id), workspace_id=workspace_id, db_path=db_path
+            )
+        except (LookupError, ValueError, TypeError):
+            return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
+
     with _sync_jobs_lock:
         running = any(j['status'] == 'running' for j in _sync_jobs.values())
         if running:
@@ -6795,7 +6805,10 @@ def analytics_sync_status_route():
     account_id = request.args.get('accountId', type=int)
     limit = request.args.get('limit', 20, type=int)
     try:
-        entries = analytics_store.list_sync_log(account_id=account_id, limit=limit, db_path=db_path)
+        entries = analytics_store.list_sync_log(
+            account_id=account_id, limit=limit,
+            workspace_id=_workspace_scope(), db_path=db_path,
+        )
         return jsonify({"code": 200, "msg": "ok", "data": entries})
     except Exception as exc:
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
@@ -6813,7 +6826,7 @@ def analytics_overview_route():
         stats = analytics_store.get_aggregate_stats(
             platform=platform, account_id=account_id,
             date_from=date_from, date_to=date_to,
-            db_path=db_path,
+            workspace_id=_workspace_scope(), db_path=db_path,
         )
         return jsonify({"code": 200, "msg": "ok", "data": stats})
     except Exception as exc:
@@ -6830,7 +6843,7 @@ def analytics_videos_route():
     try:
         videos = analytics_store.get_latest_snapshots(
             platform=platform, account_id=account_id,
-            limit=limit, db_path=db_path,
+            limit=limit, workspace_id=_workspace_scope(), db_path=db_path,
         )
         return jsonify({"code": 200, "msg": "ok", "data": videos})
     except Exception as exc:
@@ -6843,7 +6856,10 @@ def analytics_video_history_route(platform_video_id):
     db_path = _current_db_path()
     days = request.args.get('days', 30, type=int)
     try:
-        history = analytics_store.get_snapshot_history(platform_video_id, days=days, db_path=db_path)
+        history = analytics_store.get_snapshot_history(
+            platform_video_id, days=days,
+            workspace_id=_workspace_scope(), db_path=db_path,
+        )
         return jsonify({"code": 200, "msg": "ok", "data": history})
     except Exception as exc:
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
@@ -6860,7 +6876,8 @@ def analytics_top_videos_route():
     try:
         videos = analytics_store.get_top_videos(
             platform=platform, account_id=account_id,
-            metric=metric, limit=limit, db_path=db_path,
+            metric=metric, limit=limit,
+            workspace_id=_workspace_scope(), db_path=db_path,
         )
         return jsonify({"code": 200, "msg": "ok", "data": videos})
     except Exception as exc:
@@ -6880,7 +6897,7 @@ def analytics_trends_route():
         trends = analytics_store.get_trends(
             platform=platform, account_id=account_id,
             date_from=date_from, date_to=date_to,
-            metric=metric, db_path=db_path,
+            metric=metric, workspace_id=_workspace_scope(), db_path=db_path,
         )
         return jsonify({"code": 200, "msg": "ok", "data": trends})
     except Exception as exc:
@@ -6900,7 +6917,7 @@ def analytics_advice_route():
         advice = analytics_advisor.generate_advice(
             platform=platform, account_id=account_id,
             date_from=date_from, date_to=date_to,
-            db_path=db_path,
+            workspace_id=_workspace_scope(), db_path=db_path,
         )
         return jsonify({"code": 200, "msg": "ok", "data": advice})
     except Exception as exc:

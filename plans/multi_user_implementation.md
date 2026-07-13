@@ -523,15 +523,30 @@ limits, quotas, structured logs, audit logs.
   Two-user matrix now **35 tests**. Route matrix re-derived (139 routes,
   source_line only), `check_csvs` green.
 
+- 2026-07-13 — Phase 6g analytics isolation (stacked on the open PR #29 branch).
+  Solved the "deep write-path" concern by anchoring on the account instead of
+  stamping analytics rows: analytics rows carry `account_id` (NOT NULL, FK to
+  accounts) and accounts carry `workspace_id`, so every read filters via
+  `account_id IN (SELECT id FROM accounts WHERE workspace_id = ?)` — **no
+  changes to the sync write-path**, and it holds for data synced before tenancy
+  was enabled. Scoped `analytics_store` read functions (`get_latest_snapshots`,
+  `get_snapshot_history`, `get_aggregate_stats`, `get_top_videos`, `get_trends`,
+  `list_sync_log`) plus `analytics_advisor.generate_advice`. Routes wired:
+  `/analytics/{overview,videos,videos/<id>/history,top-videos,trends,advice,
+  sync/status}`; `/analytics/sync` POST gained an account-ownership guard (a
+  specific-account sync must target one of the caller's accounts → 404). Two-user
+  matrix now **39 tests**. Route matrix re-derived (139 routes, source_line
+  only), `check_csvs` green.
+
 ## Next incomplete task
 
-Phase 6 (continued) — the remaining domains all share a **deep write-path**
-(rows are stamped far from the request, inside sync loops / audit-log helpers),
-so they need a small "derive workspace from the account" helper before
-scoping: the analytics store (`/api/analytics*`, video_analytics_*,
-analytics_sync_log — stamped inside `analytics_sync`), account-events
-(`record_event` at 10+ call sites), and per-platform OAuth status/review
-tables. Then Phase 7 (credential encryption) and the frontend (Phase 10).
+Phase 6 (final slice) — account-events (`/api/account-events` history; isolate
+via the same account/profile-anchored read filter — no changes to the
+`record_event` write-path) and the per-platform OAuth status/review tables.
+Then Phase 7 (credential encryption + response redaction) and the frontend
+(Phase 10). Analytics `/analytics/sync` **sync-all** still triggers a global
+refresh (write-only, not a read leak) — a per-workspace sync-all is a small
+follow-up if desired.
 
 **Standing user input still needed** (does not block the code build): a Google
 OAuth client to exercise a *real* login (Phase 3 live path), and access to run

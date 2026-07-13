@@ -217,11 +217,23 @@ def get_video_thumbnail(platform_video_id: str, db_path: Path = DB_PATH) -> str 
         return row["thumbnail_url"] if row and row["thumbnail_url"] else None
 
 
+def _workspace_account_clause(column: str) -> str:
+    """SQL predicate restricting ``column`` (an account_id) to a workspace.
+
+    Analytics rows are anchored on ``account_id`` (NOT NULL, FK to accounts);
+    accounts carry ``workspace_id``. Isolation therefore derives from the owning
+    account rather than a separate workspace_id column on each analytics row, so
+    it holds for data synced before tenancy was enabled.
+    """
+    return f"{column} IN (SELECT id FROM accounts WHERE workspace_id = ?)"
+
+
 def get_latest_snapshots(
     *,
     platform: str | None = None,
     account_id: int | None = None,
     limit: int = 100,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> list[dict]:
     """Get the most recent snapshot for each video, with optional filters."""
@@ -233,6 +245,9 @@ def get_latest_snapshots(
     if account_id:
         conditions.append("v.account_id = ?")
         params.append(account_id)
+    if workspace_id is not None:
+        conditions.append(_workspace_account_clause("s.account_id"))
+        params.append(workspace_id)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     conjunction = "AND" if conditions else "WHERE"
@@ -260,18 +275,25 @@ def get_latest_snapshots(
 def get_snapshot_history(
     platform_video_id: str,
     days: int = 30,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> list[dict]:
     """Time series of snapshots for one video."""
+    extra = ""
+    params: list[Any] = [platform_video_id, f"-{days} days"]
+    if workspace_id is not None:
+        extra = " AND " + _workspace_account_clause("account_id")
+        params.append(workspace_id)
     with _connect(db_path) as conn:
         rows = conn.execute(
-            """SELECT snapshot_at, views, likes, comments, shares,
+            f"""SELECT snapshot_at, views, likes, comments, shares,
                       watch_time_seconds, engagement_rate
                FROM video_analytics_snapshots
                WHERE platform_video_id = ?
                  AND snapshot_at >= datetime('now', ?)
+                 {extra}
                ORDER BY snapshot_at ASC""",
-            (platform_video_id, f"-{days} days"),
+            params,
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -282,6 +304,7 @@ def get_aggregate_stats(
     account_id: int | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> dict:
     """Aggregated stats using the latest snapshot per video."""
@@ -293,6 +316,9 @@ def get_aggregate_stats(
     if account_id:
         conditions.append("s.account_id = ?")
         params.append(account_id)
+    if workspace_id is not None:
+        conditions.append(_workspace_account_clause("s.account_id"))
+        params.append(workspace_id)
     if date_from:
         conditions.append("s.snapshot_at >= ?")
         params.append(date_from)
@@ -360,6 +386,7 @@ def get_top_videos(
     account_id: int | None = None,
     metric: str = "views",
     limit: int = 10,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> list[dict]:
     allowed_metrics = {"views", "likes", "comments", "shares", "engagement_rate"}
@@ -374,6 +401,9 @@ def get_top_videos(
     if account_id:
         conditions.append("v.account_id = ?")
         params.append(account_id)
+    if workspace_id is not None:
+        conditions.append(_workspace_account_clause("s.account_id"))
+        params.append(workspace_id)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     conjunction = "AND" if conditions else "WHERE"
@@ -407,6 +437,7 @@ def get_trends(
     date_from: str | None = None,
     date_to: str | None = None,
     metric: str = "views",
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> list[dict]:
     """Daily aggregated metric trends."""
@@ -422,6 +453,9 @@ def get_trends(
     if account_id:
         conditions.append("account_id = ?")
         params.append(account_id)
+    if workspace_id is not None:
+        conditions.append(_workspace_account_clause("account_id"))
+        params.append(workspace_id)
     if date_from:
         conditions.append("snapshot_at >= ?")
         params.append(date_from)
@@ -482,6 +516,7 @@ def record_sync_finish(
 def list_sync_log(
     account_id: int | None = None,
     limit: int = 20,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> list[dict]:
     conditions = []
@@ -489,6 +524,9 @@ def list_sync_log(
     if account_id:
         conditions.append("account_id = ?")
         params.append(account_id)
+    if workspace_id is not None:
+        conditions.append(_workspace_account_clause("account_id"))
+        params.append(workspace_id)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     params.append(limit)
 
