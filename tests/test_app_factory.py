@@ -150,9 +150,30 @@ class RequestIdTests(unittest.TestCase):
 @unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
 class ErrorSchemaTests(unittest.TestCase):
     def setUp(self) -> None:
+        import os
+
         from sau_backend import app
 
+        # Ensure open mode (no auth tokens) so unmatched routes reach Flask's
+        # error handlers instead of being intercepted by the auth gate.
+        self._prev_tokens = os.environ.pop("SAU_API_TOKENS", None)
+        from myUtils.security import load_policy
+
+        self._prev_policy = app.config.get("SECURITY_POLICY")
+        app.config["SECURITY_POLICY"] = load_policy()
         self.client = app.test_client()
+
+    def tearDown(self) -> None:
+        import os
+
+        from sau_backend import app
+
+        if self._prev_tokens is not None:
+            os.environ["SAU_API_TOKENS"] = self._prev_tokens
+        else:
+            os.environ.pop("SAU_API_TOKENS", None)
+        if self._prev_policy is not None:
+            app.config["SECURITY_POLICY"] = self._prev_policy
 
     def test_unmatched_route_returns_json_404(self) -> None:
         resp = self.client.get("/this-route-does-not-exist-xyz")
