@@ -440,6 +440,13 @@ def add_account(
         resolved_path = ""
 
     with _connect(db_path) as conn:
+        # Accounts inherit their parent profile's workspace so ownership stays
+        # consistent regardless of which mode created the profile. NULL for
+        # legacy profiles (assigned later by the backfill).
+        parent_ws_row = conn.execute(
+            "SELECT workspace_id FROM profiles WHERE id = ?", (profile_id,)
+        ).fetchone()
+        parent_workspace_id = parent_ws_row[0] if parent_ws_row else None
         cursor = conn.execute(
             """
             INSERT INTO accounts (
@@ -450,9 +457,10 @@ def add_account(
                 auth_type,
                 config_json,
                 enabled,
-                status
+                status,
+                workspace_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 profile_id,
@@ -463,6 +471,7 @@ def add_account(
                 json.dumps(config or {}, ensure_ascii=False),
                 int(enabled),
                 status,
+                parent_workspace_id,
             ),
         )
         conn.commit()
@@ -470,9 +479,19 @@ def add_account(
     return get_account(account_id, db_path=db_path)
 
 
-def get_account(account_id: int, *, db_path: Path = DB_PATH) -> Account:
+def get_account(account_id: int, *, workspace_id: str | None = None, db_path: Path = DB_PATH) -> Account:
+    """Fetch an account. When ``workspace_id`` is given, an account that belongs
+    to another workspace is treated as not found (tenant isolation)."""
     with _connect(db_path) as conn:
-        row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        if workspace_id is not None:
+            row = conn.execute(
+                "SELECT * FROM accounts WHERE id = ? AND workspace_id = ?",
+                (account_id, workspace_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()
     if row is None:
         raise LookupError(f"Account not found: id={account_id}")
     return _row_to_account(row)
@@ -497,6 +516,7 @@ def list_accounts(
     profile_id: int | None = None,
     platform: str | None = None,
     enabled: bool | None = None,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> list[Account]:
     query = "SELECT * FROM accounts"
@@ -511,6 +531,9 @@ def list_accounts(
     if enabled is not None:
         clauses.append("enabled = ?")
         params.append(int(enabled))
+    if workspace_id is not None:
+        clauses.append("workspace_id = ?")
+        params.append(workspace_id)
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY platform, account_name"
@@ -520,8 +543,10 @@ def list_accounts(
 
 
 def update_account_status(
-    account_id: int, status: int, *, db_path: Path = DB_PATH
+    account_id: int, status: int, *, workspace_id: str | None = None, db_path: Path = DB_PATH
 ) -> None:
+    if workspace_id is not None:
+        get_account(account_id, workspace_id=workspace_id, db_path=db_path)
     now = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
     with _connect(db_path) as conn:
         conn.execute(
@@ -541,9 +566,12 @@ def update_account(
     config: dict | None = None,
     enabled: bool | None = None,
     status: int | None = None,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> Account:
-    current = get_account(account_id, db_path=db_path)
+    """Update an account. When ``workspace_id`` is given, an account owned by
+    another workspace raises ``LookupError`` and is left untouched."""
+    current = get_account(account_id, workspace_id=workspace_id, db_path=db_path)
     next_profile_id = current.profile_id if profile_id is None else profile_id
     next_account_name = current.account_name if account_name is None else account_name.strip()
     next_auth_type = current.auth_type if auth_type is None else auth_type
@@ -582,7 +610,11 @@ def update_account(
     return get_account(account_id, db_path=db_path)
 
 
-def delete_account(account_id: int, *, db_path: Path = DB_PATH) -> None:
+def delete_account(account_id: int, *, workspace_id: str | None = None, db_path: Path = DB_PATH) -> None:
+    """Delete an account. When ``workspace_id`` is given, an account owned by
+    another workspace raises ``LookupError`` and is left intact."""
+    if workspace_id is not None:
+        get_account(account_id, workspace_id=workspace_id, db_path=db_path)
     with _connect(db_path) as conn:
         conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
         conn.commit()

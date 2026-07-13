@@ -1653,7 +1653,9 @@ def upload_cookie():
 def import_cookies(account_id):
     """Import cookies from browser DevTools (tab-separated) or JSON array."""
     try:
-        account = profile_registry.get_account(account_id, db_path=_current_db_path())
+        account = profile_registry.get_account(
+            account_id, workspace_id=_workspace_scope(), db_path=_current_db_path()
+        )
     except (ValueError, LookupError):
         return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
 
@@ -5284,6 +5286,8 @@ def profile_accounts_create(profile_id):
 def accounts_check_connection(account_id):
     db_path = _current_db_path()
     try:
+        # Tenant isolation: 404 for accounts owned by another workspace.
+        profile_registry.get_account(account_id, workspace_id=_workspace_scope(), db_path=db_path)
         updated = _run_account_connection_check(account_id=account_id, db_path=db_path)
     except LookupError:
         return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
@@ -5297,6 +5301,7 @@ def accounts_check_connection(account_id):
 def accounts_refresh_token(account_id):
     db_path = _current_db_path()
     try:
+        profile_registry.get_account(account_id, workspace_id=_workspace_scope(), db_path=db_path)
         updated = _run_account_token_refresh(account_id=account_id, db_path=db_path)
     except LookupError:
         return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
@@ -5546,7 +5551,9 @@ def accounts_refresh_stale_tiktok_tokens():
 def accounts_patch(account_id):
     try:
         data = _read_json_body()
-        existing = profile_registry.get_account(account_id, db_path=_current_db_path())
+        existing = profile_registry.get_account(
+            account_id, workspace_id=_workspace_scope(), db_path=_current_db_path()
+        )
         new_profile_id = data.get("profileId", existing.profile_id)
         # Merge config: start with existing, overlay with incoming fields
         existing_config = dict(existing.config or {})
@@ -7592,9 +7599,9 @@ def _import_cookies_for_account(platform, account, profile, fmt, payload, *, db_
 @app.route("/api/accounts", methods=["GET"])
 def api_accounts():
     """Return all accounts with cookie status and expiry, matching the
-    redesigned frontend's expected shape."""
+    redesigned frontend's expected shape. Workspace-scoped in enforced mode."""
     db_path = _current_db_path()
-    rows = profile_registry.list_accounts(db_path=db_path)
+    rows = profile_registry.list_accounts(workspace_id=_workspace_scope(), db_path=db_path)
     out = []
     for a in rows:
         config = a.config or {}
@@ -7699,6 +7706,12 @@ def api_accounts_health():
 def api_account_check(account_id):
     """Check an account's connection / cookie validity."""
     try:
+        profile_registry.get_account(
+            account_id, workspace_id=_workspace_scope(), db_path=_current_db_path()
+        )
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
+    try:
         result = _run_account_connection_check(account_id=account_id, db_path=_current_db_path())
         return jsonify({"code": 200, "data": {"ok": True, "message": "Connection valid"}, "msg": "ok"})
     except Exception as exc:
@@ -7707,10 +7720,14 @@ def api_account_check(account_id):
 
 @app.route("/api/auth/cookies/<int:account_id>/export", methods=["GET"])
 def api_cookies_export(account_id):
-    """Export decrypted cookies for an account."""
+    """Export decrypted cookies for an account (workspace-scoped)."""
     db_path = _current_db_path()
-    account = profile_registry.get_account(account_id, db_path=db_path)
-    if not account:
+    try:
+        # Tenant isolation: cookie material must never cross workspaces.
+        account = profile_registry.get_account(
+            account_id, workspace_id=_workspace_scope(), db_path=db_path
+        )
+    except LookupError:
         return jsonify(error="Account not found"), 404
     cookie_path = Path(account.cookie_path) if account.cookie_path else None
     if not cookie_path or not cookie_path.exists():

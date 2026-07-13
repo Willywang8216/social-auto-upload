@@ -323,11 +323,23 @@ gated by `SAU_TENANCY_MODE` (default `single` = unscoped, unchanged).
 **Exit evidence:** **585 backend tests pass** (8 new). Default (`single`) mode
 unchanged — 577 prior tests still green, `test_profiles.py` green.
 
-**Remaining (same helper + pattern, incremental):** accounts, media/media-groups,
-campaigns/templates, jobs + job logs, analytics, OAuth status, exports — each
-threads `workspace_id` through its registry calls and adds its slice of the
-two-user matrix. Then flip `SAU_TENANCY_MODE` `single`→`shadow`→`enforced` once
-the production backfill (Phase 5) has run. **Rollback:** `SAU_TENANCY_MODE=single`.
+**Accounts domain — done (2026-07-12):** `get/list/update/delete_account` +
+`update_account_status` take the optional `workspace_id`; `add_account` stamps
+the new account with its **parent profile's workspace** so ownership propagates
+automatically. Wired routes: `/accounts/<id>` PATCH, `check-connection`,
+`refresh-token`, `/api/accounts/<id>/check`, **`/api/auth/cookies/<id>/export`
+(the P0 cookie-export — now workspace-scoped, also fixing its missing-account
+500)**, `/accounts/<id>/import-cookies`, and the `/api/accounts` list. Two-user
+matrix extended to 14 tests (591 total passing): A gets 404 patching/exporting/
+importing/checking/refreshing B's account; `/api/accounts` lists only the
+caller's workspace; accounts inherit the parent workspace.
+
+**Remaining (same helper + pattern, incremental):** media/media-groups,
+campaigns/templates, jobs + job logs, analytics, OAuth status, exports, and the
+batch account routes (report-unauthorized-ids semantics) — each threads
+`workspace_id` through its registry calls and adds its slice of the two-user
+matrix. Then flip `SAU_TENANCY_MODE` `single`→`shadow`→`enforced` once the
+production backfill (Phase 5) has run. **Rollback:** `SAU_TENANCY_MODE=single`.
 
 ## Phase 7 — Credential encryption and response redaction ⬜
 
@@ -454,6 +466,13 @@ limits, quotas, structured logs, audit logs.
   pattern incrementally. Commit `1bdc8b3`. CI on head `1bdc8b3`
   ([run 29205390492](https://github.com/Willywang8216/social-auto-upload/actions/runs/29205390492)):
   postgres-tests ✅, frontend-build ✅, dependency-guard ✅, backend-tests ✅.
+- 2026-07-12 — Phase 6b accounts-domain isolation. Account registry scoped
+  (accounts inherit the parent profile's workspace on create); wired PATCH,
+  check/refresh, cookie export/import, and the /api/accounts list. Two-user
+  matrix now 14 tests; 591 backend tests pass (6 new). The user's Google login
+  client ID + both registered redirect hosts recorded in
+  docs/credential-setup.md with the go-live env block (secret stays in the
+  deployment env).
 
 ## Next incomplete task
 

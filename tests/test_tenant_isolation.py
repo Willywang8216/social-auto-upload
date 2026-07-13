@@ -179,6 +179,62 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         self.assertIn("OwnedByA", a)
         self.assertNotIn("OwnedByA", b)
 
+    # --- accounts domain ---------------------------------------------------
+
+    def _seed_account(self, workspace_id: str, profile_name: str) -> int:
+        """Create a profile+account in a workspace; returns the account id."""
+        p = prof.create_profile(name=profile_name, workspace_id=workspace_id, db_path=self.db_path)
+        acct = prof.add_account(p.id, "douyin", "acct1", db_path=self.db_path)
+        return acct.id
+
+    def test_account_inherits_parent_profile_workspace(self) -> None:
+        acct_id = self._seed_account(self.ws_a, "A-brand")
+        got = prof.get_account(acct_id, workspace_id=self.ws_a, db_path=self.db_path)
+        self.assertEqual(got.id, acct_id)
+        with self.assertRaises(LookupError):
+            prof.get_account(acct_id, workspace_id=self.ws_b, db_path=self.db_path)
+
+    def test_cannot_patch_foreign_account(self) -> None:
+        b_acct = self._seed_account(self.ws_b, "B-brand")
+        resp = self._patch(self._client(self.sid_a), f"/accounts/{b_acct}", self.csrf_a,
+                           accountName="hacked")
+        self.assertEqual(resp.status_code, 404)
+        # B's account is unchanged.
+        got = prof.get_account(b_acct, workspace_id=self.ws_b, db_path=self.db_path)
+        self.assertEqual(got.account_name, "acct1")
+
+    def test_cannot_export_foreign_account_cookies(self) -> None:
+        b_acct = self._seed_account(self.ws_b, "B-brand")
+        resp = self._get(self._client(self.sid_a), f"/api/auth/cookies/{b_acct}/export")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_cannot_import_cookies_into_foreign_account(self) -> None:
+        b_acct = self._seed_account(self.ws_b, "B-brand")
+        resp = self._post(self._client(self.sid_a), f"/accounts/{b_acct}/import-cookies",
+                          self.csrf_a, cookies="name\tvalue")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_cannot_check_or_refresh_foreign_account(self) -> None:
+        b_acct = self._seed_account(self.ws_b, "B-brand")
+        a = self._client(self.sid_a)
+        self.assertEqual(
+            self._post(a, f"/accounts/{b_acct}/check-connection", self.csrf_a).status_code, 404
+        )
+        self.assertEqual(
+            self._post(a, f"/accounts/{b_acct}/refresh-token", self.csrf_a).status_code, 404
+        )
+        self.assertEqual(
+            self._post(a, f"/api/accounts/{b_acct}/check", self.csrf_a).status_code, 404
+        )
+
+    def test_api_accounts_lists_only_own_workspace(self) -> None:
+        self._seed_account(self.ws_a, "A-brand")
+        self._seed_account(self.ws_b, "B-brand")
+        a = self._get(self._client(self.sid_a), "/api/accounts").get_json()["data"]
+        b = self._get(self._client(self.sid_b), "/api/accounts").get_json()["data"]
+        self.assertEqual(len(a), 1)
+        self.assertEqual(len(b), 1)
+
     def test_legacy_token_is_unscoped_admin_path(self) -> None:
         # A legacy bearer token (no session) is not workspace-scoped: it sees all
         # profiles. This is the documented single-tenant/admin compatibility path.
