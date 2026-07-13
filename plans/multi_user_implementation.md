@@ -499,6 +499,8 @@ limits, quotas, structured logs, audit logs.
   Deferred to a follow-up (Phase 6e): the prepared-posts / `content_generator`
   domain behind `/api/campaigns/<id>/{validate,approve,posts,export/csv}`,
   which needs the `prepared_posts` store scoped in its own right.
+  Commit `de23693`; stacked on **PR #28**; **CI all green** (backend-tests,
+  postgres-tests, frontend-build, dependency-guard on run 29229532653).
 
 ## Next incomplete task
 
