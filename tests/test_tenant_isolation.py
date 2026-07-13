@@ -56,9 +56,20 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         os.environ["DATABASE_URL"] = f"sqlite:///{self.db_path}"
         sau_db.reset_engine_cache()
 
-        # Point the legacy DB path (profiles) at the same temp DB as the sessions.
-        self._patch_db = patch.object(sau_backend, "_get_legacy_db_path", return_value=self.db_path)
-        self._patch_db.start()
+        # Point every runtime DB path at the same temp DB as the sessions.
+        # profiles/accounts/media-groups routes go through _current_db_path();
+        # the jobs and media_asset modules resolve their own module DB_PATH
+        # (a monkeypatch hook), so patch those too.
+        from myUtils import jobs as _jobs
+        from myUtils import media_asset_service as _mas
+
+        self._patches = [
+            patch.object(sau_backend, "_get_legacy_db_path", return_value=self.db_path),
+            patch.object(_jobs, "DB_PATH", self.db_path),
+            patch.object(_mas, "DB_PATH", self.db_path),
+        ]
+        for p in self._patches:
+            p.start()
 
         # Two workspaces, each with an owner session.
         self.ws_a, self.csrf_a, self.sid_a = self._make_workspace_session("a@x.com")
@@ -80,7 +91,8 @@ class ProfileTenantIsolationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.app.config["SECURITY_POLICY"] = self._prev_policy
         self.app.config["SAU_APP_CONFIG"] = self._prev_cfg
-        self._patch_db.stop()
+        for p in self._patches:
+            p.stop()
         sau_db.reset_engine_cache()
         if self._prev_url is None:
             os.environ.pop("DATABASE_URL", None)
@@ -234,6 +246,67 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         b = self._get(self._client(self.sid_b), "/api/accounts").get_json()["data"]
         self.assertEqual(len(a), 1)
         self.assertEqual(len(b), 1)
+
+    # --- jobs + media domains ----------------------------------------------
+
+    def _seed_job(self, workspace_id: str, key: str) -> int:
+        from myUtils import jobs
+        spec = jobs.JobSpec(platform="douyin", payload={}, targets=[("account:1", "f.mp4", None)],
+                            idempotency_key=key)
+        return jobs.enqueue_job(spec, workspace_id=workspace_id, db_path=self.db_path).id
+
+    def test_cannot_read_or_cancel_foreign_job(self) -> None:
+        b_job = self._seed_job(self.ws_b, "kb")
+        a = self._client(self.sid_a)
+        self.assertEqual(self._get(a, f"/jobs/{b_job}").status_code, 404)
+        self.assertEqual(self._post(a, f"/jobs/{b_job}/cancel", self.csrf_a).status_code, 404)
+        # Owner can read it.
+        self.assertEqual(self._get(self._client(self.sid_b), f"/jobs/{b_job}").status_code, 200)
+
+    def test_jobs_list_scoped_to_workspace(self) -> None:
+        self._seed_job(self.ws_a, "ka")
+        self._seed_job(self.ws_b, "kb")
+        a = self._get(self._client(self.sid_a), "/jobs").get_json()["data"]
+        b = self._get(self._client(self.sid_b), "/jobs").get_json()["data"]
+        self.assertEqual(len(a), 1)
+        self.assertEqual(len(b), 1)
+
+    def _seed_media_group(self, workspace_id: str, name: str) -> int:
+        from myUtils import media_groups
+        return media_groups.create_media_group(name, workspace_id=workspace_id, db_path=self.db_path).id
+
+    def test_cannot_read_foreign_media_group(self) -> None:
+        b_g = self._seed_media_group(self.ws_b, "Bgroup")
+        self.assertEqual(self._get(self._client(self.sid_a), f"/media-groups/{b_g}").status_code, 404)
+        self.assertEqual(self._get(self._client(self.sid_b), f"/media-groups/{b_g}").status_code, 200)
+
+    def test_media_groups_list_scoped(self) -> None:
+        self._seed_media_group(self.ws_a, "Agroup")
+        self._seed_media_group(self.ws_b, "Bgroup")
+        a = self._get(self._client(self.sid_a), "/media-groups").get_json()["data"]
+        self.assertEqual(len(a), 1)
+
+    def _seed_media_asset(self, workspace_id: str, name: str) -> int:
+        from myUtils import media_asset_service
+        return media_asset_service.create_media_asset(
+            original_filename=name, workspace_id=workspace_id, db_path=self.db_path
+        ).id
+
+    def test_cannot_read_or_delete_foreign_media_asset(self) -> None:
+        b_a = self._seed_media_asset(self.ws_b, "b.mp4")
+        a = self._client(self.sid_a)
+        self.assertEqual(self._get(a, f"/api/media/assets/{b_a}").status_code, 404)
+        self.assertEqual(self._delete(a, f"/api/media/assets/{b_a}", self.csrf_a).status_code, 404)
+        # Owner still sees it.
+        self.assertEqual(
+            self._get(self._client(self.sid_b), f"/api/media/assets/{b_a}").status_code, 200
+        )
+
+    def test_media_assets_list_scoped(self) -> None:
+        self._seed_media_asset(self.ws_a, "a.mp4")
+        self._seed_media_asset(self.ws_b, "b.mp4")
+        a = self._get(self._client(self.sid_a), "/api/media/assets").get_json()
+        self.assertEqual(len(a), 1)
 
     def test_legacy_token_is_unscoped_admin_path(self) -> None:
         # A legacy bearer token (no session) is not workspace-scoped: it sees all

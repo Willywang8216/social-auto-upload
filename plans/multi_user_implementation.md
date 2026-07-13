@@ -29,7 +29,7 @@ to command output, test results, migration reports, or screenshots.
 | 4 | 3 | Google OIDC and sessions | ✅ complete (flag-gated; live path needs a Google client) |
 | 5 | 4 | CSRF and authorization (AuthContext, roles) | ✅ complete |
 | 6 | 5 | Workspace schema and legacy backfill | ✅ expand + backfill tool (constrain + prod run pending) |
-| 7 | 6 | Route-by-route tenant isolation | 🚧 profile domain scoped + two-user matrix; other domains incremental |
+| 7 | 6 | Route-by-route tenant isolation | 🚧 profiles+accounts+jobs+media scoped (20-test matrix); campaigns/analytics remain |
 | 8 | 7 | Credential encryption and response redaction | ⬜ |
 | 9 | 8 | Tenant-aware object storage | ⬜ |
 | 10 | 9 | Redis queues and separate workers | ⬜ |
@@ -475,6 +475,14 @@ limits, quotas, structured logs, audit logs.
   deployment env). Commit `01b77aa`. CI on head `01b77aa`
   ([run 29217020659](https://github.com/Willywang8216/social-auto-upload/actions/runs/29217020659)):
   backend-tests ✅, postgres-tests ✅, frontend-build ✅, dependency-guard ✅.
+- 2026-07-13 — PR #27 (Phases 0-6b) **merged to main** by the operator; Google
+  login verified live at /auth/google/start (hybrid mode). Follow-up work
+  restarted from the new main on the same branch.
+- 2026-07-13 — Phase 6c jobs + media isolation. workspace_id scoping through
+  the jobs registry (enqueue stamps it; get/list scoped) and media_groups +
+  media_assets (create stamps; get/list/delete scoped); wired /jobs*,
+  /media-groups*, /api/media/assets*, /api/media-groups* routes. Two-user
+  matrix now 20 tests; 597 backend tests pass.
 
 ## Next incomplete task
 

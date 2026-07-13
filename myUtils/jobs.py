@@ -222,11 +222,13 @@ def _schedule_canonical(sched: datetime | None) -> str:
 # --------------------------- enqueue / lookup ---------------------------
 
 
-def enqueue_job(spec: JobSpec, *, db_path: Path | None = None) -> Job:
+def enqueue_job(spec: JobSpec, *, workspace_id: str | None = None, db_path: Path | None = None) -> Job:
     """Insert a job and its targets atomically.
 
     If an existing job already has the same ``idempotency_key`` the existing
     row is returned unchanged — neither the job nor the targets are mutated.
+    When ``workspace_id`` is given, the new job is stamped with it (tenant
+    ownership); ``None`` leaves it unset (legacy/single-tenant).
     """
 
     if not spec.targets:
@@ -253,15 +255,26 @@ def enqueue_job(spec: JobSpec, *, db_path: Path | None = None) -> Job:
         if existing is not None:
             return _row_to_job(existing)
 
-        cursor = conn.execute(
-            """
-            INSERT INTO publish_jobs (idempotency_key, profile_id, platform,
-                                       payload_json, status, total_targets)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (key, spec.profile_id, spec.platform, payload_json,
-             JOB_PENDING, len(deduped_targets)),
-        )
+        if workspace_id is not None:
+            cursor = conn.execute(
+                """
+                INSERT INTO publish_jobs (idempotency_key, profile_id, platform,
+                                           payload_json, status, total_targets, workspace_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (key, spec.profile_id, spec.platform, payload_json,
+                 JOB_PENDING, len(deduped_targets), workspace_id),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO publish_jobs (idempotency_key, profile_id, platform,
+                                           payload_json, status, total_targets)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (key, spec.profile_id, spec.platform, payload_json,
+                 JOB_PENDING, len(deduped_targets)),
+            )
         job_id = cursor.lastrowid
 
         for account_ref, file_ref, schedule_at in deduped_targets:
@@ -281,9 +294,19 @@ def enqueue_job(spec: JobSpec, *, db_path: Path | None = None) -> Job:
         )
 
 
-def get_job(job_id: int, *, db_path: Path | None = None) -> Job:
+def get_job(job_id: int, *, workspace_id: str | None = None, db_path: Path | None = None) -> Job:
+    """Fetch a job. When ``workspace_id`` is given, a job owned by another
+    workspace is treated as not found (tenant isolation)."""
     with _connect(db_path) as conn:
-        row = conn.execute("SELECT * FROM publish_jobs WHERE id = ?", (job_id,)).fetchone()
+        if workspace_id is not None:
+            row = conn.execute(
+                "SELECT * FROM publish_jobs WHERE id = ? AND workspace_id = ?",
+                (job_id, workspace_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM publish_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
     if row is None:
         raise LookupError(f"Job not found: id={job_id}")
     return _row_to_job(row)
@@ -305,6 +328,7 @@ def list_jobs(
     status: str | None = None,
     platform: str | None = None,
     limit: int = 50,
+    workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> list[Job]:
     # Guard against the SQLite quirk where ``LIMIT -1`` (and any negative
@@ -328,6 +352,9 @@ def list_jobs(
     if platform is not None:
         clauses.append("platform = ?")
         params.append(platform)
+    if workspace_id is not None:
+        clauses.append("workspace_id = ?")
+        params.append(workspace_id)
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY id DESC LIMIT ?"

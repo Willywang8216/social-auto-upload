@@ -113,37 +113,61 @@ def create_media_group(
     *,
     notes: str = "",
     primary_video_file_id: int | None = None,
+    workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> MediaGroup:
     with _connect(db_path) as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO media_groups (name, notes, primary_video_file_id)
-            VALUES (?, ?, ?)
-            """,
-            (name.strip(), notes.strip(), primary_video_file_id),
-        )
+        if workspace_id is not None:
+            cursor = conn.execute(
+                """
+                INSERT INTO media_groups (name, notes, primary_video_file_id, workspace_id)
+                VALUES (?, ?, ?, ?)
+                """,
+                (name.strip(), notes.strip(), primary_video_file_id, workspace_id),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO media_groups (name, notes, primary_video_file_id)
+                VALUES (?, ?, ?)
+                """,
+                (name.strip(), notes.strip(), primary_video_file_id),
+            )
         conn.commit()
         media_group_id = cursor.lastrowid
-    return get_media_group(media_group_id, db_path=db_path)
+    return get_media_group(media_group_id, workspace_id=workspace_id, db_path=db_path)
 
 
-def get_media_group(media_group_id: int, *, db_path: Path | None = None) -> MediaGroup:
+def get_media_group(media_group_id: int, *, workspace_id: str | None = None, db_path: Path | None = None) -> MediaGroup:
+    """Fetch a media group. When ``workspace_id`` is given, a group owned by
+    another workspace is treated as not found (tenant isolation)."""
     with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT * FROM media_groups WHERE id = ?",
-            (media_group_id,),
-        ).fetchone()
+        if workspace_id is not None:
+            row = conn.execute(
+                "SELECT * FROM media_groups WHERE id = ? AND workspace_id = ?",
+                (media_group_id, workspace_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM media_groups WHERE id = ?",
+                (media_group_id,),
+            ).fetchone()
     if row is None:
         raise LookupError(f"Media group not found: id={media_group_id}")
     return _row_to_media_group(row)
 
 
-def list_media_groups(*, db_path: Path | None = None) -> list[MediaGroup]:
+def list_media_groups(*, workspace_id: str | None = None, db_path: Path | None = None) -> list[MediaGroup]:
     with _connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM media_groups ORDER BY id DESC"
-        ).fetchall()
+        if workspace_id is not None:
+            rows = conn.execute(
+                "SELECT * FROM media_groups WHERE workspace_id = ? ORDER BY id DESC",
+                (workspace_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM media_groups ORDER BY id DESC"
+            ).fetchall()
     return [_row_to_media_group(row) for row in rows]
 
 
