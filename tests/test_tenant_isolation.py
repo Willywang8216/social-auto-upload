@@ -56,9 +56,22 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         os.environ["DATABASE_URL"] = f"sqlite:///{self.db_path}"
         sau_db.reset_engine_cache()
 
-        # Point the legacy DB path (profiles) at the same temp DB as the sessions.
-        self._patch_db = patch.object(sau_backend, "_get_legacy_db_path", return_value=self.db_path)
-        self._patch_db.start()
+        # Point every runtime DB path at the same temp DB as the sessions.
+        # profiles/accounts/media-groups routes go through _current_db_path();
+        # the jobs, media_asset and (for the /api/campaigns/* routes) campaigns
+        # modules resolve their own module DB_PATH default, so patch those too.
+        from myUtils import jobs as _jobs
+        from myUtils import media_asset_service as _mas
+        from myUtils import campaigns as _campaigns
+
+        self._patches = [
+            patch.object(sau_backend, "_get_legacy_db_path", return_value=self.db_path),
+            patch.object(_jobs, "DB_PATH", self.db_path),
+            patch.object(_mas, "DB_PATH", self.db_path),
+            patch.object(_campaigns, "DB_PATH", self.db_path),
+        ]
+        for p in self._patches:
+            p.start()
 
         # Two workspaces, each with an owner session.
         self.ws_a, self.csrf_a, self.sid_a = self._make_workspace_session("a@x.com")
@@ -80,7 +93,8 @@ class ProfileTenantIsolationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.app.config["SECURITY_POLICY"] = self._prev_policy
         self.app.config["SAU_APP_CONFIG"] = self._prev_cfg
-        self._patch_db.stop()
+        for p in self._patches:
+            p.stop()
         sau_db.reset_engine_cache()
         if self._prev_url is None:
             os.environ.pop("DATABASE_URL", None)
@@ -234,6 +248,149 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         b = self._get(self._client(self.sid_b), "/api/accounts").get_json()["data"]
         self.assertEqual(len(a), 1)
         self.assertEqual(len(b), 1)
+
+    # --- jobs + media domains ----------------------------------------------
+
+    def _seed_job(self, workspace_id: str, key: str) -> int:
+        from myUtils import jobs
+        spec = jobs.JobSpec(platform="douyin", payload={}, targets=[("account:1", "f.mp4", None)],
+                            idempotency_key=key)
+        return jobs.enqueue_job(spec, workspace_id=workspace_id, db_path=self.db_path).id
+
+    def test_cannot_read_or_cancel_foreign_job(self) -> None:
+        b_job = self._seed_job(self.ws_b, "kb")
+        a = self._client(self.sid_a)
+        self.assertEqual(self._get(a, f"/jobs/{b_job}").status_code, 404)
+        self.assertEqual(self._post(a, f"/jobs/{b_job}/cancel", self.csrf_a).status_code, 404)
+        # Owner can read it.
+        self.assertEqual(self._get(self._client(self.sid_b), f"/jobs/{b_job}").status_code, 200)
+
+    def test_jobs_list_scoped_to_workspace(self) -> None:
+        self._seed_job(self.ws_a, "ka")
+        self._seed_job(self.ws_b, "kb")
+        a = self._get(self._client(self.sid_a), "/jobs").get_json()["data"]
+        b = self._get(self._client(self.sid_b), "/jobs").get_json()["data"]
+        self.assertEqual(len(a), 1)
+        self.assertEqual(len(b), 1)
+
+    def _seed_media_group(self, workspace_id: str, name: str) -> int:
+        from myUtils import media_groups
+        return media_groups.create_media_group(name, workspace_id=workspace_id, db_path=self.db_path).id
+
+    def test_cannot_read_foreign_media_group(self) -> None:
+        b_g = self._seed_media_group(self.ws_b, "Bgroup")
+        self.assertEqual(self._get(self._client(self.sid_a), f"/media-groups/{b_g}").status_code, 404)
+        self.assertEqual(self._get(self._client(self.sid_b), f"/media-groups/{b_g}").status_code, 200)
+
+    def test_media_groups_list_scoped(self) -> None:
+        self._seed_media_group(self.ws_a, "Agroup")
+        self._seed_media_group(self.ws_b, "Bgroup")
+        a = self._get(self._client(self.sid_a), "/media-groups").get_json()["data"]
+        self.assertEqual(len(a), 1)
+
+    def _seed_media_asset(self, workspace_id: str, name: str) -> int:
+        from myUtils import media_asset_service
+        return media_asset_service.create_media_asset(
+            original_filename=name, workspace_id=workspace_id, db_path=self.db_path
+        ).id
+
+    def test_cannot_read_or_delete_foreign_media_asset(self) -> None:
+        b_a = self._seed_media_asset(self.ws_b, "b.mp4")
+        a = self._client(self.sid_a)
+        self.assertEqual(self._get(a, f"/api/media/assets/{b_a}").status_code, 404)
+        self.assertEqual(self._delete(a, f"/api/media/assets/{b_a}", self.csrf_a).status_code, 404)
+        # Owner still sees it.
+        self.assertEqual(
+            self._get(self._client(self.sid_b), f"/api/media/assets/{b_a}").status_code, 200
+        )
+
+    def test_media_assets_list_scoped(self) -> None:
+        self._seed_media_asset(self.ws_a, "a.mp4")
+        self._seed_media_asset(self.ws_b, "b.mp4")
+        a = self._get(self._client(self.sid_a), "/api/media/assets").get_json()
+        self.assertEqual(len(a), 1)
+
+    # --- campaigns domain --------------------------------------------------
+
+    def _seed_campaign(self, workspace_id: str) -> int:
+        from myUtils import campaigns
+        from myUtils import media_groups
+        p = prof.create_profile(name=uuid.uuid4().hex, workspace_id=workspace_id, db_path=self.db_path)
+        g = media_groups.create_media_group("g", workspace_id=workspace_id, db_path=self.db_path)
+        return campaigns.create_campaign(
+            p.id, g.id, workspace_id=workspace_id, db_path=self.db_path
+        ).id
+
+    def test_cannot_read_foreign_campaign(self) -> None:
+        b_c = self._seed_campaign(self.ws_b)
+        self.assertEqual(self._get(self._client(self.sid_a), f"/campaigns/{b_c}").status_code, 404)
+        # Owner can read it.
+        self.assertEqual(self._get(self._client(self.sid_b), f"/campaigns/{b_c}").status_code, 200)
+
+    def test_cannot_publish_foreign_campaign(self) -> None:
+        b_c = self._seed_campaign(self.ws_b)
+        resp = self._post(self._client(self.sid_a), f"/campaigns/{b_c}/publish", self.csrf_a)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_cannot_patch_post_of_foreign_campaign(self) -> None:
+        b_c = self._seed_campaign(self.ws_b)
+        resp = self._patch(
+            self._client(self.sid_a), f"/campaigns/{b_c}/posts/1", self.csrf_a, status="ready"
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_cannot_export_or_generate_foreign_campaign(self) -> None:
+        # /api/campaigns/* routes resolve the campaigns module DB_PATH (patched).
+        b_c = self._seed_campaign(self.ws_b)
+        a = self._client(self.sid_a)
+        self.assertEqual(
+            self._post(a, f"/api/campaigns/{b_c}/generate", self.csrf_a).status_code, 404
+        )
+        self.assertEqual(
+            self._post(a, f"/api/campaigns/{b_c}/export/google-sheet", self.csrf_a).status_code,
+            404,
+        )
+
+    # --- publish templates domain ------------------------------------------
+
+    def _seed_template(self, workspace_id: str, name: str) -> int:
+        from myUtils import publish_templates
+        return publish_templates.create_template(
+            name=name, workspace_id=workspace_id, db_path=self.db_path
+        ).id
+
+    def test_cannot_read_foreign_template(self) -> None:
+        b_t = self._seed_template(self.ws_b, "B-template")
+        self.assertEqual(
+            self._get(self._client(self.sid_a), f"/publish-templates/{b_t}").status_code, 404
+        )
+        self.assertEqual(
+            self._get(self._client(self.sid_b), f"/publish-templates/{b_t}").status_code, 200
+        )
+
+    def test_templates_list_scoped(self) -> None:
+        self._seed_template(self.ws_a, "A-template")
+        self._seed_template(self.ws_b, "B-template")
+        a = self._get(self._client(self.sid_a), "/publish-templates").get_json()["data"]["templates"]
+        self.assertEqual([t["name"] for t in a], ["A-template"])
+
+    def test_cannot_modify_or_delete_foreign_template(self) -> None:
+        b_t = self._seed_template(self.ws_b, "B-template")
+        a = self._client(self.sid_a)
+        self.assertEqual(
+            self._patch(a, f"/publish-templates/{b_t}", self.csrf_a, name="hacked").status_code, 404
+        )
+        self.assertEqual(
+            self._delete(a, f"/publish-templates/{b_t}", self.csrf_a).status_code, 404
+        )
+
+    def test_created_template_assigned_to_caller_workspace(self) -> None:
+        created = self._post(self._client(self.sid_a), "/publish-templates", self.csrf_a, name="OwnedByA")
+        self.assertEqual(created.status_code, 200)
+        a = [t["name"] for t in self._get(self._client(self.sid_a), "/publish-templates").get_json()["data"]["templates"]]
+        b = [t["name"] for t in self._get(self._client(self.sid_b), "/publish-templates").get_json()["data"]["templates"]]
+        self.assertIn("OwnedByA", a)
+        self.assertNotIn("OwnedByA", b)
 
     def test_legacy_token_is_unscoped_admin_path(self) -> None:
         # A legacy bearer token (no session) is not workspace-scoped: it sees all

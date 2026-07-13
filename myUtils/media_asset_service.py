@@ -149,26 +149,43 @@ def create_media_asset(
     checksum: str = "",
     file_record_id: int | None = None,
     metadata: dict | None = None,
+    workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> MediaAsset:
     if media_type is None:
         media_type = detect_media_type(original_filename)
     now = _now_iso()
     with _connect(db_path) as conn:
-        cur = conn.execute(
-            """INSERT INTO media_assets
-            (original_filename, media_type, mime_type, local_original_path,
-             file_size, checksum, upload_status, processing_status,
-             content_analysis_json, metadata_json, file_record_id,
-             created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                original_filename, media_type, mime_type, local_original_path,
-                file_size, checksum, UPLOAD_STATUS_PENDING, PROCESSING_STATUS_PENDING,
-                json.dumps({}), json.dumps(metadata or {}), file_record_id,
-                now, now,
-            ),
-        )
+        if workspace_id is not None:
+            cur = conn.execute(
+                """INSERT INTO media_assets
+                (original_filename, media_type, mime_type, local_original_path,
+                 file_size, checksum, upload_status, processing_status,
+                 content_analysis_json, metadata_json, file_record_id,
+                 created_at, updated_at, workspace_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    original_filename, media_type, mime_type, local_original_path,
+                    file_size, checksum, UPLOAD_STATUS_PENDING, PROCESSING_STATUS_PENDING,
+                    json.dumps({}), json.dumps(metadata or {}), file_record_id,
+                    now, now, workspace_id,
+                ),
+            )
+        else:
+            cur = conn.execute(
+                """INSERT INTO media_assets
+                (original_filename, media_type, mime_type, local_original_path,
+                 file_size, checksum, upload_status, processing_status,
+                 content_analysis_json, metadata_json, file_record_id,
+                 created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    original_filename, media_type, mime_type, local_original_path,
+                    file_size, checksum, UPLOAD_STATUS_PENDING, PROCESSING_STATUS_PENDING,
+                    json.dumps({}), json.dumps(metadata or {}), file_record_id,
+                    now, now,
+                ),
+            )
         conn.commit()
         row = conn.execute(
             "SELECT * FROM media_assets WHERE id = ?", (cur.lastrowid,)
@@ -176,11 +193,19 @@ def create_media_asset(
         return _row_to_asset(row)
 
 
-def get_media_asset(asset_id: int, *, db_path: Path | None = None) -> MediaAsset:
+def get_media_asset(asset_id: int, *, workspace_id: str | None = None, db_path: Path | None = None) -> MediaAsset:
+    """Fetch an asset. When ``workspace_id`` is given, an asset owned by another
+    workspace is treated as not found (tenant isolation)."""
     with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT * FROM media_assets WHERE id = ?", (asset_id,)
-        ).fetchone()
+        if workspace_id is not None:
+            row = conn.execute(
+                "SELECT * FROM media_assets WHERE id = ? AND workspace_id = ?",
+                (asset_id, workspace_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM media_assets WHERE id = ?", (asset_id,)
+            ).fetchone()
         if row is None:
             raise ValueError(f"MediaAsset {asset_id} not found")
         return _row_to_asset(row)
@@ -193,6 +218,7 @@ def list_media_assets(
     processing_status: str | None = None,
     limit: int = 200,
     offset: int = 0,
+    workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> list[MediaAsset]:
     with _connect(db_path) as conn:
@@ -207,6 +233,9 @@ def list_media_assets(
         if processing_status:
             query += " AND processing_status = ?"
             params.append(processing_status)
+        if workspace_id is not None:
+            query += " AND workspace_id = ?"
+            params.append(workspace_id)
         query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         rows = conn.execute(query, params).fetchall()
@@ -250,7 +279,11 @@ def update_media_asset(
         return _row_to_asset(row)
 
 
-def delete_media_asset(asset_id: int, *, db_path: Path | None = None) -> None:
+def delete_media_asset(asset_id: int, *, workspace_id: str | None = None, db_path: Path | None = None) -> None:
+    """Delete an asset. When ``workspace_id`` is given, an asset owned by another
+    workspace raises ``ValueError`` and is left intact."""
+    if workspace_id is not None:
+        get_media_asset(asset_id, workspace_id=workspace_id, db_path=db_path)
     with _connect(db_path) as conn:
         conn.execute("DELETE FROM media_assets WHERE id = ?", (asset_id,))
         conn.commit()

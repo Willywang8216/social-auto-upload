@@ -179,43 +179,81 @@ def create_campaign(
     metadata: dict | None = None,
     sheet_spreadsheet_id: str | None = None,
     sheet_title: str | None = None,
+    workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> Campaign:
     with _connect(db_path) as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO campaigns (
-                profile_id,
-                media_group_id,
-                status,
-                selected_account_ids_json,
-                sheet_spreadsheet_id,
-                sheet_title,
-                metadata_json
+        if workspace_id is not None:
+            cursor = conn.execute(
+                """
+                INSERT INTO campaigns (
+                    profile_id,
+                    media_group_id,
+                    status,
+                    selected_account_ids_json,
+                    sheet_spreadsheet_id,
+                    sheet_title,
+                    metadata_json,
+                    workspace_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    profile_id,
+                    media_group_id,
+                    status,
+                    json.dumps(selected_account_ids or [], ensure_ascii=False),
+                    sheet_spreadsheet_id,
+                    sheet_title,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                    workspace_id,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                profile_id,
-                media_group_id,
-                status,
-                json.dumps(selected_account_ids or [], ensure_ascii=False),
-                sheet_spreadsheet_id,
-                sheet_title,
-                json.dumps(metadata or {}, ensure_ascii=False),
-            ),
-        )
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO campaigns (
+                    profile_id,
+                    media_group_id,
+                    status,
+                    selected_account_ids_json,
+                    sheet_spreadsheet_id,
+                    sheet_title,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    profile_id,
+                    media_group_id,
+                    status,
+                    json.dumps(selected_account_ids or [], ensure_ascii=False),
+                    sheet_spreadsheet_id,
+                    sheet_title,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
         conn.commit()
         campaign_id = cursor.lastrowid
-    return get_campaign(campaign_id, db_path=db_path)
+    return get_campaign(campaign_id, workspace_id=workspace_id, db_path=db_path)
 
 
-def get_campaign(campaign_id: int, *, db_path: Path | None = None) -> Campaign:
+def get_campaign(
+    campaign_id: int, *, workspace_id: str | None = None, db_path: Path | None = None
+) -> Campaign:
+    """Fetch a campaign. When ``workspace_id`` is given, a campaign owned by
+    another workspace is treated as not found (tenant isolation)."""
     with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT * FROM campaigns WHERE id = ?",
-            (campaign_id,),
-        ).fetchone()
+        if workspace_id is not None:
+            row = conn.execute(
+                "SELECT * FROM campaigns WHERE id = ? AND workspace_id = ?",
+                (campaign_id, workspace_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM campaigns WHERE id = ?",
+                (campaign_id,),
+            ).fetchone()
     if row is None:
         raise LookupError(f"Campaign not found: id={campaign_id}")
     return _row_to_campaign(row)
@@ -225,11 +263,15 @@ def list_campaigns(
     *,
     profile_id: int | None = None,
     status: str | None = None,
+    workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> list[Campaign]:
     query = "SELECT * FROM campaigns"
     clauses: list[str] = []
     params: list[object] = []
+    if workspace_id is not None:
+        clauses.append("workspace_id = ?")
+        params.append(workspace_id)
     if profile_id is not None:
         clauses.append("profile_id = ?")
         params.append(profile_id)
@@ -315,9 +357,17 @@ def update_campaign(
     return get_campaign(campaign_id, db_path=db_path)
 
 
-def delete_campaign(campaign_id: int, *, db_path: Path | None = None) -> None:
+def delete_campaign(
+    campaign_id: int, *, workspace_id: str | None = None, db_path: Path | None = None
+) -> None:
     with _connect(db_path) as conn:
-        conn.execute("DELETE FROM campaigns WHERE id = ?", (campaign_id,))
+        if workspace_id is not None:
+            conn.execute(
+                "DELETE FROM campaigns WHERE id = ? AND workspace_id = ?",
+                (campaign_id, workspace_id),
+            )
+        else:
+            conn.execute("DELETE FROM campaigns WHERE id = ?", (campaign_id,))
         conn.commit()
 
 

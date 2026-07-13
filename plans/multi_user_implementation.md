@@ -29,7 +29,7 @@ to command output, test results, migration reports, or screenshots.
 | 4 | 3 | Google OIDC and sessions | ✅ complete (flag-gated; live path needs a Google client) |
 | 5 | 4 | CSRF and authorization (AuthContext, roles) | ✅ complete |
 | 6 | 5 | Workspace schema and legacy backfill | ✅ expand + backfill tool (constrain + prod run pending) |
-| 7 | 6 | Route-by-route tenant isolation | 🚧 profile domain scoped + two-user matrix; other domains incremental |
+| 7 | 6 | Route-by-route tenant isolation | 🚧 profiles+accounts+jobs+media scoped (20-test matrix); campaigns/analytics remain |
 | 8 | 7 | Credential encryption and response redaction | ⬜ |
 | 9 | 8 | Tenant-aware object storage | ⬜ |
 | 10 | 9 | Redis queues and separate workers | ⬜ |
@@ -475,15 +475,41 @@ limits, quotas, structured logs, audit logs.
   deployment env). Commit `01b77aa`. CI on head `01b77aa`
   ([run 29217020659](https://github.com/Willywang8216/social-auto-upload/actions/runs/29217020659)):
   backend-tests ✅, postgres-tests ✅, frontend-build ✅, dependency-guard ✅.
+- 2026-07-13 — PR #27 (Phases 0-6b) **merged to main** by the operator; Google
+  login verified live at /auth/google/start (hybrid mode). Follow-up work
+  restarted from the new main on the same branch.
+- 2026-07-13 — Phase 6c jobs + media isolation. workspace_id scoping through
+  the jobs registry (enqueue stamps it; get/list scoped) and media_groups +
+  media_assets (create stamps; get/list/delete scoped); wired /jobs*,
+  /media-groups*, /api/media/assets*, /api/media-groups* routes. Two-user
+  matrix now 20 tests; 597 backend tests pass. Follow-up **PR #28**
+  (https://github.com/Willywang8216/social-auto-upload/pull/28), commit `b2fa84e`; CI all green (backend/postgres/frontend/dependency-guard).
+- 2026-07-13 — Phase 6d campaigns + publish-templates isolation. `campaigns`
+  store: `create_campaign` stamps `workspace_id`; `get`/`list`/`delete` scoped
+  (404 on a foreign campaign). `publish_templates` store: `create` stamps;
+  `list`/`get` scoped (slug stays global-unique — the per-workspace composite
+  unique is the later constrain step). Routes wired: `/campaigns/prepare`
+  (scopes the user-supplied `profileId`/`mediaGroupId` + account fetches + the
+  create), `/campaigns/<id>` GET, `/campaigns/<id>/posts/<pid>` PATCH,
+  `/campaigns/<id>/publish` (gate + stamps the enqueued job's workspace),
+  `/api/campaigns/<id>/generate` and `/export/google-sheet` (campaign-ownership
+  gate), and all five `/publish-templates*` routes. Two-user matrix now **28
+  tests**; **605 backend tests pass** (1 skipped). Route matrix re-derived
+  (139 routes, source_line only) and `check_csvs` green. Stacked on **PR #28**.
+  Deferred to a follow-up (Phase 6e): the prepared-posts / `content_generator`
+  domain behind `/api/campaigns/<id>/{validate,approve,posts,export/csv}`,
+  which needs the `prepared_posts` store scoped in its own right.
+  Commit `de23693`; stacked on **PR #28**; **CI all green** (backend-tests,
+  postgres-tests, frontend-build, dependency-guard on run 29229532653).
 
 ## Next incomplete task
 
 Phase 6 (continued) — extend the proven `_workspace_scope()` pattern to the
-remaining domains: accounts (`/accounts/*`, `/api/accounts`), media +
-media-groups, campaigns + templates, jobs + job logs, analytics, OAuth status,
-and exports — each threading `workspace_id` through its registry calls and
-adding its slice of the two-user matrix. Then Phase 7 (credential encryption)
-and the frontend (Phase 10).
+remaining domains: prepared-posts (`content_generator`) + sheet-exports, the
+analytics store (`/api/analytics*`, video_analytics_*), watermark configs,
+account-events, and per-platform OAuth status/review tables — each threading
+`workspace_id` through its registry calls and adding its slice of the two-user
+matrix. Then Phase 7 (credential encryption) and the frontend (Phase 10).
 
 **Standing user input still needed** (does not block the code build): a Google
 OAuth client to exercise a *real* login (Phase 3 live path), and access to run
