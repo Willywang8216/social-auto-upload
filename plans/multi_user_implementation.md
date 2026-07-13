@@ -484,15 +484,30 @@ limits, quotas, structured logs, audit logs.
   /media-groups*, /api/media/assets*, /api/media-groups* routes. Two-user
   matrix now 20 tests; 597 backend tests pass. Follow-up **PR #28**
   (https://github.com/Willywang8216/social-auto-upload/pull/28), commit `b2fa84e`; CI all green (backend/postgres/frontend/dependency-guard).
+- 2026-07-13 — Phase 6d campaigns + publish-templates isolation. `campaigns`
+  store: `create_campaign` stamps `workspace_id`; `get`/`list`/`delete` scoped
+  (404 on a foreign campaign). `publish_templates` store: `create` stamps;
+  `list`/`get` scoped (slug stays global-unique — the per-workspace composite
+  unique is the later constrain step). Routes wired: `/campaigns/prepare`
+  (scopes the user-supplied `profileId`/`mediaGroupId` + account fetches + the
+  create), `/campaigns/<id>` GET, `/campaigns/<id>/posts/<pid>` PATCH,
+  `/campaigns/<id>/publish` (gate + stamps the enqueued job's workspace),
+  `/api/campaigns/<id>/generate` and `/export/google-sheet` (campaign-ownership
+  gate), and all five `/publish-templates*` routes. Two-user matrix now **28
+  tests**; **605 backend tests pass** (1 skipped). Route matrix re-derived
+  (139 routes, source_line only) and `check_csvs` green. Stacked on **PR #28**.
+  Deferred to a follow-up (Phase 6e): the prepared-posts / `content_generator`
+  domain behind `/api/campaigns/<id>/{validate,approve,posts,export/csv}`,
+  which needs the `prepared_posts` store scoped in its own right.
 
 ## Next incomplete task
 
 Phase 6 (continued) — extend the proven `_workspace_scope()` pattern to the
-remaining domains: accounts (`/accounts/*`, `/api/accounts`), media +
-media-groups, campaigns + templates, jobs + job logs, analytics, OAuth status,
-and exports — each threading `workspace_id` through its registry calls and
-adding its slice of the two-user matrix. Then Phase 7 (credential encryption)
-and the frontend (Phase 10).
+remaining domains: prepared-posts (`content_generator`) + sheet-exports, the
+analytics store (`/api/analytics*`, video_analytics_*), watermark configs,
+account-events, and per-platform OAuth status/review tables — each threading
+`workspace_id` through its registry calls and adding its slice of the two-user
+matrix. Then Phase 7 (credential encryption) and the frontend (Phase 10).
 
 **Standing user input still needed** (does not block the code build): a Google
 OAuth client to exercise a *real* login (Phase 3 live path), and access to run

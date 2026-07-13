@@ -5742,24 +5742,32 @@ def media_groups_get(media_group_id):
 @app.route("/campaigns/prepare", methods=["POST"])
 def campaigns_prepare():
     db_path = _current_db_path()
+    workspace_id = _workspace_scope()
     try:
         data = _read_json_body()
         profile_id = int(data.get("profileId"))
         media_group_id = int(data.get("mediaGroupId"))
-        profile = profile_registry.get_profile(profile_id, db_path=db_path)
-        media_group = media_group_store.get_media_group(media_group_id, db_path=db_path)
+        profile = profile_registry.get_profile(
+            profile_id, workspace_id=workspace_id, db_path=db_path
+        )
+        media_group = media_group_store.get_media_group(
+            media_group_id, workspace_id=workspace_id, db_path=db_path
+        )
         selected_account_ids = data.get("selectedAccountIds")
         if selected_account_ids is None:
             account_rows = profile_registry.list_accounts(
                 profile_id=profile_id,
                 enabled=True,
+                workspace_id=workspace_id,
                 db_path=db_path,
             )
         else:
             if not isinstance(selected_account_ids, list):
                 raise ValueError("selectedAccountIds must be a list")
             account_rows = [
-                profile_registry.get_account(int(account_id), db_path=db_path)
+                profile_registry.get_account(
+                    int(account_id), workspace_id=workspace_id, db_path=db_path
+                )
                 for account_id in selected_account_ids
             ]
             account_rows = [
@@ -5809,6 +5817,7 @@ def campaigns_prepare():
             },
             sheet_spreadsheet_id=data.get("spreadsheetId"),
             sheet_title=str(data.get("sheetTitle", "") or "") or None,
+            workspace_id=workspace_id,
             db_path=db_path,
         )
 
@@ -5918,7 +5927,9 @@ def campaigns_prepare():
 def campaigns_get(campaign_id):
     db_path = _current_db_path()
     try:
-        campaign = campaign_store.get_campaign(campaign_id, db_path=db_path)
+        campaign = campaign_store.get_campaign(
+            campaign_id, workspace_id=_workspace_scope(), db_path=db_path
+        )
     except LookupError:
         return jsonify({"code": 404, "msg": "Campaign not found", "data": None}), 404
     return jsonify(
@@ -5930,7 +5941,9 @@ def campaigns_get(campaign_id):
 def campaigns_posts_patch(campaign_id, post_id):
     db_path = _current_db_path()
     try:
-        campaign_store.get_campaign(campaign_id, db_path=db_path)
+        campaign_store.get_campaign(
+            campaign_id, workspace_id=_workspace_scope(), db_path=db_path
+        )
         post = campaign_store.get_campaign_post(post_id, db_path=db_path)
         if post.campaign_id != campaign_id:
             raise LookupError("Campaign post not found")
@@ -5954,8 +5967,11 @@ def campaigns_posts_patch(campaign_id, post_id):
 @app.route("/campaigns/<int:campaign_id>/publish", methods=["POST"])
 def campaigns_publish(campaign_id):
     db_path = _current_db_path()
+    workspace_id = _workspace_scope()
     try:
-        campaign = campaign_store.get_campaign(campaign_id, db_path=db_path)
+        campaign = campaign_store.get_campaign(
+            campaign_id, workspace_id=workspace_id, db_path=db_path
+        )
     except LookupError:
         return jsonify({"code": 404, "msg": "Campaign not found", "data": None}), 404
 
@@ -6001,6 +6017,7 @@ def campaigns_publish(campaign_id):
                 profile_id=campaign.profile_id,
                 idempotency_key=f"campaign-{campaign.id}-post-{post.id}",
             ),
+            workspace_id=workspace_id,
             db_path=db_path,
         )
         queued_jobs.append(_job_to_payload(job))
@@ -6457,7 +6474,9 @@ def _template_payload(template):
 @app.route("/publish-templates", methods=["GET"])
 def publish_templates_list():
     db_path = _current_db_path()
-    rows = template_store.list_templates(db_path=db_path)
+    rows = template_store.list_templates(
+        workspace_id=_workspace_scope(), db_path=db_path
+    )
     return jsonify({
         "code": 200,
         "msg": "ok",
@@ -6475,6 +6494,7 @@ def publish_templates_create():
             description=str(data.get("description") or "").strip(),
             config=data.get("config") if isinstance(data.get("config"), dict) else {},
             included_settings=data.get("includedSettings") if isinstance(data.get("includedSettings"), list) else None,
+            workspace_id=_workspace_scope(),
             db_path=db_path,
         )
     except ValueError as exc:
@@ -6486,7 +6506,9 @@ def publish_templates_create():
 def publish_templates_get(template_id):
     db_path = _current_db_path()
     try:
-        template = template_store.get_template(template_id, db_path=db_path)
+        template = template_store.get_template(
+            template_id, workspace_id=_workspace_scope(), db_path=db_path
+        )
     except LookupError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
     return jsonify({"code": 200, "msg": "ok", "data": _template_payload(template)}), 200
@@ -6496,6 +6518,10 @@ def publish_templates_get(template_id):
 def publish_templates_update(template_id):
     db_path = _current_db_path()
     try:
+        # Ownership gate: a template in another workspace is 404 before update.
+        template_store.get_template(
+            template_id, workspace_id=_workspace_scope(), db_path=db_path
+        )
         data = _read_json_body()
         kwargs: dict = {"db_path": db_path}
         if "name" in data:
@@ -6518,7 +6544,9 @@ def publish_templates_update(template_id):
 def publish_templates_delete(template_id):
     db_path = _current_db_path()
     try:
-        template_store.get_template(template_id, db_path=db_path)
+        template_store.get_template(
+            template_id, workspace_id=_workspace_scope(), db_path=db_path
+        )
         template_store.delete_template(template_id, db_path=db_path)
     except LookupError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
@@ -7275,7 +7303,9 @@ def api_campaign_generate(campaign_id):
     db_path = Path(BASE_DIR) / "db" / "database.db"
 
     try:
-        campaign = campaign_store.get_campaign(campaign_id)
+        campaign = campaign_store.get_campaign(
+            campaign_id, workspace_id=_workspace_scope()
+        )
     except (ValueError, Exception):
         return jsonify({"error": "Campaign not found"}), 404
 
@@ -7445,7 +7475,9 @@ def api_campaign_export_sheet(campaign_id):
     spreadsheet_id = data.get("spreadsheet_id")
 
     try:
-        campaign = campaign_store.get_campaign(campaign_id)
+        campaign = campaign_store.get_campaign(
+            campaign_id, workspace_id=_workspace_scope()
+        )
     except (ValueError, Exception):
         return jsonify({"error": "Campaign not found"}), 404
 

@@ -113,20 +113,39 @@ def _ensure_slug_unique(slug: str, *, db_path: Path | None, exclude_id: int | No
             suffix += 1
 
 
-def list_templates(*, db_path: Path | None = None) -> list[PublishTemplate]:
+def list_templates(
+    *, workspace_id: str | None = None, db_path: Path | None = None
+) -> list[PublishTemplate]:
     with _connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM publish_templates ORDER BY updated_at DESC, id DESC"
-        ).fetchall()
+        if workspace_id is not None:
+            rows = conn.execute(
+                "SELECT * FROM publish_templates WHERE workspace_id = ? "
+                "ORDER BY updated_at DESC, id DESC",
+                (workspace_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM publish_templates ORDER BY updated_at DESC, id DESC"
+            ).fetchall()
     return [_row_to_template(row) for row in rows]
 
 
-def get_template(template_id: int, *, db_path: Path | None = None) -> PublishTemplate:
+def get_template(
+    template_id: int, *, workspace_id: str | None = None, db_path: Path | None = None
+) -> PublishTemplate:
+    """Fetch a template. When ``workspace_id`` is given, a template owned by
+    another workspace is treated as not found (tenant isolation)."""
     with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT * FROM publish_templates WHERE id = ?",
-            (template_id,),
-        ).fetchone()
+        if workspace_id is not None:
+            row = conn.execute(
+                "SELECT * FROM publish_templates WHERE id = ? AND workspace_id = ?",
+                (template_id, workspace_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM publish_templates WHERE id = ?",
+                (template_id,),
+            ).fetchone()
     if row is None:
         raise LookupError(f"Publish template not found: id={template_id}")
     return _row_to_template(row)
@@ -138,31 +157,52 @@ def create_template(
     description: str = "",
     config: dict | None = None,
     included_settings: list[str] | None = None,
+    workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> PublishTemplate:
     cleaned_name = (name or "").strip()
     if not cleaned_name:
         raise ValueError("Template name is required")
+    # Slug uniqueness stays global: the DB enforces a UNIQUE(slug) constraint
+    # today. The per-workspace composite unique is a later "constrain" step.
     slug = _ensure_slug_unique(slugify(cleaned_name), db_path=db_path)
     settings = [str(item) for item in (included_settings or list(ALL_SETTINGS)) if item]
     with _connect(db_path) as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO publish_templates (
-                name, slug, description, config_json, included_settings_json
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                cleaned_name,
-                slug,
-                (description or "").strip(),
-                json.dumps(config or {}, ensure_ascii=False),
-                json.dumps(settings, ensure_ascii=False),
-            ),
-        )
+        if workspace_id is not None:
+            cursor = conn.execute(
+                """
+                INSERT INTO publish_templates (
+                    name, slug, description, config_json, included_settings_json,
+                    workspace_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cleaned_name,
+                    slug,
+                    (description or "").strip(),
+                    json.dumps(config or {}, ensure_ascii=False),
+                    json.dumps(settings, ensure_ascii=False),
+                    workspace_id,
+                ),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO publish_templates (
+                    name, slug, description, config_json, included_settings_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    cleaned_name,
+                    slug,
+                    (description or "").strip(),
+                    json.dumps(config or {}, ensure_ascii=False),
+                    json.dumps(settings, ensure_ascii=False),
+                ),
+            )
         conn.commit()
         template_id = cursor.lastrowid
-    return get_template(template_id, db_path=db_path)
+    return get_template(template_id, workspace_id=workspace_id, db_path=db_path)
 
 
 _UNSET = object()
