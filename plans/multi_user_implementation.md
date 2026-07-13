@@ -483,7 +483,7 @@ limits, quotas, structured logs, audit logs.
   media_assets (create stamps; get/list/delete scoped); wired /jobs*,
   /media-groups*, /api/media/assets*, /api/media-groups* routes. Two-user
   matrix now 20 tests; 597 backend tests pass. Follow-up **PR #28**
-  (https://github.com/Willywang8216/social-auto-upload/pull/28), commit `b2fa84e`.
+  (https://github.com/Willywang8216/social-auto-upload/pull/28), commit `b2fa84e`; CI all green (backend/postgres/frontend/dependency-guard).
 
 ## Next incomplete task
 
