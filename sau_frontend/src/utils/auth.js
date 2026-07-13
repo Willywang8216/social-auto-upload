@@ -7,6 +7,11 @@
 // /whoami to confirm the backend is reachable.
 
 const TOKEN_KEY = 'sau-auth-token'
+// CSRF secret for the Google session. Handed out by GET /api/v1/session and
+// echoed on mutating requests via the X-CSRF-Token header. Kept in
+// sessionStorage (cleared when the tab closes) and re-fetched on every
+// bootstrap, so it never needs to outlive a session.
+const CSRF_KEY = 'sau-csrf-token'
 
 export function getToken() {
   try {
@@ -28,6 +33,34 @@ export function setToken(token) {
 export function clearToken() {
   try {
     window.localStorage.removeItem(TOKEN_KEY)
+  } catch {
+    // ignore
+  }
+}
+
+export function getCsrfToken() {
+  try {
+    return window.sessionStorage.getItem(CSRF_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+export function setCsrfToken(token) {
+  try {
+    if (token) {
+      window.sessionStorage.setItem(CSRF_KEY, token)
+    } else {
+      window.sessionStorage.removeItem(CSRF_KEY)
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export function clearCsrfToken() {
+  try {
+    window.sessionStorage.removeItem(CSRF_KEY)
   } catch {
     // ignore
   }

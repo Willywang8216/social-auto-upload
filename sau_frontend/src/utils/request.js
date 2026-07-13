@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
-import { clearToken, getToken } from '@/utils/auth'
+import { clearToken, getToken, getCsrfToken, clearCsrfToken } from '@/utils/auth'
 import { getApiBaseUrl } from '@/utils/api-url'
 
 // Guard to prevent duplicate 401 handling on concurrent requests
@@ -19,6 +19,14 @@ const request = axios.create({
 // 请求拦截器
 request.interceptors.request.use(
   (config) => {
+    // Google session: send the cookie and echo the CSRF secret on mutating
+    // requests. Presence of a CSRF token means a session is active.
+    const csrf = getCsrfToken()
+    if (csrf) {
+      config.withCredentials = true
+      config.headers['X-CSRF-Token'] = csrf
+    }
+    // Legacy bearer token (harmless alongside a session; unchanged when alone).
     const token = getToken()
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
@@ -60,6 +68,13 @@ request.interceptors.response.use(
             isRedirectingToLogin = true
             ElMessage.error('未授權，請重新登入')
             clearToken()
+            // Drop any stale Google session so the router guard stops treating
+            // the workspace as authenticated. Imported lazily to avoid a
+            // module-load cycle and to reach the store only at runtime.
+            clearCsrfToken()
+            import('@/stores/auth')
+              .then(({ useAuthStore }) => useAuthStore().clearSession())
+              .catch(() => {})
             // Bounce back to the login screen using the hash router. Use a
             // direct location.hash assignment rather than importing the
             // router, which would create a circular dependency.
