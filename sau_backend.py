@@ -7019,7 +7019,9 @@ def analytics_thumbnail_proxy(platform_video_id):
 @app.route("/api/watermark-configs", methods=["GET"])
 def api_list_watermark_configs():
     profile_id = request.args.get("profile_id", type=int)
-    configs = watermark_service.list_watermark_configs(profile_id=profile_id)
+    configs = watermark_service.list_watermark_configs(
+        profile_id=profile_id, workspace_id=_workspace_scope()
+    )
     return jsonify([c.to_dict() for c in configs])
 
 
@@ -7029,8 +7031,11 @@ def api_create_watermark_config():
     if not data:
         return jsonify({"error": "Invalid or missing JSON body"}), 400
     data.pop("db_path", None)  # Never accept from client
+    data.pop("workspace_id", None)  # Owner is derived from the session, never client-set
     try:
-        config = watermark_service.create_watermark_config(**data)
+        config = watermark_service.create_watermark_config(
+            **data, workspace_id=_workspace_scope()
+        )
         return jsonify(config.to_dict()), 201
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -7042,7 +7047,9 @@ def api_create_watermark_config():
 @app.route("/api/watermark-configs/<int:config_id>", methods=["GET"])
 def api_get_watermark_config(config_id):
     try:
-        config = watermark_service.get_watermark_config(config_id)
+        config = watermark_service.get_watermark_config(
+            config_id, workspace_id=_workspace_scope()
+        )
         return jsonify(config.to_dict())
     except ValueError:
         return jsonify({"error": "Not found"}), 404
@@ -7054,8 +7061,11 @@ def api_update_watermark_config(config_id):
     if not data:
         return jsonify({"error": "Invalid or missing JSON body"}), 400
     data.pop("db_path", None)  # Never accept from client
+    data.pop("workspace_id", None)  # Owner is derived from the session, never client-set
     try:
-        config = watermark_service.update_watermark_config(config_id, **data)
+        config = watermark_service.update_watermark_config(
+            config_id, workspace_id=_workspace_scope(), **data
+        )
         return jsonify(config.to_dict())
     except ValueError:
         return jsonify({"error": "Not found"}), 404
@@ -7063,11 +7073,12 @@ def api_update_watermark_config(config_id):
 
 @app.route("/api/watermark-configs/<int:config_id>", methods=["DELETE"])
 def api_delete_watermark_config(config_id):
+    workspace_id = _workspace_scope()
     try:
-        watermark_service.get_watermark_config(config_id)
+        watermark_service.get_watermark_config(config_id, workspace_id=workspace_id)
     except ValueError:
         return jsonify({"error": "Not found"}), 404
-    watermark_service.delete_watermark_config(config_id)
+    watermark_service.delete_watermark_config(config_id, workspace_id=workspace_id)
     return jsonify({"ok": True})
 
 

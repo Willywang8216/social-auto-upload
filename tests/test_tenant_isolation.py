@@ -65,6 +65,7 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         from myUtils import campaigns as _campaigns
         from myUtils import content_generator as _cg
         from myUtils import sheet_export_service as _ses
+        from myUtils import watermark_service as _wm
 
         self._patches = [
             patch.object(sau_backend, "_get_legacy_db_path", return_value=self.db_path),
@@ -73,6 +74,7 @@ class ProfileTenantIsolationTests(unittest.TestCase):
             patch.object(_campaigns, "DB_PATH", self.db_path),
             patch.object(_cg, "DB_PATH", self.db_path),
             patch.object(_ses, "DB_PATH", self.db_path),
+            patch.object(_wm, "DB_PATH", self.db_path),
         ]
         for p in self._patches:
             p.start()
@@ -443,6 +445,51 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         b = self._get(self._client(self.sid_b), "/api/sheet-exports").get_json()["data"]
         self.assertEqual(len(a), 1)
         self.assertEqual(len(b), 1)
+
+    # --- watermark configs domain ------------------------------------------
+
+    def _seed_watermark(self, workspace_id: str, name: str) -> int:
+        from myUtils import watermark_service
+        return watermark_service.create_watermark_config(
+            name=name, workspace_id=workspace_id, db_path=self.db_path
+        ).id
+
+    def test_cannot_read_foreign_watermark_config(self) -> None:
+        b_w = self._seed_watermark(self.ws_b, "B-wm")
+        self.assertEqual(
+            self._get(self._client(self.sid_a), f"/api/watermark-configs/{b_w}").status_code, 404
+        )
+        self.assertEqual(
+            self._get(self._client(self.sid_b), f"/api/watermark-configs/{b_w}").status_code, 200
+        )
+
+    def test_watermark_configs_list_scoped(self) -> None:
+        self._seed_watermark(self.ws_a, "A-wm")
+        self._seed_watermark(self.ws_b, "B-wm")
+        a = self._get(self._client(self.sid_a), "/api/watermark-configs").get_json()
+        self.assertEqual([c["name"] for c in a], ["A-wm"])
+
+    def test_cannot_modify_or_delete_foreign_watermark_config(self) -> None:
+        b_w = self._seed_watermark(self.ws_b, "B-wm")
+        a = self._client(self.sid_a)
+        self.assertEqual(
+            self._patch(a, f"/api/watermark-configs/{b_w}", self.csrf_a, name="hax").status_code, 404
+        )
+        self.assertEqual(
+            self._delete(a, f"/api/watermark-configs/{b_w}", self.csrf_a).status_code, 404
+        )
+        # B's config is intact.
+        from myUtils import watermark_service
+        got = watermark_service.get_watermark_config(b_w, db_path=self.db_path)
+        self.assertEqual(got.name, "B-wm")
+
+    def test_created_watermark_config_bound_to_caller_workspace(self) -> None:
+        created = self._post(self._client(self.sid_a), "/api/watermark-configs", self.csrf_a, name="OwnedByA")
+        self.assertEqual(created.status_code, 201)
+        a = [c["name"] for c in self._get(self._client(self.sid_a), "/api/watermark-configs").get_json()]
+        b = [c["name"] for c in self._get(self._client(self.sid_b), "/api/watermark-configs").get_json()]
+        self.assertIn("OwnedByA", a)
+        self.assertNotIn("OwnedByA", b)
 
     def test_legacy_token_is_unscoped_admin_path(self) -> None:
         # A legacy bearer token (no session) is not workspace-scoped: it sees all

@@ -513,14 +513,25 @@ limits, quotas, structured logs, audit logs.
   tests**. Route matrix re-derived (139 routes, source_line only), `check_csvs`
   green.
 
+- 2026-07-13 — Phase 6f watermark-configs isolation (stacked on the open PR #29
+  branch). `watermark_service`: `create` stamps `workspace_id` (column
+  referenced only when scoped); `get`/`update`/`delete` scoped (foreign config
+  404s via `ValueError`); `list` filters by workspace while preserving the
+  existing `profile_id = ? OR profile_id IS NULL` shared-default logic. All
+  five `/api/watermark-configs*` routes wired; POST/PATCH also pop any
+  client-supplied `workspace_id` (owner is session-derived, never client-set).
+  Two-user matrix now **35 tests**. Route matrix re-derived (139 routes,
+  source_line only), `check_csvs` green.
+
 ## Next incomplete task
 
-Phase 6 (continued) — extend the proven `_workspace_scope()` pattern to the
-remaining domains: the analytics store (`/api/analytics*`, video_analytics_*,
-analytics_sync_log), watermark configs (`/api/watermark-configs*`),
-account-events, and per-platform OAuth status/review tables — each threading
-`workspace_id` through its registry calls and adding its slice of the two-user
-matrix. Then Phase 7 (credential encryption) and the frontend (Phase 10).
+Phase 6 (continued) — the remaining domains all share a **deep write-path**
+(rows are stamped far from the request, inside sync loops / audit-log helpers),
+so they need a small "derive workspace from the account" helper before
+scoping: the analytics store (`/api/analytics*`, video_analytics_*,
+analytics_sync_log — stamped inside `analytics_sync`), account-events
+(`record_event` at 10+ call sites), and per-platform OAuth status/review
+tables. Then Phase 7 (credential encryption) and the frontend (Phase 10).
 
 **Standing user input still needed** (does not block the code build): a Google
 OAuth client to exercise a *real* login (Phase 3 live path), and access to run
