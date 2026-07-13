@@ -472,7 +472,9 @@ limits, quotas, structured logs, audit logs.
   matrix now 14 tests; 591 backend tests pass (6 new). The user's Google login
   client ID + both registered redirect hosts recorded in
   docs/credential-setup.md with the go-live env block (secret stays in the
-  deployment env).
+  deployment env). Commit `01b77aa`. CI on head `01b77aa`
+  ([run 29217020659](https://github.com/Willywang8216/social-auto-upload/actions/runs/29217020659)):
+  backend-tests ✅, postgres-tests ✅, frontend-build ✅, dependency-guard ✅.
 
 ## Next incomplete task
 
