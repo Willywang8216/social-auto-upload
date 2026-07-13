@@ -596,15 +596,36 @@ limits, quotas, structured logs, audit logs.
   **643 passed, 1 skipped**; route matrix + CSVs unchanged (no `sau_backend.py`
   edits). Documented in `.env.example` + `CLAUDE.md`.
 
+- 2026-07-13 — Phase 10 (part 1) frontend Google login (fresh follow-up off the
+  merged main; **new PR**). Adds the customer-facing "Sign in with Google"
+  button and session-cookie auth *alongside* the legacy bearer-token flow (a
+  workspace is authenticated when either is present). New `src/stores/auth.js`
+  (Pinia) with a dedicated axios client — the `/api/v1/session` body has no
+  `{code:200}` envelope so it bypasses the shared interceptor — exposing
+  `bootstrap()` (resolves the session on load; 404 ⇒ Google login disabled),
+  `loginWithGoogle()` (full-page redirect to `/auth/google/start`), `logout()`
+  (CSRF-protected `POST /api/v1/logout`), and `isAuthenticated`
+  (session-or-token). Wired: `utils/auth.js` gains CSRF get/set/clear
+  (sessionStorage); `utils/request.js` sends `withCredentials` + `X-CSRF-Token`
+  when a session is active and clears the session on 401; the router guard uses
+  the store; `main.js` bootstraps the session before the first navigation;
+  `LoginView.vue` shows the Google button (gated on `googleLoginEnabled`) and
+  renders `?error=` callback failures. `__Host-` cookies require https, so the
+  full round-trip is a production/https feature. Evidence: `npm run build` ✓;
+  `npm test` — the new `src/stores/__tests__/auth.test.js` (4 tests) + existing
+  util tests pass (**16 passed**); the only failing file is the pre-existing
+  Playwright `demo.spec.ts` (baseline defect F-1, not run in CI).
+
 ## Next incomplete task
 
-Read-isolation and the credential leaks (in-transit **and** at-rest) are closed.
-Remaining:
-- `storage_backends` S3-key at-rest encryption (internal-only today — no response
-  leak — so lower priority; same envelope applies).
-- Phase 6 tail — per-platform OAuth status/review tables (transient state);
-  role-gating for the `/admin/*` OAuth-status routes.
-- **Phase 10** — frontend Google login screen.
+Read-isolation and the credential leaks (in-transit **and** at-rest) are closed;
+the frontend Google-login screen exists. Remaining:
+- Phase 10 (part 2) — a logout control in the app nav (the `authStore.logout()`
+  method is ready to wire) and a workspace/user chip showing the signed-in
+  identity; optional CORS-credentials config for cross-origin dev.
+- `storage_backends` S3-key at-rest encryption (internal-only — lower priority).
+- Phase 6 tail — per-platform OAuth status/review tables; role-gating for the
+  `/admin/*` OAuth-status routes.
 Operator steps still pending: run the Phase 5 backfill on the production DB, then
 flip `SAU_TENANCY_MODE=single→shadow→enforced`. To enable config encryption in
 prod, set `SAU_CONFIG_ENCRYPTION_KEY` then re-save accounts (a save re-encrypts).

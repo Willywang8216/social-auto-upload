@@ -1,5 +1,5 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-import { getToken } from '@/utils/auth'
+import { useAuthStore } from '@/stores/auth'
 
 /* ------------------------------------------------------------------ */
 /*  Lazy-loaded views — each becomes its own chunk                     */
@@ -208,10 +208,11 @@ const router = createRouter({
 /* ------------------------------------------------------------------ */
 router.beforeEach((to) => {
   if (to.meta?.public) return true
-  if (!getToken()) {
-    return { name: 'Login', query: { redirect: to.fullPath } }
-  }
-  return true
+  // Authenticated when either a Google session is live or a legacy bearer
+  // token is present (the store's isAuthenticated covers both).
+  const auth = useAuthStore()
+  if (auth.isAuthenticated) return true
+  return { name: 'Login', query: { redirect: to.fullPath } }
 })
 
 router.afterEach((to) => {
