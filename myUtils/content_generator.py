@@ -160,32 +160,41 @@ def create_prepared_post(
     validation_errors: list | None = None,
     llm_raw_output: dict | None = None,
     char_count: int = 0,
+    workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> PreparedPost:
     now = _now_iso()
+    columns = [
+        "campaign_id", "media_group_id", "profile_id", "platform", "account_id",
+        "target_name", "message", "title", "description", "first_comment", "hashtags",
+        "link", "image_urls", "video_url", "video_thumbnail_url", "alt_text",
+        "post_preset", "category", "watermark_name", "hashtag_group", "cta_group",
+        "story_flag", "pinterest_board", "scheduled_month", "scheduled_day",
+        "scheduled_year", "scheduled_hour", "scheduled_minute", "status",
+        "validation_errors_json", "llm_raw_output_json", "char_count",
+        "created_at", "updated_at",
+    ]
+    values: list = [
+        campaign_id, media_group_id, profile_id, platform, account_id,
+        target_name, message, title, description, first_comment, hashtags,
+        link, image_urls, video_url, video_thumbnail_url, alt_text,
+        post_preset, category, watermark_name, hashtag_group, cta_group,
+        int(story_flag), pinterest_board, scheduled_month, scheduled_day,
+        scheduled_year, scheduled_hour, scheduled_minute, status,
+        json.dumps(validation_errors or []),
+        json.dumps(llm_raw_output or {}),
+        char_count, now, now,
+    ]
+    # Reference the workspace_id column only when a scope is supplied so the
+    # default single-tenant INSERT stays byte-identical to before.
+    if workspace_id is not None:
+        columns.append("workspace_id")
+        values.append(workspace_id)
+    placeholders = ",".join("?" for _ in columns)
     with _connect(db_path) as conn:
         cur = conn.execute(
-            """INSERT INTO prepared_posts
-            (campaign_id, media_group_id, profile_id, platform, account_id,
-             target_name, message, title, description, first_comment, hashtags,
-             link, image_urls, video_url, video_thumbnail_url, alt_text,
-             post_preset, category, watermark_name, hashtag_group, cta_group,
-             story_flag, pinterest_board, scheduled_month, scheduled_day,
-             scheduled_year, scheduled_hour, scheduled_minute, status,
-             validation_errors_json, llm_raw_output_json, char_count,
-             created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                campaign_id, media_group_id, profile_id, platform, account_id,
-                target_name, message, title, description, first_comment, hashtags,
-                link, image_urls, video_url, video_thumbnail_url, alt_text,
-                post_preset, category, watermark_name, hashtag_group, cta_group,
-                int(story_flag), pinterest_board, scheduled_month, scheduled_day,
-                scheduled_year, scheduled_hour, scheduled_minute, status,
-                json.dumps(validation_errors or []),
-                json.dumps(llm_raw_output or {}),
-                char_count, now, now,
-            ),
+            f"INSERT INTO prepared_posts ({', '.join(columns)}) VALUES ({placeholders})",
+            values,
         )
         conn.commit()
         row = conn.execute(
@@ -194,11 +203,19 @@ def create_prepared_post(
         return _row_to_post(row)
 
 
-def get_prepared_post(post_id: int, *, db_path: Path | None = None) -> PreparedPost:
+def get_prepared_post(
+    post_id: int, *, workspace_id: str | None = None, db_path: Path | None = None
+) -> PreparedPost:
     with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT * FROM prepared_posts WHERE id = ?", (post_id,)
-        ).fetchone()
+        if workspace_id is not None:
+            row = conn.execute(
+                "SELECT * FROM prepared_posts WHERE id = ? AND workspace_id = ?",
+                (post_id, workspace_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM prepared_posts WHERE id = ?", (post_id,)
+            ).fetchone()
         if row is None:
             raise ValueError(f"PreparedPost {post_id} not found")
         return _row_to_post(row)
@@ -209,11 +226,15 @@ def list_prepared_posts(
     campaign_id: int | None = None,
     platform: str | None = None,
     status: str | None = None,
+    workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> list[PreparedPost]:
     with _connect(db_path) as conn:
         query = "SELECT * FROM prepared_posts WHERE 1=1"
         params: list = []
+        if workspace_id is not None:
+            query += " AND workspace_id = ?"
+            params.append(workspace_id)
         if campaign_id is not None:
             query += " AND campaign_id = ?"
             params.append(campaign_id)
@@ -229,7 +250,7 @@ def list_prepared_posts(
 
 
 def update_prepared_post(
-    post_id: int, *, db_path: Path | None = None, **fields
+    post_id: int, *, workspace_id: str | None = None, db_path: Path | None = None, **fields
 ) -> PreparedPost:
     allowed = {
         "message", "title", "description", "first_comment", "hashtags",
@@ -254,24 +275,37 @@ def update_prepared_post(
             v = int(bool(v))
         updates[k] = v
     if not updates:
-        return get_prepared_post(post_id, db_path=db_path)
+        return get_prepared_post(post_id, workspace_id=workspace_id, db_path=db_path)
     updates["updated_at"] = _now_iso()
     set_clause = ", ".join(f"{k} = ?" for k in updates)
+    where = "WHERE id = ?"
     values = list(updates.values()) + [post_id]
+    if workspace_id is not None:
+        where += " AND workspace_id = ?"
+        values.append(workspace_id)
     with _connect(db_path) as conn:
-        conn.execute(f"UPDATE prepared_posts SET {set_clause} WHERE id = ?", values)
+        conn.execute(f"UPDATE prepared_posts SET {set_clause} {where}", values)
         conn.commit()
         row = conn.execute(
-            "SELECT * FROM prepared_posts WHERE id = ?", (post_id,)
+            "SELECT * FROM prepared_posts " + where,
+            [post_id] + ([workspace_id] if workspace_id is not None else []),
         ).fetchone()
         if row is None:
             raise ValueError(f"PreparedPost {post_id} not found")
         return _row_to_post(row)
 
 
-def delete_prepared_post(post_id: int, *, db_path: Path | None = None) -> None:
+def delete_prepared_post(
+    post_id: int, *, workspace_id: str | None = None, db_path: Path | None = None
+) -> None:
     with _connect(db_path) as conn:
-        conn.execute("DELETE FROM prepared_posts WHERE id = ?", (post_id,))
+        if workspace_id is not None:
+            conn.execute(
+                "DELETE FROM prepared_posts WHERE id = ? AND workspace_id = ?",
+                (post_id, workspace_id),
+            )
+        else:
+            conn.execute("DELETE FROM prepared_posts WHERE id = ?", (post_id,))
         conn.commit()
 
 

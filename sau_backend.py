@@ -7400,6 +7400,7 @@ def api_campaign_generate(campaign_id):
                 validation_errors=errors,
                 llm_raw_output={"raw": raw_content, "parsed": parsed},
                 char_count=len(parsed.get("message", "")),
+                workspace_id=_workspace_scope(),
             )
             generated_posts.append(post.to_dict())
         except Exception as e:
@@ -7415,13 +7416,19 @@ def api_campaign_generate(campaign_id):
 
 @app.route("/api/campaigns/<int:campaign_id>/validate", methods=["POST"])
 def api_campaign_validate(campaign_id):
-    posts = content_generator.list_prepared_posts(campaign_id=campaign_id)
+    workspace_id = _workspace_scope()
+    posts = content_generator.list_prepared_posts(
+        campaign_id=campaign_id, workspace_id=workspace_id
+    )
     results = []
     for post in posts:
         post_data = post.to_dict()
         errors = content_generator.validate_post(post.platform, post_data)
         if errors:
-            content_generator.update_prepared_post(post.id, validation_errors=errors, status="needs_review")
+            content_generator.update_prepared_post(
+                post.id, workspace_id=workspace_id,
+                validation_errors=errors, status="needs_review",
+            )
         results.append({"id": post.id, "platform": post.platform, "errors": errors, "valid": not errors})
     return jsonify({"results": results, "total": len(results), "valid": sum(1 for r in results if r["valid"])})
 
@@ -7431,14 +7438,19 @@ def api_campaign_approve(campaign_id):
     data = request.get_json(force=True) if request.is_json else {}
     post_ids = data.get("post_ids")
 
-    posts = content_generator.list_prepared_posts(campaign_id=campaign_id)
+    workspace_id = _workspace_scope()
+    posts = content_generator.list_prepared_posts(
+        campaign_id=campaign_id, workspace_id=workspace_id
+    )
     approved = 0
     for post in posts:
         if post_ids and post.id not in post_ids:
             continue
         if post.validation_errors:
             continue
-        content_generator.update_prepared_post(post.id, status="approved")
+        content_generator.update_prepared_post(
+            post.id, workspace_id=workspace_id, status="approved"
+        )
         approved += 1
 
     return jsonify({"approved": approved, "total": len(posts)})
@@ -7449,7 +7461,8 @@ def api_campaign_posts(campaign_id):
     platform = request.args.get("platform")
     status = request.args.get("status")
     posts = content_generator.list_prepared_posts(
-        campaign_id=campaign_id, platform=platform, status=status
+        campaign_id=campaign_id, platform=platform, status=status,
+        workspace_id=_workspace_scope(),
     )
     return jsonify([p.to_dict() for p in posts])
 
@@ -7462,7 +7475,9 @@ def api_update_prepared_post(campaign_id, post_id):
     # Prevent clients from directly setting status (must go through validate/approve flow)
     data.pop("status", None)
     try:
-        post = content_generator.update_prepared_post(post_id, **data)
+        post = content_generator.update_prepared_post(
+            post_id, workspace_id=_workspace_scope(), **data
+        )
         return jsonify(post.to_dict())
     except ValueError:
         return jsonify({"error": "Post not found"}), 404
@@ -7473,15 +7488,18 @@ def api_campaign_export_sheet(campaign_id):
     data = request.get_json(force=True) if request.is_json else {}
     profile_slug = data.get("profile_slug", "default")
     spreadsheet_id = data.get("spreadsheet_id")
+    workspace_id = _workspace_scope()
 
     try:
         campaign = campaign_store.get_campaign(
-            campaign_id, workspace_id=_workspace_scope()
+            campaign_id, workspace_id=workspace_id
         )
     except (ValueError, Exception):
         return jsonify({"error": "Campaign not found"}), 404
 
-    posts = content_generator.list_prepared_posts(campaign_id=campaign_id, status="approved")
+    posts = content_generator.list_prepared_posts(
+        campaign_id=campaign_id, status="approved", workspace_id=workspace_id
+    )
     if not posts:
         return jsonify({"error": "No approved posts to export"}), 400
 
@@ -7511,6 +7529,7 @@ def api_campaign_export_sheet(campaign_id):
             spreadsheet_url=result.get("spreadsheet_url", ""),
             row_count=result.get("row_count", len(rows)),
             status="completed",
+            workspace_id=workspace_id,
         )
         return jsonify(export.to_dict())
     except Exception as e:
@@ -7520,13 +7539,17 @@ def api_campaign_export_sheet(campaign_id):
             sheet_name=sheet_name,
             status="failed",
             error_message=str(e),
+            workspace_id=workspace_id,
         )
         return jsonify({"error": str(e), "export": export.to_dict()}), 500
 
 
 @app.route("/api/campaigns/<int:campaign_id>/export/csv", methods=["GET"])
 def api_campaign_export_csv(campaign_id):
-    posts = content_generator.list_prepared_posts(campaign_id=campaign_id, status="approved")
+    workspace_id = _workspace_scope()
+    posts = content_generator.list_prepared_posts(
+        campaign_id=campaign_id, status="approved", workspace_id=workspace_id
+    )
     if not posts:
         return jsonify({"error": "No approved posts to export"}), 400
 
@@ -7534,7 +7557,7 @@ def api_campaign_export_csv(campaign_id):
     csv_bytes = sheet_export_service.generate_csv_bytes(rows)
 
     try:
-        campaign = campaign_store.get_campaign(campaign_id)
+        campaign = campaign_store.get_campaign(campaign_id, workspace_id=workspace_id)
         profile = profile_registry.get_profile(campaign.profile_id)
         filename = f"{sheet_export_service.generate_sheet_name(profile.slug)}.csv"
     except Exception:
@@ -7558,7 +7581,8 @@ def api_list_sheet_exports():
     campaign_id = request.args.get("campaign_id", type=int)
     profile_id = request.args.get("profile_id", type=int)
     exports = sheet_export_service.list_sheet_exports(
-        campaign_id=campaign_id, profile_id=profile_id
+        campaign_id=campaign_id, profile_id=profile_id,
+        workspace_id=_workspace_scope(),
     )
     return jsonify({"code": 200, "msg": "ok", "data": [e.to_dict() for e in exports]})
 

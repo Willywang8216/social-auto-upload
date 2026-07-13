@@ -499,14 +499,25 @@ limits, quotas, structured logs, audit logs.
   Deferred to a follow-up (Phase 6e): the prepared-posts / `content_generator`
   domain behind `/api/campaigns/<id>/{validate,approve,posts,export/csv}`,
   which needs the `prepared_posts` store scoped in its own right.
-  Commit `de23693`; stacked on **PR #28**; **CI all green** (backend-tests,
-  postgres-tests, frontend-build, dependency-guard on run 29229532653).
+  Commit `de23693`; **PR #28 merged to main** (merge `2d8bd91`); **CI all green**
+  (backend-tests, postgres-tests, frontend-build, dependency-guard on run 29229532653).
+- 2026-07-13 — Phase 6e prepared-posts + sheet-exports isolation (fresh follow-up
+  off the merged main). `content_generator` prepared-posts store: `create`
+  stamps `workspace_id`; `get`/`list`/`update`/`delete` scoped (foreign post
+  404s via `ValueError`). `sheet_export_service`: `create` stamps; `list`
+  scoped. Routes wired: `/api/campaigns/<id>/generate` (stamps each generated
+  post), `/validate`, `/approve`, `/posts` GET, `/posts/<pid>` PATCH (all scope
+  list/update — a foreign campaign's posts read as empty, a foreign post 404s),
+  `/export/google-sheet` + `/export/csv` (scope the approved-post list + stamp
+  the export record), and `/api/sheet-exports` GET. Two-user matrix now **31
+  tests**. Route matrix re-derived (139 routes, source_line only), `check_csvs`
+  green.
 
 ## Next incomplete task
 
 Phase 6 (continued) — extend the proven `_workspace_scope()` pattern to the
-remaining domains: prepared-posts (`content_generator`) + sheet-exports, the
-analytics store (`/api/analytics*`, video_analytics_*), watermark configs,
+remaining domains: the analytics store (`/api/analytics*`, video_analytics_*,
+analytics_sync_log), watermark configs (`/api/watermark-configs*`),
 account-events, and per-platform OAuth status/review tables — each threading
 `workspace_id` through its registry calls and adding its slice of the two-user
 matrix. Then Phase 7 (credential encryption) and the frontend (Phase 10).

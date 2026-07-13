@@ -63,12 +63,16 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         from myUtils import jobs as _jobs
         from myUtils import media_asset_service as _mas
         from myUtils import campaigns as _campaigns
+        from myUtils import content_generator as _cg
+        from myUtils import sheet_export_service as _ses
 
         self._patches = [
             patch.object(sau_backend, "_get_legacy_db_path", return_value=self.db_path),
             patch.object(_jobs, "DB_PATH", self.db_path),
             patch.object(_mas, "DB_PATH", self.db_path),
             patch.object(_campaigns, "DB_PATH", self.db_path),
+            patch.object(_cg, "DB_PATH", self.db_path),
+            patch.object(_ses, "DB_PATH", self.db_path),
         ]
         for p in self._patches:
             p.start()
@@ -391,6 +395,54 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         b = [t["name"] for t in self._get(self._client(self.sid_b), "/publish-templates").get_json()["data"]["templates"]]
         self.assertIn("OwnedByA", a)
         self.assertNotIn("OwnedByA", b)
+
+    # --- prepared-posts (content generation) + sheet-exports domain --------
+
+    def _seed_prepared_post(self, workspace_id: str, campaign_id: int) -> int:
+        from myUtils import content_generator
+        return content_generator.create_prepared_post(
+            campaign_id=campaign_id, platform="douyin",
+            workspace_id=workspace_id, db_path=self.db_path,
+        ).id
+
+    def _seed_sheet_export(self, workspace_id: str, campaign_id: int) -> int:
+        from myUtils import sheet_export_service
+        return sheet_export_service.create_sheet_export(
+            campaign_id=campaign_id, sheet_name="s",
+            workspace_id=workspace_id, db_path=self.db_path,
+        ).id
+
+    def test_prepared_posts_list_scoped_to_workspace(self) -> None:
+        b_c = self._seed_campaign(self.ws_b)
+        self._seed_prepared_post(self.ws_b, b_c)
+        # A cannot see B's campaign posts even by campaign id.
+        a = self._get(self._client(self.sid_a), f"/api/campaigns/{b_c}/posts").get_json()
+        self.assertEqual(a, [])
+        b = self._get(self._client(self.sid_b), f"/api/campaigns/{b_c}/posts").get_json()
+        self.assertEqual(len(b), 1)
+
+    def test_cannot_patch_foreign_prepared_post(self) -> None:
+        b_c = self._seed_campaign(self.ws_b)
+        b_post = self._seed_prepared_post(self.ws_b, b_c)
+        resp = self._patch(
+            self._client(self.sid_a), f"/api/campaigns/{b_c}/posts/{b_post}",
+            self.csrf_a, message="hax",
+        )
+        self.assertEqual(resp.status_code, 404)
+        # B's post is unchanged.
+        from myUtils import content_generator
+        got = content_generator.get_prepared_post(b_post, db_path=self.db_path)
+        self.assertNotEqual(got.message, "hax")
+
+    def test_sheet_exports_list_scoped(self) -> None:
+        a_c = self._seed_campaign(self.ws_a)
+        b_c = self._seed_campaign(self.ws_b)
+        self._seed_sheet_export(self.ws_a, a_c)
+        self._seed_sheet_export(self.ws_b, b_c)
+        a = self._get(self._client(self.sid_a), "/api/sheet-exports").get_json()["data"]
+        b = self._get(self._client(self.sid_b), "/api/sheet-exports").get_json()["data"]
+        self.assertEqual(len(a), 1)
+        self.assertEqual(len(b), 1)
 
     def test_legacy_token_is_unscoped_admin_path(self) -> None:
         # A legacy bearer token (no session) is not workspace-scoped: it sees all
