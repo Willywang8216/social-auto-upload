@@ -35,6 +35,7 @@ from myUtils import prepared_publishers
 from myUtils import publish_orchestrator
 from myUtils import publish_templates as template_store
 from myUtils import account_events
+from myUtils import secret_redaction
 from myUtils import rclone_storage
 from myUtils import media_remote_storage
 from myUtils import analytics_store
@@ -943,6 +944,46 @@ def _lookup_account_cookie_path(account_id: int) -> tuple[Path, str] | None:
     return None
 
 
+def _cookie_path_owned_by_workspace(cookie_path: Path, workspace_id: str, db_path: Path) -> bool:
+    """True when some account in ``workspace_id`` owns ``cookie_path``.
+
+    Cookie files are addressed by filesystem path, so ``/downloadCookie`` cannot
+    rely on an account-id scope. Ownership is resolved by matching the requested
+    path against the resolved ``cookie_path`` of every account (structured and
+    legacy) the workspace owns.
+    """
+    target = cookie_path.resolve()
+    for account in profile_registry.list_accounts(workspace_id=workspace_id, db_path=db_path):
+        if not account.cookie_path:
+            continue
+        try:
+            if _resolve_cookie_path(account.cookie_path) == target:
+                return True
+        except Exception:
+            continue
+    # Legacy cookie accounts live in user_info, which carries workspace_id after
+    # the tenant backfill.
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT filePath FROM user_info WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    for row in rows:
+        file_path = row["filePath"]
+        if not file_path:
+            continue
+        try:
+            if _resolve_cookie_path(file_path) == target:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 @app.route('/uploadSave', methods=['POST'])
 def upload_save():
     if 'file' not in request.files:
@@ -1783,6 +1824,19 @@ def download_cookie():
                 "data": None
             }), 404
 
+        # Tenant isolation: a cookie file may only be downloaded by the workspace
+        # that owns the account it belongs to. Reported as 404 (not 403) so a
+        # foreign path is indistinguishable from a missing one.
+        _download_workspace = _workspace_scope()
+        if _download_workspace is not None and not _cookie_path_owned_by_workspace(
+            cookie_file_path, _download_workspace, _current_db_path()
+        ):
+            return jsonify({
+                "code": 404,
+                "msg": "Cookie文件不存在",
+                "data": None
+            }), 404
+
         # Always serve plaintext to the user — they're typically exporting
         # the session for use in another tool. cookie_storage.read_cookie
         # transparently decrypts when SAU_COOKIE_ENCRYPTION_KEY is set and
@@ -1937,6 +1991,9 @@ def _profile_payload(profile: profile_registry.Profile) -> dict:
 
 def _account_payload(account: profile_registry.Account) -> dict:
     payload = account.to_dict()
+    # Never echo live OAuth material (tokens, secrets, cookies) back to a client.
+    if isinstance(payload.get("config"), (dict, list)):
+        payload["config"] = secret_redaction.redact_config_secrets(payload["config"])
     if account.platform == "tiktok":
         payload["isSandbox"] = os.environ.get("TIKTOK_CLIENT_KEY", "").startswith("sb")
     return payload
@@ -4485,7 +4542,7 @@ def oauth_admin_status():
         request_state = tiktok_review.latest_oauth_request(account_id=account_id, db_path=db_path)
         products = ['TikTok Login Kit', 'Content Posting API']
 
-    events = account_events.list_events(limit=25, account_id=account_id, platform=platform, db_path=db_path)
+    events = account_events.list_events(limit=25, account_id=account_id, platform=platform, workspace_id=_workspace_scope(), db_path=db_path)
     last_start = next((event for event in events if event.action == 'oauth_start'), None)
     last_callback = next((event for event in events if event.action == 'oauth_callback'), None)
     last_refresh = next((event for event in events if event.action == 'refresh_token'), None)
@@ -5250,6 +5307,9 @@ def accounts_validate_config():
 def profile_accounts_create(profile_id):
     try:
         data = _read_json_body()
+        # Drop any round-tripped redaction sentinels so they are never persisted.
+        if isinstance(data.get("config"), dict):
+            data["config"] = secret_redaction.strip_redaction_sentinels(data["config"])
         account_name = str(data.get("accountName", "")).strip()
         platform = str(data.get("platform", "")).strip().lower()
         if not account_name:
@@ -5355,6 +5415,7 @@ def accounts_events_list():
         account_id=account_id,
         profile_id=profile_id,
         platform=platform,
+        workspace_id=_workspace_scope(),
         db_path=db_path,
     )
     return jsonify({"code": 200, "msg": "ok", "data": [event.to_dict() for event in events]}), 200
@@ -5466,7 +5527,7 @@ def accounts_health_summary():
                     'recommendedAction': 'reconnect' if reconnect_required else 'refresh',
                 })
 
-    recent_events = account_events.list_events(limit=10, db_path=db_path)
+    recent_events = account_events.list_events(limit=10, workspace_id=_workspace_scope(), db_path=db_path)
     event_totals = {'total': len(recent_events), 'ok': 0, 'error': 0}
     for event in recent_events:
         if event.status == 'ok':
@@ -5555,10 +5616,13 @@ def accounts_patch(account_id):
             account_id, workspace_id=_workspace_scope(), db_path=_current_db_path()
         )
         new_profile_id = data.get("profileId", existing.profile_id)
-        # Merge config: start with existing, overlay with incoming fields
+        # Merge config: start with existing, overlay with incoming fields.
+        # Strip redaction sentinels first so a resubmitted masked secret keeps
+        # the stored value instead of overwriting it.
         existing_config = dict(existing.config or {})
         incoming_config = data.get("config")
         if isinstance(incoming_config, dict):
+            incoming_config = secret_redaction.strip_redaction_sentinels(incoming_config)
             existing_config.update(incoming_config)
         print(f"🔍 PATCH /accounts/{account_id}: incoming_keys={list(incoming_config.keys()) if isinstance(incoming_config, dict) else 'NONE'} merged_keys={list(existing_config.keys())} authType={data.get('authType')} status={data.get('status')}")
         merged = {
@@ -6751,6 +6815,16 @@ def analytics_sync_route():
     body = request.get_json(silent=True) or {}
     account_id = body.get('accountId')
 
+    # A specific-account sync must target one of the caller's own accounts.
+    workspace_id = _workspace_scope()
+    if account_id is not None and workspace_id is not None:
+        try:
+            profile_registry.get_account(
+                int(account_id), workspace_id=workspace_id, db_path=db_path
+            )
+        except (LookupError, ValueError, TypeError):
+            return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
+
     with _sync_jobs_lock:
         running = any(j['status'] == 'running' for j in _sync_jobs.values())
         if running:
@@ -6795,7 +6869,10 @@ def analytics_sync_status_route():
     account_id = request.args.get('accountId', type=int)
     limit = request.args.get('limit', 20, type=int)
     try:
-        entries = analytics_store.list_sync_log(account_id=account_id, limit=limit, db_path=db_path)
+        entries = analytics_store.list_sync_log(
+            account_id=account_id, limit=limit,
+            workspace_id=_workspace_scope(), db_path=db_path,
+        )
         return jsonify({"code": 200, "msg": "ok", "data": entries})
     except Exception as exc:
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
@@ -6813,7 +6890,7 @@ def analytics_overview_route():
         stats = analytics_store.get_aggregate_stats(
             platform=platform, account_id=account_id,
             date_from=date_from, date_to=date_to,
-            db_path=db_path,
+            workspace_id=_workspace_scope(), db_path=db_path,
         )
         return jsonify({"code": 200, "msg": "ok", "data": stats})
     except Exception as exc:
@@ -6830,7 +6907,7 @@ def analytics_videos_route():
     try:
         videos = analytics_store.get_latest_snapshots(
             platform=platform, account_id=account_id,
-            limit=limit, db_path=db_path,
+            limit=limit, workspace_id=_workspace_scope(), db_path=db_path,
         )
         return jsonify({"code": 200, "msg": "ok", "data": videos})
     except Exception as exc:
@@ -6843,7 +6920,10 @@ def analytics_video_history_route(platform_video_id):
     db_path = _current_db_path()
     days = request.args.get('days', 30, type=int)
     try:
-        history = analytics_store.get_snapshot_history(platform_video_id, days=days, db_path=db_path)
+        history = analytics_store.get_snapshot_history(
+            platform_video_id, days=days,
+            workspace_id=_workspace_scope(), db_path=db_path,
+        )
         return jsonify({"code": 200, "msg": "ok", "data": history})
     except Exception as exc:
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
@@ -6860,7 +6940,8 @@ def analytics_top_videos_route():
     try:
         videos = analytics_store.get_top_videos(
             platform=platform, account_id=account_id,
-            metric=metric, limit=limit, db_path=db_path,
+            metric=metric, limit=limit,
+            workspace_id=_workspace_scope(), db_path=db_path,
         )
         return jsonify({"code": 200, "msg": "ok", "data": videos})
     except Exception as exc:
@@ -6880,7 +6961,7 @@ def analytics_trends_route():
         trends = analytics_store.get_trends(
             platform=platform, account_id=account_id,
             date_from=date_from, date_to=date_to,
-            metric=metric, db_path=db_path,
+            metric=metric, workspace_id=_workspace_scope(), db_path=db_path,
         )
         return jsonify({"code": 200, "msg": "ok", "data": trends})
     except Exception as exc:
@@ -6900,7 +6981,7 @@ def analytics_advice_route():
         advice = analytics_advisor.generate_advice(
             platform=platform, account_id=account_id,
             date_from=date_from, date_to=date_to,
-            db_path=db_path,
+            workspace_id=_workspace_scope(), db_path=db_path,
         )
         return jsonify({"code": 200, "msg": "ok", "data": advice})
     except Exception as exc:
@@ -7019,7 +7100,9 @@ def analytics_thumbnail_proxy(platform_video_id):
 @app.route("/api/watermark-configs", methods=["GET"])
 def api_list_watermark_configs():
     profile_id = request.args.get("profile_id", type=int)
-    configs = watermark_service.list_watermark_configs(profile_id=profile_id)
+    configs = watermark_service.list_watermark_configs(
+        profile_id=profile_id, workspace_id=_workspace_scope()
+    )
     return jsonify([c.to_dict() for c in configs])
 
 
@@ -7029,8 +7112,11 @@ def api_create_watermark_config():
     if not data:
         return jsonify({"error": "Invalid or missing JSON body"}), 400
     data.pop("db_path", None)  # Never accept from client
+    data.pop("workspace_id", None)  # Owner is derived from the session, never client-set
     try:
-        config = watermark_service.create_watermark_config(**data)
+        config = watermark_service.create_watermark_config(
+            **data, workspace_id=_workspace_scope()
+        )
         return jsonify(config.to_dict()), 201
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -7042,7 +7128,9 @@ def api_create_watermark_config():
 @app.route("/api/watermark-configs/<int:config_id>", methods=["GET"])
 def api_get_watermark_config(config_id):
     try:
-        config = watermark_service.get_watermark_config(config_id)
+        config = watermark_service.get_watermark_config(
+            config_id, workspace_id=_workspace_scope()
+        )
         return jsonify(config.to_dict())
     except ValueError:
         return jsonify({"error": "Not found"}), 404
@@ -7054,8 +7142,11 @@ def api_update_watermark_config(config_id):
     if not data:
         return jsonify({"error": "Invalid or missing JSON body"}), 400
     data.pop("db_path", None)  # Never accept from client
+    data.pop("workspace_id", None)  # Owner is derived from the session, never client-set
     try:
-        config = watermark_service.update_watermark_config(config_id, **data)
+        config = watermark_service.update_watermark_config(
+            config_id, workspace_id=_workspace_scope(), **data
+        )
         return jsonify(config.to_dict())
     except ValueError:
         return jsonify({"error": "Not found"}), 404
@@ -7063,11 +7154,12 @@ def api_update_watermark_config(config_id):
 
 @app.route("/api/watermark-configs/<int:config_id>", methods=["DELETE"])
 def api_delete_watermark_config(config_id):
+    workspace_id = _workspace_scope()
     try:
-        watermark_service.get_watermark_config(config_id)
+        watermark_service.get_watermark_config(config_id, workspace_id=workspace_id)
     except ValueError:
         return jsonify({"error": "Not found"}), 404
-    watermark_service.delete_watermark_config(config_id)
+    watermark_service.delete_watermark_config(config_id, workspace_id=workspace_id)
     return jsonify({"ok": True})
 
 
@@ -7400,6 +7492,7 @@ def api_campaign_generate(campaign_id):
                 validation_errors=errors,
                 llm_raw_output={"raw": raw_content, "parsed": parsed},
                 char_count=len(parsed.get("message", "")),
+                workspace_id=_workspace_scope(),
             )
             generated_posts.append(post.to_dict())
         except Exception as e:
@@ -7415,13 +7508,19 @@ def api_campaign_generate(campaign_id):
 
 @app.route("/api/campaigns/<int:campaign_id>/validate", methods=["POST"])
 def api_campaign_validate(campaign_id):
-    posts = content_generator.list_prepared_posts(campaign_id=campaign_id)
+    workspace_id = _workspace_scope()
+    posts = content_generator.list_prepared_posts(
+        campaign_id=campaign_id, workspace_id=workspace_id
+    )
     results = []
     for post in posts:
         post_data = post.to_dict()
         errors = content_generator.validate_post(post.platform, post_data)
         if errors:
-            content_generator.update_prepared_post(post.id, validation_errors=errors, status="needs_review")
+            content_generator.update_prepared_post(
+                post.id, workspace_id=workspace_id,
+                validation_errors=errors, status="needs_review",
+            )
         results.append({"id": post.id, "platform": post.platform, "errors": errors, "valid": not errors})
     return jsonify({"results": results, "total": len(results), "valid": sum(1 for r in results if r["valid"])})
 
@@ -7431,14 +7530,19 @@ def api_campaign_approve(campaign_id):
     data = request.get_json(force=True) if request.is_json else {}
     post_ids = data.get("post_ids")
 
-    posts = content_generator.list_prepared_posts(campaign_id=campaign_id)
+    workspace_id = _workspace_scope()
+    posts = content_generator.list_prepared_posts(
+        campaign_id=campaign_id, workspace_id=workspace_id
+    )
     approved = 0
     for post in posts:
         if post_ids and post.id not in post_ids:
             continue
         if post.validation_errors:
             continue
-        content_generator.update_prepared_post(post.id, status="approved")
+        content_generator.update_prepared_post(
+            post.id, workspace_id=workspace_id, status="approved"
+        )
         approved += 1
 
     return jsonify({"approved": approved, "total": len(posts)})
@@ -7449,7 +7553,8 @@ def api_campaign_posts(campaign_id):
     platform = request.args.get("platform")
     status = request.args.get("status")
     posts = content_generator.list_prepared_posts(
-        campaign_id=campaign_id, platform=platform, status=status
+        campaign_id=campaign_id, platform=platform, status=status,
+        workspace_id=_workspace_scope(),
     )
     return jsonify([p.to_dict() for p in posts])
 
@@ -7462,7 +7567,9 @@ def api_update_prepared_post(campaign_id, post_id):
     # Prevent clients from directly setting status (must go through validate/approve flow)
     data.pop("status", None)
     try:
-        post = content_generator.update_prepared_post(post_id, **data)
+        post = content_generator.update_prepared_post(
+            post_id, workspace_id=_workspace_scope(), **data
+        )
         return jsonify(post.to_dict())
     except ValueError:
         return jsonify({"error": "Post not found"}), 404
@@ -7473,15 +7580,18 @@ def api_campaign_export_sheet(campaign_id):
     data = request.get_json(force=True) if request.is_json else {}
     profile_slug = data.get("profile_slug", "default")
     spreadsheet_id = data.get("spreadsheet_id")
+    workspace_id = _workspace_scope()
 
     try:
         campaign = campaign_store.get_campaign(
-            campaign_id, workspace_id=_workspace_scope()
+            campaign_id, workspace_id=workspace_id
         )
     except (ValueError, Exception):
         return jsonify({"error": "Campaign not found"}), 404
 
-    posts = content_generator.list_prepared_posts(campaign_id=campaign_id, status="approved")
+    posts = content_generator.list_prepared_posts(
+        campaign_id=campaign_id, status="approved", workspace_id=workspace_id
+    )
     if not posts:
         return jsonify({"error": "No approved posts to export"}), 400
 
@@ -7511,6 +7621,7 @@ def api_campaign_export_sheet(campaign_id):
             spreadsheet_url=result.get("spreadsheet_url", ""),
             row_count=result.get("row_count", len(rows)),
             status="completed",
+            workspace_id=workspace_id,
         )
         return jsonify(export.to_dict())
     except Exception as e:
@@ -7520,13 +7631,17 @@ def api_campaign_export_sheet(campaign_id):
             sheet_name=sheet_name,
             status="failed",
             error_message=str(e),
+            workspace_id=workspace_id,
         )
         return jsonify({"error": str(e), "export": export.to_dict()}), 500
 
 
 @app.route("/api/campaigns/<int:campaign_id>/export/csv", methods=["GET"])
 def api_campaign_export_csv(campaign_id):
-    posts = content_generator.list_prepared_posts(campaign_id=campaign_id, status="approved")
+    workspace_id = _workspace_scope()
+    posts = content_generator.list_prepared_posts(
+        campaign_id=campaign_id, status="approved", workspace_id=workspace_id
+    )
     if not posts:
         return jsonify({"error": "No approved posts to export"}), 400
 
@@ -7534,7 +7649,7 @@ def api_campaign_export_csv(campaign_id):
     csv_bytes = sheet_export_service.generate_csv_bytes(rows)
 
     try:
-        campaign = campaign_store.get_campaign(campaign_id)
+        campaign = campaign_store.get_campaign(campaign_id, workspace_id=workspace_id)
         profile = profile_registry.get_profile(campaign.profile_id)
         filename = f"{sheet_export_service.generate_sheet_name(profile.slug)}.csv"
     except Exception:
@@ -7558,7 +7673,8 @@ def api_list_sheet_exports():
     campaign_id = request.args.get("campaign_id", type=int)
     profile_id = request.args.get("profile_id", type=int)
     exports = sheet_export_service.list_sheet_exports(
-        campaign_id=campaign_id, profile_id=profile_id
+        campaign_id=campaign_id, profile_id=profile_id,
+        workspace_id=_workspace_scope(),
     )
     return jsonify({"code": 200, "msg": "ok", "data": [e.to_dict() for e in exports]})
 
@@ -7780,11 +7896,15 @@ def api_cookies_export(account_id):
     cookie_path = Path(account.cookie_path) if account.cookie_path else None
     if not cookie_path or not cookie_path.exists():
         return jsonify(error="No cookie file on record"), 404
+    # ``read_cookie`` transparently decrypts when SAU_COOKIE_ENCRYPTION_KEY is
+    # set and returns a legacy plaintext file verbatim otherwise. (The previous
+    # ``read_cookie_file`` name did not exist, so this always fell back to a raw
+    # read that returned ciphertext / 500'd once encryption was enabled.)
+    from myUtils import cookie_storage
     try:
-        from myUtils import cookie_storage
-        data = cookie_storage.read_cookie_file(cookie_path)
+        data = json.loads(cookie_storage.read_cookie(cookie_path).decode("utf-8"))
     except Exception:
-        data = json.loads(cookie_path.read_text(encoding="utf-8"))
+        return jsonify(error="Cookie file is unreadable"), 500
     return jsonify({"code": 200, "data": data, "msg": "ok"})
 
 

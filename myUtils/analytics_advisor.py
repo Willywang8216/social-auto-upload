@@ -42,6 +42,7 @@ def generate_advice(
     account_id: int | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    workspace_id: str | None = None,
     db_path: Path = analytics_store.DB_PATH,
 ) -> dict:
     """Generate AI-powered advice based on collected analytics data.
@@ -52,17 +53,20 @@ def generate_advice(
     stats = analytics_store.get_aggregate_stats(
         platform=platform, account_id=account_id,
         date_from=date_from, date_to=date_to,
+        workspace_id=workspace_id,
         db_path=db_path,
     )
     top_videos = analytics_store.get_top_videos(
         platform=platform, account_id=account_id,
         metric="views", limit=20,
+        workspace_id=workspace_id,
         db_path=db_path,
     )
     trends = analytics_store.get_trends(
         platform=platform, account_id=account_id,
         date_from=date_from, date_to=date_to,
         metric="views",
+        workspace_id=workspace_id,
         db_path=db_path,
     )
 

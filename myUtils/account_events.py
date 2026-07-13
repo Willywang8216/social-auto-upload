@@ -93,7 +93,7 @@ def get_event(event_id: int, *, db_path: Path | None = None) -> AccountEvent | N
     return _row_to_event(row) if row else None
 
 
-def list_events(*, limit: int = 50, account_id: int | None = None, profile_id: int | None = None, platform: str | None = None, db_path: Path | None = None) -> list[AccountEvent]:
+def list_events(*, limit: int = 50, account_id: int | None = None, profile_id: int | None = None, platform: str | None = None, workspace_id: str | None = None, db_path: Path | None = None) -> list[AccountEvent]:
     query = 'SELECT * FROM account_events WHERE 1=1'
     params: list[object] = []
     if account_id is not None:
@@ -105,6 +105,16 @@ def list_events(*, limit: int = 50, account_id: int | None = None, profile_id: i
     if platform:
         query += ' AND platform = ?'
         params.append(platform)
+    if workspace_id is not None:
+        # Events are anchored on their account/profile; both carry workspace_id.
+        # Rows with neither (system-level events) are not surfaced under a
+        # workspace scope.
+        query += (
+            ' AND (account_id IN (SELECT id FROM accounts WHERE workspace_id = ?)'
+            ' OR profile_id IN (SELECT id FROM profiles WHERE workspace_id = ?))'
+        )
+        params.append(workspace_id)
+        params.append(workspace_id)
     query += ' ORDER BY id DESC LIMIT ?'
     params.append(limit)
     with _connect(db_path) as conn:

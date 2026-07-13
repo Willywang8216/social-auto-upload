@@ -131,27 +131,36 @@ def create_watermark_config(
     font_size: int = 0,
     font_color: str = "white",
     enabled: bool = True,
+    workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> WatermarkConfig:
     if allowed_positions is None:
         allowed_positions = ["top_left", "top_right", "bottom_left", "bottom_right"]
     now = _now_iso()
+    columns = [
+        "profile_id", "name", "watermark_type", "text", "image_path", "opacity",
+        "scale", "margin", "randomize_position", "video_dynamic_position",
+        "video_position_change_min_seconds", "video_position_change_max_seconds",
+        "allowed_positions", "font_family", "font_size", "font_color", "enabled",
+        "created_at", "updated_at",
+    ]
+    values: list = [
+        profile_id, name, watermark_type, text, image_path,
+        opacity, scale, margin,
+        int(randomize_position), int(video_dynamic_position),
+        video_position_change_min_seconds, video_position_change_max_seconds,
+        json.dumps(allowed_positions), font_family, font_size, font_color,
+        int(enabled), now, now,
+    ]
+    # Reference workspace_id only when scoped so the default INSERT is unchanged.
+    if workspace_id is not None:
+        columns.append("workspace_id")
+        values.append(workspace_id)
+    placeholders = ",".join("?" for _ in columns)
     with _connect(db_path) as conn:
         cur = conn.execute(
-            """INSERT INTO watermark_configs
-            (profile_id, name, watermark_type, text, image_path, opacity, scale, margin,
-             randomize_position, video_dynamic_position, video_position_change_min_seconds,
-             video_position_change_max_seconds, allowed_positions, font_family, font_size,
-             font_color, enabled, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                profile_id, name, watermark_type, text, image_path,
-                opacity, scale, margin,
-                int(randomize_position), int(video_dynamic_position),
-                video_position_change_min_seconds, video_position_change_max_seconds,
-                json.dumps(allowed_positions), font_family, font_size, font_color,
-                int(enabled), now, now,
-            ),
+            f"INSERT INTO watermark_configs ({', '.join(columns)}) VALUES ({placeholders})",
+            values,
         )
         conn.commit()
         row = conn.execute(
@@ -160,34 +169,47 @@ def create_watermark_config(
         return _row_to_config(row)
 
 
-def get_watermark_config(config_id: int, *, db_path: Path | None = None) -> WatermarkConfig:
+def get_watermark_config(
+    config_id: int, *, workspace_id: str | None = None, db_path: Path | None = None
+) -> WatermarkConfig:
     with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT * FROM watermark_configs WHERE id = ?", (config_id,)
-        ).fetchone()
+        if workspace_id is not None:
+            row = conn.execute(
+                "SELECT * FROM watermark_configs WHERE id = ? AND workspace_id = ?",
+                (config_id, workspace_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM watermark_configs WHERE id = ?", (config_id,)
+            ).fetchone()
         if row is None:
             raise ValueError(f"WatermarkConfig {config_id} not found")
         return _row_to_config(row)
 
 
 def list_watermark_configs(
-    *, profile_id: int | None = None, db_path: Path | None = None
+    *, profile_id: int | None = None, workspace_id: str | None = None,
+    db_path: Path | None = None,
 ) -> list[WatermarkConfig]:
+    clauses: list[str] = []
+    params: list = []
+    if workspace_id is not None:
+        clauses.append("workspace_id = ?")
+        params.append(workspace_id)
+    if profile_id is not None:
+        clauses.append("(profile_id = ? OR profile_id IS NULL)")
+        params.append(profile_id)
+    query = "SELECT * FROM watermark_configs"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY name"
     with _connect(db_path) as conn:
-        if profile_id is not None:
-            rows = conn.execute(
-                "SELECT * FROM watermark_configs WHERE profile_id = ? OR profile_id IS NULL ORDER BY name",
-                (profile_id,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM watermark_configs ORDER BY name"
-            ).fetchall()
+        rows = conn.execute(query, params).fetchall()
         return [_row_to_config(r) for r in rows]
 
 
 def update_watermark_config(
-    config_id: int, *, db_path: Path | None = None, **fields
+    config_id: int, *, workspace_id: str | None = None, db_path: Path | None = None, **fields
 ) -> WatermarkConfig:
     allowed = {
         "profile_id", "name", "watermark_type", "text", "image_path",
@@ -205,26 +227,39 @@ def update_watermark_config(
             v = int(bool(v))
         updates[k] = v
     if not updates:
-        return get_watermark_config(config_id, db_path=db_path)
+        return get_watermark_config(config_id, workspace_id=workspace_id, db_path=db_path)
     updates["updated_at"] = _now_iso()
     set_clause = ", ".join(f"{k} = ?" for k in updates)
+    where = "WHERE id = ?"
     values = list(updates.values()) + [config_id]
+    if workspace_id is not None:
+        where += " AND workspace_id = ?"
+        values.append(workspace_id)
     with _connect(db_path) as conn:
         conn.execute(
-            f"UPDATE watermark_configs SET {set_clause} WHERE id = ?", values
+            f"UPDATE watermark_configs SET {set_clause} {where}", values
         )
         conn.commit()
         row = conn.execute(
-            "SELECT * FROM watermark_configs WHERE id = ?", (config_id,)
+            "SELECT * FROM watermark_configs " + where,
+            [config_id] + ([workspace_id] if workspace_id is not None else []),
         ).fetchone()
         if row is None:
             raise ValueError(f"WatermarkConfig {config_id} not found")
         return _row_to_config(row)
 
 
-def delete_watermark_config(config_id: int, *, db_path: Path | None = None) -> None:
+def delete_watermark_config(
+    config_id: int, *, workspace_id: str | None = None, db_path: Path | None = None
+) -> None:
     with _connect(db_path) as conn:
-        conn.execute("DELETE FROM watermark_configs WHERE id = ?", (config_id,))
+        if workspace_id is not None:
+            conn.execute(
+                "DELETE FROM watermark_configs WHERE id = ? AND workspace_id = ?",
+                (config_id, workspace_id),
+            )
+        else:
+            conn.execute("DELETE FROM watermark_configs WHERE id = ?", (config_id,))
         conn.commit()
 
 

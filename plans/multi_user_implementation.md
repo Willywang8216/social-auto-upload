@@ -499,17 +499,94 @@ limits, quotas, structured logs, audit logs.
   Deferred to a follow-up (Phase 6e): the prepared-posts / `content_generator`
   domain behind `/api/campaigns/<id>/{validate,approve,posts,export/csv}`,
   which needs the `prepared_posts` store scoped in its own right.
-  Commit `de23693`; stacked on **PR #28**; **CI all green** (backend-tests,
-  postgres-tests, frontend-build, dependency-guard on run 29229532653).
+  Commit `de23693`; **PR #28 merged to main** (merge `2d8bd91`); **CI all green**
+  (backend-tests, postgres-tests, frontend-build, dependency-guard on run 29229532653).
+- 2026-07-13 — Phase 6e prepared-posts + sheet-exports isolation (fresh follow-up
+  off the merged main). `content_generator` prepared-posts store: `create`
+  stamps `workspace_id`; `get`/`list`/`update`/`delete` scoped (foreign post
+  404s via `ValueError`). `sheet_export_service`: `create` stamps; `list`
+  scoped. Routes wired: `/api/campaigns/<id>/generate` (stamps each generated
+  post), `/validate`, `/approve`, `/posts` GET, `/posts/<pid>` PATCH (all scope
+  list/update — a foreign campaign's posts read as empty, a foreign post 404s),
+  `/export/google-sheet` + `/export/csv` (scope the approved-post list + stamp
+  the export record), and `/api/sheet-exports` GET. Two-user matrix now **31
+  tests**. Route matrix re-derived (139 routes, source_line only), `check_csvs`
+  green.
+
+- 2026-07-13 — Phase 6f watermark-configs isolation (stacked on the open PR #29
+  branch). `watermark_service`: `create` stamps `workspace_id` (column
+  referenced only when scoped); `get`/`update`/`delete` scoped (foreign config
+  404s via `ValueError`); `list` filters by workspace while preserving the
+  existing `profile_id = ? OR profile_id IS NULL` shared-default logic. All
+  five `/api/watermark-configs*` routes wired; POST/PATCH also pop any
+  client-supplied `workspace_id` (owner is session-derived, never client-set).
+  Two-user matrix now **35 tests**. Route matrix re-derived (139 routes,
+  source_line only), `check_csvs` green.
+
+- 2026-07-13 — Phase 6g analytics isolation (stacked on the open PR #29 branch).
+  Solved the "deep write-path" concern by anchoring on the account instead of
+  stamping analytics rows: analytics rows carry `account_id` (NOT NULL, FK to
+  accounts) and accounts carry `workspace_id`, so every read filters via
+  `account_id IN (SELECT id FROM accounts WHERE workspace_id = ?)` — **no
+  changes to the sync write-path**, and it holds for data synced before tenancy
+  was enabled. Scoped `analytics_store` read functions (`get_latest_snapshots`,
+  `get_snapshot_history`, `get_aggregate_stats`, `get_top_videos`, `get_trends`,
+  `list_sync_log`) plus `analytics_advisor.generate_advice`. Routes wired:
+  `/analytics/{overview,videos,videos/<id>/history,top-videos,trends,advice,
+  sync/status}`; `/analytics/sync` POST gained an account-ownership guard (a
+  specific-account sync must target one of the caller's accounts → 404). Two-user
+  matrix now **39 tests**. Route matrix re-derived (139 routes, source_line
+  only), `check_csvs` green.
+
+- 2026-07-13 — Phase 6h account-events read isolation (stacked on PR #29).
+  `account_events.list_events` gains an optional `workspace_id` that appends an
+  account/profile-anchored predicate — `account_id IN (accounts of ws) OR
+  profile_id IN (profiles of ws)`; system-level events (both NULL) are not
+  surfaced under a scope. No changes to the `record_event` write-path (10+ call
+  sites untouched). Wired all three read call sites: `/accounts/events`, the
+  per-account OAuth-review detail route, and the previously **unfiltered**
+  `recent_events` in `/accounts/health-summary` (which had leaked every
+  workspace's recent events). Two-user matrix now **40 tests**. Route matrix
+  re-derived (139 routes, source_line only), `check_csvs` green.
+
+- 2026-07-13 — Phase 7 (part 1) credential **response redaction** (stacked on
+  PR #29). New `myUtils/secret_redaction.py`: `is_secret_key` (name-suffix based
+  — `…Token/…Secret/…Password/…apiKey`, while metadata `…ExpiresAt/…UpdatedAt/
+  …Type/…Env` and semi-public `…Key` are preserved), `redact_config_secrets`
+  (recursive; non-empty secret values → `"__redacted__"`, empties preserved so
+  the UI can tell set from unset), and `strip_redaction_sentinels` (recursive
+  removal). `_account_payload` now redacts `config` so no route (`/profiles/<id>/
+  accounts`, account create/check/refresh/PATCH, OAuth-review detail) ever echoes
+  a live token/secret/cookie. The account **create + PATCH** routes strip
+  sentinels from the incoming config before persist/merge, so a resubmitted
+  redacted config keeps the stored secret (the PATCH merge preserves it). 12 new
+  unit tests + 2 HTTP tests (raw token absent from the response; PATCH round-trip
+  preserves the stored token). Two-user matrix now **42 tests**. Route matrix
+  re-derived (139 routes, source_line only), `check_csvs` green.
+
+- 2026-07-13 — Phase 7b cookie-export hardening (stacked on PR #29). Fixed a real
+  bug in `GET /api/auth/cookies/<id>/export`: it called a **nonexistent**
+  `cookie_storage.read_cookie_file` and fell back to a raw `read_text`, so once
+  `SAU_COOKIE_ENCRYPTION_KEY` was set the export returned ciphertext / 500'd.
+  Now uses `cookie_storage.read_cookie` (transparently decrypts; returns legacy
+  plaintext verbatim). Added tenant scoping to `GET /downloadCookie`, which is
+  path-addressed and had **no ownership check** — a new
+  `_cookie_path_owned_by_workspace` resolves the requested path against the
+  caller's structured accounts and legacy `user_info` rows and 404s a foreign
+  path. Two-user matrix now **44 tests** (encrypted-export decrypts for the
+  owner; foreign `/downloadCookie` → 404, own → 200). Route matrix re-derived
+  (139 routes, source_line only), `check_csvs` green.
 
 ## Next incomplete task
 
-Phase 6 (continued) — extend the proven `_workspace_scope()` pattern to the
-remaining domains: prepared-posts (`content_generator`) + sheet-exports, the
-analytics store (`/api/analytics*`, video_analytics_*), watermark configs,
-account-events, and per-platform OAuth status/review tables — each threading
-`workspace_id` through its registry calls and adding its slice of the two-user
-matrix. Then Phase 7 (credential encryption) and the frontend (Phase 10).
+Read-isolation and the credential-response leaks are closed. Remaining:
+- **Phase 7 (part 3, optional)** — at-rest encryption of `config_json` OAuth
+  tokens (reuse the AES-GCM envelope from `myUtils.cookie_storage`) and
+  `storage_backends` key redaction.
+- Phase 6 tail — per-platform OAuth status/review tables (transient state).
+- **Phase 10** — frontend Google login screen.
+Operator steps still pending: run the Phase 5 backfill on the production DB, then
+flip `SAU_TENANCY_MODE=single→shadow→enforced`.
 
 **Standing user input still needed** (does not block the code build): a Google
 OAuth client to exercise a *real* login (Phase 3 live path), and access to run

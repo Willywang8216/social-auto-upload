@@ -63,12 +63,18 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         from myUtils import jobs as _jobs
         from myUtils import media_asset_service as _mas
         from myUtils import campaigns as _campaigns
+        from myUtils import content_generator as _cg
+        from myUtils import sheet_export_service as _ses
+        from myUtils import watermark_service as _wm
 
         self._patches = [
             patch.object(sau_backend, "_get_legacy_db_path", return_value=self.db_path),
             patch.object(_jobs, "DB_PATH", self.db_path),
             patch.object(_mas, "DB_PATH", self.db_path),
             patch.object(_campaigns, "DB_PATH", self.db_path),
+            patch.object(_cg, "DB_PATH", self.db_path),
+            patch.object(_ses, "DB_PATH", self.db_path),
+            patch.object(_wm, "DB_PATH", self.db_path),
         ]
         for p in self._patches:
             p.start()
@@ -391,6 +397,239 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         b = [t["name"] for t in self._get(self._client(self.sid_b), "/publish-templates").get_json()["data"]["templates"]]
         self.assertIn("OwnedByA", a)
         self.assertNotIn("OwnedByA", b)
+
+    # --- prepared-posts (content generation) + sheet-exports domain --------
+
+    def _seed_prepared_post(self, workspace_id: str, campaign_id: int) -> int:
+        from myUtils import content_generator
+        return content_generator.create_prepared_post(
+            campaign_id=campaign_id, platform="douyin",
+            workspace_id=workspace_id, db_path=self.db_path,
+        ).id
+
+    def _seed_sheet_export(self, workspace_id: str, campaign_id: int) -> int:
+        from myUtils import sheet_export_service
+        return sheet_export_service.create_sheet_export(
+            campaign_id=campaign_id, sheet_name="s",
+            workspace_id=workspace_id, db_path=self.db_path,
+        ).id
+
+    def test_prepared_posts_list_scoped_to_workspace(self) -> None:
+        b_c = self._seed_campaign(self.ws_b)
+        self._seed_prepared_post(self.ws_b, b_c)
+        # A cannot see B's campaign posts even by campaign id.
+        a = self._get(self._client(self.sid_a), f"/api/campaigns/{b_c}/posts").get_json()
+        self.assertEqual(a, [])
+        b = self._get(self._client(self.sid_b), f"/api/campaigns/{b_c}/posts").get_json()
+        self.assertEqual(len(b), 1)
+
+    def test_cannot_patch_foreign_prepared_post(self) -> None:
+        b_c = self._seed_campaign(self.ws_b)
+        b_post = self._seed_prepared_post(self.ws_b, b_c)
+        resp = self._patch(
+            self._client(self.sid_a), f"/api/campaigns/{b_c}/posts/{b_post}",
+            self.csrf_a, message="hax",
+        )
+        self.assertEqual(resp.status_code, 404)
+        # B's post is unchanged.
+        from myUtils import content_generator
+        got = content_generator.get_prepared_post(b_post, db_path=self.db_path)
+        self.assertNotEqual(got.message, "hax")
+
+    def test_sheet_exports_list_scoped(self) -> None:
+        a_c = self._seed_campaign(self.ws_a)
+        b_c = self._seed_campaign(self.ws_b)
+        self._seed_sheet_export(self.ws_a, a_c)
+        self._seed_sheet_export(self.ws_b, b_c)
+        a = self._get(self._client(self.sid_a), "/api/sheet-exports").get_json()["data"]
+        b = self._get(self._client(self.sid_b), "/api/sheet-exports").get_json()["data"]
+        self.assertEqual(len(a), 1)
+        self.assertEqual(len(b), 1)
+
+    # --- watermark configs domain ------------------------------------------
+
+    def _seed_watermark(self, workspace_id: str, name: str) -> int:
+        from myUtils import watermark_service
+        return watermark_service.create_watermark_config(
+            name=name, workspace_id=workspace_id, db_path=self.db_path
+        ).id
+
+    def test_cannot_read_foreign_watermark_config(self) -> None:
+        b_w = self._seed_watermark(self.ws_b, "B-wm")
+        self.assertEqual(
+            self._get(self._client(self.sid_a), f"/api/watermark-configs/{b_w}").status_code, 404
+        )
+        self.assertEqual(
+            self._get(self._client(self.sid_b), f"/api/watermark-configs/{b_w}").status_code, 200
+        )
+
+    def test_watermark_configs_list_scoped(self) -> None:
+        self._seed_watermark(self.ws_a, "A-wm")
+        self._seed_watermark(self.ws_b, "B-wm")
+        a = self._get(self._client(self.sid_a), "/api/watermark-configs").get_json()
+        self.assertEqual([c["name"] for c in a], ["A-wm"])
+
+    def test_cannot_modify_or_delete_foreign_watermark_config(self) -> None:
+        b_w = self._seed_watermark(self.ws_b, "B-wm")
+        a = self._client(self.sid_a)
+        self.assertEqual(
+            self._patch(a, f"/api/watermark-configs/{b_w}", self.csrf_a, name="hax").status_code, 404
+        )
+        self.assertEqual(
+            self._delete(a, f"/api/watermark-configs/{b_w}", self.csrf_a).status_code, 404
+        )
+        # B's config is intact.
+        from myUtils import watermark_service
+        got = watermark_service.get_watermark_config(b_w, db_path=self.db_path)
+        self.assertEqual(got.name, "B-wm")
+
+    def test_created_watermark_config_bound_to_caller_workspace(self) -> None:
+        created = self._post(self._client(self.sid_a), "/api/watermark-configs", self.csrf_a, name="OwnedByA")
+        self.assertEqual(created.status_code, 201)
+        a = [c["name"] for c in self._get(self._client(self.sid_a), "/api/watermark-configs").get_json()]
+        b = [c["name"] for c in self._get(self._client(self.sid_b), "/api/watermark-configs").get_json()]
+        self.assertIn("OwnedByA", a)
+        self.assertNotIn("OwnedByA", b)
+
+    # --- analytics domain (account-anchored) -------------------------------
+
+    def _seed_analytics(self, workspace_id: str, platform_video_id: str) -> int:
+        """Create an account in the workspace and one analytics snapshot +
+        sync-log row for it. Returns the account id."""
+        from myUtils import analytics_store
+        acct_id = self._seed_account(workspace_id, uuid.uuid4().hex)
+        analytics_store.record_snapshot(
+            account_id=acct_id, platform="tiktok",
+            platform_video_id=platform_video_id, views=100,
+            db_path=self.db_path,
+        )
+        analytics_store.record_sync_start(acct_id, "tiktok", db_path=self.db_path)
+        return acct_id
+
+    def test_analytics_overview_scoped_to_workspace(self) -> None:
+        self._seed_analytics(self.ws_b, "vidB")
+        a = self._get(self._client(self.sid_a), "/analytics/overview").get_json()["data"]
+        self.assertEqual(a["video_count"], 0)
+        b = self._get(self._client(self.sid_b), "/analytics/overview").get_json()["data"]
+        self.assertEqual(b["video_count"], 1)
+
+    def test_analytics_videos_list_scoped(self) -> None:
+        self._seed_analytics(self.ws_a, "vidA")
+        self._seed_analytics(self.ws_b, "vidB2")
+        a = self._get(self._client(self.sid_a), "/analytics/videos").get_json()["data"]
+        self.assertEqual(len(a), 1)
+
+    def test_analytics_sync_log_scoped(self) -> None:
+        self._seed_analytics(self.ws_b, "vidB3")
+        a = self._get(self._client(self.sid_a), "/analytics/sync/status").get_json()["data"]
+        self.assertEqual(a, [])
+        b = self._get(self._client(self.sid_b), "/analytics/sync/status").get_json()["data"]
+        self.assertEqual(len(b), 1)
+
+    def test_cannot_trigger_sync_for_foreign_account(self) -> None:
+        b_acct = self._seed_account(self.ws_b, "B-sync")
+        resp = self._post(
+            self._client(self.sid_a), "/analytics/sync", self.csrf_a, accountId=b_acct
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    # --- account-events domain (account/profile-anchored) ------------------
+
+    def _seed_account_event(self, workspace_id: str) -> int:
+        from myUtils import account_events
+        p = prof.create_profile(name=uuid.uuid4().hex, workspace_id=workspace_id, db_path=self.db_path)
+        acct = prof.add_account(p.id, "douyin", "acct1", db_path=self.db_path)
+        account_events.record_event(
+            account_id=acct.id, profile_id=p.id, platform="douyin",
+            account_name="acct1", action="login", status="ok", summary="x",
+            db_path=self.db_path,
+        )
+        return acct.id
+
+    def test_account_events_list_scoped(self) -> None:
+        self._seed_account_event(self.ws_b)
+        a = self._get(self._client(self.sid_a), "/accounts/events").get_json()["data"]
+        self.assertEqual(a, [])
+        b = self._get(self._client(self.sid_b), "/accounts/events").get_json()["data"]
+        self.assertEqual(len(b), 1)
+
+    # --- credential redaction (Phase 7) ------------------------------------
+
+    def test_account_config_secrets_redacted_in_responses(self) -> None:
+        from myUtils.secret_redaction import REDACTION_SENTINEL
+        p = prof.create_profile(name=uuid.uuid4().hex, workspace_id=self.ws_a, db_path=self.db_path)
+        acct = prof.add_account(p.id, "douyin", "acct1", db_path=self.db_path)
+        prof.update_account(
+            acct.id,
+            config={"accessToken": "SUPER-SECRET-TOKEN", "channelTitle": "Chan"},
+            db_path=self.db_path,
+        )
+        resp = self._get(self._client(self.sid_a), f"/profiles/{p.id}/accounts")
+        body = resp.get_data(as_text=True)
+        # The raw token must never appear anywhere in the response body.
+        self.assertNotIn("SUPER-SECRET-TOKEN", body)
+        cfg = resp.get_json()["data"][0]["config"]
+        self.assertEqual(cfg["accessToken"], REDACTION_SENTINEL)
+        self.assertEqual(cfg["channelTitle"], "Chan")
+
+    def test_patch_with_redacted_secret_preserves_stored_token(self) -> None:
+        from myUtils.secret_redaction import REDACTION_SENTINEL
+        p = prof.create_profile(name=uuid.uuid4().hex, workspace_id=self.ws_a, db_path=self.db_path)
+        acct = prof.add_account(p.id, "douyin", "acct1", db_path=self.db_path)
+        prof.update_account(
+            acct.id,
+            config={"accessToken": "SUPER-SECRET-TOKEN", "channelTitle": "Chan"},
+            db_path=self.db_path,
+        )
+        # The client resubmits the redacted config with only a non-secret edit.
+        resp = self._patch(
+            self._client(self.sid_a), f"/accounts/{acct.id}", self.csrf_a,
+            config={"accessToken": REDACTION_SENTINEL, "channelTitle": "NewChan"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        stored = prof.get_account(acct.id, db_path=self.db_path)
+        self.assertEqual(stored.config["accessToken"], "SUPER-SECRET-TOKEN")  # preserved
+        self.assertEqual(stored.config["channelTitle"], "NewChan")  # updated
+
+    # --- cookie export / download hardening (Phase 7b) ---------------------
+
+    def test_own_cookie_export_decrypts_encrypted_file(self) -> None:
+        # Regression: the export route called a nonexistent read_cookie_file and
+        # fell back to a raw read, which broke once cookies were encrypted.
+        import base64
+        import json as _json
+        import secrets
+        from myUtils import cookie_storage
+        key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
+        with patch.dict(os.environ, {"SAU_COOKIE_ENCRYPTION_KEY": key}):
+            p = prof.create_profile(name=uuid.uuid4().hex, workspace_id=self.ws_a, db_path=self.db_path)
+            cookie_file = Path(self._tmp.name) / "enc_cookies.json"
+            cookie_storage.write_cookie(
+                cookie_file,
+                _json.dumps({"cookies": [{"name": "sid", "value": "xyz"}]}).encode("utf-8"),
+            )
+            self.assertTrue(cookie_storage.looks_encrypted(cookie_file.read_bytes()))
+            acct = prof.add_account(
+                p.id, "douyin", "acct1", cookie_path=str(cookie_file), db_path=self.db_path
+            )
+            resp = self._get(self._client(self.sid_a), f"/api/auth/cookies/{acct.id}/export")
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.get_json()["data"]["cookies"][0]["value"], "xyz")
+
+    def test_downloadcookie_scoped_to_workspace(self) -> None:
+        import json as _json
+        cookie_root = Path(self._tmp.name) / "cookiesFile"
+        cookie_root.mkdir(exist_ok=True)
+        b_file = cookie_root / "b.json"
+        b_file.write_text(_json.dumps({"cookies": []}), encoding="utf-8")
+        pb = prof.create_profile(name=uuid.uuid4().hex, workspace_id=self.ws_b, db_path=self.db_path)
+        prof.add_account(pb.id, "douyin", "bacct", cookie_path=str(b_file), db_path=self.db_path)
+        with patch.object(self.sau_backend, "_allowed_cookie_roots", return_value=(cookie_root.resolve(),)):
+            qs = {"filePath": str(b_file)}
+            ra = self._client(self.sid_a).get("/downloadCookie", base_url="https://localhost", query_string=qs)
+            self.assertEqual(ra.status_code, 404)
+            rb = self._client(self.sid_b).get("/downloadCookie", base_url="https://localhost", query_string=qs)
+            self.assertEqual(rb.status_code, 200)
 
     def test_legacy_token_is_unscoped_admin_path(self) -> None:
         # A legacy bearer token (no session) is not workspace-scoped: it sees all

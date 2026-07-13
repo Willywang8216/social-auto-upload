@@ -121,17 +121,28 @@ def create_sheet_export(
     row_count: int = 0,
     status: str = "pending",
     error_message: str = "",
+    workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> SheetExport:
     now = _now_iso()
+    columns = [
+        "campaign_id", "profile_id", "sheet_name", "spreadsheet_id",
+        "spreadsheet_url", "exported_at", "row_count", "status",
+        "error_message", "created_at",
+    ]
+    values: list = [
+        campaign_id, profile_id, sheet_name, spreadsheet_id, spreadsheet_url,
+        now, row_count, status, error_message, now,
+    ]
+    # Reference workspace_id only when scoped so the default INSERT is unchanged.
+    if workspace_id is not None:
+        columns.append("workspace_id")
+        values.append(workspace_id)
+    placeholders = ",".join("?" for _ in columns)
     with _connect(db_path) as conn:
         cur = conn.execute(
-            """INSERT INTO sheet_exports
-            (campaign_id, profile_id, sheet_name, spreadsheet_id, spreadsheet_url,
-             exported_at, row_count, status, error_message, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (campaign_id, profile_id, sheet_name, spreadsheet_id, spreadsheet_url,
-             now, row_count, status, error_message, now),
+            f"INSERT INTO sheet_exports ({', '.join(columns)}) VALUES ({placeholders})",
+            values,
         )
         conn.commit()
         return get_sheet_export(cur.lastrowid, db_path=db_path)
@@ -151,11 +162,15 @@ def list_sheet_exports(
     *,
     campaign_id: int | None = None,
     profile_id: int | None = None,
+    workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> list[SheetExport]:
     with _connect(db_path) as conn:
         query = "SELECT * FROM sheet_exports WHERE 1=1"
         params: list = []
+        if workspace_id is not None:
+            query += " AND workspace_id = ?"
+            params.append(workspace_id)
         if campaign_id is not None:
             query += " AND campaign_id = ?"
             params.append(campaign_id)
