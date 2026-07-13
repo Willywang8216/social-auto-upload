@@ -57,6 +57,16 @@ class CampaignApiTests(unittest.TestCase):
         if hasattr(self, "_tmp"):
             self._tmp.cleanup()
 
+    def _stored_config(self, account_id: int) -> dict:
+        """Return an account's *persisted* config.
+
+        API responses redact secret config values (access/refresh tokens, etc.),
+        so token-persistence assertions read the stored config directly.
+        """
+        return self.sau_backend.profile_registry.get_account(
+            account_id, db_path=self.db_path
+        ).config or {}
+
     def _insert_file_record(self, filename: str, file_path: str) -> int:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
@@ -284,7 +294,7 @@ class CampaignApiTests(unittest.TestCase):
             response = self.client.post(f'/accounts/{account_id}/refresh-token')
 
         self.assertEqual(response.status_code, 200)
-        config = response.get_json()['data']['config']
+        config = self._stored_config(account_id)
         self.assertEqual(config['accessToken'], 'new-token')
         self.assertEqual(config['refreshToken'], 'new-refresh')
         self.assertEqual(config['openId'], 'open-123')
@@ -350,7 +360,7 @@ class CampaignApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         account = self.client.get(f'/profiles/{profile_id}/accounts').get_json()['data'][0]
-        self.assertEqual(account['config']['accessToken'], 'token-1')
+        self.assertEqual(self._stored_config(account['id'])['accessToken'], 'token-1')
         status = self.client.get('/admin/tiktok/status').get_json()['data']
         self.assertEqual(status['lastCallback']['status'], 'ok')
         self.assertEqual(status['lastCallback']['displayName'], 'TikTok Demo')
@@ -454,7 +464,7 @@ class CampaignApiTests(unittest.TestCase):
         }):
             response = self.client.post(f'/accounts/{account_id}/refresh-token')
         self.assertEqual(response.status_code, 200)
-        config = response.get_json()['data']['config']
+        config = self._stored_config(account_id)
         self.assertEqual(config['accessToken'], 'reddit-token')
         self.assertEqual(config['redditUserName'], 'reddit-user')
         self.assertTrue(config['lastManualRefreshAt'])
@@ -484,7 +494,7 @@ class CampaignApiTests(unittest.TestCase):
         }):
             response = self.client.post(f'/accounts/{account_id}/refresh-token')
         self.assertEqual(response.status_code, 200)
-        config = response.get_json()['data']['config']
+        config = self._stored_config(account_id)
         self.assertEqual(config['accessToken'], 'yt-token')
         self.assertEqual(config['channelTitle'], 'Demo Channel')
         self.assertTrue(config['lastManualRefreshAt'])
@@ -505,7 +515,7 @@ class CampaignApiTests(unittest.TestCase):
         with patch.object(self.sau_backend.prepared_publishers, 'validate_facebook_config_live', return_value={'id': '123', 'name': 'Brand Page'}):
             response = self.client.post(f'/accounts/{account_id}/check-connection')
         self.assertEqual(response.status_code, 200)
-        config = response.get_json()['data']['config']
+        config = self._stored_config(account_id)
         self.assertEqual(config['facebookPageName'], 'Brand Page')
         self.assertTrue(config['lastConnectionCheckAt'])
 
@@ -525,7 +535,7 @@ class CampaignApiTests(unittest.TestCase):
         with patch.object(self.sau_backend.prepared_publishers, 'validate_instagram_config_live', return_value={'id': '1789', 'username': 'ig-demo'}):
             response = self.client.post(f'/accounts/{account_id}/check-connection')
         self.assertEqual(response.status_code, 200)
-        config = response.get_json()['data']['config']
+        config = self._stored_config(account_id)
         self.assertEqual(config['instagramUserName'], 'ig-demo')
         self.assertTrue(config['lastConnectionCheckAt'])
 
@@ -545,7 +555,7 @@ class CampaignApiTests(unittest.TestCase):
         with patch.object(self.sau_backend.prepared_publishers, 'validate_threads_config_live', return_value={'id': '42', 'username': 'threads-demo'}):
             response = self.client.post(f'/accounts/{account_id}/check-connection')
         self.assertEqual(response.status_code, 200)
-        config = response.get_json()['data']['config']
+        config = self._stored_config(account_id)
         self.assertEqual(config['threadsUserName'], 'threads-demo')
         self.assertTrue(config['lastConnectionCheckAt'])
 
@@ -565,7 +575,7 @@ class CampaignApiTests(unittest.TestCase):
         with patch.object(self.sau_backend.prepared_publishers, 'validate_telegram_config_live', return_value={'bot': {'result': {'username': 'brand_bot'}}, 'chat': {'result': {'title': 'Brand Chat'}}}):
             response = self.client.post(f'/accounts/{account_id}/check-connection')
         self.assertEqual(response.status_code, 200)
-        config = response.get_json()['data']['config']
+        config = self._stored_config(account_id)
         self.assertEqual(config['telegramBotName'], 'brand_bot')
         self.assertEqual(config['telegramChatTitle'], 'Brand Chat')
         self.assertTrue(config['lastConnectionCheckAt'])
@@ -586,7 +596,7 @@ class CampaignApiTests(unittest.TestCase):
         with patch.object(self.sau_backend.prepared_publishers, 'validate_discord_config_live', return_value={'name': 'Brand Hook', 'channel_id': '999'}):
             response = self.client.post(f'/accounts/{account_id}/check-connection')
         self.assertEqual(response.status_code, 200)
-        config = response.get_json()['data']['config']
+        config = self._stored_config(account_id)
         self.assertEqual(config['discordWebhookName'], 'Brand Hook')
         self.assertEqual(config['discordWebhookChannel'], '999')
         self.assertTrue(config['lastConnectionCheckAt'])
@@ -846,7 +856,7 @@ class CampaignApiTests(unittest.TestCase):
             response = self.client.get('/oauth/reddit/callback?state=reddit-state-1&code=demo-code')
         self.assertEqual(response.status_code, 200)
         account = self.client.get(f'/profiles/{profile_id}/accounts').get_json()['data'][0]
-        self.assertEqual(account['config']['refreshToken'], 'reddit-refresh')
+        self.assertEqual(self._stored_config(account['id'])['refreshToken'], 'reddit-refresh')
         self.assertEqual(account['config']['redditUserName'], 'reddit-user')
 
     def test_validate_account_config_allows_youtube_oauth_without_channel_id(self) -> None:
@@ -928,7 +938,7 @@ class CampaignApiTests(unittest.TestCase):
             response = self.client.get('/oauth/youtube/callback?state=youtube-state-1&code=demo-code')
         self.assertEqual(response.status_code, 200)
         account = self.client.get(f'/profiles/{profile_id}/accounts').get_json()['data'][0]
-        self.assertEqual(account['config']['refreshToken'], 'yt-refresh')
+        self.assertEqual(self._stored_config(account['id'])['refreshToken'], 'yt-refresh')
         self.assertEqual(account['config']['channelId'], 'UC123')
         self.assertEqual(account['config']['channelTitle'], 'Demo Channel')
 
@@ -982,7 +992,7 @@ class CampaignApiTests(unittest.TestCase):
         account = self.client.get(f'/profiles/{profile_id}/accounts').get_json()['data'][0]
         self.assertEqual(account['config']['pageId'], '123')
         self.assertEqual(account['config']['facebookPageName'], 'Brand Page')
-        self.assertEqual(account['config']['accessToken'], 'page-token')
+        self.assertEqual(self._stored_config(account['id'])['accessToken'], 'page-token')
 
     def test_meta_oauth_callback_updates_instagram_account(self) -> None:
         profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})
@@ -1010,7 +1020,7 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(account['config']['pageId'], '321')
         self.assertEqual(account['config']['igUserId'], 'ig-1')
         self.assertEqual(account['config']['instagramUserName'], 'brand_ig')
-        self.assertEqual(account['config']['accessToken'], 'page-token')
+        self.assertEqual(self._stored_config(account['id'])['accessToken'], 'page-token')
 
     def test_validate_account_config_allows_threads_oauth_without_user_id(self) -> None:
         response = self.client.post(
@@ -1084,7 +1094,7 @@ class CampaignApiTests(unittest.TestCase):
         account = self.client.get(f'/profiles/{profile_id}/accounts').get_json()['data'][0]
         self.assertEqual(account['config']['threadUserId'], 'th-1')
         self.assertEqual(account['config']['threadsUserName'], 'threads-user')
-        self.assertEqual(account['config']['accessToken'], 'threads-long')
+        self.assertEqual(self._stored_config(account['id'])['accessToken'], 'threads-long')
 
     def test_refresh_threads_token_updates_structured_account(self) -> None:
         profile_response = self.client.post('/profiles', json={'name': 'Threads Brand'})
@@ -1109,7 +1119,7 @@ class CampaignApiTests(unittest.TestCase):
         }), patch.object(self.sau_backend.threads_auth, 'fetch_me', return_value={'id': 'th-1', 'username': 'threads-user-2'}):
             response = self.client.post(f'/accounts/{account_id}/refresh-token')
         self.assertEqual(response.status_code, 200)
-        config = response.get_json()['data']['config']
+        config = self._stored_config(account_id)
         self.assertEqual(config['accessToken'], 'threads-long-2')
         self.assertEqual(config['threadsUserName'], 'threads-user-2')
         self.assertTrue(config['lastManualRefreshAt'])
@@ -1244,7 +1254,7 @@ class CampaignApiTests(unittest.TestCase):
         with patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '123', 'name': 'Brand Page 2', 'access_token': 'page-token-2'}]}):
             response = self.client.post(f'/accounts/{account_id}/refresh-token')
         self.assertEqual(response.status_code, 200)
-        config = response.get_json()['data']['config']
+        config = self._stored_config(account_id)
         self.assertEqual(config['facebookPageName'], 'Brand Page 2')
         self.assertEqual(config['accessToken'], 'page-token-2')
         self.assertTrue(config['lastManualRefreshAt'])
@@ -1270,7 +1280,7 @@ class CampaignApiTests(unittest.TestCase):
         with patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '321', 'name': 'Brand Page', 'access_token': 'page-token-2', 'instagram_business_account': {'id': 'ig-1', 'username': 'brand_ig_2'}}]}):
             response = self.client.post(f'/accounts/{account_id}/refresh-token')
         self.assertEqual(response.status_code, 200)
-        config = response.get_json()['data']['config']
+        config = self._stored_config(account_id)
         self.assertEqual(config['pageId'], '321')
         self.assertEqual(config['instagramUserName'], 'brand_ig_2')
         self.assertEqual(config['accessToken'], 'page-token-2')

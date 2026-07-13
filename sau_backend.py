@@ -35,6 +35,7 @@ from myUtils import prepared_publishers
 from myUtils import publish_orchestrator
 from myUtils import publish_templates as template_store
 from myUtils import account_events
+from myUtils import secret_redaction
 from myUtils import rclone_storage
 from myUtils import media_remote_storage
 from myUtils import analytics_store
@@ -1937,6 +1938,9 @@ def _profile_payload(profile: profile_registry.Profile) -> dict:
 
 def _account_payload(account: profile_registry.Account) -> dict:
     payload = account.to_dict()
+    # Never echo live OAuth material (tokens, secrets, cookies) back to a client.
+    if isinstance(payload.get("config"), (dict, list)):
+        payload["config"] = secret_redaction.redact_config_secrets(payload["config"])
     if account.platform == "tiktok":
         payload["isSandbox"] = os.environ.get("TIKTOK_CLIENT_KEY", "").startswith("sb")
     return payload
@@ -5250,6 +5254,9 @@ def accounts_validate_config():
 def profile_accounts_create(profile_id):
     try:
         data = _read_json_body()
+        # Drop any round-tripped redaction sentinels so they are never persisted.
+        if isinstance(data.get("config"), dict):
+            data["config"] = secret_redaction.strip_redaction_sentinels(data["config"])
         account_name = str(data.get("accountName", "")).strip()
         platform = str(data.get("platform", "")).strip().lower()
         if not account_name:
@@ -5556,10 +5563,13 @@ def accounts_patch(account_id):
             account_id, workspace_id=_workspace_scope(), db_path=_current_db_path()
         )
         new_profile_id = data.get("profileId", existing.profile_id)
-        # Merge config: start with existing, overlay with incoming fields
+        # Merge config: start with existing, overlay with incoming fields.
+        # Strip redaction sentinels first so a resubmitted masked secret keeps
+        # the stored value instead of overwriting it.
         existing_config = dict(existing.config or {})
         incoming_config = data.get("config")
         if isinstance(incoming_config, dict):
+            incoming_config = secret_redaction.strip_redaction_sentinels(incoming_config)
             existing_config.update(incoming_config)
         print(f"🔍 PATCH /accounts/{account_id}: incoming_keys={list(incoming_config.keys()) if isinstance(incoming_config, dict) else 'NONE'} merged_keys={list(existing_config.keys())} authType={data.get('authType')} status={data.get('status')}")
         merged = {

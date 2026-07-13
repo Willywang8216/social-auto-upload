@@ -553,6 +553,44 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         b = self._get(self._client(self.sid_b), "/accounts/events").get_json()["data"]
         self.assertEqual(len(b), 1)
 
+    # --- credential redaction (Phase 7) ------------------------------------
+
+    def test_account_config_secrets_redacted_in_responses(self) -> None:
+        from myUtils.secret_redaction import REDACTION_SENTINEL
+        p = prof.create_profile(name=uuid.uuid4().hex, workspace_id=self.ws_a, db_path=self.db_path)
+        acct = prof.add_account(p.id, "douyin", "acct1", db_path=self.db_path)
+        prof.update_account(
+            acct.id,
+            config={"accessToken": "SUPER-SECRET-TOKEN", "channelTitle": "Chan"},
+            db_path=self.db_path,
+        )
+        resp = self._get(self._client(self.sid_a), f"/profiles/{p.id}/accounts")
+        body = resp.get_data(as_text=True)
+        # The raw token must never appear anywhere in the response body.
+        self.assertNotIn("SUPER-SECRET-TOKEN", body)
+        cfg = resp.get_json()["data"][0]["config"]
+        self.assertEqual(cfg["accessToken"], REDACTION_SENTINEL)
+        self.assertEqual(cfg["channelTitle"], "Chan")
+
+    def test_patch_with_redacted_secret_preserves_stored_token(self) -> None:
+        from myUtils.secret_redaction import REDACTION_SENTINEL
+        p = prof.create_profile(name=uuid.uuid4().hex, workspace_id=self.ws_a, db_path=self.db_path)
+        acct = prof.add_account(p.id, "douyin", "acct1", db_path=self.db_path)
+        prof.update_account(
+            acct.id,
+            config={"accessToken": "SUPER-SECRET-TOKEN", "channelTitle": "Chan"},
+            db_path=self.db_path,
+        )
+        # The client resubmits the redacted config with only a non-secret edit.
+        resp = self._patch(
+            self._client(self.sid_a), f"/accounts/{acct.id}", self.csrf_a,
+            config={"accessToken": REDACTION_SENTINEL, "channelTitle": "NewChan"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        stored = prof.get_account(acct.id, db_path=self.db_path)
+        self.assertEqual(stored.config["accessToken"], "SUPER-SECRET-TOKEN")  # preserved
+        self.assertEqual(stored.config["channelTitle"], "NewChan")  # updated
+
     def test_legacy_token_is_unscoped_admin_path(self) -> None:
         # A legacy bearer token (no session) is not workspace-scoped: it sees all
         # profiles. This is the documented single-tenant/admin compatibility path.

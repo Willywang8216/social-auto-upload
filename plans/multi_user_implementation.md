@@ -549,18 +549,33 @@ limits, quotas, structured logs, audit logs.
   workspace's recent events). Two-user matrix now **40 tests**. Route matrix
   re-derived (139 routes, source_line only), `check_csvs` green.
 
+- 2026-07-13 — Phase 7 (part 1) credential **response redaction** (stacked on
+  PR #29). New `myUtils/secret_redaction.py`: `is_secret_key` (name-suffix based
+  — `…Token/…Secret/…Password/…apiKey`, while metadata `…ExpiresAt/…UpdatedAt/
+  …Type/…Env` and semi-public `…Key` are preserved), `redact_config_secrets`
+  (recursive; non-empty secret values → `"__redacted__"`, empties preserved so
+  the UI can tell set from unset), and `strip_redaction_sentinels` (recursive
+  removal). `_account_payload` now redacts `config` so no route (`/profiles/<id>/
+  accounts`, account create/check/refresh/PATCH, OAuth-review detail) ever echoes
+  a live token/secret/cookie. The account **create + PATCH** routes strip
+  sentinels from the incoming config before persist/merge, so a resubmitted
+  redacted config keeps the stored secret (the PATCH merge preserves it). 12 new
+  unit tests + 2 HTTP tests (raw token absent from the response; PATCH round-trip
+  preserves the stored token). Two-user matrix now **42 tests**. Route matrix
+  re-derived (139 routes, source_line only), `check_csvs` green.
+
 ## Next incomplete task
 
-Phase 6 read-isolation is now complete across all user-data domains (profiles,
-accounts, jobs, media, campaigns, templates, prepared-posts, sheet-exports,
-watermarks, analytics, account-events). Remaining Phase 6 tail: the per-platform
-OAuth status/review tables (`*_oauth_requests`, `tiktok_publish_status`,
-`tiktok_review_events`) — lower-risk transient state, same account-anchored
-pattern. Then **Phase 7** (credential encryption + response redaction — the
-`_account_payload` plaintext-token leak, the two cookie-export endpoints) and
-**Phase 10** (frontend Google login screen). Operator steps still pending: run
-the Phase 5 backfill on the production DB, then flip
-`SAU_TENANCY_MODE=single→shadow→enforced`.
+Phase 6 read-isolation is complete across all user-data domains; Phase 7 response
+redaction closes the `_account_payload` plaintext-token leak. Remaining:
+- **Phase 7 (part 2)** — the two cookie-export surfaces (`GET /api/auth/cookies/
+  <id>/export`, `GET /downloadCookie`) and optional at-rest encryption of
+  `config_json` OAuth tokens (reuse the AES-GCM envelope from
+  `myUtils.cookie_storage`); `storage_backends` key redaction.
+- Phase 6 tail — per-platform OAuth status/review tables (transient state).
+- **Phase 10** — frontend Google login screen.
+Operator steps still pending: run the Phase 5 backfill on the production DB, then
+flip `SAU_TENANCY_MODE=single→shadow→enforced`.
 
 **Standing user input still needed** (does not block the code build): a Google
 OAuth client to exercise a *real* login (Phase 3 live path), and access to run
