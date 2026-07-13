@@ -533,6 +533,26 @@ class ProfileTenantIsolationTests(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 404)
 
+    # --- account-events domain (account/profile-anchored) ------------------
+
+    def _seed_account_event(self, workspace_id: str) -> int:
+        from myUtils import account_events
+        p = prof.create_profile(name=uuid.uuid4().hex, workspace_id=workspace_id, db_path=self.db_path)
+        acct = prof.add_account(p.id, "douyin", "acct1", db_path=self.db_path)
+        account_events.record_event(
+            account_id=acct.id, profile_id=p.id, platform="douyin",
+            account_name="acct1", action="login", status="ok", summary="x",
+            db_path=self.db_path,
+        )
+        return acct.id
+
+    def test_account_events_list_scoped(self) -> None:
+        self._seed_account_event(self.ws_b)
+        a = self._get(self._client(self.sid_a), "/accounts/events").get_json()["data"]
+        self.assertEqual(a, [])
+        b = self._get(self._client(self.sid_b), "/accounts/events").get_json()["data"]
+        self.assertEqual(len(b), 1)
+
     def test_legacy_token_is_unscoped_admin_path(self) -> None:
         # A legacy bearer token (no session) is not workspace-scoped: it sees all
         # profiles. This is the documented single-tenant/admin compatibility path.

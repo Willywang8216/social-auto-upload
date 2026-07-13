@@ -538,15 +538,29 @@ limits, quotas, structured logs, audit logs.
   matrix now **39 tests**. Route matrix re-derived (139 routes, source_line
   only), `check_csvs` green.
 
+- 2026-07-13 — Phase 6h account-events read isolation (stacked on PR #29).
+  `account_events.list_events` gains an optional `workspace_id` that appends an
+  account/profile-anchored predicate — `account_id IN (accounts of ws) OR
+  profile_id IN (profiles of ws)`; system-level events (both NULL) are not
+  surfaced under a scope. No changes to the `record_event` write-path (10+ call
+  sites untouched). Wired all three read call sites: `/accounts/events`, the
+  per-account OAuth-review detail route, and the previously **unfiltered**
+  `recent_events` in `/accounts/health-summary` (which had leaked every
+  workspace's recent events). Two-user matrix now **40 tests**. Route matrix
+  re-derived (139 routes, source_line only), `check_csvs` green.
+
 ## Next incomplete task
 
-Phase 6 (final slice) — account-events (`/api/account-events` history; isolate
-via the same account/profile-anchored read filter — no changes to the
-`record_event` write-path) and the per-platform OAuth status/review tables.
-Then Phase 7 (credential encryption + response redaction) and the frontend
-(Phase 10). Analytics `/analytics/sync` **sync-all** still triggers a global
-refresh (write-only, not a read leak) — a per-workspace sync-all is a small
-follow-up if desired.
+Phase 6 read-isolation is now complete across all user-data domains (profiles,
+accounts, jobs, media, campaigns, templates, prepared-posts, sheet-exports,
+watermarks, analytics, account-events). Remaining Phase 6 tail: the per-platform
+OAuth status/review tables (`*_oauth_requests`, `tiktok_publish_status`,
+`tiktok_review_events`) — lower-risk transient state, same account-anchored
+pattern. Then **Phase 7** (credential encryption + response redaction — the
+`_account_payload` plaintext-token leak, the two cookie-export endpoints) and
+**Phase 10** (frontend Google login screen). Operator steps still pending: run
+the Phase 5 backfill on the production DB, then flip
+`SAU_TENANCY_MODE=single→shadow→enforced`.
 
 **Standing user input still needed** (does not block the code build): a Google
 OAuth client to exercise a *real* login (Phase 3 live path), and access to run

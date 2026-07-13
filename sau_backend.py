@@ -4485,7 +4485,7 @@ def oauth_admin_status():
         request_state = tiktok_review.latest_oauth_request(account_id=account_id, db_path=db_path)
         products = ['TikTok Login Kit', 'Content Posting API']
 
-    events = account_events.list_events(limit=25, account_id=account_id, platform=platform, db_path=db_path)
+    events = account_events.list_events(limit=25, account_id=account_id, platform=platform, workspace_id=_workspace_scope(), db_path=db_path)
     last_start = next((event for event in events if event.action == 'oauth_start'), None)
     last_callback = next((event for event in events if event.action == 'oauth_callback'), None)
     last_refresh = next((event for event in events if event.action == 'refresh_token'), None)
@@ -5355,6 +5355,7 @@ def accounts_events_list():
         account_id=account_id,
         profile_id=profile_id,
         platform=platform,
+        workspace_id=_workspace_scope(),
         db_path=db_path,
     )
     return jsonify({"code": 200, "msg": "ok", "data": [event.to_dict() for event in events]}), 200
@@ -5466,7 +5467,7 @@ def accounts_health_summary():
                     'recommendedAction': 'reconnect' if reconnect_required else 'refresh',
                 })
 
-    recent_events = account_events.list_events(limit=10, db_path=db_path)
+    recent_events = account_events.list_events(limit=10, workspace_id=_workspace_scope(), db_path=db_path)
     event_totals = {'total': len(recent_events), 'ok': 0, 'error': 0}
     for event in recent_events:
         if event.status == 'ok':
