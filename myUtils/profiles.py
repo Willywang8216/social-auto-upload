@@ -18,7 +18,7 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -154,9 +154,16 @@ def _connect(db_path: Path = DB_PATH) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+_PROFILE_FIELDS = {f.name for f in fields(Profile)}
+_ACCOUNT_FIELDS = {f.name for f in fields(Account)}
+
+
 def _row_to_profile(row: sqlite3.Row) -> Profile:
     payload = {key: row[key] for key in row.keys()}
     payload["settings"] = json.loads(payload.pop("settings_json", "{}") or "{}")
+    # Filter to declared fields so schema additions (e.g. workspace_id) don't
+    # break construction — the tenancy columns are handled by the ORM layer.
+    payload = {k: v for k, v in payload.items() if k in _PROFILE_FIELDS}
     return Profile(**payload)
 
 
@@ -164,6 +171,7 @@ def _row_to_account(row: sqlite3.Row) -> Account:
     payload = {key: row[key] for key in row.keys()}
     payload["config"] = json.loads(payload.pop("config_json", "{}") or "{}")
     payload["enabled"] = bool(payload.get("enabled", 1))
+    payload = {k: v for k, v in payload.items() if k in _ACCOUNT_FIELDS}
     return Account(**payload)
 
 
@@ -275,30 +283,56 @@ def create_profile(
     description: str = "",
     *,
     settings: dict | None = None,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> Profile:
     slug = slugify(name)
     with _connect(db_path) as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO profiles (name, slug, description, settings_json)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                name.strip(),
-                slug,
-                description.strip(),
-                json.dumps(settings or {}, ensure_ascii=False),
-            ),
-        )
+        if workspace_id is not None:
+            cursor = conn.execute(
+                """
+                INSERT INTO profiles (name, slug, description, settings_json, workspace_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    name.strip(),
+                    slug,
+                    description.strip(),
+                    json.dumps(settings or {}, ensure_ascii=False),
+                    workspace_id,
+                ),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO profiles (name, slug, description, settings_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    name.strip(),
+                    slug,
+                    description.strip(),
+                    json.dumps(settings or {}, ensure_ascii=False),
+                ),
+            )
         conn.commit()
         profile_id = cursor.lastrowid
-    return get_profile(profile_id, db_path=db_path)
+    return get_profile(profile_id, workspace_id=workspace_id, db_path=db_path)
 
 
-def get_profile(profile_id: int, *, db_path: Path = DB_PATH) -> Profile:
+def get_profile(profile_id: int, *, workspace_id: str | None = None, db_path: Path = DB_PATH) -> Profile:
+    """Fetch a profile. When ``workspace_id`` is given, a profile that belongs to
+    another workspace is treated as not found (tenant isolation)."""
     with _connect(db_path) as conn:
-        row = conn.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,)).fetchone()
+        if workspace_id is not None:
+            row = conn.execute(
+                "SELECT * FROM profiles WHERE id = ? AND workspace_id = ?",
+                (profile_id, workspace_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
     if row is None:
         raise LookupError(f"Profile not found: id={profile_id}")
     return _row_to_profile(row)
@@ -312,9 +346,15 @@ def get_profile_by_slug(slug: str, *, db_path: Path = DB_PATH) -> Profile:
     return _row_to_profile(row)
 
 
-def list_profiles(*, db_path: Path = DB_PATH) -> list[Profile]:
+def list_profiles(*, workspace_id: str | None = None, db_path: Path = DB_PATH) -> list[Profile]:
     with _connect(db_path) as conn:
-        rows = conn.execute("SELECT * FROM profiles ORDER BY name").fetchall()
+        if workspace_id is not None:
+            rows = conn.execute(
+                "SELECT * FROM profiles WHERE workspace_id = ? ORDER BY name",
+                (workspace_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM profiles ORDER BY name").fetchall()
     return [_row_to_profile(row) for row in rows]
 
 
@@ -324,16 +364,20 @@ def update_profile(
     name: str | None = None,
     description: str | None = None,
     settings: dict | None = None,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
     **extra_fields,
 ) -> Profile:
-    """Update a profile. Supports name, description, settings, and any extended column."""
+    """Update a profile. Supports name, description, settings, and any extended column.
+
+    When ``workspace_id`` is given, a profile owned by another workspace raises
+    ``LookupError`` and is left untouched (tenant isolation)."""
     _EXTENDED_FIELDS = {
         "default_language", "timezone", "system_prompt", "writing_style_prompt",
         "contact_details", "default_cta", "default_hashtags", "default_link",
         "watermark_config_id", "google_sheet_folder_id",
     }
-    current = get_profile(profile_id, db_path=db_path)
+    current = get_profile(profile_id, workspace_id=workspace_id, db_path=db_path)
     next_name = current.name if name is None else name.strip()
     next_description = current.description if description is None else description.strip()
     next_settings = current.settings if settings is None else settings
@@ -355,10 +399,15 @@ def update_profile(
             values,
         )
         conn.commit()
-    return get_profile(profile_id, db_path=db_path)
+    return get_profile(profile_id, workspace_id=workspace_id, db_path=db_path)
 
 
-def delete_profile(profile_id: int, *, db_path: Path = DB_PATH) -> None:
+def delete_profile(profile_id: int, *, workspace_id: str | None = None, db_path: Path = DB_PATH) -> None:
+    """Delete a profile. When ``workspace_id`` is given, a profile owned by
+    another workspace raises ``LookupError`` and is left intact."""
+    if workspace_id is not None:
+        # Confirm ownership before deleting (foreign profile -> LookupError -> 404).
+        get_profile(profile_id, workspace_id=workspace_id, db_path=db_path)
     with _connect(db_path) as conn:
         conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
         conn.commit()
@@ -391,6 +440,13 @@ def add_account(
         resolved_path = ""
 
     with _connect(db_path) as conn:
+        # Accounts inherit their parent profile's workspace so ownership stays
+        # consistent regardless of which mode created the profile. NULL for
+        # legacy profiles (assigned later by the backfill).
+        parent_ws_row = conn.execute(
+            "SELECT workspace_id FROM profiles WHERE id = ?", (profile_id,)
+        ).fetchone()
+        parent_workspace_id = parent_ws_row[0] if parent_ws_row else None
         cursor = conn.execute(
             """
             INSERT INTO accounts (
@@ -401,9 +457,10 @@ def add_account(
                 auth_type,
                 config_json,
                 enabled,
-                status
+                status,
+                workspace_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 profile_id,
@@ -414,6 +471,7 @@ def add_account(
                 json.dumps(config or {}, ensure_ascii=False),
                 int(enabled),
                 status,
+                parent_workspace_id,
             ),
         )
         conn.commit()
@@ -421,9 +479,19 @@ def add_account(
     return get_account(account_id, db_path=db_path)
 
 
-def get_account(account_id: int, *, db_path: Path = DB_PATH) -> Account:
+def get_account(account_id: int, *, workspace_id: str | None = None, db_path: Path = DB_PATH) -> Account:
+    """Fetch an account. When ``workspace_id`` is given, an account that belongs
+    to another workspace is treated as not found (tenant isolation)."""
     with _connect(db_path) as conn:
-        row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        if workspace_id is not None:
+            row = conn.execute(
+                "SELECT * FROM accounts WHERE id = ? AND workspace_id = ?",
+                (account_id, workspace_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()
     if row is None:
         raise LookupError(f"Account not found: id={account_id}")
     return _row_to_account(row)
@@ -448,6 +516,7 @@ def list_accounts(
     profile_id: int | None = None,
     platform: str | None = None,
     enabled: bool | None = None,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> list[Account]:
     query = "SELECT * FROM accounts"
@@ -462,6 +531,9 @@ def list_accounts(
     if enabled is not None:
         clauses.append("enabled = ?")
         params.append(int(enabled))
+    if workspace_id is not None:
+        clauses.append("workspace_id = ?")
+        params.append(workspace_id)
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY platform, account_name"
@@ -471,8 +543,10 @@ def list_accounts(
 
 
 def update_account_status(
-    account_id: int, status: int, *, db_path: Path = DB_PATH
+    account_id: int, status: int, *, workspace_id: str | None = None, db_path: Path = DB_PATH
 ) -> None:
+    if workspace_id is not None:
+        get_account(account_id, workspace_id=workspace_id, db_path=db_path)
     now = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
     with _connect(db_path) as conn:
         conn.execute(
@@ -492,9 +566,12 @@ def update_account(
     config: dict | None = None,
     enabled: bool | None = None,
     status: int | None = None,
+    workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> Account:
-    current = get_account(account_id, db_path=db_path)
+    """Update an account. When ``workspace_id`` is given, an account owned by
+    another workspace raises ``LookupError`` and is left untouched."""
+    current = get_account(account_id, workspace_id=workspace_id, db_path=db_path)
     next_profile_id = current.profile_id if profile_id is None else profile_id
     next_account_name = current.account_name if account_name is None else account_name.strip()
     next_auth_type = current.auth_type if auth_type is None else auth_type
@@ -533,7 +610,11 @@ def update_account(
     return get_account(account_id, db_path=db_path)
 
 
-def delete_account(account_id: int, *, db_path: Path = DB_PATH) -> None:
+def delete_account(account_id: int, *, workspace_id: str | None = None, db_path: Path = DB_PATH) -> None:
+    """Delete an account. When ``workspace_id`` is given, an account owned by
+    another workspace raises ``LookupError`` and is left intact."""
+    if workspace_id is not None:
+        get_account(account_id, workspace_id=workspace_id, db_path=db_path)
     with _connect(db_path) as conn:
         conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
         conn.commit()

@@ -41,6 +41,20 @@ sau = "sau_cli:main"
 web = [
   "Flask[async]==3.1.1",
   "flask-cors==6.0.0",
+  # Production WSGI server. The dev server (app.run) remains the local path;
+  # production serves the app via `gunicorn wsgi:app`.
+  "gunicorn>=21.2",
+  # SQLAlchemy 2.x is the ORM for the repository layer (sau_app/db). It is
+  # already an Alembic dependency; pin it explicitly for the app.
+  "SQLAlchemy>=2.0",
+  # Authlib powers the Google OpenID Connect application-login flow
+  # (separate from the YouTube account-connection OAuth).
+  "Authlib>=1.3",
+]
+# PostgreSQL driver for the production database target. The repository layer
+# (sau_app/db) is dialect-agnostic; install this extra to run against Postgres.
+postgres = [
+  "psycopg[binary]>=3.1",
 ]
 
 [tool.uv]
@@ -56,7 +70,7 @@ py-modules = ["conf", "sau_cli"]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["uploader*", "utils*", "myUtils*", "db*"]
+include = ["uploader*", "utils*", "myUtils*", "db*", "sau_app*"]
 
 [tool.setuptools.package-data]
 utils = ["stealth.min.js"]

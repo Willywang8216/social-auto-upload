@@ -20,7 +20,7 @@ install_browserless_patch()
 from flask_cors import CORS
 from myUtils.auth import check_cookie
 from myUtils import account_validation
-from flask import Flask, request, jsonify, Response, render_template, send_from_directory, current_app, url_for, redirect
+from flask import Flask, request, jsonify, Response, render_template, send_from_directory, current_app, url_for, redirect, g
 from utils.conf_defaults import BASE_DIR
 from myUtils import campaigns as campaign_store
 from myUtils import content_rules
@@ -136,6 +136,16 @@ CORS(
     allow_headers=["Authorization", "Content-Type"],
     supports_credentials=False,
 )
+
+# Phase 1 factory extensions: request/correlation IDs, structured request
+# logging, a standard JSON error schema, config validation, and the health
+# blueprint (/healthz, /readyz). Registered here — before the auth gate below —
+# so the request-id middleware runs first. Idempotent, so sau_app.create_app()
+# (the Gunicorn entrypoint) can call it again safely. The database readiness
+# probe is registered near the end of this module, once _get_legacy_db_path is
+# defined.
+from sau_app import init_extensions, register_readiness_check  # noqa: E402
+init_extensions(app)
 
 LEGACY_DB_REQUIRED_TABLES = frozenset({"user_info", "file_records"})
 
@@ -365,6 +375,12 @@ def _enforce_auth():
     if request.method == "OPTIONS":
         return None  # let the CORS layer answer preflight
     if policy.is_public_path(request.path):
+        return None
+
+    # Hybrid/oidc: a valid Google session (resolved by the tenancy middleware,
+    # which runs before this hook) satisfies the gate. This flag is only ever
+    # set when Google login is enabled, so legacy-mode behavior is unchanged.
+    if getattr(g, "sau_session_authenticated", False):
         return None
 
     is_sse = request.path == "/login"
@@ -1637,7 +1653,9 @@ def upload_cookie():
 def import_cookies(account_id):
     """Import cookies from browser DevTools (tab-separated) or JSON array."""
     try:
-        account = profile_registry.get_account(account_id, db_path=_current_db_path())
+        account = profile_registry.get_account(
+            account_id, workspace_id=_workspace_scope(), db_path=_current_db_path()
+        )
     except (ValueError, LookupError):
         return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
 
@@ -1893,6 +1911,24 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 
 def _current_db_path() -> Path:
     return _ensure_legacy_db_ready()
+
+
+def _workspace_scope() -> str | None:
+    """Workspace id to scope tenant queries by, or ``None`` for no scoping.
+
+    Returns ``None`` in the default ``single``/``shadow`` tenancy modes and for
+    legacy-token callers (single-tenant/admin path). In ``enforced`` mode a
+    Google-session caller is scoped to their active workspace, so cross-workspace
+    resources resolve as 404. Wired route-by-route (Phase 6); unscoped by default
+    so existing behavior is unchanged.
+    """
+    config = app.config.get("SAU_APP_CONFIG")
+    if config is None or getattr(config, "tenancy_mode", "single") != "enforced":
+        return None
+    ctx = getattr(g, "auth_ctx", None)
+    if ctx is None or getattr(ctx, "auth_method", None) != "google_session":
+        return None
+    return getattr(ctx, "workspace_id", None)
 
 
 def _profile_payload(profile: profile_registry.Profile) -> dict:
@@ -5102,7 +5138,7 @@ def tiktok_publish_status(job_id):
 @app.route("/profiles", methods=["GET"])
 def profiles_list():
     db_path = _current_db_path()
-    items = profile_registry.list_profiles(db_path=db_path)
+    items = profile_registry.list_profiles(workspace_id=_workspace_scope(), db_path=db_path)
     return jsonify(
         {"code": 200, "msg": "ok", "data": [_profile_payload(item) for item in items]}
     ), 200
@@ -5119,6 +5155,7 @@ def profiles_create():
             name,
             description=str(data.get("description", "") or ""),
             settings=data.get("settings") if isinstance(data.get("settings"), dict) else None,
+            workspace_id=_workspace_scope(),
             db_path=_current_db_path(),
         )
     except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
@@ -5129,7 +5166,9 @@ def profiles_create():
 @app.route("/profiles/<int:profile_id>", methods=["GET"])
 def profiles_get(profile_id):
     try:
-        profile = profile_registry.get_profile(profile_id, db_path=_current_db_path())
+        profile = profile_registry.get_profile(
+            profile_id, workspace_id=_workspace_scope(), db_path=_current_db_path()
+        )
     except LookupError:
         return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
     return jsonify({"code": 200, "msg": "ok", "data": _profile_payload(profile)}), 200
@@ -5144,6 +5183,7 @@ def profiles_patch(profile_id):
             name=data.get("name"),
             description=data.get("description"),
             settings=data.get("settings") if isinstance(data.get("settings"), dict) else None,
+            workspace_id=_workspace_scope(),
             db_path=_current_db_path(),
         )
     except LookupError:
@@ -5156,7 +5196,9 @@ def profiles_patch(profile_id):
 @app.route("/profiles/<int:profile_id>", methods=["DELETE"])
 def profiles_delete(profile_id):
     try:
-        profile_registry.delete_profile(profile_id, db_path=_current_db_path())
+        profile_registry.delete_profile(
+            profile_id, workspace_id=_workspace_scope(), db_path=_current_db_path()
+        )
     except LookupError:
         return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
     except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
@@ -5168,7 +5210,7 @@ def profiles_delete(profile_id):
 def profile_accounts_list(profile_id):
     db_path = _current_db_path()
     try:
-        profile_registry.get_profile(profile_id, db_path=db_path)
+        profile_registry.get_profile(profile_id, workspace_id=_workspace_scope(), db_path=db_path)
     except LookupError:
         return jsonify({"code": 404, "msg": "Profile not found", "data": None}), 404
 
@@ -5214,6 +5256,8 @@ def profile_accounts_create(profile_id):
             raise ValueError("accountName is required")
         if not platform:
             raise ValueError("platform is required")
+        # Reject creating an account under a profile owned by another workspace.
+        profile_registry.get_profile(profile_id, workspace_id=_workspace_scope(), db_path=_current_db_path())
         validation = _validate_account_payload(data, db_path=_current_db_path(), profile_id=profile_id)
         if not validation.valid:
             raise ValueError("; ".join(validation.errors))
@@ -5242,6 +5286,8 @@ def profile_accounts_create(profile_id):
 def accounts_check_connection(account_id):
     db_path = _current_db_path()
     try:
+        # Tenant isolation: 404 for accounts owned by another workspace.
+        profile_registry.get_account(account_id, workspace_id=_workspace_scope(), db_path=db_path)
         updated = _run_account_connection_check(account_id=account_id, db_path=db_path)
     except LookupError:
         return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
@@ -5255,6 +5301,7 @@ def accounts_check_connection(account_id):
 def accounts_refresh_token(account_id):
     db_path = _current_db_path()
     try:
+        profile_registry.get_account(account_id, workspace_id=_workspace_scope(), db_path=db_path)
         updated = _run_account_token_refresh(account_id=account_id, db_path=db_path)
     except LookupError:
         return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
@@ -5504,7 +5551,9 @@ def accounts_refresh_stale_tiktok_tokens():
 def accounts_patch(account_id):
     try:
         data = _read_json_body()
-        existing = profile_registry.get_account(account_id, db_path=_current_db_path())
+        existing = profile_registry.get_account(
+            account_id, workspace_id=_workspace_scope(), db_path=_current_db_path()
+        )
         new_profile_id = data.get("profileId", existing.profile_id)
         # Merge config: start with existing, overlay with incoming fields
         existing_config = dict(existing.config or {})
@@ -7550,9 +7599,9 @@ def _import_cookies_for_account(platform, account, profile, fmt, payload, *, db_
 @app.route("/api/accounts", methods=["GET"])
 def api_accounts():
     """Return all accounts with cookie status and expiry, matching the
-    redesigned frontend's expected shape."""
+    redesigned frontend's expected shape. Workspace-scoped in enforced mode."""
     db_path = _current_db_path()
-    rows = profile_registry.list_accounts(db_path=db_path)
+    rows = profile_registry.list_accounts(workspace_id=_workspace_scope(), db_path=db_path)
     out = []
     for a in rows:
         config = a.config or {}
@@ -7657,6 +7706,12 @@ def api_accounts_health():
 def api_account_check(account_id):
     """Check an account's connection / cookie validity."""
     try:
+        profile_registry.get_account(
+            account_id, workspace_id=_workspace_scope(), db_path=_current_db_path()
+        )
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Account not found", "data": None}), 404
+    try:
         result = _run_account_connection_check(account_id=account_id, db_path=_current_db_path())
         return jsonify({"code": 200, "data": {"ok": True, "message": "Connection valid"}, "msg": "ok"})
     except Exception as exc:
@@ -7665,10 +7720,14 @@ def api_account_check(account_id):
 
 @app.route("/api/auth/cookies/<int:account_id>/export", methods=["GET"])
 def api_cookies_export(account_id):
-    """Export decrypted cookies for an account."""
+    """Export decrypted cookies for an account (workspace-scoped)."""
     db_path = _current_db_path()
-    account = profile_registry.get_account(account_id, db_path=db_path)
-    if not account:
+    try:
+        # Tenant isolation: cookie material must never cross workspaces.
+        account = profile_registry.get_account(
+            account_id, workspace_id=_workspace_scope(), db_path=db_path
+        )
+    except LookupError:
         return jsonify(error="Account not found"), 404
     cookie_path = Path(account.cookie_path) if account.cookie_path else None
     if not cookie_path or not cookie_path.exists():
@@ -7773,6 +7832,28 @@ def api_cookies_import():
         return jsonify({"code": 200, "data": result, "msg": "ok"})
     except Exception as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+def _database_readiness_check():
+    """Readiness probe: confirm the legacy SQLite database is reachable.
+
+    Side-effect-free — if the database file does not exist yet (fresh install,
+    bootstrapped lazily on the first request) the instance is still considered
+    ready. When the file exists we open it and run a trivial query.
+    """
+
+    path = _get_legacy_db_path()
+    if not path.exists():
+        return ("uninitialized", True)
+    conn = sqlite3.connect(str(path), timeout=2)
+    try:
+        conn.execute("SELECT 1")
+    finally:
+        conn.close()
+    return ("ok", True)
+
+
+register_readiness_check(app, "database", _database_readiness_check)
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5409, threaded=True)

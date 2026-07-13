@@ -1,0 +1,32 @@
+path_or_prefix,match_type,handler_endpoint,reason_public,data_exposed,abuse_risk,keep_public_in_target,mitigation,notes
+/,exact,index,serves SPA index.html,none (static shell),low,y,none,
+/healthz,exact,sau_health.healthz,orchestrator liveness probe,none,low,y,none,Phase 1 health blueprint; always 200 if process is up
+/readyz,exact,sau_health.readyz,orchestrator readiness probe,none (status + check names only),low,y,none,Phase 1 health blueprint; runs DB connectivity check
+/auth/google/start,exact,sau_auth.google_start,begins Google OIDC login,none (redirect to Google with state/PKCE),low,y,server-derived redirect_uri; one-time state,Phase 3; only registered when SAU_GOOGLE_LOGIN_ENABLED
+/auth/google/callback,exact,sau_auth.google_callback,Google OIDC return,none (sets HttpOnly session cookie; no tokens in body),medium,y,one-time state + nonce + PKCE verified server-side,Phase 3; provisions user+workspace then redirects to frontend
+/api/v1/session,exact,sau_auth.api_session,current session introspection,session user/workspace/permissions/csrf for the cookie holder only,low,conditional,enforces its own auth via the session cookie,Phase 3; returns authenticated:false without a valid session
+/api/v1/logout,exact,sau_auth.api_logout,revoke current session,none,low,y,requires X-CSRF-Token matching the session secret,Phase 3; CSRF-protected
+/getFile,exact,get_file,SPA/CDN media fetch without a token,any uploaded media file by filename,high,n,replace with authorized download or short-lived presigned URL scoped to workspace,path-traversal-guarded only; no per-tenant ACL (route matrix P1)
+/privacy,exact,privacy_page,legal page,none,low,y,none,
+/privacy/,exact,privacy_page,legal page,none,low,y,none,
+/privacy-policy.html,exact,privacy_page,legal page (Meta app-review URL),none,low,y,none,
+/terms,exact,terms_page,legal page,none,low,y,none,
+/terms/,exact,terms_page,legal page,none,low,y,none,
+/terms-of-service.html,exact,terms_page,legal page (Meta app-review URL),none,low,y,none,
+/favicon.ico,exact,favicon,browser icon,none,low,y,none,
+/vite.svg,exact,vite_svg,static asset,none,low,y,none,
+/socialupload-app-icon.png,exact,app_icon,static asset,none,low,y,none,
+/oauth/tiktok/callback,exact,tiktok_oauth_callback,provider redirect target,oauth code in query; page broadcasts result via postMessage('*'),high,y,pin postMessage origin; one-time server-side state; do not embed tokens in HTML,also has trailing-slash variant in PUBLIC_PATHS
+/oauth/reddit/callback,exact,reddit_oauth_callback,provider redirect target,oauth code in query; postMessage('*'),high,y,pin postMessage origin; one-time server-side state,
+/oauth/youtube/callback,exact,youtube_oauth_callback,provider redirect target,oauth code in query; postMessage('*'),high,y,pin postMessage origin; one-time server-side state,
+/oauth/meta/callback,exact,meta_oauth_callback,provider redirect target,oauth code in query; postMessage('*'),high,y,pin postMessage origin; one-time server-side state,
+/oauth/threads/callback,exact,threads_oauth_callback,provider redirect target,oauth code in query; postMessage('*'),high,y,pin postMessage origin; one-time server-side state,
+/oauth/twitter/callback,exact,twitter_oauth_callback,provider redirect target,oauth code in query; postMessage('*'),high,y,pin postMessage origin; one-time server-side state,
+/oauth/messenger/callback,exact,messenger_webhook,Meta webhook verify/receive,none (hub.challenge echo),medium,y,verify hub.verify_token and app-secret signature,
+/webhooks/tiktok,exact,tiktok_webhook,provider webhook receiver,none,medium,y,require valid Tiktok-Signature before persisting; drop on failure,currently persists events even when signature invalid
+/oauth/meta/deauthorize,exact,meta_deauthorize,Meta-initiated deauth callback,none,medium,y,require valid signed_request,
+/oauth/meta/data-deletion,exact,meta_data_deletion,Meta-initiated data-deletion callback,none,medium,y,require valid signed_request,
+/assets/,prefix,custom_static,SPA JS/CSS bundle,none (built frontend assets),low,y,none,
+/static/,prefix,static (Flask builtin),static files,depends on what is placed there,low,conditional,ensure nothing sensitive is served from /static,Flask's built-in static rule; excluded from the route matrix
+/analytics/thumbnail/,prefix,analytics_thumbnail_proxy,unauthenticated thumbnail images,thumbnail images by caller-chosen platform_video_id; refreshes token from FIRST tiktok account on miss,medium,n,serve via authorized/presigned URL; do not use a shared account for refresh,route matrix P1
+/login,sse-query,login,EventSource cannot send Authorization header so token is accepted via ?auth=,token appears in URL (history/proxy/log leak surface),high,n,move to same-origin SSE with the HttpOnly session cookie; drop ?auth=,protected route but token-in-query is the exception carved into extract_bearer_token()

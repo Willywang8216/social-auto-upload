@@ -1,0 +1,31 @@
+table,defined_in,current_ownership_column,ownership_nullable,planned_scoping,backfill_source,constraints_to_change,notes
+user_info,0001_baseline.py / db/createTable.py:43,none,n/a,direct-workspace_id,legacy workspace constant,none,legacy flat account table (cookie filePath per account); consolidate into accounts long-term
+file_records,0001_baseline.py (+storage cols in 0012) / createTable.py:53,none,n/a,direct-workspace_id,legacy workspace constant,none,storage_key lives in shared uploads/ namespace; needs workspace prefix (Phase 8)
+profiles,0001_baseline.py / createTable.py:63,none,n/a,direct-workspace_id,legacy workspace constant,UNIQUE(slug) -> UNIQUE(workspace_id; slug),current de-facto root of the ownership hierarchy; has no owner column at all
+accounts,0001_baseline.py / createTable.py:75,profile_id (FK profiles; CASCADE),n,via-profiles,parent profiles.workspace_id,add UNIQUE(workspace_id; profile_id; platform; account_name),config_json holds plaintext OAuth tokens -> encrypted credential store (Phase 7)
+publish_jobs,0001_baseline.py / createTable.py:93,profile_id (FK profiles; SET NULL),y,direct-workspace_id,via profile_id when set; else legacy workspace,UNIQUE(idempotency_key) -> UNIQUE(workspace_id; idempotency_key),global idempotency uniqueness is a cross-tenant collision bug in multi-user
+publish_job_targets,0001_baseline.py / createTable.py:111,none (job_id FK only),n/a,via-publish_jobs,parent publish_jobs.workspace_id,replace loose account_ref/file_ref TEXT with FKs (Phase 9),account_ref may be 'account:<id>' or a raw cookie filename/path
+media_groups,0002_campaign_profiles_media.py / createTable.py:128,none,n/a,direct-workspace_id,legacy workspace constant,none,no ownership column at all today
+media_group_items,0002_campaign_profiles_media.py / createTable.py:140,none (group FK only),n/a,via-media_groups,parent media_groups.workspace_id,none,
+campaigns,0002_campaign_profiles_media.py / createTable.py:154,profile_id (NOT NULL),n,direct-workspace_id,via profiles.workspace_id,none,denormalize workspace_id for query paths; keep profile_id
+campaign_artifacts,0002_campaign_profiles_media.py / createTable.py:173,none (campaign_id FK),n/a,via-campaigns,parent campaigns.workspace_id,none,
+campaign_posts,0002_campaign_profiles_media.py / createTable.py:189,none (campaign_id FK),n/a,via-campaigns,parent campaigns.workspace_id,none,file_record_ids_json added in 0010
+tiktok_oauth_requests,0003_tiktok_review_persistence.py / createTable.py:207,profile_id + account_id,y,direct-workspace_id,via profile/account when set; else legacy workspace,add workspace_id + expires_at; hash state,state_token PK is globally scoped with no expiry
+reddit_oauth_requests,0005_reddit_oauth_persistence.py / createTable.py:225,profile_id + account_id,y,direct-workspace_id,via profile/account when set; else legacy workspace,add workspace_id + expires_at; hash state,
+youtube_oauth_requests,0006_youtube_oauth_persistence.py / createTable.py:243,profile_id + account_id,y,direct-workspace_id,via profile/account when set; else legacy workspace,add workspace_id + expires_at; hash state,
+meta_oauth_requests,0007_meta_oauth_persistence.py / createTable.py:261,profile_id + account_id,y,direct-workspace_id,via profile/account when set; else legacy workspace,add workspace_id + expires_at; hash state,
+threads_oauth_requests,0008_threads_oauth_persistence.py / createTable.py:280,profile_id + account_id,y,direct-workspace_id,via profile/account when set; else legacy workspace,add workspace_id + expires_at; hash state,
+twitter_oauth_requests,0009_twitter_oauth_persistence.py / createTable.py:423,profile_id + account_id,y,direct-workspace_id,via profile/account when set; else legacy workspace,add workspace_id + expires_at; hash state,also stores PKCE code_verifier plaintext
+tiktok_review_events,0003_tiktok_review_persistence.py / createTable.py:298,account_id,y,via-accounts,via account when set; else legacy workspace,none,webhook events persist even when signature verification fails
+account_events,0004_account_events.py / createTable.py:315,account_id + profile_id,y,via-accounts,via account/profile when set; else legacy workspace,none,
+video_analytics_videos,0011_video_analytics.py / createTable.py:333,account_id (NOT NULL),n,via-accounts,parent accounts.workspace_id,none,
+video_analytics_snapshots,0011_video_analytics.py / createTable.py:352,account_id (NOT NULL),n,via-accounts,parent accounts.workspace_id,unique idx (account_id; platform_video_id; snapshot_at) unchanged,
+analytics_sync_log,0011_video_analytics.py / createTable.py:375,account_id (NOT NULL),n,via-accounts,parent accounts.workspace_id,none,
+storage_backends,0012_storage_backends.py / createTable.py:389,none,n/a,global-config,n/a (operator-level infrastructure),none,access_key/secret_key stored PLAINTEXT; move to secret manager / encrypted store (Phase 7); never tenant-visible
+tiktok_publish_status,0013_tiktok_publish_status.py / createTable.py:407,account_id (TEXT ref),y,via-accounts,resolve TEXT ref to account then workspace,normalize account_id TEXT -> INTEGER FK,
+publish_templates,0010_publish_templates_and_post_files.py / createTable.py:442,none,n/a,direct-workspace_id,legacy workspace constant,add UNIQUE(workspace_id; name),no ownership column at all today
+watermark_configs,0014_socialupload_full_schema.py / createTable.py:455,profile_id,y,via-profiles,via profile when set; else legacy workspace,none,
+media_assets,0014_socialupload_full_schema.py / createTable.py:481,none,n/a,direct-workspace_id,legacy workspace constant,none,no ownership column at all today
+sheet_exports,0014_socialupload_full_schema.py / createTable.py:510,campaign_id + profile_id,y,via-campaigns,via campaign/profile when set; else legacy workspace,none,
+prepared_posts,0014_socialupload_full_schema.py / createTable.py:528,campaign_id (NOT NULL) + profile_id + account_id,n,via-campaigns,parent campaigns.workspace_id,none,
+alembic_version,alembic bookkeeping / createTable.py:742,none,n/a,system,n/a,none,written directly by createTable.py bootstrap() head-stamping (defect D-8)

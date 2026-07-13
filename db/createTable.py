@@ -38,6 +38,17 @@ DB_PATH = Path(__file__).resolve().parent / "database.db"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ALEMBIC_INI_PATH = _PROJECT_ROOT / "alembic.ini"
 
+# The Alembic revision whose schema the raw ``CREATE TABLE`` block below fully
+# reproduces. ``bootstrap()`` creates the baseline tables directly (fast, used
+# by the test suite) and then stamps *this* revision — not the dynamic head —
+# before running ``alembic upgrade head``. That makes Alembic the authority for
+# every migration newer than the raw block: a future revision (e.g. the
+# multi-tenant identity/workspace tables) is applied by the upgrade rather than
+# silently skipped by a blind head-stamp. Keep this in lockstep with the raw
+# block: only bump it if you also extend the raw ``CREATE TABLE`` chain (which
+# new schema work should avoid — add a migration instead).
+RAW_SCHEMA_REVISION = "0014_socialupload_full_schema"
+
 
 LEGACY_USER_INFO = """
 CREATE TABLE IF NOT EXISTS user_info (
@@ -706,17 +717,23 @@ def _ensure_required_columns(conn: sqlite3.Connection) -> None:
 
 
 def _stamp_alembic_head(db_path: Path) -> None:
-    """Best-effort: mark the DB as up-to-date with Alembic head.
+    """Reconcile ``alembic_version`` with the migrations, then apply new ones.
 
-    We avoid actually running migrations from inside ``bootstrap`` because
-    spinning up an Alembic config is expensive and the test suite calls
-    this function on every test setup. Instead we directly write the
-    current head revision into ``alembic_version`` so any later
-    ``alembic upgrade`` is a no-op.
+    The raw ``CREATE TABLE`` block in :func:`bootstrap` reproduces the schema
+    as of :data:`RAW_SCHEMA_REVISION` (fast, so the test suite can call it on
+    every setup without spinning up a full ``alembic upgrade`` from base). This
+    function makes Alembic authoritative for anything newer:
 
-    Alembic might not be installed in extremely minimal environments
-    (running tests against a stripped-down sandbox); we degrade
-    gracefully there.
+    1. If the DB has no ``alembic_version`` row yet, stamp it at
+       ``RAW_SCHEMA_REVISION`` — the revision the raw block implements.
+    2. If the migration head is newer than that revision, run
+       ``alembic upgrade head`` to apply the outstanding migrations. Because we
+       stamped the raw revision (not a blind head), those migrations actually
+       run instead of being skipped.
+
+    When the head equals ``RAW_SCHEMA_REVISION`` (today's state) step 2 is a
+    no-op and behavior is identical to the previous blind-stamp. Alembic may be
+    absent in a stripped-down sandbox; we degrade gracefully.
     """
 
     try:
@@ -748,16 +765,14 @@ def _stamp_alembic_head(db_path: Path) -> None:
         if existing is None:
             conn.execute(
                 "INSERT INTO alembic_version (version_num) VALUES (?)",
-                (head_rev,),
+                (RAW_SCHEMA_REVISION,),
             )
-        elif existing[0] != head_rev:
-            # A real migration would normally do this; we just keep the
-            # row in sync so the bootstrap path doesn't drift behind.
-            conn.execute(
-                "UPDATE alembic_version SET version_num = ?",
-                (head_rev,),
-            )
-        conn.commit()
+            conn.commit()
+
+    # Apply any migrations newer than what the raw block created. When the head
+    # already matches the raw revision this is skipped entirely (fast path).
+    if head_rev != RAW_SCHEMA_REVISION:
+        _alembic_upgrade_head(db_path)
 
 
 def bootstrap(db_path: Path = DB_PATH) -> None:

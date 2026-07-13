@@ -39,6 +39,15 @@ from typing import Iterable
 # auth token via query string instead.
 PUBLIC_PATHS: frozenset[str] = frozenset({
     "/",
+    "/healthz",
+    "/readyz",
+    # Google login (Phase 3) — these establish/inspect the server-side session,
+    # so they must bypass the legacy bearer-token gate. They enforce their own
+    # auth via the session cookie + CSRF. Only wired when the login flag is on.
+    "/auth/google/start",
+    "/auth/google/callback",
+    "/api/v1/session",
+    "/api/v1/logout",
     "/getFile",
     "/privacy",
     "/privacy/",

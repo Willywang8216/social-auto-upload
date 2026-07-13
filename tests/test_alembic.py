@@ -107,6 +107,30 @@ class AlembicBaselineTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(rows[0], 1)
 
+    def test_raw_schema_revision_is_valid_ancestor_of_head(self) -> None:
+        # bootstrap() stamps RAW_SCHEMA_REVISION and then upgrades to head, so
+        # the raw revision must exist and be head or an ancestor of it —
+        # otherwise the follow-up ``alembic upgrade head`` would be invalid.
+        cfg = Config(str(create_table.ALEMBIC_INI_PATH))
+        script = ScriptDirectory.from_config(cfg)
+        raw = create_table.RAW_SCHEMA_REVISION
+        head = script.get_current_head()
+        # The revision resolves (raises if unknown).
+        self.assertIsNotNone(script.get_revision(raw))
+        # raw is head, or head is reachable by walking down from head to raw.
+        ancestors = {rev.revision for rev in script.walk_revisions(base="base", head=head)}
+        self.assertIn(raw, ancestors)
+
+    def test_bootstrap_then_upgrade_matches_head(self) -> None:
+        # After bootstrap(), the DB is stamped at head (today RAW == head; once
+        # newer migrations exist, bootstrap applies them up to head).
+        create_table.bootstrap(self.db_path)
+        cfg = Config(str(create_table.ALEMBIC_INI_PATH))
+        head = ScriptDirectory.from_config(cfg).get_current_head()
+        with sqlite3.connect(self.db_path) as conn:
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        self.assertEqual(version, head)
+
 
 if __name__ == "__main__":
     unittest.main()
