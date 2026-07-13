@@ -96,6 +96,15 @@ The project also provides a command-line interface (CLI) for users who prefer to
     `0o600` permissions. The worker decrypts to a `0o600` tempfile right
     before calling each uploader and re-encrypts on exit.
 
+    Independently, `SAU_CONFIG_ENCRYPTION_KEY` (same base64 key format)
+    encrypts the OAuth secret values inside `accounts.config_json`
+    (access/refresh tokens, app secrets) at rest via `myUtils.config_crypto`,
+    which reuses the same AES-GCM envelope (AAD = the secret's field name).
+    Encryption is per-value, so non-secret fields stay readable; it is opt-in
+    (unset key = plaintext, unchanged) and applied at the single `myUtils.profiles`
+    choke point (encrypt in `add_account`/`update_account`, decrypt in
+    `_row_to_account`), so every consumer still sees plaintext.
+
 7.  **Schema migrations (Alembic):**
     The schema is now Alembic-managed under `migrations/versions/`.
     `python db/createTable.py` runs `alembic upgrade head` against
