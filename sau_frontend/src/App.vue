@@ -108,7 +108,19 @@
                 :title="t"
               >{{ t === 'dark' ? '🌙' : '☀️' }}</button>
             </div>
-            <div class="avatar">A</div>
+            <el-dropdown trigger="click" @command="onUserCommand">
+              <div class="avatar" :title="identityLabel">{{ identityInitial }}</div>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <div style="padding:8px 16px 4px;max-width:220px">
+                    <div style="font-weight:600;font-size:13px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ identityLabel }}</div>
+                    <div v-if="userEmail" style="font-size:12px;color:var(--text-2,#888);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ userEmail }}</div>
+                    <div v-if="workspaceName" style="font-size:12px;color:var(--text-2,#888);margin-top:2px">{{ workspaceName }}</div>
+                  </div>
+                  <el-dropdown-item command="signout" divided>Sign out</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </header>
 
           <!-- Content -->
@@ -136,12 +148,33 @@
 
 <script setup>
 import { ref, computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
 import { icons } from '@/utils/icons'
 
 const route = useRoute()
+const router = useRouter()
 const appStore = useAppStore()
+const authStore = useAuthStore()
+
+/* Signed-in identity for the header avatar menu. Falls back to a generic
+ * label in legacy token-only mode (no Google session). */
+const userEmail = computed(() => authStore.currentUser?.email || '')
+const identityLabel = computed(
+  () => authStore.currentUser?.displayName || userEmail.value || 'Session',
+)
+const identityInitial = computed(
+  () => (identityLabel.value || 'S').trim().charAt(0).toUpperCase() || 'S',
+)
+const workspaceName = computed(() => authStore.currentWorkspace?.name || '')
+
+async function onUserCommand(command) {
+  if (command === 'signout') {
+    await authStore.logout()
+    router.push({ name: 'Login' })
+  }
+}
 
 const usePublicLayout = computed(() => Boolean(route.meta?.publicLayout))
 const isCollapse = ref(false)
