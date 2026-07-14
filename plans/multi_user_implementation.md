@@ -616,13 +616,22 @@ limits, quotas, structured logs, audit logs.
   util tests pass (**16 passed**); the only failing file is the pre-existing
   Playwright `demo.spec.ts` (baseline defect F-1, not run in CI).
 
+- 2026-07-13 — Phase 10b nav identity chip + logout (fresh follow-up off the
+  merged main; **new PR**). Replaced the hardcoded header avatar in `App.vue`
+  with an `el-dropdown`: the trigger shows the signed-in user's initial; the menu
+  shows the display name, email, and active workspace, plus a **Sign out** item
+  wired to `authStore.logout()` (CSRF-protected `POST /api/v1/logout` + clears the
+  local token/CSRF) and a redirect to `/login`. Falls back to a generic "Session"
+  label in legacy token-only mode. Menu head uses inline styles (the dropdown is
+  teleported out of the scoped-style tree). `npm run build` ✓; auth-store vitest
+  still 4/4.
+
 ## Next incomplete task
 
-Read-isolation and the credential leaks (in-transit **and** at-rest) are closed;
-the frontend Google-login screen exists. Remaining:
-- Phase 10 (part 2) — a logout control in the app nav (the `authStore.logout()`
-  method is ready to wire) and a workspace/user chip showing the signed-in
-  identity; optional CORS-credentials config for cross-origin dev.
+The multi-tenant conversion is functionally complete: Google login (backend +
+frontend screen + nav logout/identity), full tenant read-isolation, and
+credentials protected in-transit and at-rest. Remaining polish:
+- optional CORS-credentials config for cross-origin dev of the session flow.
 - `storage_backends` S3-key at-rest encryption (internal-only — lower priority).
 - Phase 6 tail — per-platform OAuth status/review tables; role-gating for the
   `/admin/*` OAuth-status routes.
