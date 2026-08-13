@@ -128,6 +128,17 @@
                   <div class="md">Authorize via {{ platformLabel(connectData.platform) }}</div>
                 </div>
               </div>
+              <div v-if="supportsManual" class="method-tab" :class="{ on: connectMethod === 'manual' }" @click="connectMethod = 'manual'">
+                <div class="mi"><component :is="icons.settings" :width="16" :height="16" /></div>
+                <div>
+                  <div class="mt">Configure manually</div>
+                  <div class="md">
+                    <template v-if="connectData.platform === 'telegram'">Bot token env + chat ids</template>
+                    <template v-else-if="connectData.platform === 'discord'">Webhook URL env</template>
+                    <template v-else>API token + IDs</template>
+                  </div>
+                </div>
+              </div>
               <div class="method-tab" :class="{ on: connectMethod === 'qr' }" @click="connectMethod = 'qr'">
                 <div class="mi"><component :is="icons.oauth" :width="16" :height="16" /></div>
                 <div>
@@ -157,6 +168,27 @@
                   <p>OAuth is the recommended auth method. Your credentials never pass through this app — only the platform's official authorization flow is used.</p>
                 </div>
               </div>
+            </div>
+
+            <!-- Manual configure method -->
+            <div v-else-if="connectMethod === 'manual'">
+              <div class="steps" v-if="connectData.platform === 'telegram'">
+                <div class="step"><span class="num">1</span><span>Set <code>{{ connectData.config.botTokenEnv || 'TELEGRAM_BOT_TOKEN' }}</code> in the worker's <code>.env</code> with the bot token from <code>@BotFather</code>.</span></div>
+                <div class="step"><span class="num">2</span><span>Add one or more chat ids — channels (<code>@channel_name</code>), groups, or numeric ids (<code>-100123…</code>). One bot → many targets.</span></div>
+                <div class="step"><span class="num">3</span><span>Save the account, then "Run health check" to confirm each chat is reachable.</span></div>
+              </div>
+              <div class="steps" v-else-if="connectData.platform === 'discord'">
+                <div class="step"><span class="num">1</span><span>Set <code>{{ connectData.config.webhookUrlEnv || 'DISCORD_WEBHOOK_URL' }}</code> in <code>.env</code>.</span></div>
+              </div>
+              <div class="steps" v-else>
+                <div class="step"><span class="num">1</span><span>Paste the env var names holding the credentials in <code>.env</code>.</span></div>
+                <div class="step"><span class="num">2</span><span>Save the account — credentials stay in <code>.env</code>, never in the DB.</span></div>
+              </div>
+              <AccountTextFieldList
+                :fields="currentFieldDefs"
+                :model-value="connectData.config"
+                @update-field="onConfigFieldUpdate"
+              />
             </div>
 
             <!-- QR method -->
@@ -224,6 +256,15 @@
           >
             {{ importBusy ? 'Importing…' : 'Import & encrypt' }}
           </button>
+          <button
+            v-else-if="connectMethod === 'manual'"
+            class="btn-primary"
+            :disabled="!manualFormValid || manualBusy"
+            :style="{ opacity: (!manualFormValid || manualBusy) ? 0.5 : 1 }"
+            @click="doManualConnect"
+          >
+            {{ manualBusy ? 'Saving…' : 'Save account' }}
+          </button>
           <button v-else class="btn-sec" disabled style="opacity:0.6">
             {{ loginStatusLabel }}
           </button>
@@ -249,6 +290,18 @@ import { threadsApi } from '@/api/threads'
 import { youtubeApi } from '@/api/youtube'
 import { twitterApi } from '@/api/twitter'
 import { icons } from '@/utils/icons'
+import {
+  telegramFieldDefs,
+  redditFieldDefs,
+  youtubeFieldDefs,
+  facebookFieldDefs,
+  instagramFieldDefs,
+  threadsFieldDefs,
+  tiktokTokenFieldDefs,
+  discordFieldDefs,
+  twitterFieldDefs,
+} from '@/utils/account-form-defs'
+import AccountTextFieldList from '@/components/AccountTextFieldList.vue'
 
 const accountStore = useAccountStore()
 
@@ -277,6 +330,22 @@ const PLATFORM_META = {
 
 /* Platforms that support OAuth (default auth method) */
 const OAUTH_PLATFORMS = ['tiktok', 'facebook', 'instagram', 'threads', 'youtube', 'twitter']
+
+/* Platform-specific manual config field definitions, sourced from
+   account-form-defs.js. Drives the "Configure manually" connect tab so
+   operators can paste bot tokens / chat ids / webhook URLs at account
+   creation time (especially for Telegram's multi-target chatIds). */
+const platformManualFieldDefs = {
+  telegram: telegramFieldDefs,
+  reddit: redditFieldDefs,
+  youtube: youtubeFieldDefs,
+  facebook: facebookFieldDefs,
+  instagram: instagramFieldDefs,
+  threads: threadsFieldDefs,
+  tiktok: tiktokTokenFieldDefs,
+  discord: discordFieldDefs,
+  twitter: twitterFieldDefs,
+}
 
 const allPlatforms = computed(() =>
   Object.entries(PLATFORM_META).map(([slug, meta]) => ({ slug, ...meta }))
@@ -377,9 +446,10 @@ const runHealthCheck = async () => {
 /* Connect modal */
 const showConnect = ref(false)
 const connectMethod = ref('qr')
-const connectData = ref({ platform: null, account: '', profile: 'default', paste: '' })
+const connectData = ref({ platform: null, account: '', profile: 'default', paste: '', config: {} })
 const importBusy = ref(false)
 const oauthBusy = ref(false)
+const manualBusy = ref(false)
 const refreshAllBusy = ref(false)
 const loginStatus = ref('pending')
 const toast = ref(null)
@@ -388,17 +458,45 @@ const isOAuthPlatform = computed(() =>
   connectData.value.platform && OAUTH_PLATFORMS.includes(connectData.value.platform)
 )
 
+const currentFieldDefs = computed(() =>
+  connectData.value.platform ? (platformManualFieldDefs[connectData.value.platform] || []) : []
+)
+const supportsManual = computed(() => currentFieldDefs.value.length > 0)
+
+const manualFormValid = computed(() => {
+  if (!connectData.value.platform || !supportsManual.value) return false
+  const cfg = connectData.value.config || {}
+  const platform = connectData.value.platform
+  // Telegram requires botTokenEnv + chatId(s); other platforms require at
+  // least one non-empty field so the backend doesn't reject with "missing
+  // field" errors.
+  if (platform === 'telegram') {
+    const hasToken = Boolean((cfg.botTokenEnv || '').trim())
+    const hasTargets = Boolean((cfg.chatId || '').trim()) || Boolean((cfg.chatIds || '').trim())
+    return hasToken && hasTargets
+  }
+  if (platform === 'discord') {
+    return Boolean((cfg.webhookUrlEnv || '').trim())
+  }
+  // Generic: require any of the provided fields to be non-empty.
+  return Object.values(cfg).some((v) => Boolean(String(v || '').trim()))
+})
+
 const loginStatusLabel = computed(() => {
   const map = { pending: 'Waiting for scan…', scanned: 'Scanned — confirm on your phone', confirmed: 'Confirmed — saving session', saved: 'Saved', error: 'Login failed' }
   return map[loginStatus.value] || 'Waiting for scan…'
 })
 
 const openConnect = (initial = {}) => {
-  connectData.value = { platform: initial.platform || null, account: initial.account || '', profile: initial.profile || 'default', paste: '' }
+  connectData.value = { platform: initial.platform || null, account: initial.account || '', profile: initial.profile || 'default', paste: '', config: {} }
   // Default to OAuth for platforms that support it
   connectMethod.value = initial.platform && OAUTH_PLATFORMS.includes(initial.platform) ? 'oauth' : 'qr'
   loginStatus.value = 'pending'
   showConnect.value = true
+}
+
+const onConfigFieldUpdate = ({ key, value }) => {
+  connectData.value.config = { ...(connectData.value.config || {}), [key]: value }
 }
 
 /* Start OAuth flow for supported platforms */
@@ -501,6 +599,37 @@ const doImport = async () => {
     await loadAccounts()
   } catch (e) { flash('Import failed: ' + e.message) }
   finally { importBusy.value = false }
+}
+
+const doManualConnect = async () => {
+  if (!connectData.value.platform || !supportsManual.value) return
+  manualBusy.value = true
+  try {
+    const platform = connectData.value.platform
+    const accountName = connectData.value.account || `${platform}-manual`
+
+    const profilesRes = await profilesApi.list()
+    const profiles = profilesRes?.data || profilesRes || []
+    const profileId = profiles[0]?.id
+    if (!profileId) throw new Error('No profiles available — create a profile first')
+
+    // Filter empty values so we don't push blanks into config_json.
+    const config = Object.fromEntries(
+      Object.entries(connectData.value.config || {}).filter(([, v]) => String(v || '').trim() !== '')
+    )
+
+    await profilesApi.createAccount(profileId, {
+      accountName,
+      platform,
+      authType: 'manual',
+      profile: connectData.value.profile || 'default',
+      config,
+    })
+    flash(`Saved ${accountName} · ${platformLabel(platform)} (manual)`)
+    showConnect.value = false
+    await loadAccounts()
+  } catch (e) { flash('Save failed: ' + e.message) }
+  finally { manualBusy.value = false }
 }
 
 /* Load accounts on mount — uses /api/accounts which returns the enriched

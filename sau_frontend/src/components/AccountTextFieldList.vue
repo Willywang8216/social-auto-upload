@@ -1,14 +1,24 @@
 <template>
   <div class="account-text-field-list">
-    <el-form-item v-for="field in fields" :key="field.key" :label="field.label">
+    <div v-for="field in fields" :key="field.key" class="field" style="margin-top:14px">
+      <label>{{ field.label }}</label>
       <el-input
+        v-if="!field.type || field.type === 'text'"
         :model-value="modelValue?.[field.key] ?? ''"
-        :type="field.type || 'text'"
+        type="text"
+        :placeholder="field.placeholder || ''"
+        @update:model-value="(value) => emit('update-field', { key: field.key, value })"
+      />
+      <el-input
+        v-else
+        :model-value="modelValue?.[field.key] ?? ''"
+        :type="field.type"
         :rows="field.rows || undefined"
         :placeholder="field.placeholder || ''"
         @update:model-value="(value) => emit('update-field', { key: field.key, value })"
       />
-    </el-form-item>
+      <div v-if="field.hint" class="ath-hint">{{ field.hint }}</div>
+    </div>
   </div>
 </template>
 
@@ -26,3 +36,15 @@ defineProps({
 
 const emit = defineEmits(['update-field'])
 </script>
+
+<style scoped>
+.account-text-field-list {
+  display: block;
+}
+.ath-hint {
+  font-size: 11.5px;
+  color: var(--text-3, #888);
+  margin-top: 5px;
+  line-height: 1.4;
+}
+</style>
