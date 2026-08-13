@@ -219,20 +219,22 @@ TikTok 使用 Content Posting API：
 
 ### Telegram 多目標發佈與訂閱管理
 
-- **狀態**：提案中
+- **狀態**：Phase 1 + 2 已完成；Phase 3 提案中（訂閱／成員管理仍待啟動）
 - **目標**：把 Telegram 從「單帳號 → 單一 `chatId`」升級為「單帳號 → 多個 channels / groups + 訂閱／成員管理」。
 - **背景**：現有 Telegram 整合走 Bot API（`api.telegram.org/bot{token}/...`），每個 `accounts.config_json` 只存一個 `chatId`。多 channel / group 場景需要重複建立帳號，且沒有訂閱／成員管理能力（Bot API 無法收款、發票、踢人）。
-- **核心需求**：
-  1. **多目標發佈**：同一支 bot 一次發送到多個 `chat_id`（channels、groups、supergroups、私聊皆可）。程式化（CLI / API）與 Web UI 都要支援。
-  2. **Web UI 多選**：發佈表單允許勾選多個 channel / group，並提供「測試連線」按鈕呼叫 `getChat` 預覽頭貼與成員數。
-  3. **成員管理**：
+- **已完成（Phase 1 + 2）**：
+  1. **多目標發佈**：同一支 bot 一次發送到多個 `chat_id`（channels、groups、supergroups、私聊皆可），由 `config.chatIds: list[str]` 攜帶，`payload.draft.chatIds`（per-publish override）> `config.chatIds` > `config.chatId`（legacy 單一）。後端 fan-out 已實作，部分失敗不會拖累其他 chat。
+  2. **Web UI 多選**：AccountManagement 連線 modal 新增「Configure manually」分頁可直接建立帶 `chatIds` 的 Telegram 帳號；PublishCenter 對 Telegram 帳號顯示多選 chat-id 選擇器，並保留 per-publish override。
+  3. **連線檢查**：記錄 `telegramChatTitles`（list）+ `telegramChatTitle`（joined string，舊相容）。
+- **未完成（Phase 3）**：
+  1. **成員管理**：
      - 接收 `chat_member` / `my_chat_member` 更新，記錄使用者加入／離開事件。
      - 串接外部支付（Stripe、Telegram Stars、Crypto Bot 任一）後，依付費狀態自動 `banChatMember` / `unbanChatMember`。
      - 提供 join request 審批流程（`approveChatJoinRequest` / `declineChatJoinRequest`）。
-  4. **資料模型**：新增 `telegram_chat_targets`（account_id, chat_id, kind, title, enabled）與 `telegram_memberships`（user_id, chat_id, status, expires_at）。
+  2. **資料模型**：新增 `telegram_chat_targets`（account_id, chat_id, kind, title, enabled）與 `telegram_memberships`（user_id, chat_id, status, expires_at）。
 - **非目標**：Bot API 不支援金流，所以本期不包含「收款」本身；只負責「收到 webhook 之後的成員控管」。
-- **預估影響**：觸及 `myUtils/prepared_publishers.py`、`sau_backend.py` 新路由、前端 `publish-center` 表單、新 Alembic revision。
-- **驗證方式**：新增 unit tests（多 chat 廣播、payload 切分、join request 審批），以及 worker 端的 `chat_member` 處理測試。
+- **預估影響**：觸及 `myUtils/prepared_publishers.py`（已完成）、`sau_backend.py`（Phase 3 新增路由）、前端 `publish-center`（已完成）+ `account-management`（已完成）、新 Alembic revision（Phase 3）。
+- **驗證方式**：Phase 1+2 由 `tests/test_prepared_publishers.py` + `tests/test_campaigns_http.py` 涵蓋；Phase 3 需要新增 webhook 接收與 member reconciliation 測試。
 
 ### Reddit 內容創作輔助（已拒絕，僅作紀錄）
 
