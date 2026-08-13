@@ -350,13 +350,58 @@ def _telegram_caption_chunks(message: str) -> tuple[str, str]:
     return message[:1024], message
 
 
+def _telegram_chat_id_list(value: Any) -> list[str]:
+    """Normalise a Telegram chat-id input (list, csv, scalar) to a list of non-empty strings.
+
+    Empty inputs collapse to ``[]``. Whitespace is trimmed. Used by both the
+    publisher and the live validator so the precedence rules stay in one
+    place.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        candidates: list[Any] = value
+    elif isinstance(value, str):
+        candidates = value.split(",")
+    else:
+        candidates = [value]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _telegram_resolve_chat_ids(config: dict[str, Any], payload: dict | None = None) -> list[str]:
+    """Resolve the ordered list of Telegram chat ids to publish to.
+
+    Precedence:
+      1. ``payload.draft.chatIds`` (per-publish override, list or csv)
+      2. ``config.chatIds`` (account-level default, list or csv)
+      3. ``config.chatId`` (legacy single id, wrapped in a one-element list)
+    """
+    payload = payload or {}
+    draft = payload.get("draft") or {}
+    return (
+        _telegram_chat_id_list(draft.get("chatIds"))
+        or _telegram_chat_id_list(config.get("chatIds"))
+        or _telegram_chat_id_list(config.get("chatId"))
+    )
+
+
 def validate_telegram_config_live(config: dict[str, Any], *, session=None) -> dict:
     token = str(_config_value(config, "botToken", default_env="TELEGRAM_BOT_TOKEN") or "").strip()
-    chat_id = str(config.get("chatId") or "").strip()
+    chat_ids = _telegram_resolve_chat_ids(config)
     if not token:
         raise PreparedPublishError("Telegram validation requires botToken or botTokenEnv")
-    if not chat_id:
-        raise PreparedPublishError("Telegram validation requires chatId")
+    if not chat_ids:
+        raise PreparedPublishError("Telegram validation requires chatId or chatIds")
 
     http = _get_session(session)
     bot_response = http.post(
@@ -365,23 +410,162 @@ def validate_telegram_config_live(config: dict[str, Any], *, session=None) -> di
         timeout=120,
     )
     _raise_for_status(bot_response)
-    chat_response = http.post(
-        TELEGRAM_API_ROOT.format(token=token, method="getChat"),
-        data={"chat_id": chat_id},
-        timeout=120,
-    )
-    _raise_for_status(chat_response)
-    return {"bot": _response_payload(bot_response), "chat": _response_payload(chat_response)}
+    chat_payloads: list[dict[str, Any]] = []
+    for chat_id in chat_ids:
+        chat_response = http.post(
+            TELEGRAM_API_ROOT.format(token=token, method="getChat"),
+            data={"chat_id": chat_id},
+            timeout=120,
+        )
+        _raise_for_status(chat_response)
+        chat_payloads.append({"chatId": chat_id, "result": _response_payload(chat_response)})
+    bot_payload = _response_payload(bot_response)
+    # Keep the legacy ``chat`` key (singular) so existing readers see the
+    # first chat as if it were the only one.
+    return {
+        "bot": bot_payload,
+        "chats": chat_payloads,
+        "chat": chat_payloads[0]["result"] if chat_payloads else {},
+    }
+
+
+def _publish_telegram_to_one(
+    http,
+    *,
+    token: str,
+    chat_id: str,
+    message: str,
+    caption: str,
+    overflow_message: str,
+    parse_mode: str | None,
+    silent: str,
+    disable_preview: str,
+    media: dict[str, list[dict[str, str]]],
+) -> dict[str, Any]:
+    """Send the given payload to a single Telegram chat and return a status dict.
+
+    Mirrors the original single-chat logic from ``publish_telegram_sync`` but
+    is chat-id-parameterised so the fan-out wrapper can reuse it.
+    """
+    attachments = [*media["videos"], *media["images"]]
+    responses: list[Any] = []
+    errors: list[str] = []
+
+    def _post(method: str, **kwargs):
+        response = http.post(TELEGRAM_API_ROOT.format(token=token, method=method), **kwargs)
+        _raise_for_status(response)
+        responses.append(response)
+        return response
+
+    try:
+        if not attachments:
+            data = {
+                "chat_id": chat_id,
+                "text": message,
+                "disable_notification": silent,
+                "disable_web_page_preview": disable_preview,
+            }
+            if parse_mode:
+                data["parse_mode"] = parse_mode
+            _post("sendMessage", data=data, timeout=120)
+        elif len(attachments) == 1:
+            item = attachments[0]
+            is_video = item in media["videos"]
+            method = "sendVideo" if is_video else "sendPhoto"
+            field_name = "video" if is_video else "photo"
+            data = {
+                "chat_id": chat_id,
+                "caption": caption,
+                "disable_notification": silent,
+            }
+            if parse_mode:
+                data["parse_mode"] = parse_mode
+            local_path = item.get("local_path")
+            if local_path:
+                with Path(local_path).open("rb") as handle:
+                    _post(method, data=data, files={field_name: (Path(local_path).name, handle)}, timeout=600)
+            else:
+                data[field_name] = item.get("public_url")
+                _post(method, data=data, timeout=120)
+            if overflow_message:
+                _post(
+                    "sendMessage",
+                    data={
+                        "chat_id": chat_id,
+                        "text": overflow_message,
+                        "disable_notification": silent,
+                        "disable_web_page_preview": disable_preview,
+                        **({"parse_mode": parse_mode} if parse_mode else {}),
+                    },
+                    timeout=120,
+                )
+        else:
+            media_payload = []
+            files = {}
+            open_files = []
+            try:
+                for index, item in enumerate(attachments[:10]):
+                    is_video = item in media["videos"]
+                    local_path = item.get("local_path")
+                    media_entry = {
+                        "type": "video" if is_video else "photo",
+                        "media": item.get("public_url") or f"attach://media{index}",
+                    }
+                    if index == 0 and caption:
+                        media_entry["caption"] = caption
+                        if parse_mode:
+                            media_entry["parse_mode"] = parse_mode
+                    media_payload.append(media_entry)
+                    if local_path:
+                        handle = Path(local_path).open("rb")
+                        open_files.append(handle)
+                        files[f"media{index}"] = (Path(local_path).name, handle)
+                _post(
+                    "sendMediaGroup",
+                    data={
+                        "chat_id": chat_id,
+                        "disable_notification": silent,
+                        "media": json.dumps(media_payload, ensure_ascii=False),
+                    },
+                    files=files,
+                    timeout=600,
+                )
+            finally:
+                for handle in open_files:
+                    handle.close()
+            if overflow_message:
+                _post(
+                    "sendMessage",
+                    data={
+                        "chat_id": chat_id,
+                        "text": overflow_message,
+                        "disable_notification": silent,
+                        "disable_web_page_preview": disable_preview,
+                        **({"parse_mode": parse_mode} if parse_mode else {}),
+                    },
+                    timeout=120,
+                )
+    except PreparedPublishError as exc:
+        errors.append(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        errors.append(str(exc))
+
+    return {
+        "chatId": chat_id,
+        "ok": not errors,
+        "errors": errors,
+        "responses": responses,
+    }
 
 
 def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
     config = account.config or {}
     token = str(_config_value(config, "botToken", default_env="TELEGRAM_BOT_TOKEN") or "").strip()
-    chat_id = str(config.get("chatId") or "").strip()
+    chat_ids = _telegram_resolve_chat_ids(config, payload)
     if not token:
         raise PreparedPublishError("Telegram publish requires botToken or botTokenEnv")
-    if not chat_id:
-        raise PreparedPublishError("Telegram publish requires chatId")
+    if not chat_ids:
+        raise PreparedPublishError("Telegram publish requires chatId or chatIds")
 
     http = _get_session(session)
     message = _payload_message(payload)
@@ -390,107 +574,35 @@ def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
     silent = "true" if bool(config.get("silent", False)) else "false"
     disable_preview = "true" if bool(config.get("disableWebPreview", False)) else "false"
     media = _extract_media(payload)
-    attachments = [*media["videos"], *media["images"]]
-    responses: list[Any] = []
 
-    def _post(method: str, **kwargs):
-        response = http.post(TELEGRAM_API_ROOT.format(token=token, method=method), **kwargs)
-        _raise_for_status(response)
-        responses.append(response)
-        return response
-
-    if not attachments:
-        data = {
-            "chat_id": chat_id,
-            "text": message,
-            "disable_notification": silent,
-            "disable_web_page_preview": disable_preview,
-        }
-        if parse_mode:
-            data["parse_mode"] = parse_mode
-        _post("sendMessage", data=data, timeout=120)
-        return responses
-
-    if len(attachments) == 1:
-        item = attachments[0]
-        is_video = item in media["videos"]
-        method = "sendVideo" if is_video else "sendPhoto"
-        field_name = "video" if is_video else "photo"
-        data = {
-            "chat_id": chat_id,
-            "caption": caption,
-            "disable_notification": silent,
-        }
-        if parse_mode:
-            data["parse_mode"] = parse_mode
-        local_path = item.get("local_path")
-        if local_path:
-            with Path(local_path).open("rb") as handle:
-                _post(method, data=data, files={field_name: (Path(local_path).name, handle)}, timeout=600)
-        else:
-            data[field_name] = item.get("public_url")
-            _post(method, data=data, timeout=120)
-        if overflow_message:
-            _post(
-                "sendMessage",
-                data={
-                    "chat_id": chat_id,
-                    "text": overflow_message,
-                    "disable_notification": silent,
-                    "disable_web_page_preview": disable_preview,
-                    **({"parse_mode": parse_mode} if parse_mode else {}),
-                },
-                timeout=120,
+    results: list[dict[str, Any]] = []
+    for chat_id in chat_ids:
+        results.append(
+            _publish_telegram_to_one(
+                http,
+                token=token,
+                chat_id=chat_id,
+                message=message,
+                caption=caption,
+                overflow_message=overflow_message,
+                parse_mode=parse_mode,
+                silent=silent,
+                disable_preview=disable_preview,
+                media=media,
             )
-        return responses
-
-    media_payload = []
-    files = {}
-    open_files = []
-    try:
-        for index, item in enumerate(attachments[:10]):
-            is_video = item in media["videos"]
-            local_path = item.get("local_path")
-            media_entry = {
-                "type": "video" if is_video else "photo",
-                "media": item.get("public_url") or f"attach://media{index}",
-            }
-            if index == 0 and caption:
-                media_entry["caption"] = caption
-                if parse_mode:
-                    media_entry["parse_mode"] = parse_mode
-            media_payload.append(media_entry)
-            if local_path:
-                handle = Path(local_path).open("rb")
-                open_files.append(handle)
-                files[f"media{index}"] = (Path(local_path).name, handle)
-        _post(
-            "sendMediaGroup",
-            data={
-                "chat_id": chat_id,
-                "disable_notification": silent,
-                "media": json.dumps(media_payload, ensure_ascii=False),
-            },
-            files=files,
-            timeout=600,
         )
-    finally:
-        for handle in open_files:
-            handle.close()
 
-    if overflow_message:
-        _post(
-            "sendMessage",
-            data={
-                "chat_id": chat_id,
-                "text": overflow_message,
-                "disable_notification": silent,
-                "disable_web_page_preview": disable_preview,
-                **({"parse_mode": parse_mode} if parse_mode else {}),
-            },
-            timeout=120,
+    # Aggregate: if any chat failed, surface a single error so the worker
+    # marks the job accordingly; successful chats' responses are still in
+    # ``results[i].responses`` for callers that want per-chat detail.
+    failures = [item for item in results if not item["ok"]]
+    if failures and len(failures) == len(results):
+        joined = "; ".join(
+            f"{item['chatId']}: {'; '.join(item['errors']) or 'unknown error'}"
+            for item in failures
         )
-    return responses
+        raise PreparedPublishError(f"Telegram publish failed for all chats: {joined}")
+    return results
 
 
 def validate_discord_config_live(config: dict[str, Any], *, session=None) -> dict:

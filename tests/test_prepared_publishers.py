@@ -114,6 +114,115 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[1][1], "https://api.telegram.org/bottoken/getChat")
         self.assertIn("chat", result)
 
+    def test_telegram_live_validation_fans_out_to_each_chat_id(self):
+        session = _RecordingSession([
+            _FakeResponse({"ok": True}),
+            _FakeResponse({"ok": True}),
+            _FakeResponse({"ok": True}),
+        ])
+        result = prepared_publishers.validate_telegram_config_live(
+            {"botToken": "token", "chatIds": ["@a", "@b"]},
+            session=session,
+        )
+        urls = [call[1] for call in session.calls]
+        self.assertEqual(urls[0], "https://api.telegram.org/bottoken/getMe")
+        self.assertEqual(urls[1], "https://api.telegram.org/bottoken/getChat")
+        self.assertEqual(urls[2], "https://api.telegram.org/bottoken/getChat")
+        self.assertEqual(len(result["chats"]), 2)
+        self.assertEqual(result["chats"][0]["chatId"], "@a")
+        self.assertEqual(result["chats"][1]["chatId"], "@b")
+        # Back-compat: the legacy singular key still points at the first chat.
+        self.assertEqual(result["chat"], result["chats"][0]["result"])
+
+    def test_telegram_publish_fans_out_to_each_chat_id(self):
+        session = _RecordingSession([
+            _FakeResponse({"ok": True}),
+            _FakeResponse({"ok": True}),
+            _FakeResponse({"ok": True}),
+        ])
+        account = SimpleNamespace(config={"botToken": "token", "chatIds": ["@a", "@b"]})
+        prepared_publishers.publish_telegram_sync(
+            account,
+            {"message": "hello both"},
+            session=session,
+        )
+        urls = [call[1] for call in session.calls]
+        self.assertEqual(urls.count("https://api.telegram.org/bottoken/sendMessage"), 2)
+
+    def test_telegram_publish_draft_chat_ids_override_config(self):
+        # Config provides two chats, draft overrides with a single chat. Only
+        # the draft's chat should receive the message.
+        session = _RecordingSession([
+            _FakeResponse({"ok": True}),
+            _FakeResponse({"ok": True}),
+        ])
+        account = SimpleNamespace(config={"botToken": "token", "chatIds": ["@config-a", "@config-b"]})
+        prepared_publishers.publish_telegram_sync(
+            account,
+            {"message": "hi", "draft": {"chatIds": ["@override"]}},
+            session=session,
+        )
+        sent_chat_ids = []
+        for call in session.calls:
+            if call[1].endswith("sendMessage"):
+                sent_chat_ids.append(call[2]["data"]["chat_id"])
+        self.assertEqual(sent_chat_ids, ["@override"])
+
+    def test_telegram_publish_partial_failure_returns_per_chat_status(self):
+        # First chat succeeds, second raises HTTPError. The wrapper records
+        # per-chat results so callers can see which chats failed; since at
+        # least one chat succeeded it does NOT raise.
+        from requests import HTTPError
+
+        bad = _FakeResponse({}, status_code=400)
+        def raise_for_status():
+            raise HTTPError("400 chat not found")
+        bad.raise_for_status = raise_for_status
+
+        session = _RecordingSession([
+            _FakeResponse({"ok": True}),
+            bad,
+        ])
+        account = SimpleNamespace(config={"botToken": "token", "chatIds": ["@good", "@bad"]})
+        results = prepared_publishers.publish_telegram_sync(
+            account,
+            {"message": "mixed"},
+            session=session,
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["chatId"], "@good")
+        self.assertTrue(results[0]["ok"])
+        self.assertEqual(results[1]["chatId"], "@bad")
+        self.assertFalse(results[1]["ok"])
+        self.assertTrue(results[1]["errors"])
+
+    def test_telegram_publish_all_chats_fail_raises(self):
+        # Every chat fails -> aggregate error so the worker marks the job failed.
+        from requests import HTTPError
+
+        bad = _FakeResponse({}, status_code=400)
+        bad.raise_for_status = lambda: (_ for _ in ()).throw(HTTPError("400 chat not found"))
+        session = _RecordingSession([bad, bad])
+        account = SimpleNamespace(config={"botToken": "token", "chatIds": ["@a", "@b"]})
+        with self.assertRaises(prepared_publishers.PreparedPublishError):
+            prepared_publishers.publish_telegram_sync(
+                account,
+                {"message": "all bad"},
+                session=session,
+            )
+
+    def test_telegram_publish_legacy_chat_id_still_works(self):
+        # Single-string ``chatId`` keeps working for backwards compatibility.
+        session = _RecordingSession([_FakeResponse({"ok": True})])
+        account = SimpleNamespace(config={"botToken": "token", "chatId": "@legacy"})
+        prepared_publishers.publish_telegram_sync(
+            account,
+            {"message": "legacy"},
+            session=session,
+        )
+        self.assertEqual(session.calls[0][1], "https://api.telegram.org/bottoken/sendMessage")
+        self.assertEqual(session.calls[0][2]["data"]["chat_id"], "@legacy")
+
     def test_facebook_live_validation_fetches_page(self):
         session = _RecordingSession([_FakeResponse({"id": "123", "name": "Brand Page"})])
         result = prepared_publishers.validate_facebook_config_live(

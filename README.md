@@ -31,6 +31,7 @@
 - [🐾 交流與支援](#交流與支援)
 - [🤝 貢獻指南](#貢獻指南)
 - [📜 許可證](#許可證)
+- [📋 Backlog（規劃中 / 未排程）](#backlog規劃中--未排程)
 
 ## 功能特性
 
@@ -50,7 +51,8 @@
 | Instagram | ✅ | ✅ | ✅ | — | ✅ | ❌ | ✅ | Graph API，支援圖片/影片 |
 | Threads | ✅ | ✅ | — | — | ✅ | ❌ | ✅ | Threads API |
 | Medium | ✅ | — | — | ✅ | ❌ (草稿/立即) | ✅ | — | 瀏覽器自動化 |
-| Substack | ✅ | — | — | ✅ | ✅ (定時) | ✅ | — | 瀏覽器自動化 |
+| Substack | ✅ | — | — | ✅ | ✅ (定時) | ✅ | — | 瀏覽�器自動化 |
+| Telegram | — | — | — | ✅ | ❌ | ❌ | ✅ | Bot API；單帳號目前只支援單一 `chatId` |
 
 ### Profile 模型（多帳號管理）
 
@@ -156,6 +158,10 @@ curl -X POST https://socialupload.iamwillywang.com/publish-center/submit \
 
 ## 支援平台
 
+### Telegram
+
+> 📋 詳見 [Backlog → Telegram 多目標發佈與訂閱管理](#telegram-多目標發佈與訂閱管理)。
+
 ### Reddit
 
 Reddit 支援兩種認證模式：
@@ -206,3 +212,30 @@ TikTok 使用 Content Posting API：
 ## 許可證
 
 本項目暫時採用 [MIT License](LICENSE) 開源許可證。
+
+## 📋 Backlog（規劃中 / 未排程）
+
+追蹤已討論過、但尚未排入具體版本的功能請求與改進項目。
+
+### Telegram 多目標發佈與訂閱管理
+
+- **狀態**：提案中
+- **目標**：把 Telegram 從「單帳號 → 單一 `chatId`」升級為「單帳號 → 多個 channels / groups + 訂閱／成員管理」。
+- **背景**：現有 Telegram 整合走 Bot API（`api.telegram.org/bot{token}/...`），每個 `accounts.config_json` 只存一個 `chatId`。多 channel / group 場景需要重複建立帳號，且沒有訂閱／成員管理能力（Bot API 無法收款、發票、踢人）。
+- **核心需求**：
+  1. **多目標發佈**：同一支 bot 一次發送到多個 `chat_id`（channels、groups、supergroups、私聊皆可）。程式化（CLI / API）與 Web UI 都要支援。
+  2. **Web UI 多選**：發佈表單允許勾選多個 channel / group，並提供「測試連線」按鈕呼叫 `getChat` 預覽頭貼與成員數。
+  3. **成員管理**：
+     - 接收 `chat_member` / `my_chat_member` 更新，記錄使用者加入／離開事件。
+     - 串接外部支付（Stripe、Telegram Stars、Crypto Bot 任一）後，依付費狀態自動 `banChatMember` / `unbanChatMember`。
+     - 提供 join request 審批流程（`approveChatJoinRequest` / `declineChatJoinRequest`）。
+  4. **資料模型**：新增 `telegram_chat_targets`（account_id, chat_id, kind, title, enabled）與 `telegram_memberships`（user_id, chat_id, status, expires_at）。
+- **非目標**：Bot API 不支援金流，所以本期不包含「收款」本身；只負責「收到 webhook 之後的成員控管」。
+- **預估影響**：觸及 `myUtils/prepared_publishers.py`、`sau_backend.py` 新路由、前端 `publish-center` 表單、新 Alembic revision。
+- **驗證方式**：新增 unit tests（多 chat 廣播、payload 切分、join request 審批），以及 worker 端的 `chat_member` 處理測試。
+
+### Reddit 內容創作輔助（已拒絕，僅作紀錄）
+
+- **狀態**：Reddit Data API 申請被拒，原因是用途與「Responsible Builder Policy」不符。
+- **原因**：政策明令禁止「商業化 Reddit 資料」與「用於訓練／挖掘／爬取資料」，包括把 Reddit 內容改寫後發到其他平台。
+- **替代方案**：瀏覽器自動化（Playwright）、手動閱讀、Google Trends 等第三方工具。Telegram Bot 也不能取代 Reddit 內容來源。

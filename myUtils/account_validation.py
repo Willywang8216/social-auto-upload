@@ -127,8 +127,13 @@ def validate_structured_account_config(
                 errors.append("Reddit 帳號缺少 clientSecret 或 clientSecretEnv")
 
     if platform == profiles.PLATFORM_TELEGRAM:
-        if not _present(config.get("chatId")):
-            errors.append("Telegram 帳號缺少 chatId")
+        from myUtils.prepared_publishers import _telegram_chat_id_list
+        chat_targets = (
+            _telegram_chat_id_list(config.get("chatIds"))
+            or _telegram_chat_id_list(config.get("chatId"))
+        )
+        if not chat_targets:
+            errors.append("Telegram 帳號缺少 chatId 或 chatIds")
         if not _present(_config_value(config, "botToken")):
             errors.append("Telegram 帳號缺少 botToken 或 botTokenEnv")
 

@@ -572,13 +572,44 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with patch.object(self.sau_backend.prepared_publishers, 'validate_telegram_config_live', return_value={'bot': {'result': {'username': 'brand_bot'}}, 'chat': {'result': {'title': 'Brand Chat'}}}):
+        with patch.object(self.sau_backend.prepared_publishers, 'validate_telegram_config_live', return_value={'bot': {'result': {'username': 'brand_bot'}}, 'chats': [{'chatId': '@brand', 'result': {'title': 'Brand Chat'}}], 'chat': {'title': 'Brand Chat'}}):
             response = self.client.post(f'/accounts/{account_id}/check-connection')
         self.assertEqual(response.status_code, 200)
         config = self._stored_config(account_id)
         self.assertEqual(config['telegramBotName'], 'brand_bot')
         self.assertEqual(config['telegramChatTitle'], 'Brand Chat')
+        self.assertEqual(config['telegramChatTitles'], ['Brand Chat'])
         self.assertTrue(config['lastConnectionCheckAt'])
+
+    def test_check_telegram_connection_records_all_chat_titles(self) -> None:
+        # Multi-target account: validate_telegram_config_live returns every
+        # chat; the connection-check route persists each title and a joined
+        # string for backwards compatibility.
+        profile_response = self.client.post('/profiles', json={'name': 'Multi Telegram'})
+        profile_id = profile_response.get_json()['data']['id']
+        account_response = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'telegram',
+                'accountName': 'brand-telegram-multi',
+                'authType': 'manual',
+                'config': {'chatIds': ['@a', '@b'], 'botTokenEnv': 'TELEGRAM_BOT_TOKEN'},
+            },
+        )
+        account_id = account_response.get_json()['data']['id']
+        with patch.object(self.sau_backend.prepared_publishers, 'validate_telegram_config_live', return_value={
+            'bot': {'result': {'username': 'brand_bot'}},
+            'chats': [
+                {'chatId': '@a', 'result': {'title': 'Channel A'}},
+                {'chatId': '@b', 'result': {'title': 'Channel B'}},
+            ],
+            'chat': {'title': 'Channel A'},
+        }):
+            response = self.client.post(f'/accounts/{account_id}/check-connection')
+        self.assertEqual(response.status_code, 200)
+        config = self._stored_config(account_id)
+        self.assertEqual(config['telegramChatTitles'], ['Channel A', 'Channel B'])
+        self.assertEqual(config['telegramChatTitle'], 'Channel A, Channel B')
 
     def test_check_discord_connection_updates_structured_account(self) -> None:
         profile_response = self.client.post('/profiles', json={'name': 'Discord Brand'})

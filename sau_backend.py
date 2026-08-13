@@ -2150,7 +2150,17 @@ def _run_account_connection_check(*, account_id: int, db_path: Path):
         elif account.platform == profile_registry.PLATFORM_TELEGRAM:
             result = prepared_publishers.validate_telegram_config_live(config)
             config['telegramBotName'] = result.get('bot', {}).get('result', {}).get('username', config.get('telegramBotName', ''))
-            config['telegramChatTitle'] = result.get('chat', {}).get('result', {}).get('title', config.get('telegramChatTitle', '')) or result.get('chat', {}).get('result', {}).get('username', config.get('telegramChatTitle', ''))
+            chats = result.get('chats') or []
+            titles = [
+                (chat.get('result', {}) or {}).get('title')
+                or (chat.get('result', {}) or {}).get('username')
+                or chat.get('chatId')
+                for chat in chats
+            ]
+            titles = [title for title in titles if title]
+            if titles:
+                config['telegramChatTitles'] = titles
+                config['telegramChatTitle'] = ', '.join(titles)
             summary = f"Telegram chat: {config.get('telegramChatTitle') or account.account_name}"
         elif account.platform == profile_registry.PLATFORM_DISCORD:
             result = prepared_publishers.validate_discord_config_live(config)
@@ -6315,6 +6325,12 @@ def _publish_center_preview_payload(*, profile, accounts, drafts_by_account):
             "supportsFirstComment": platform_capabilities.platform_supports_first_comment(account.platform),
             "supportsMultiMedia": platform_capabilities.platform_supports_multi_media(account.platform),
             "configSubreddits": (account.config or {}).get("subreddits", []) if account.platform == "reddit" else [],
+            "configChatIds": (
+                (account.config or {}).get("chatIds")
+                or ([(account.config or {}).get("chatId")] if (account.config or {}).get("chatId") else [])
+                if account.platform == "telegram" else []
+            ),
+            "configChatTitles": (account.config or {}).get("telegramChatTitles", []) if account.platform == "telegram" else [],
         })
     return profile_payload
 

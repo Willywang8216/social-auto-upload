@@ -33,7 +33,8 @@ export const threadsFieldDefs = [
 ]
 
 export const telegramFieldDefs = [
-  { key: 'chatId', label: 'Chat ID', placeholder: '例如：@channel_name 或 -100123456' },
+  { key: 'chatId', label: 'Chat ID (legacy)', placeholder: '例如：@channel_name 或 -100123456（單一目標）' },
+  { key: 'chatIds', label: 'Chat IDs（多個，逗號分隔）', placeholder: '例如：@channel_a, -100123456, @group_b' },
   { key: 'botTokenEnv', label: 'Bot Token Env', placeholder: '例如：TELEGRAM_BOT_TOKEN' }
 ]
 

@@ -323,6 +323,12 @@ const sections = ref([
           { name: 'accountDrafts[id].message', type: 'string', desc: 'Post body text' },
         ]
       },
+      { method: 'POST', path: '/publish-center/submit', description: 'Publish to Telegram (multi-chat override)',
+        params: [
+          { name: 'accountDrafts[id].chatIds', type: 'array', desc: 'Override Telegram chat ids per account, e.g. ["@channel_a", "-100123456"]. Falls back to account.config.chatIds, then legacy config.chatId.' },
+          { name: 'accountDrafts[id].message', type: 'string', desc: 'Caption / body text (auto-splits at 1024 chars)' },
+        ]
+      },
     ]
   },
   {

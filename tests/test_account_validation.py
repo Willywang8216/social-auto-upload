@@ -38,6 +38,24 @@ class AccountValidationTests(unittest.TestCase):
         self.assertTrue(result.valid)
         self.assertEqual(result.errors, [])
 
+    def test_telegram_chat_ids_list_passes(self) -> None:
+        result = account_validation.validate_structured_account_config(
+            platform=profiles.PLATFORM_TELEGRAM,
+            auth_type='manual',
+            config={'chatIds': ['@brand', '-100123456'], 'botTokenEnv': 'TELEGRAM_BOT_TOKEN'},
+        )
+        self.assertTrue(result.valid)
+        self.assertEqual(result.errors, [])
+
+    def test_telegram_missing_chat_targets_fails(self) -> None:
+        result = account_validation.validate_structured_account_config(
+            platform=profiles.PLATFORM_TELEGRAM,
+            auth_type='manual',
+            config={'botTokenEnv': 'TELEGRAM_BOT_TOKEN'},
+        )
+        self.assertFalse(result.valid)
+        self.assertTrue(any('chatId' in err or 'chatIds' in err for err in result.errors))
+
     def test_tiktok_profile_watermark_becomes_warning(self) -> None:
         result = account_validation.validate_structured_account_config(
             platform=profiles.PLATFORM_TIKTOK,

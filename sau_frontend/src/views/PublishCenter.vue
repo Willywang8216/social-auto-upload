@@ -316,6 +316,30 @@
                 Type a subreddit name and press Enter to add. These override the account defaults.
               </el-text>
             </div>
+            <!-- Telegram chat ids selector (multi-target) -->
+            <div v-else-if="account.platform === 'telegram'" class="pc-draft-field">
+              <el-text size="small" type="info">目標 chats（單一 bot 一次發送至多個）：</el-text>
+              <el-select
+                v-model="account.draft.chatIds"
+                multiple
+                filterable
+                allow-create
+                default-first-option
+                placeholder="@channel_name 或 -100123456，Enter 新增"
+                size="small"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="(chatId, index) in (account.configChatIds || [])"
+                  :key="chatId"
+                  :label="(account.configChatTitles || [])[index] || chatId"
+                  :value="chatId"
+                />
+              </el-select>
+              <el-text size="small" type="info" style="margin-top:4px;display:block">
+                可貼上多個 chat id 並按 Enter 新增。留空時沿用帳號預設。同一個 bot 會依序送出。
+              </el-text>
+            </div>
             <!-- TikTok per-post settings (audit compliance) -->
             <TikTokPostSettings
               v-if="account.platform === 'tiktok'"
@@ -1342,6 +1366,9 @@ async function generatePreviews() {
         if (account.platform === 'reddit' && !account.draft?.subreddits) {
           if (!account.draft) account.draft = {}
           account.draft.subreddits = [...(account.configSubreddits || [])]
+        } else if (account.platform === 'telegram' && !account.draft?.chatIds) {
+          if (!account.draft) account.draft = {}
+          account.draft.chatIds = [...(account.configChatIds || [])]
         }
       }
     }
@@ -1372,6 +1399,7 @@ async function regenerateAccount(profile, account) {
       if (account.draft?.title) preserved.title = account.draft.title
       if (account.draft?.firstComment) preserved.firstComment = account.draft.firstComment
       if (account.draft?.subreddits) preserved.subreddits = account.draft.subreddits
+      if (account.draft?.chatIds) preserved.chatIds = account.draft.chatIds
       account.draft = { ...draft, ...preserved }
     }
   } finally {
