@@ -1996,6 +1996,11 @@ def _account_payload(account: profile_registry.Account) -> dict:
         payload["config"] = secret_redaction.redact_config_secrets(payload["config"])
     if account.platform == "tiktok":
         payload["isSandbox"] = os.environ.get("TIKTOK_CLIENT_KEY", "").startswith("sb")
+    # Operator-facing fields: surface the new nickname + group columns under
+    # friendlier camelCase keys and tolerate the pre-migration shape where
+    # ``to_dict`` already returns them as snake_case.
+    payload["nickname"] = account.nickname or ""
+    payload["accountGroup"] = account.account_group or ""
     return payload
 
 
@@ -5654,6 +5659,8 @@ def accounts_patch(account_id):
             config=existing_config,
             enabled=data.get("enabled"),
             status=data.get("status"),
+            nickname=data.get("nickname"),
+            account_group=data.get("accountGroup"),
             db_path=_current_db_path(),
         )
     except LookupError:
@@ -7781,7 +7788,14 @@ def api_accounts():
     """Return all accounts with cookie status and expiry, matching the
     redesigned frontend's expected shape. Workspace-scoped in enforced mode."""
     db_path = _current_db_path()
-    rows = profile_registry.list_accounts(workspace_id=_workspace_scope(), db_path=db_path)
+    platform_filter = request.args.get("platform")
+    group_filter = request.args.get("group")
+    rows = profile_registry.list_accounts(
+        workspace_id=_workspace_scope(),
+        platform=platform_filter,
+        account_group=group_filter,
+        db_path=db_path,
+    )
     out = []
     for a in rows:
         config = a.config or {}
@@ -7855,6 +7869,8 @@ def api_accounts():
             "id": a.id,
             "platform": platform,
             "name": account_name,
+            "nickname": getattr(a, "nickname", "") or "",
+            "accountGroup": getattr(a, "account_group", "") or "",
             "handle": handle,
             "avatarUrl": avatar_url,
             "profile": getattr(a, "profile_name", "") or "default",
@@ -7864,6 +7880,16 @@ def api_accounts():
             "expiresAt": expires_human,
         })
     return jsonify({"code": 200, "data": out, "msg": "ok"})
+
+
+@app.route("/api/accounts/groups", methods=["GET"])
+def api_account_groups():
+    """Return distinct account groups (workspace-scoped) for the group filter."""
+    db_path = _current_db_path()
+    groups = profile_registry.list_account_groups(
+        workspace_id=_workspace_scope(), db_path=db_path
+    )
+    return jsonify({"code": 200, "data": groups, "msg": "ok"})
 
 
 @app.route("/api/accounts/health", methods=["GET"])

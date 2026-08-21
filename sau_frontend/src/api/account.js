@@ -60,6 +60,16 @@ export const accountApi = {
     return http.get('/api/accounts')
   },
 
+  // Distinct account groups for the group filter dropdown.
+  getAccountGroups() {
+    return http.get('/api/accounts/groups')
+  },
+
+  // Update nickname and/or group via the PATCH endpoint.
+  updateAccountMeta(accountId, payload) {
+    return http.patch(`/accounts/${accountId}`, payload)
+  },
+
   // Check a single account's connection / cookie validity
   checkConnection(accountId) {
     return http.post(`/accounts/${accountId}/check-connection`)

@@ -117,7 +117,75 @@ class ProfileRegistryTests(unittest.TestCase):
         self.assertEqual(account.cookie_path, "")
         self.assertTrue(account.enabled)
 
-    def test_unsupported_platform_rejected(self) -> None:
+    def test_add_account_supports_nickname_and_group(self) -> None:
+        profile = profiles.create_profile("NicknameBrand", db_path=self.db_path)
+        account = profiles.add_account(
+            profile.id,
+            profiles.PLATFORM_REDDIT,
+            "brand-main",
+            auth_type="oauth",
+            nickname="Acme Main",
+            account_group="Daily drivers",
+            db_path=self.db_path,
+        )
+        self.assertEqual(account.nickname, "Acme Main")
+        self.assertEqual(account.account_group, "Daily drivers")
+
+        # Empty defaults
+        plain = profiles.add_account(
+            profile.id, profiles.PLATFORM_MEDIUM, "plain", db_path=self.db_path
+        )
+        self.assertEqual(plain.nickname, "")
+        self.assertEqual(plain.account_group, "")
+
+    def test_update_account_changes_nickname_and_group(self) -> None:
+        profile = profiles.create_profile("UpdateBrand", db_path=self.db_path)
+        account = profiles.add_account(
+            profile.id, profiles.PLATFORM_MEDIUM, "alice", db_path=self.db_path
+        )
+        updated = profiles.update_account(
+            account.id,
+            nickname="Alice (Ops)",
+            account_group="Demos",
+            db_path=self.db_path,
+        )
+        self.assertEqual(updated.nickname, "Alice (Ops)")
+        self.assertEqual(updated.account_group, "Demos")
+
+    def test_list_accounts_filters_by_group(self) -> None:
+        profile = profiles.create_profile("FilterBrand", db_path=self.db_path)
+        a1 = profiles.add_account(
+            profile.id, profiles.PLATFORM_MEDIUM, "alice",
+            account_group="Daily", db_path=self.db_path,
+        )
+        profiles.add_account(
+            profile.id, profiles.PLATFORM_MEDIUM, "bob",
+            account_group="Demos", db_path=self.db_path,
+        )
+        profiles.add_account(
+            profile.id, profiles.PLATFORM_MEDIUM, "carol",
+            db_path=self.db_path,
+        )
+        daily = profiles.list_accounts(
+            profile_id=profile.id, account_group="Daily", db_path=self.db_path
+        )
+        self.assertEqual([a.id for a in daily], [a1.id])
+
+    def test_list_account_groups_excludes_empty(self) -> None:
+        profile = profiles.create_profile("GroupsBrand", db_path=self.db_path)
+        profiles.add_account(
+            profile.id, profiles.PLATFORM_MEDIUM, "a",
+            account_group="Daily", db_path=self.db_path,
+        )
+        profiles.add_account(
+            profile.id, profiles.PLATFORM_MEDIUM, "b",
+            account_group="Demos", db_path=self.db_path,
+        )
+        profiles.add_account(
+            profile.id, profiles.PLATFORM_MEDIUM, "c", db_path=self.db_path
+        )
+        groups = profiles.list_account_groups(db_path=self.db_path)
+        self.assertEqual(groups, ["Daily", "Demos"])
         profile = profiles.create_profile("Brand", db_path=self.db_path)
         with self.assertRaises(ValueError):
             profiles.add_account(profile.id, "myspace", "alice", db_path=self.db_path)

@@ -138,6 +138,10 @@ class Account:
     status: int = 0
     last_checked_at: str | None = None
     created_at: str | None = None
+    # Operator-defined display label (shown in the UI next to account_name).
+    nickname: str = ""
+    # Operator-defined group/segment tag for filtering the Accounts tab.
+    account_group: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -176,6 +180,10 @@ def _row_to_account(row: sqlite3.Row) -> Account:
         json.loads(payload.pop("config_json", "{}") or "{}")
     )
     payload["enabled"] = bool(payload.get("enabled", 1))
+    # Pre-migration rows may have NULL for the new operator columns; coerce
+    # to empty strings so the dataclass type stays simple.
+    payload["nickname"] = payload.get("nickname") or ""
+    payload["account_group"] = payload.get("account_group") or ""
     payload = {k: v for k, v in payload.items() if k in _ACCOUNT_FIELDS}
     return Account(**payload)
 
@@ -431,6 +439,8 @@ def add_account(
     config: dict | None = None,
     enabled: bool = True,
     status: int = 0,
+    nickname: str = "",
+    account_group: str = "",
     db_path: Path = DB_PATH,
 ) -> Account:
     if platform not in SUPPORTED_PLATFORMS:
@@ -463,9 +473,11 @@ def add_account(
                 config_json,
                 enabled,
                 status,
+                nickname,
+                account_group,
                 workspace_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 profile_id,
@@ -476,6 +488,8 @@ def add_account(
                 json.dumps(config_crypto.encrypt_config_secrets(config or {}), ensure_ascii=False),
                 int(enabled),
                 status,
+                nickname.strip(),
+                account_group.strip(),
                 parent_workspace_id,
             ),
         )
@@ -521,6 +535,7 @@ def list_accounts(
     profile_id: int | None = None,
     platform: str | None = None,
     enabled: bool | None = None,
+    account_group: str | None = None,
     workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> list[Account]:
@@ -536,6 +551,12 @@ def list_accounts(
     if enabled is not None:
         clauses.append("enabled = ?")
         params.append(int(enabled))
+    if account_group is not None:
+        # Match the literal group (case-sensitive) so empty groups can be
+        # filtered out with `account_group=""` while leaving ungrouped rows
+        # (stored as the empty string) easy to find when desired.
+        clauses.append("account_group = ?")
+        params.append(account_group)
     if workspace_id is not None:
         clauses.append("workspace_id = ?")
         params.append(workspace_id)
@@ -545,6 +566,27 @@ def list_accounts(
     with _connect(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
     return [_row_to_account(row) for row in rows]
+
+
+def list_account_groups(
+    *,
+    workspace_id: str | None = None,
+    db_path: Path = DB_PATH,
+) -> list[str]:
+    """Distinct, non-empty ``account_group`` values for the workspace.
+
+    Used by the Accounts tab UI to populate the group filter dropdown.
+    Empty strings are skipped (treated as "ungrouped") so they never appear
+    as an actionable bucket."""
+    query = "SELECT DISTINCT account_group FROM accounts WHERE account_group != ''"
+    params: list[object] = []
+    if workspace_id is not None:
+        query += " AND workspace_id = ?"
+        params.append(workspace_id)
+    query += " ORDER BY account_group"
+    with _connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [row[0] for row in rows]
 
 
 def update_account_status(
@@ -571,6 +613,8 @@ def update_account(
     config: dict | None = None,
     enabled: bool | None = None,
     status: int | None = None,
+    nickname: str | None = None,
+    account_group: str | None = None,
     workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> Account:
@@ -583,6 +627,8 @@ def update_account(
     next_config = current.config if config is None else config
     next_enabled = current.enabled if enabled is None else enabled
     next_status = current.status if status is None else status
+    next_nickname = current.nickname if nickname is None else nickname.strip()
+    next_account_group = current.account_group if account_group is None else account_group.strip()
     next_cookie_path = current.cookie_path
     if cookie_path is not None:
         next_cookie_path = str(Path(cookie_path))
@@ -597,7 +643,7 @@ def update_account(
             """
             UPDATE accounts
             SET profile_id = ?, account_name = ?, cookie_path = ?, auth_type = ?, config_json = ?,
-                enabled = ?, status = ?
+                enabled = ?, status = ?, nickname = ?, account_group = ?
             WHERE id = ?
             """,
             (
@@ -608,6 +654,8 @@ def update_account(
                 json.dumps(config_crypto.encrypt_config_secrets(next_config or {}), ensure_ascii=False),
                 int(next_enabled),
                 next_status,
+                next_nickname,
+                next_account_group,
                 account_id,
             ),
         )

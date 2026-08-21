@@ -7,6 +7,25 @@
         <button :class="{ on: filter === 'ready' }" @click="filter = 'ready'">Ready</button>
         <button :class="{ on: filter === 'attn' }" @click="filter = 'attn'">Needs auth</button>
       </div>
+      <select
+        class="filter-select"
+        :value="platformFilter"
+        @change="onPlatformFilterChange"
+        title="Filter by platform"
+      >
+        <option value="">All platforms</option>
+        <option v-for="p in platformsPresent" :key="p.slug" :value="p.slug">{{ p.label }}</option>
+      </select>
+      <select
+        class="filter-select"
+        :value="groupFilter"
+        @change="onGroupFilterChange"
+        title="Filter by group"
+      >
+        <option value="">All groups</option>
+        <option value="__none__">Ungrouped</option>
+        <option v-for="g in groups" :key="g" :value="g">{{ g }}</option>
+      </select>
       <span class="count">{{ filteredAccounts.length }} accounts · {{ platformCount }} platforms</span>
       <div class="spacer"></div>
       <button class="btn-ghost" @click="runHealthCheck">
@@ -31,8 +50,45 @@
             </span>
           </div>
           <div style="flex:1;min-width:0">
-            <div class="acct-name">{{ acct.accountName }}</div>
+            <div class="acct-name">
+              <template v-if="!isEditing(acct)">
+                <span>{{ acct.nickname || acct.accountName }}</span>
+                <span v-if="acct.nickname" class="acct-name-sub">@{{ acct.accountName }}</span>
+              </template>
+              <input
+                v-else
+                ref="editNameInput"
+                class="input inline-input"
+                v-model="editDraft.nickname"
+                :placeholder="acct.accountName"
+                @keyup.enter="saveEdit(acct)"
+                @keyup.esc="cancelEdit"
+              />
+            </div>
             <div class="acct-handle">{{ acct.connectionDetail || acct.platform }}</div>
+            <div class="acct-tags">
+              <span v-if="acct.accountGroup" class="acct-tag">{{ acct.accountGroup }}</span>
+              <select
+                v-if="isEditing(acct)"
+                class="filter-select inline-select"
+                v-model="editDraft.accountGroup"
+                @keyup.enter="saveEdit(acct)"
+                @keyup.esc="cancelEdit"
+              >
+                <option value="">No group</option>
+                <option v-for="g in groups" :key="g" :value="g">{{ g }}</option>
+              </select>
+              <button
+                v-if="!isEditing(acct)"
+                class="link-btn"
+                @click="startEdit(acct)"
+                title="Edit nickname and group"
+              >Edit</button>
+              <template v-else>
+                <button class="link-btn save" @click="saveEdit(acct)" :disabled="editSaving">Save</button>
+                <button class="link-btn" @click="cancelEdit">Cancel</button>
+              </template>
+            </div>
           </div>
           <span class="cookie-pill" :class="cookieStatusClass(acct)">
             <span class="d"></span>{{ cookieStatusLabel(acct) }}
@@ -353,10 +409,72 @@ const allPlatforms = computed(() =>
 
 /* Filter state */
 const filter = ref('all')
+const platformFilter = ref('')
+const groupFilter = ref('')
+const groups = ref([])
+const editingId = ref(null)
+const editDraft = ref({ nickname: '', accountGroup: '' })
+const editSaving = ref(false)
+
+const isEditing = (acct) => editingId.value === acct.id
+
+function startEdit(acct) {
+  editingId.value = acct.id
+  editDraft.value = { nickname: acct.nickname || '', accountGroup: acct.accountGroup || '' }
+}
+function cancelEdit() {
+  editingId.value = null
+  editDraft.value = { nickname: '', accountGroup: '' }
+}
+async function saveEdit(acct) {
+  if (editSaving.value) return
+  const nextNick = (editDraft.value.nickname || '').trim()
+  const nextGroup = (editDraft.value.accountGroup || '').trim()
+  if (nextNick === (acct.nickname || '') && nextGroup === (acct.accountGroup || '')) {
+    cancelEdit()
+    return
+  }
+  editSaving.value = true
+  try {
+    await accountApi.updateAccountMeta(acct.id, { nickname: nextNick, accountGroup: nextGroup })
+    acct.nickname = nextNick
+    acct.accountGroup = nextGroup
+    // Refresh groups list if a new group name was added
+    if (nextGroup && !groups.value.includes(nextGroup)) {
+      groups.value = [...groups.value, nextGroup].sort((a, b) => a.localeCompare(b))
+    }
+    flash(`Saved ${acct.accountName}`)
+    cancelEdit()
+  } catch (e) { flash('Save failed: ' + e.message) }
+  finally { editSaving.value = false }
+}
+
+function onPlatformFilterChange(e) { platformFilter.value = e.target.value }
+function onGroupFilterChange(e) {
+  const v = e.target.value
+  groupFilter.value = v === '__none__' ? '__none__' : v
+}
+
+const platformsPresent = computed(() => {
+  const slugs = new Set(accounts.value.map(a => a.platformSlug))
+  return allPlatforms.value
+    .filter(p => slugs.has(p.slug))
+    .sort((a, b) => a.label.localeCompare(b.label))
+})
+
 const filteredAccounts = computed(() => {
-  if (filter.value === 'ready') return accounts.value.filter(a => a.connectionLabel === 'Ready')
-  if (filter.value === 'attn') return accounts.value.filter(a => a.connectionLabel !== 'Ready')
-  return accounts.value
+  let list = accounts.value
+  if (filter.value === 'ready') list = list.filter(a => a.connectionLabel === 'Ready')
+  else if (filter.value === 'attn') list = list.filter(a => a.connectionLabel !== 'Ready')
+  if (platformFilter.value) list = list.filter(a => a.platformSlug === platformFilter.value)
+  if (groupFilter.value) {
+    if (groupFilter.value === '__none__') {
+      list = list.filter(a => !a.accountGroup)
+    } else {
+      list = list.filter(a => a.accountGroup === groupFilter.value)
+    }
+  }
+  return list
 })
 const platformCount = computed(() => new Set(filteredAccounts.value.map(a => a.platformSlug)).size)
 
@@ -648,6 +766,8 @@ const loadAccounts = async () => {
         id: a.id,
         platformSlug: a.platform,
         accountName: a.name,
+        nickname: a.nickname || '',
+        accountGroup: a.accountGroup || '',
         platform: PLATFORM_META[a.platform]?.label || a.platform,
         authType: a.authType || 'cookie',
         // For OAuth accounts, show "Token expired" instead of "Missing"
@@ -666,11 +786,20 @@ const loadAccounts = async () => {
   } catch (e) { console.warn('Failed to load accounts:', e) }
 }
 
+const loadGroups = async () => {
+  try {
+    const res = await accountApi.getAccountGroups()
+    groups.value = (res?.data || res || []).slice().sort((a, b) => a.localeCompare(b))
+  } catch (e) { console.warn('Failed to load groups:', e) }
+}
+
 // Local reactive accounts (not using the store's normalization since we
 // get pre-enriched data from /api/accounts)
 const accounts = ref([])
 
-onMounted(loadAccounts)
+onMounted(async () => {
+  await Promise.all([loadAccounts(), loadGroups()])
+})
 </script>
 
 <style scoped>
@@ -703,4 +832,67 @@ onMounted(loadAccounts)
   border: 2px solid var(--bg-1, #0a0a0d);
   line-height: 1;
 }
+.acct-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.acct-name-sub {
+  font-size: 11px;
+  color: var(--text-3);
+  font-weight: 400;
+}
+.acct-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.acct-tag {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--r-full);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 6px;
+  transition: color 0.15s;
+}
+.link-btn:hover { color: var(--text); }
+.link-btn.save { color: var(--accent); }
+.inline-input {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: 13px;
+  margin-top: 2px;
+}
+.inline-select {
+  font-size: 11.5px;
+  padding: 3px 6px;
+}
+.filter-select {
+  height: 32px;
+  padding: 0 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.filter-select:focus { outline: none; border-color: var(--accent); }
 </style>
