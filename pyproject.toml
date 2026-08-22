@@ -32,10 +32,16 @@ dependencies = [
   # `alembic` drives the SQLite schema migrations under migrations/.
   # `db/createTable.py` is now a thin wrapper around `alembic upgrade head`.
   "alembic>=1.13",
+  # `fastmcp` powers the optional Model Context Protocol server
+  # (`sau-mcp` console script). The dependency is unconditional so the
+  # MCP entry point is importable on every install, matching the cookie /
+  # config encryption pattern above.
+  "fastmcp==3.4.7",
 ]
 
 [project.scripts]
 sau = "sau_cli:main"
+sau-mcp = "mcp_server.server:main"
 
 [project.optional-dependencies]
 web = [
@@ -70,7 +76,7 @@ py-modules = ["conf", "sau_cli"]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["uploader*", "utils*", "myUtils*", "db*", "sau_app*"]
+include = ["uploader*", "utils*", "myUtils*", "db*", "sau_app*", "mcp_server*"]
 
 [tool.setuptools.package-data]
 utils = ["stealth.min.js"]

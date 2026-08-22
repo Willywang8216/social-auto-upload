@@ -106,6 +106,20 @@ sau reddit check --account <account_name>
 sau tiktok login --account <account_name>
 ```
 
+### MCP 伺服器（給 AI Agent 用）
+
+`sau-mcp` 把所有 CRUD / 排程操作包成 [Model Context Protocol](https://modelcontextprotocol.io) 工具，AI Agent（Claude Desktop、Cursor、自訂 OpenAI Agents 等）可以直接管理帳號、預約發文。
+
+```bash
+# stdio（本地 Agent 預設）
+sau-mcp
+
+# HTTP（給遠端 Agent 用）
+SAU_MCP_TRANSPORT=http SAU_MCP_HOST=0.0.0.0 SAU_MCP_PORT=8765 sau-mcp
+```
+
+完整工具列表、傳輸設定、Claude Desktop 設定範例請見 [docs/mcp.md](./docs/mcp.md)。
+
 ## 快速開始
 
 ### 方式 1：使用 CLI
@@ -193,6 +207,7 @@ TikTok 使用 Content Posting API：
 - [安裝說明](./docs/install.md)
 - [更新說明](./docs/update.md)
 - [CLI 使用說明](./docs/CLI.md)
+- [MCP 伺服器（AI Agent 整合）](./docs/mcp.md)
 - [Agent Bootstrap Prompt](./docs/agent-bootstrap.md)
 - [API 參考文件](./docs/api-reference.md)
 - [API 速率限制與配額](./docs/api-rate-limits.md)
