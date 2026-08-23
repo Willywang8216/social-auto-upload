@@ -83,6 +83,17 @@ def install(app: Flask, *, header_name: str = _DEFAULT_HEADER) -> None:
                 "duration_ms": duration_ms,
             },
         )
+        # Frontend shells and hashed asset bundles must never be served from a
+        # downstream proxy cache when the SPA is being actively redeployed.
+        # The asset filenames are content-hashed, so the right value for them
+        # would be `max-age=31536000, immutable` — but `index.html` and the
+        # boot references it makes *must* be revalidated on every request,
+        # otherwise a Cloudflare / Nginx / CDN in front of the app can hold
+        # the old shell while the new chunks are referenced from it. Use a
+        # blanket no-cache here so any missed route stays correct; cached
+        # responses that survive a deploy are exactly the bug this fixes.
+        if "Cache-Control" not in response.headers:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
 
     def _error_response(status: int, message: str):

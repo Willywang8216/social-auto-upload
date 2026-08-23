@@ -452,30 +452,67 @@ def _frontend_public_asset(filename: str) -> tuple[Path, str]:
 
 @app.route('/assets/<path:filename>')
 def custom_static(filename):
-    return send_from_directory(str(_frontend_assets_dir()), filename)
+    response = send_from_directory(str(_frontend_assets_dir()), filename)
+    # Force revalidation on every request — never serve a stale chunk from a
+    # downstream cache (Cloudflare edge, Nginx proxy, browser). Vite's content
+    # hash means we *want* the edge to revalidate aggressively, then short-
+    # circuit with a 304 if the chunk is unchanged.
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
+
+
+def _no_cache_html_response(path: Path, fallback_dir: Path, filename: str = 'index.html'):
+    """Serve ``filename`` from ``path`` (falling back to ``fallback_dir``)
+    with headers that prevent Cloudflare and any downstream proxy from
+    holding onto a stale SPA shell."""
+    if (path / filename).exists():
+        directory = path
+    elif (fallback_dir / filename).exists():
+        directory = fallback_dir
+    else:
+        directory = path
+    response = send_from_directory(str(directory), filename)
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
 @app.route('/favicon.ico')
 def favicon():
     directory, filename = _frontend_public_asset('vite.svg')
-    return send_from_directory(str(directory), filename)
+    response = send_from_directory(str(directory), filename)
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
 @app.route('/vite.svg')
 def vite_svg():
     directory, filename = _frontend_public_asset('vite.svg')
-    return send_from_directory(str(directory), filename)
+    response = send_from_directory(str(directory), filename)
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
 @app.route('/socialupload-app-icon.png')
 def app_icon():
     directory, filename = _frontend_public_asset('socialupload-app-icon.png')
-    return send_from_directory(str(directory), filename)
+    response = send_from_directory(str(directory), filename)
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
 @app.route('/')
 def index():  # put application's code here
-    return send_from_directory(str(_frontend_index_dir()), 'index.html')
+    return _no_cache_html_response(_frontend_index_dir(), Path(current_dir), 'index.html')
 
 
 @app.route('/privacy')
@@ -483,7 +520,11 @@ def index():  # put application's code here
 @app.route('/privacy-policy.html')
 def privacy_page():
     directory, filename = _frontend_public_asset('privacy-policy.html')
-    return send_from_directory(str(directory), filename)
+    response = send_from_directory(str(directory), filename)
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
 @app.route('/terms')
@@ -491,14 +532,18 @@ def privacy_page():
 @app.route('/terms-of-service.html')
 def terms_page():
     directory, filename = _frontend_public_asset('terms-of-service.html')
-    return send_from_directory(str(directory), filename)
+    response = send_from_directory(str(directory), filename)
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
 @app.route('/data-deletion')
 @app.route('/data-deletion/')
 def data_deletion_page():
     """Serve the data deletion instructions page (SPA route)."""
-    return send_from_directory(str(_frontend_index_dir()), 'index.html')
+    return _no_cache_html_response(_frontend_index_dir(), Path(current_dir), 'index.html')
 
 
 @app.route('/api/data-deletion-request', methods=['POST'])
@@ -1361,7 +1406,7 @@ def login():
     # When the browser simply visits /login without SSE parameters, serve the
     # SPA so that hash-based client-side routing takes over.
     if not request.args.get('type') and not request.args.get('id') and not request.args.get('accountId'):
-        return send_from_directory(str(_frontend_index_dir()), 'index.html')
+        return _no_cache_html_response(_frontend_index_dir(), Path(current_dir), 'index.html')
 
     account_id_raw = request.args.get('accountId')
 
