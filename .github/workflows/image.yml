@@ -1,5 +1,22 @@
 name: Build & Push App Image
 
+# This workflow pushes the production image to GHCR on every push to main.
+#
+# GOTCHA: GITHUB_TOKEN with packages:write cannot create new packages under a
+# user namespace on the first push — it returns "permission_denied:
+# read_package". The package has to be pre-created manually (one-time) before
+# any push will succeed. To do this:
+#
+#   1. Visit https://github.com/settings/packages
+#   2. Click "Create package" → Container registry
+#   3. Name it `social-auto-upload`, owner = willywang8216, public
+#
+# OR change the image's owner to an org that owns the repo (e.g. an org repo)
+# and workflows will work without the manual step.
+#
+# Once the package exists the workflow below will publish :main, :sha-<short>,
+# and :latest on every push.
+
 on:
   push:
     branches: [main]
