@@ -32,6 +32,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/sau-base
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=slim,enable={{is_default_branch}}
+
       - name: Build and push base image
         uses: docker/build-push-action@v6
         with:
@@ -39,4 +48,7 @@ jobs:
           file: Dockerfile.base
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ghcr.io/willywang8216/sau-base:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
