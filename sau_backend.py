@@ -7786,14 +7786,33 @@ def _import_cookies_for_account(platform, account, profile, fmt, payload, *, db_
 @app.route("/api/accounts", methods=["GET"])
 def api_accounts():
     """Return all accounts with cookie status and expiry, matching the
-    redesigned frontend's expected shape. Workspace-scoped in enforced mode."""
+    redesigned frontend's expected shape. Workspace-scoped in enforced mode.
+
+    Query params:
+      * ``platform`` — exact platform slug
+      * ``group`` — exact ``account_group`` (use the empty string to fetch
+        only ungrouped accounts; the response includes ``accountGroup``
+        so the frontend can re-bucket the rows)
+      * ``q`` — case-insensitive substring matched against ``nickname`` or
+        ``account_name``. Frontend filtering is local and fast, but this
+        param lets the MCP server and any external consumer fetch a
+        pre-narrowed list in one roundtrip.
+    """
     db_path = _current_db_path()
-    platform_filter = request.args.get("platform")
-    group_filter = request.args.get("group")
+    platform_filter = request.args.get("platform") or None
+    # ``group=""`` is a real sentinel for "ungrouped" — collapse only when the
+    # param is absent, not when it was passed empty.
+    group_filter: str | None
+    if "group" in request.args:
+        group_filter = request.args.get("group") or ""
+    else:
+        group_filter = None
+    search_filter = request.args.get("q") or None
     rows = profile_registry.list_accounts(
         workspace_id=_workspace_scope(),
         platform=platform_filter,
         account_group=group_filter,
+        search=search_filter,
         db_path=db_path,
     )
     out = []

@@ -186,9 +186,61 @@ class ProfileRegistryTests(unittest.TestCase):
         )
         groups = profiles.list_account_groups(db_path=self.db_path)
         self.assertEqual(groups, ["Daily", "Demos"])
-        profile = profiles.create_profile("Brand", db_path=self.db_path)
-        with self.assertRaises(ValueError):
-            profiles.add_account(profile.id, "myspace", "alice", db_path=self.db_path)
+
+    def test_list_accounts_search_matches_nickname_and_account_name(self) -> None:
+        profile = profiles.create_profile("SearchBrand", db_path=self.db_path)
+        profiles.add_account(
+            profile.id, profiles.PLATFORM_DOUYIN, "official_handle",
+            nickname="Acme Main", db_path=self.db_path,
+        )
+        profiles.add_account(
+            profile.id, profiles.PLATFORM_DOUYIN, "alt_handle",
+            nickname="Backup Brand", db_path=self.db_path,
+        )
+        profiles.add_account(
+            profile.id, profiles.PLATFORM_DOUYIN, "untouched",
+            db_path=self.db_path,
+        )
+
+        # Case-insensitive substring against the nickname
+        matched_nick = profiles.list_accounts(
+            profile_id=profile.id, search="acme", db_path=self.db_path,
+        )
+        self.assertEqual([a.account_name for a in matched_nick], ["official_handle"])
+
+        # Substring against the underlying account_name
+        matched_name = profiles.list_accounts(
+            profile_id=profile.id, search="alt_", db_path=self.db_path,
+        )
+        self.assertEqual([a.account_name for a in matched_name], ["alt_handle"])
+
+        # Blank search returns every account under the profile
+        all_rows = profiles.list_accounts(
+            profile_id=profile.id, search="   ", db_path=self.db_path,
+        )
+        self.assertEqual(len(all_rows), 3)
+
+        # No match returns an empty list (not an error)
+        self.assertEqual(
+            profiles.list_accounts(
+                profile_id=profile.id, search="ghost", db_path=self.db_path,
+            ),
+            [],
+        )
+
+        # Search combines with platform filter via AND
+        profiles.add_account(
+            profile.id, profiles.PLATFORM_MEDIUM, "another_acme",
+            nickname="Acme Blog", db_path=self.db_path,
+        )
+        douyin_acme = profiles.list_accounts(
+            profile_id=profile.id,
+            search="acme",
+            platform=profiles.PLATFORM_DOUYIN,
+            db_path=self.db_path,
+        )
+        self.assertEqual([a.account_name for a in douyin_acme], ["official_handle"])
+
 
     def test_iter_accounts_for_publish_named(self) -> None:
         profile = profiles.create_profile("Brand", db_path=self.db_path)

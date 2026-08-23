@@ -536,9 +536,17 @@ def list_accounts(
     platform: str | None = None,
     enabled: bool | None = None,
     account_group: str | None = None,
+    search: str | None = None,
     workspace_id: str | None = None,
     db_path: Path = DB_PATH,
 ) -> list[Account]:
+    """List accounts for the optional filters.
+
+    ``search`` is a case-insensitive substring matched against either
+    ``nickname`` or ``account_name`` (UI surfaces both, so the operator can
+    find accounts by either label). Whitespace is trimmed; an empty / blank
+    ``search`` is treated as no filter.
+    """
     query = "SELECT * FROM accounts"
     clauses: list[str] = []
     params: list[object] = []
@@ -557,6 +565,12 @@ def list_accounts(
         # (stored as the empty string) easy to find when desired.
         clauses.append("account_group = ?")
         params.append(account_group)
+    if search is not None:
+        needle = search.strip().lower()
+        if needle:
+            like = f"%{needle}%"
+            clauses.append("(LOWER(nickname) LIKE ? OR LOWER(account_name) LIKE ?)")
+            params.extend([like, like])
     if workspace_id is not None:
         clauses.append("workspace_id = ?")
         params.append(workspace_id)

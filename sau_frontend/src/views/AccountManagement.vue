@@ -7,6 +7,13 @@
         <button :class="{ on: filter === 'ready' }" @click="filter = 'ready'">Ready</button>
         <button :class="{ on: filter === 'attn' }" @click="filter = 'attn'">Needs auth</button>
       </div>
+      <input
+        class="filter-input"
+        type="search"
+        v-model="searchFilter"
+        placeholder="Search nickname / handle"
+        title="Filter by nickname, account name, or platform"
+      />
       <select
         class="filter-select"
         :value="platformFilter"
@@ -26,7 +33,23 @@
         <option value="__none__">Ungrouped</option>
         <option v-for="g in groups" :key="g" :value="g">{{ g }}</option>
       </select>
-      <span class="count">{{ filteredAccounts.length }} accounts · {{ platformCount }} platforms</span>
+      <button
+        class="btn-ghost btn-tiny"
+        :disabled="!hasActiveFilters"
+        @click="resetFilters"
+        title="Reset all filters"
+      >
+        Clear filters
+      </button>
+      <span class="count">
+        <template v-if="hasActiveFilters">
+          {{ filteredAccounts.length }} of {{ accounts.length }} accounts
+        </template>
+        <template v-else>
+          {{ filteredAccounts.length }} accounts
+        </template>
+        · {{ platformCount }} platforms
+      </span>
       <div class="spacer"></div>
       <button class="btn-ghost" @click="runHealthCheck">
         <component :is="icons.spark" :width="15" :height="15" /> Run health check
@@ -38,6 +61,13 @@
         <component :is="icons.plus" /> Connect Account
       </button>
     </div>
+
+    <!-- Datalist shared by all inline group editors — typing into the input
+         suggests existing groups, and free-text values create a brand-new
+         one on save. -->
+    <datalist id="account-group-options">
+      <option v-for="g in groups" :key="g" :value="g"></option>
+    </datalist>
 
     <!-- Account grid -->
     <div class="acct-grid">
@@ -67,17 +97,16 @@
             </div>
             <div class="acct-handle">{{ acct.connectionDetail || acct.platform }}</div>
             <div class="acct-tags">
-              <span v-if="acct.accountGroup" class="acct-tag">{{ acct.accountGroup }}</span>
-              <select
+              <span v-if="acct.accountGroup && !isEditing(acct)" class="acct-tag">{{ acct.accountGroup }}</span>
+              <input
                 v-if="isEditing(acct)"
-                class="filter-select inline-select"
+                class="input inline-input group-input"
+                list="account-group-options"
                 v-model="editDraft.accountGroup"
+                placeholder="No group — type to create"
                 @keyup.enter="saveEdit(acct)"
                 @keyup.esc="cancelEdit"
-              >
-                <option value="">No group</option>
-                <option v-for="g in groups" :key="g" :value="g">{{ g }}</option>
-              </select>
+              />
               <button
                 v-if="!isEditing(acct)"
                 class="link-btn"
@@ -411,6 +440,7 @@ const allPlatforms = computed(() =>
 const filter = ref('all')
 const platformFilter = ref('')
 const groupFilter = ref('')
+const searchFilter = ref('')
 const groups = ref([])
 const editingId = ref(null)
 const editDraft = ref({ nickname: '', accountGroup: '' })
@@ -439,10 +469,9 @@ async function saveEdit(acct) {
     await accountApi.updateAccountMeta(acct.id, { nickname: nextNick, accountGroup: nextGroup })
     acct.nickname = nextNick
     acct.accountGroup = nextGroup
-    // Refresh groups list if a new group name was added
-    if (nextGroup && !groups.value.includes(nextGroup)) {
-      groups.value = [...groups.value, nextGroup].sort((a, b) => a.localeCompare(b))
-    }
+    // Refresh groups list if a new group name was added (including clearing a
+    // group — reloading from the server keeps the dropdown in sync).
+    await loadGroups()
     flash(`Saved ${acct.accountName}`)
     cancelEdit()
   } catch (e) { flash('Save failed: ' + e.message) }
@@ -454,6 +483,20 @@ function onGroupFilterChange(e) {
   const v = e.target.value
   groupFilter.value = v === '__none__' ? '__none__' : v
 }
+
+function resetFilters() {
+  filter.value = 'all'
+  platformFilter.value = ''
+  groupFilter.value = ''
+  searchFilter.value = ''
+}
+
+const hasActiveFilters = computed(() =>
+  filter.value !== 'all' ||
+  Boolean(platformFilter.value) ||
+  Boolean(groupFilter.value) ||
+  Boolean((searchFilter.value || '').trim())
+)
 
 const platformsPresent = computed(() => {
   const slugs = new Set(accounts.value.map(a => a.platformSlug))
@@ -473,6 +516,19 @@ const filteredAccounts = computed(() => {
     } else {
       list = list.filter(a => a.accountGroup === groupFilter.value)
     }
+  }
+  const q = (searchFilter.value || '').trim().toLowerCase()
+  if (q) {
+    list = list.filter(a => {
+      const hay = [
+        a.nickname,
+        a.accountName,
+        a.platformSlug,
+        a.platform,
+        PLATFORM_META[a.platformSlug]?.label || '',
+      ]
+      return hay.some(s => s && String(s).toLowerCase().includes(q))
+    })
   }
   return list
 })
@@ -895,4 +951,31 @@ onMounted(async () => {
   transition: border-color 0.15s;
 }
 .filter-select:focus { outline: none; border-color: var(--accent); }
+.filter-input {
+  height: 32px;
+  padding: 0 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+  min-width: 200px;
+  transition: border-color 0.15s;
+}
+.filter-input:focus { outline: none; border-color: var(--accent); }
+.filter-input::placeholder { color: var(--text-3, #888); }
+.group-input {
+  font-size: 11.5px;
+  padding: 3px 6px;
+  margin-top: 0;
+  width: auto;
+  min-width: 140px;
+}
+.btn-tiny {
+  font-size: 11px;
+  padding: 4px 10px;
+  height: 32px;
+}
+.btn-ghost:disabled { opacity: 0.45; cursor: not-allowed; }
 </style>
