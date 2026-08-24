@@ -2,37 +2,46 @@
   <div class="fade-in">
     <!-- Toolbar -->
     <div class="toolbar">
-      <div class="seg">
-        <button :class="{ on: filter === 'all' }" @click="filter = 'all'">All</button>
-        <button :class="{ on: filter === 'ready' }" @click="filter = 'ready'">Ready</button>
-        <button :class="{ on: filter === 'attn' }" @click="filter = 'attn'">Needs auth</button>
+      <div class="seg" role="tablist" aria-label="Connection filter">
+        <button :class="{ on: filter === 'all' }" @click="filter = 'all'" role="tab">All</button>
+        <button :class="{ on: filter === 'ready' }" @click="filter = 'ready'" role="tab">Ready</button>
+        <button :class="{ on: filter === 'attn' }" @click="filter = 'attn'" role="tab">Needs auth</button>
       </div>
-      <input
-        class="filter-input"
-        type="search"
-        v-model="searchFilter"
-        placeholder="Search nickname / handle"
-        title="Filter by nickname, account name, or platform"
-      />
-      <select
-        class="filter-select"
-        :value="platformFilter"
-        @change="onPlatformFilterChange"
-        title="Filter by platform"
-      >
-        <option value="">All platforms</option>
-        <option v-for="p in platformsPresent" :key="p.slug" :value="p.slug">{{ p.label }}</option>
-      </select>
-      <select
-        class="filter-select"
-        :value="groupFilter"
-        @change="onGroupFilterChange"
-        title="Filter by group"
-      >
-        <option value="">All groups</option>
-        <option value="__none__">Ungrouped</option>
-        <option v-for="g in groups" :key="g" :value="g">{{ g }}</option>
-      </select>
+      <div class="filter-field" title="Filter by nickname, account name, or platform">
+        <component :is="icons.search" :width="14" :height="14" class="filter-icon" />
+        <input
+          class="filter-input filter-input-padded"
+          type="search"
+          v-model="searchFilter"
+          placeholder="Search nickname / handle"
+          aria-label="Search accounts"
+        />
+      </div>
+      <div class="filter-field" title="Filter by platform">
+        <component :is="icons.accounts" :width="14" :height="14" class="filter-icon" />
+        <select
+          class="filter-select filter-select-padded"
+          :value="platformFilter"
+          @change="onPlatformFilterChange"
+          aria-label="Filter by platform"
+        >
+          <option value="">All platforms</option>
+          <option v-for="p in platformsPresent" :key="p.slug" :value="p.slug">{{ p.label }}</option>
+        </select>
+      </div>
+      <div class="filter-field" title="Filter by group">
+        <component :is="icons.tag" :width="14" :height="14" class="filter-icon" />
+        <select
+          class="filter-select filter-select-padded"
+          :value="groupFilter"
+          @change="onGroupFilterChange"
+          aria-label="Filter by group"
+        >
+          <option value="">All groups</option>
+          <option value="__none__">Ungrouped</option>
+          <option v-for="g in groups" :key="g" :value="g">{{ g }}</option>
+        </select>
+      </div>
       <button
         class="btn-ghost btn-tiny"
         :disabled="!hasActiveFilters"
@@ -71,15 +80,21 @@
 
     <!-- Account grid -->
     <div class="acct-grid">
-      <div v-for="acct in filteredAccounts" :key="acct.id" class="acct">
+      <div
+        v-for="acct in filteredAccounts"
+        :key="acct.id"
+        class="acct"
+        :class="{ 'acct-editing': isEditing(acct), 'acct-flash': flashId === acct.id }"
+        @click="onCardClick(acct)"
+      >
         <div class="acct-top">
           <div class="acct-logo-wrap">
-            <img :src="acct.avatarUrl || defaultAvatar(acct.accountName)" class="acct-avatar" @error="e => e.target.src = defaultAvatar(acct.accountName)" />
+            <img :src="acct.avatarUrl || defaultAvatar(acct.accountName)" class="acct-avatar" @error="e => e.target.src = defaultAvatar(acct.accountName)" @click.stop />
             <span class="acct-platform-badge" :style="{ background: platformBg(acct.platformSlug) }">
               {{ platformShort(acct.platformSlug) }}
             </span>
           </div>
-          <div style="flex:1;min-width:0">
+          <div style="flex:1;min-width:0" @click.stop>
             <div class="acct-name">
               <template v-if="!isEditing(acct)">
                 <span>{{ acct.nickname || acct.accountName }}</span>
@@ -93,6 +108,7 @@
                 :placeholder="acct.accountName"
                 @keyup.enter="saveEdit(acct)"
                 @keyup.esc="cancelEdit"
+                @click.stop
               />
             </div>
             <div class="acct-handle">{{ acct.connectionDetail || acct.platform }}</div>
@@ -106,20 +122,26 @@
                 placeholder="No group — type to create"
                 @keyup.enter="saveEdit(acct)"
                 @keyup.esc="cancelEdit"
+                @click.stop
               />
-              <button
-                v-if="!isEditing(acct)"
-                class="link-btn"
-                @click="startEdit(acct)"
-                title="Edit nickname and group"
-              >Edit</button>
+              <template v-if="!isEditing(acct)">
+                <button
+                  class="link-btn edit-btn"
+                  @click.stop="startEdit(acct)"
+                  title="Edit nickname and group"
+                  aria-label="Edit nickname and group"
+                >
+                  <component :is="icons.pencil" :width="12" :height="12" />
+                  Edit
+                </button>
+              </template>
               <template v-else>
-                <button class="link-btn save" @click="saveEdit(acct)" :disabled="editSaving">Save</button>
-                <button class="link-btn" @click="cancelEdit">Cancel</button>
+                <button class="link-btn save" @click.stop="saveEdit(acct)" :disabled="editSaving" title="Save changes">Save</button>
+                <button class="link-btn" @click.stop="cancelEdit" title="Discard changes">Cancel</button>
               </template>
             </div>
           </div>
-          <span class="cookie-pill" :class="cookieStatusClass(acct)">
+          <span class="cookie-pill" :class="cookieStatusClass(acct)" @click.stop>
             <span class="d"></span>{{ cookieStatusLabel(acct) }}
           </span>
         </div>
@@ -137,7 +159,7 @@
             <div class="l">Cookie</div>
           </div>
         </div>
-        <div class="acct-actions">
+        <div class="acct-actions" @click.stop>
           <button class="mini-btn" :class="{ accent: cookieStatusClass(acct) !== 'ck-valid' }" @click="onReauth(acct)">
             <component :is="icons.oauth" :width="13" :height="13" />
             {{ acct.connectionLabel === 'Ready' ? 'Re-auth' : 'Reconnect' }}
@@ -149,6 +171,9 @@
             <component :is="icons.upload" :width="13" :height="13" /> Export
           </button>
           <button class="mini-btn" title="Remove" style="flex:0 0 38px" @click="onRemove(acct)">✕</button>
+        </div>
+        <div v-if="isEditing(acct)" class="acct-edit-hint" @click.stop>
+          <span>Editing — press <kbd>Enter</kbd> to save, <kbd>Esc</kbd> to cancel</span>
         </div>
       </div>
     </div>
@@ -365,7 +390,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { useAccountStore } from '@/stores/account'
 import { accountApi } from '@/api/account'
 import { profilesApi } from '@/api/profiles'
@@ -445,16 +470,33 @@ const groups = ref([])
 const editingId = ref(null)
 const editDraft = ref({ nickname: '', accountGroup: '' })
 const editSaving = ref(false)
+const flashId = ref(null)
+const editNameInput = ref(null)
 
 const isEditing = (acct) => editingId.value === acct.id
 
 function startEdit(acct) {
   editingId.value = acct.id
   editDraft.value = { nickname: acct.nickname || '', accountGroup: acct.accountGroup || '' }
+  // Focus the nickname input after Vue flushes the DOM
+  nextTick(() => {
+    const inputs = editNameInput.value
+    if (inputs) {
+      const el = Array.isArray(inputs) ? inputs[0] : inputs
+      el?.focus?.()
+      el?.select?.()
+    }
+  })
 }
 function cancelEdit() {
   editingId.value = null
   editDraft.value = { nickname: '', accountGroup: '' }
+}
+function onCardClick(acct) {
+  // Click on the card itself toggles edit mode (excluding inner controls,
+  // which stop propagation before this handler fires).
+  if (isEditing(acct)) return
+  startEdit(acct)
 }
 async function saveEdit(acct) {
   if (editSaving.value) return
@@ -472,6 +514,9 @@ async function saveEdit(acct) {
     // Refresh groups list if a new group name was added (including clearing a
     // group — reloading from the server keeps the dropdown in sync).
     await loadGroups()
+    // Brief highlight so the user sees their save took effect
+    flashId.value = acct.id
+    setTimeout(() => { if (flashId.value === acct.id) flashId.value = null }, 1200)
     flash(`Saved ${acct.accountName}`)
     cancelEdit()
   } catch (e) { flash('Save failed: ' + e.message) }
@@ -928,6 +973,80 @@ onMounted(async () => {
 }
 .link-btn:hover { color: var(--text); }
 .link-btn.save { color: var(--accent); }
+
+/* Edit button — give it a visible affordance (border + accent on hover) so
+   it isn't lost among the grey text. */
+.edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border, transparent);
+  background: var(--bg-2, transparent);
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: var(--r-full, 999px);
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.edit-btn:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Card-level click-to-edit affordance */
+.acct {
+  cursor: pointer;
+  transition: outline-color 0.15s, background 0.15s, box-shadow 0.4s;
+}
+.acct:hover {
+  outline: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+}
+.acct.editing {
+  cursor: default;
+}
+.acct.acct-flash {
+  box-shadow: 0 0 0 2px var(--accent), 0 0 12px var(--accent-soft);
+}
+
+/* Filter field wrapper (icon + control) */
+.filter-field {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.filter-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-3);
+  pointer-events: none;
+}
+.filter-input-padded { padding-left: 26px; }
+.filter-select-padded { padding-left: 26px; }
+
+/* Inline editing hint */
+.acct-edit-hint {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11.5px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+}
+.acct-edit-hint kbd {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin: 0 2px;
+}
 .inline-input {
   width: 100%;
   padding: 4px 8px;

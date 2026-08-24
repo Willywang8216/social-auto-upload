@@ -157,6 +157,14 @@ export const icons = {
     s('path', { d: 'M3 6h18' }),
     s('path', { d: 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2' }),
   ]),
+  pencil: (p) => h('svg', S(p), [
+    s('path', { d: 'M12 20h9' }),
+    s('path', { d: 'M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z' }),
+  ]),
+  tag: (p) => h('svg', S(p), [
+    s('path', { d: 'M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z' }),
+    s('circle', { cx: 7, cy: 7, r: 1.4 }),
+  ]),
 }
 
 export default icons
