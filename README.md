@@ -111,6 +111,20 @@ sau tiktok login --account <account_name>
 `sau-mcp` 把所有 CRUD / 排程操作包成 [Model Context Protocol](https://modelcontextprotocol.io) 工具，AI Agent（Claude Desktop、Cursor、自訂 OpenAI Agents 等）可以直接管理帳號、預約發文。
 
 ```bash
+# 一次註冊到所有偵測到的 MCP 用戶端（冪等）
+sau skill install
+
+# 預覽會動到哪些設定檔，不實際寫入
+sau skill install --dry-run
+
+# 移除
+sau skill remove
+
+# 查看狀態
+sau skill list
+```
+
+```bash
 # stdio（本地 Agent 預設）
 sau-mcp
 
