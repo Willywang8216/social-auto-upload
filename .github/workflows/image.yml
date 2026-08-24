@@ -4,18 +4,13 @@ name: Build & Push App Image
 #
 # GOTCHA: GITHUB_TOKEN with packages:write cannot create new packages under a
 # user namespace on the first push — it returns "permission_denied:
-# read_package". The package has to be pre-created manually (one-time) before
-# any push will succeed. To do this:
+# read_package". Even when the package already exists, GITHUB_TOKEN pushes have
+# been flaky on this user-namespace setup. So we authenticate with a PAT stored
+# as the `CR_PAT` repo secret (which has packages:write).
 #
-#   1. Visit https://github.com/settings/packages
-#   2. Click "Create package" → Container registry
-#   3. Name it `social-auto-upload`, owner = willywang8216, public
-#
-# OR change the image's owner to an org that owns the repo (e.g. an org repo)
-# and workflows will work without the manual step.
-#
-# Once the package exists the workflow below will publish :main, :sha-<short>,
-# and :latest on every push.
+# To rotate the PAT: regenerate at https://github.com/settings/tokens (needs
+# `write:packages` scope), then `gh secret set CR_PAT -b <new-pat> --repo
+# Willywang8216/social-auto-upload`.
 
 on:
   push:
@@ -38,7 +33,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
 
     steps:
       - name: Checkout
@@ -54,8 +48,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: willywang8216
+          password: ${{ secrets.CR_PAT }}
 
       - name: Extract metadata (tags, labels)
         id: meta
