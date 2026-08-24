@@ -12,6 +12,7 @@
           <a href="#" @click.prevent="scrollTo('platforms')">Platforms</a>
           <a href="#" @click.prevent="scrollTo('how-it-works')">How It Works</a>
           <a href="#" @click.prevent="scrollTo('quick-start')">Quick Start</a>
+          <a href="#" @click.prevent="scrollTo('mcp')">MCP / Agents</a>
           <a href="#" @click.prevent="scrollTo('api')">API</a>
           <router-link to="/privacy">Privacy</router-link>
           <router-link to="/terms">Terms</router-link>
@@ -341,6 +342,95 @@ curl /api/campaigns/1/export/csv -o export.csv</pre>
       </div>
     </section>
 
+    <!-- MCP / AI Agents -->
+    <section id="mcp" class="mcp-section">
+      <div class="section-inner">
+        <h2 class="section-title">Drive your uploads from any AI agent</h2>
+        <p class="section-desc">
+          Socialupload ships a built-in
+          <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">Model Context Protocol</a>
+          server (<code>sau-mcp</code>) so Claude Desktop, Cursor, Claude Code, and any MCP-compatible agent
+          can manage accounts, schedule posts, and read publish-job state &mdash; with the same payloads
+          the REST API and web UI see.
+        </p>
+
+        <div class="mcp-install">
+          <h3>One-line install</h3>
+          <p class="mcp-install-desc">
+            Register the MCP server with every detected client. Idempotent &mdash; safe to re-run.
+          </p>
+          <pre class="code-block"><code>sau skill install</code></pre>
+        </div>
+
+        <div class="mcp-grid">
+          <div class="mcp-card">
+            <h3>28 tools across 7 modules</h3>
+            <p>
+              <code>accounts_*</code>, <code>profiles_*</code>, <code>publish_*</code>,
+              <code>jobs_*</code>, <code>upload_register</code>, <code>whoami</code>,
+              <code>supported_platforms</code>. Full reference in the
+              <a href="https://github.com/Willywang8216/social-auto-upload/blob/main/docs/mcp.md" target="_blank" rel="noopener">MCP docs</a>.
+            </p>
+          </div>
+          <div class="mcp-card">
+            <h3>Claude Desktop</h3>
+            <p>Drop this into <code>claude_desktop_config.json</code> &mdash; or just run <code>sau skill install</code>.</p>
+            <pre class="code-block"><code>{
+  "mcpServers": {
+    "sau": {
+      "command": "/abs/path/to/sau-mcp",
+      "env": {
+        "SAU_MCP_DB_PATH": "/abs/path/to/db/database.db"
+      }
+    }
+  }
+}</code></pre>
+          </div>
+          <div class="mcp-card">
+            <h3>Cursor</h3>
+            <p>Same entry, same path &mdash; Cursor reads <code>~/.cursor/mcp.json</code>.</p>
+            <pre class="code-block"><code>{
+  "mcpServers": {
+    "sau": {
+      "command": "/abs/path/to/sau-mcp",
+      "env": { "SAU_MCP_DB_PATH": "/abs/path/to/db/database.db" }
+    }
+  }
+}</code></pre>
+          </div>
+          <div class="mcp-card">
+            <h3>Claude Code</h3>
+            <p>Stored under <code>~/.claude.json</code>. Use <code>sau skill install</code> to write it for you.</p>
+            <pre class="code-block"><code>{
+  "mcpServers": {
+    "sau": {
+      "command": "/abs/path/to/sau-mcp",
+      "env": { "SAU_MCP_DB_PATH": "/abs/path/to/db/database.db" }
+    }
+  }
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="mcp-notes">
+          <div class="mcp-note">
+            <strong>stdio by default.</strong> The agent&rsquo;s runtime spawns <code>sau-mcp</code> directly &mdash;
+            no network listener, no public port. Set <code>SAU_MCP_TRANSPORT=http</code> only if you need
+            remote agents.
+          </div>
+          <div class="mcp-note">
+            <strong>Secrets stay redacted.</strong> Every <code>accounts_get</code> / <code>accounts_list</code>
+            payload scrubs cookies, OAuth tokens, and any <code>*_token / *_secret / *_password</code> field
+            before it leaves the server. Pair with <code>SAU_CONFIG_ENCRYPTION_KEY</code> for at-rest AES-GCM.
+          </div>
+          <div class="mcp-note">
+            <strong>Transport-agnostic.</strong> HTTP mode (port <code>8765</code>) is opt-in via env vars.
+            Reverse-proxy auth (OAuth bearer, mTLS, etc.) is the operator&rsquo;s responsibility.
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- API Reference -->
     <section id="api" class="api-section">
       <div class="section-inner">
@@ -409,6 +499,7 @@ curl /api/campaigns/1/export/csv -o export.csv</pre>
             <a href="#platforms">Platforms</a>
             <a href="#how-it-works">How It Works</a>
             <a href="#quick-start">Quick Start</a>
+            <a href="#mcp">MCP / Agents</a>
             <a href="#api">API</a>
             <router-link to="/login">Sign In</router-link>
           </div>
@@ -963,6 +1054,146 @@ $max-width: 1120px;
     display: flex;
     gap: 16px;
     justify-content: center;
+  }
+}
+
+// MCP / AI Agents
+.mcp-section {
+  padding: 80px 24px;
+  background: linear-gradient(180deg, #fafbfc 0%, #ffffff 100%);
+
+  .section-desc {
+    text-align: center;
+    color: $text-secondary;
+    margin: 0 auto 32px;
+    font-size: 16px;
+    max-width: 760px;
+    line-height: 1.7;
+
+    a {
+      color: $primary;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+  }
+
+  .mcp-install {
+    text-align: center;
+    margin-bottom: 48px;
+
+    h3 {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 0 0 8px;
+    }
+
+    .mcp-install-desc {
+      color: $text-secondary;
+      margin: 0 0 16px;
+      font-size: 15px;
+    }
+
+    .code-block {
+      max-width: 560px;
+      margin: 0 auto;
+    }
+  }
+
+  .mcp-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 20px;
+  }
+
+  .mcp-card {
+    background: $bg;
+    border-radius: 12px;
+    padding: 24px;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    transition: transform 0.2s, box-shadow 0.2s;
+
+    &:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+    }
+
+    h3 {
+      font-size: 18px;
+      font-weight: 600;
+      margin: 0 0 8px;
+    }
+
+    p {
+      font-size: 14px;
+      color: $text-secondary;
+      margin: 0 0 12px;
+      line-height: 1.5;
+    }
+
+    code {
+      background: #eef2ff;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: #4338ca;
+    }
+
+    a {
+      color: $primary;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+
+    pre.code-block {
+      background: #0f172a;
+      color: #e2e8f0;
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin: 12px 0 0;
+      font-size: 12.5px;
+      line-height: 1.55;
+      overflow-x: auto;
+    }
+  }
+
+  .mcp-notes {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-top: 32px;
+
+    .mcp-note {
+      background: rgba(99, 102, 241, 0.06);
+      border-left: 3px solid #6366f1;
+      border-radius: 6px;
+      padding: 14px 16px;
+      font-size: 13.5px;
+      color: $text;
+      line-height: 1.55;
+
+      strong {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+
+      code {
+        background: rgba(99, 102, 241, 0.12);
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 12px;
+        color: #312e81;
+      }
+    }
+  }
+}
+
+@media (max-width: 880px) {
+  .mcp-section {
+    .mcp-grid,
+    .mcp-notes {
+      grid-template-columns: 1fr;
+    }
   }
 }
 

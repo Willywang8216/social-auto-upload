@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import os
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -893,6 +896,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print which files would be encrypted without touching disk.",
     )
 
+    # ----- Skill (MCP) installer -----
+    skill_parser = platform_parsers.add_parser(
+        "skill",
+        help="Register sau-mcp with AI agent clients (Claude Desktop, Cursor, Claude Code).",
+    )
+    skill_actions = skill_parser.add_subparsers(dest="action", required=True)
+    skill_install = skill_actions.add_parser(
+        "install",
+        help=(
+            "Detect installed MCP-aware clients and patch their config so "
+            "they expose the sau-mcp server under the `sau` MCP name."
+        ),
+    )
+    skill_install.add_argument(
+        "--client",
+        choices=("claude-desktop", "cursor", "claude-code", "all"),
+        default="all",
+        help="Which client to install into (default: all detected).",
+    )
+    skill_install.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would change without touching any config file.",
+    )
+    skill_remove = skill_actions.add_parser(
+        "remove",
+        help="Remove the sau-mcp entry from installed client configs.",
+    )
+    skill_remove.add_argument(
+        "--client",
+        choices=("claude-desktop", "cursor", "claude-code", "all"),
+        default="all",
+        help="Which client to remove from (default: all detected).",
+    )
+    skill_list = skill_actions.add_parser(
+        "list",
+        help="Print detected client configs and whether `sau` is registered.",
+    )
+    skill_list.add_argument(
+        "--client",
+        choices=("claude-desktop", "cursor", "claude-code", "all"),
+        default="all",
+    )
+
     return parser
 
 
@@ -1268,6 +1315,18 @@ async def dispatch(args: argparse.Namespace) -> int:
 
         raise RuntimeError(f"Unsupported cookies action: {args.action}")
 
+    if args.platform == "skill":
+        if args.action == "list":
+            return _skill_list(getattr(args, "client", "all"))
+        if args.action == "install":
+            return _skill_install(
+                client=getattr(args, "client", "all"),
+                dry_run=args.dry_run,
+            )
+        if args.action == "remove":
+            return _skill_remove(client=getattr(args, "client", "all"))
+        raise RuntimeError(f"Unsupported skill action: {args.action}")
+
     raise RuntimeError(f"Unsupported platform: {args.platform}")
 
 
@@ -1287,6 +1346,265 @@ def _all_cookie_files() -> list[Path]:
     if new_root.exists():
         candidates.extend(p for p in new_root.rglob("*.json") if p.is_file())
     return sorted(set(candidates))
+
+
+# ---------------------------------------------------------------------------
+# Skill / MCP installer
+# ---------------------------------------------------------------------------
+
+_SAU_MCP_NAME = "sau"
+
+
+@dataclass(slots=True)
+class SkillTarget:
+    """One MCP-aware client we know how to register sau-mcp with."""
+
+    client: str
+    config_path: Path
+    servers_key: str  # key under which `mcpServers` lives (or empty for root)
+
+
+def _resolve_sau_mcp_binary() -> Path:
+    """Return the absolute path to the sau-mcp binary, preferring the venv.
+
+    We prefer the venv copy (``sys.prefix / bin / sau-mcp``) so callers do
+    not pick up a stale system-wide install. Falls back to ``shutil.which``
+    and finally to a synthesized path under ``BASE_DIR/.venv/bin/sau-mcp``
+    which the user may need to install with ``uv sync``.
+    """
+    exe_name = "sau-mcp.exe" if os.name == "nt" else "sau-mcp"
+    venv_bin = Path(sys.prefix) / "Scripts" if os.name == "nt" else Path(sys.prefix) / "bin"
+    candidate = venv_bin / exe_name
+    if candidate.exists():
+        return candidate.resolve()
+    found = shutil.which("sau-mcp")
+    if found:
+        return Path(found).resolve()
+    fallback = Path(BASE_DIR) / ".venv" / "bin" / exe_name
+    return fallback.resolve()
+
+
+def _resolve_default_db_path() -> Path:
+    """Return the project's default DB path for the ``SAU_MCP_DB_PATH`` env.
+
+    Operators running the backend in-place already have this file; we point
+    the MCP entry at it so agents see the same rows as the web UI.
+    """
+    return (Path(BASE_DIR) / "db" / "database.db").resolve()
+
+
+def _build_sau_mcp_entry() -> dict:
+    """Construct the JSON entry an MCP client expects for sau-mcp."""
+    entry: dict = {"command": str(_resolve_sau_mcp_binary())}
+    db_path = _resolve_default_db_path()
+    entry["env"] = {"SAU_MCP_DB_PATH": str(db_path)}
+    return entry
+
+
+def _detect_skill_targets() -> list[SkillTarget]:
+    """Locate every known MCP client config on this machine.
+
+    All paths are returned even when the file does not exist — callers
+    distinguish "missing" from "empty" so the installer can decide whether
+    to create the file (which is fine for ``~/.cursor/mcp.json``) or skip
+    it (e.g. Claude Desktop absent).
+    """
+    home = Path.home()
+    targets: list[SkillTarget] = []
+
+    # Claude Desktop — Mac/Win/Linux
+    if sys.platform == "darwin":
+        cd_path = home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    elif os.name == "nt":
+        appdata = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
+        cd_path = Path(appdata) / "Claude" / "claude_desktop_config.json"
+    else:
+        cd_path = home / ".config" / "Claude" / "claude_desktop_config.json"
+    targets.append(SkillTarget(client="claude-desktop", config_path=cd_path, servers_key="mcpServers"))
+
+    # Cursor — `~/.cursor/mcp.json` (also recognised as `~/.config/cursor/mcp.json`)
+    cursor_path = home / ".cursor" / "mcp.json"
+    targets.append(SkillTarget(client="cursor", config_path=cursor_path, servers_key="mcpServers"))
+
+    # Claude Code — global MCP servers live under `~/.claude.json`
+    targets.append(SkillTarget(client="claude-code", config_path=home / ".claude.json", servers_key="mcpServers"))
+
+    return targets
+
+
+def _filter_targets(targets: list[SkillTarget], client: str) -> list[SkillTarget]:
+    if client == "all":
+        return list(targets)
+    return [t for t in targets if t.client == client]
+
+
+def _read_config(target: SkillTarget) -> dict:
+    if not target.config_path.exists():
+        return {}
+    try:
+        with target.config_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Could not read {target.config_path}: {exc}. Refusing to overwrite an unparseable config."
+        ) from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"{target.config_path} is not a JSON object (got {type(data).__name__}). Skipping."
+        )
+    return data
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Write JSON to ``path`` via a sibling tempfile + rename so a crash never
+    leaves the client with a truncated config."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".sau-tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    tmp.replace(path)
+
+
+def _ensure_servers_block(config: dict, target: SkillTarget) -> dict:
+    """Return the ``mcpServers`` block, creating it if missing."""
+    servers = config.get(target.servers_key)
+    if servers is None:
+        servers = {}
+        config[target.servers_key] = servers
+    if not isinstance(servers, dict):
+        raise RuntimeError(
+            f"{target.config_path} has a non-object `{target.servers_key}` block; refusing to touch it."
+        )
+    return servers
+
+
+def _format_target_line(target: SkillTarget, status: str, detail: str = "") -> str:
+    base = f"{target.client:<14} {status:<10} {target.config_path}"
+    return f"{base} {detail}".rstrip()
+
+
+def _skill_list(client: str) -> int:
+    targets = _filter_targets(_detect_skill_targets(), client)
+    if not targets:
+        print(f"No MCP clients matched --client={client}", file=sys.stderr)
+        return 2
+    print(f"{'client':<14} {'status':<10} config path")
+    print("-" * 80)
+    for target in targets:
+        if not target.config_path.exists():
+            print(_format_target_line(target, "missing"))
+            continue
+        try:
+            config = _read_config(target)
+        except RuntimeError as exc:
+            print(_format_target_line(target, "broken", str(exc)))
+            continue
+        servers = config.get(target.servers_key) or {}
+        registered = isinstance(servers, dict) and _SAU_MCP_NAME in servers
+        status = "registered" if registered else "present"
+        detail = f"({_SAU_MCP_NAME}={'yes' if registered else 'no'})"
+        print(_format_target_line(target, status, detail))
+    return 0
+
+
+def _skill_install(client: str, dry_run: bool) -> int:
+    targets = _filter_targets(_detect_skill_targets(), client)
+    if not targets:
+        print(f"No MCP clients matched --client={client}", file=sys.stderr)
+        return 2
+
+    entry = _build_sau_mcp_entry()
+    changed: list[str] = []
+    skipped: list[str] = []
+    missing: list[str] = []
+
+    for target in targets:
+        if not target.config_path.exists():
+            missing.append(target.client)
+            continue
+        try:
+            config = _read_config(target)
+            servers = _ensure_servers_block(config, target)
+        except RuntimeError as exc:
+            skipped.append(f"{target.client}: {exc}")
+            continue
+
+        existing = servers.get(_SAU_MCP_NAME)
+        if existing == entry:
+            continue
+
+        if dry_run:
+            changed.append(f"{target.client} (would set {_SAU_MCP_NAME})")
+            continue
+
+        servers[_SAU_MCP_NAME] = entry
+        try:
+            _atomic_write_json(target.config_path, config)
+        except OSError as exc:
+            skipped.append(f"{target.client}: write failed ({exc})")
+            continue
+        changed.append(target.client)
+
+    print("sau-mcp installer")
+    print(f"  binary:  {entry['command']}")
+    print(f"  db path: {entry['env']['SAU_MCP_DB_PATH']}")
+    if changed:
+        verb = "would update" if dry_run else "updated"
+        print(f"{verb}: {', '.join(changed)}")
+    if missing:
+        print(
+            f"skipped (config not found): {', '.join(missing)} — "
+            "install the client first or pass --client explicitly."
+        )
+    if skipped:
+        print("skipped (manual fix needed):")
+        for line in skipped:
+            print(f"  - {line}")
+    if not changed and not missing and not skipped:
+        print("everything already registered — nothing to do.")
+    return 0
+
+
+def _skill_remove(client: str) -> int:
+    targets = _filter_targets(_detect_skill_targets(), client)
+    if not targets:
+        print(f"No MCP clients matched --client={client}", file=sys.stderr)
+        return 2
+
+    removed: list[str] = []
+    missing: list[str] = []
+
+    for target in targets:
+        if not target.config_path.exists():
+            missing.append(target.client)
+            continue
+        try:
+            config = _read_config(target)
+        except RuntimeError as exc:
+            print(f"skipped {target.client}: {exc}", file=sys.stderr)
+            continue
+        servers = config.get(target.servers_key)
+        if not isinstance(servers, dict) or _SAU_MCP_NAME not in servers:
+            continue
+        del servers[_SAU_MCP_NAME]
+        # Drop the parent key when empty so we don't leave a stale `mcpServers: {}`.
+        if not servers:
+            config.pop(target.servers_key, None)
+        try:
+            _atomic_write_json(target.config_path, config)
+        except OSError as exc:
+            print(f"write failed for {target.client}: {exc}", file=sys.stderr)
+            continue
+        removed.append(target.client)
+
+    if removed:
+        print(f"removed `sau` MCP entry from: {', '.join(removed)}")
+    if missing:
+        print(f"skipped (config not found): {', '.join(missing)}")
+    if not removed and not missing:
+        print("`sau` was not registered anywhere — nothing to do.")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

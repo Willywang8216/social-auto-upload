@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from argparse import Namespace
@@ -288,6 +289,106 @@ class BrowserCliDispatchTests(unittest.TestCase):
         self.assertEqual(request.note, "图文正文")
         self.assertTrue(request.headless)
         self.assertEqual(len(request.image_files), 2)
+
+
+class SkillInstallerTests(unittest.TestCase):
+    """End-to-end tests for ``sau skill install`` / ``remove`` / ``list``.
+
+    These use a throwaway ``HOME`` so we never touch the operator's real
+    Claude Desktop / Cursor / Claude Code configs.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.cursor_dir = self.tmp / ".cursor"
+        self.cursor_dir.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_install_writes_sau_entry_under_mcpServers(self) -> None:
+        (self.cursor_dir / "mcp.json").write_text("{}", encoding="utf-8")
+        with patch("sau_cli.Path.home", lambda: self.tmp):
+            code = asyncio.run(
+                sau_cli.dispatch(
+                    sau_cli.build_parser().parse_args(["skill", "install", "--client", "cursor"])
+                )
+            )
+
+        self.assertEqual(code, 0)
+        written = json.loads((self.cursor_dir / "mcp.json").read_text(encoding="utf-8"))
+        self.assertIn("mcpServers", written)
+        self.assertIn("sau", written["mcpServers"])
+        self.assertEqual(written["mcpServers"]["sau"]["command"], str(sau_cli._resolve_sau_mcp_binary()))
+        self.assertEqual(
+            written["mcpServers"]["sau"]["env"]["SAU_MCP_DB_PATH"],
+            str(sau_cli._resolve_default_db_path()),
+        )
+
+    def test_install_dry_run_does_not_touch_disk(self) -> None:
+        (self.cursor_dir / "mcp.json").write_text("{}", encoding="utf-8")
+        original = (self.cursor_dir / "mcp.json").read_text(encoding="utf-8")
+        with patch("sau_cli.Path.home", lambda: self.tmp):
+            asyncio.run(
+                sau_cli.dispatch(
+                    sau_cli.build_parser().parse_args(
+                        ["skill", "install", "--client", "cursor", "--dry-run"]
+                    )
+                )
+            )
+        self.assertEqual((self.cursor_dir / "mcp.json").read_text(encoding="utf-8"), original)
+
+    def test_install_preserves_other_servers(self) -> None:
+        (self.cursor_dir / "mcp.json").write_text(
+            json.dumps(
+                {"mcpServers": {"other": {"command": "/usr/bin/other-mcp"}}},
+            ),
+            encoding="utf-8",
+        )
+        with patch("sau_cli.Path.home", lambda: self.tmp):
+            asyncio.run(
+                sau_cli.dispatch(
+                    sau_cli.build_parser().parse_args(["skill", "install", "--client", "cursor"])
+                )
+            )
+        written = json.loads((self.cursor_dir / "mcp.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["mcpServers"]["other"], {"command": "/usr/bin/other-mcp"})
+        self.assertIn("sau", written["mcpServers"])
+
+    def test_remove_drops_only_sau_entry(self) -> None:
+        (self.cursor_dir / "mcp.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "other": {"command": "/usr/bin/other-mcp"},
+                        "sau": {"command": "/tmp/sau-mcp"},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch("sau_cli.Path.home", lambda: self.tmp):
+            code = asyncio.run(
+                sau_cli.dispatch(
+                    sau_cli.build_parser().parse_args(["skill", "remove", "--client", "cursor"])
+                )
+            )
+        self.assertEqual(code, 0)
+        written = json.loads((self.cursor_dir / "mcp.json").read_text(encoding="utf-8"))
+        self.assertEqual(list(written["mcpServers"].keys()), ["other"])
+
+    def test_install_skips_unparseable_config(self) -> None:
+        (self.cursor_dir / "mcp.json").write_text("not-json", encoding="utf-8")
+        with patch("sau_cli.Path.home", lambda: self.tmp):
+            code = asyncio.run(
+                sau_cli.dispatch(
+                    sau_cli.build_parser().parse_args(["skill", "install", "--client", "cursor"])
+                )
+            )
+        self.assertEqual(code, 0)
+        # File untouched — installer must never overwrite an unparseable config.
+        self.assertEqual((self.cursor_dir / "mcp.json").read_text(encoding="utf-8"), "not-json")
 
 
 if __name__ == "__main__":

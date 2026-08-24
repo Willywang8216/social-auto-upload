@@ -13,6 +13,28 @@
         Get your token from <code>.env</code> → <code>SAU_API_TOKENS</code>.
       </el-alert>
 
+      <div class="mcp-overview">
+        <h3>🤖 Drive the same data from AI agents</h3>
+        <p>
+          Every endpoint below has a corresponding tool in the
+          <a href="https://github.com/Willywang8216/social-auto-upload/blob/main/docs/mcp.md" target="_blank" rel="noopener"><code>sau-mcp</code></a>
+          Model Context Protocol server. Register it once and Claude Desktop,
+          Cursor, and Claude Code can drive account CRUD, scheduling, and
+          publish-job reads &mdash; with secrets redacted before they leave the server.
+        </p>
+        <pre class="mcp-install-snippet">sau skill install          # register sau-mcp with every detected MCP client
+sau skill install --client cursor --dry-run   # preview changes
+sau skill remove           # unregister everywhere
+sau skill list             # show detection status</pre>
+        <p class="mcp-meta">
+          Stdio transport by default (no public port). HTTP opt-in via
+          <code>SAU_MCP_TRANSPORT=http</code>. Tools: <code>accounts_*</code>,
+          <code>profiles_*</code>, <code>publish_*</code>, <code>jobs_*</code>,
+          <code>upload_register</code>, <code>whoami</code>,
+          <code>supported_platforms</code>.
+        </p>
+      </div>
+
       <div v-for="section in sections" :key="section.title" class="api-section">
         <h3 @click="section.open = !section.open" class="section-title">
           <el-icon><ArrowDown v-if="section.open" /><ArrowRight v-else /></el-icon>
@@ -355,6 +377,51 @@ const sections = ref([
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+.mcp-overview {
+  background: linear-gradient(180deg, #f5f3ff 0%, #ede9fe 100%);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 10px;
+  padding: 18px 22px;
+  margin-bottom: 24px;
+}
+.mcp-overview h3 {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+.mcp-overview p {
+  font-size: 14px;
+  color: #1f2937;
+  margin: 0 0 12px;
+  line-height: 1.55;
+}
+.mcp-overview a {
+  color: #4f46e5;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.mcp-overview code {
+  background: rgba(99, 102, 241, 0.12);
+  color: #312e81;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12.5px;
+}
+.mcp-install-snippet {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  margin: 0 0 12px;
+  overflow-x: auto;
+}
+.mcp-meta {
+  font-size: 12.5px !important;
+  color: #4b5563 !important;
+  margin: 0 !important;
 }
 .api-section {
   margin-bottom: 16px;
