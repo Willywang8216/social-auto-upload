@@ -362,6 +362,36 @@ curl /api/campaigns/1/export/csv -o export.csv</pre>
           <pre class="code-block"><code>sau skill install</code></pre>
         </div>
 
+        <div class="mcp-onboarding">
+          <h3>First-time setup</h3>
+          <ol>
+            <li>
+              <strong>Connect at least one account in the web UI.</strong>
+              Cookie-based platforms (Douyin, Xiaohongshu, Kuaishou, Bilibili,
+              WeChat Channel) need a real browser to harvest the session &mdash;
+              visit <a href="#/accounts">Accounts</a>, click a platform, and
+              finish the login flow. OAuth platforms (TikTok, YouTube, Meta,
+              Reddit, Threads, X) start their callback from the UI as well.
+            </li>
+            <li>
+              <strong>Run <code>sau skill install</code>.</strong> This writes
+              the <code>sau</code> entry into Claude Desktop / Cursor / Claude
+              Code&rsquo;s MCP config and points it at your
+              <code>SAU_MCP_DB_PATH</code>.
+            </li>
+            <li>
+              <strong>Restart your AI client</strong> so it discovers the new
+              MCP server.
+            </li>
+            <li>
+              <strong>Sanity-check from the agent:</strong> ask it to call
+              <code>whoami</code> and <code>accounts_health</code>. If a
+              platform shows <code>0 ready</code>, finish its login in the web
+              UI and re-run <code>accounts_check</code>.
+            </li>
+          </ol>
+        </div>
+
         <div class="mcp-grid">
           <div class="mcp-card">
             <h3>28 tools across 7 modules</h3>
@@ -414,6 +444,14 @@ curl /api/campaigns/1/export/csv -o export.csv</pre>
 
         <div class="mcp-notes">
           <div class="mcp-note">
+            <strong>One workspace, every client.</strong> <code>sau-mcp</code>
+            reads from the same SQLite file as the web UI &mdash; new accounts,
+            groups, templates, and publish jobs created in <code>#/accounts</code>
+            or <code>#/profiles</code> are visible to the agent the next time
+            it calls <code>accounts_list</code> / <code>profiles_list</code>.
+            No restart, no resync.
+          </div>
+          <div class="mcp-note">
             <strong>stdio by default.</strong> The agent&rsquo;s runtime spawns <code>sau-mcp</code> directly &mdash;
             no network listener, no public port. Set <code>SAU_MCP_TRANSPORT=http</code> only if you need
             remote agents.
@@ -422,10 +460,6 @@ curl /api/campaigns/1/export/csv -o export.csv</pre>
             <strong>Secrets stay redacted.</strong> Every <code>accounts_get</code> / <code>accounts_list</code>
             payload scrubs cookies, OAuth tokens, and any <code>*_token / *_secret / *_password</code> field
             before it leaves the server. Pair with <code>SAU_CONFIG_ENCRYPTION_KEY</code> for at-rest AES-GCM.
-          </div>
-          <div class="mcp-note">
-            <strong>Transport-agnostic.</strong> HTTP mode (port <code>8765</code>) is opt-in via env vars.
-            Reverse-proxy auth (OAuth bearer, mTLS, etc.) is the operator&rsquo;s responsibility.
           </div>
         </div>
       </div>
@@ -1153,6 +1187,50 @@ $max-width: 1120px;
       font-size: 12.5px;
       line-height: 1.55;
       overflow-x: auto;
+    }
+  }
+
+  .mcp-onboarding {
+    background: #fff;
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    border-radius: 12px;
+    padding: 20px 28px;
+    margin-bottom: 32px;
+
+    h3 {
+      font-size: 18px;
+      font-weight: 600;
+      margin: 0 0 12px;
+    }
+
+    ol {
+      margin: 0;
+      padding-left: 22px;
+      color: $text;
+      font-size: 14px;
+      line-height: 1.65;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    strong {
+      font-weight: 600;
+    }
+
+    code {
+      background: #eef2ff;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 12.5px;
+      color: #4338ca;
+    }
+
+    a {
+      color: $primary;
+      text-decoration: underline;
+      text-underline-offset: 3px;
     }
   }
 

@@ -24,6 +24,55 @@ pip install -e .             # installs both entry points
 The `fastmcp==3.4.7` dependency is pinned in **both** `pyproject.toml`
 and `requirements.txt` per the project's dependency-manifest policy.
 
+## First-time setup
+
+`sau-mcp` is a *control surface* on top of the existing social-auto-upload
+workspace. The first account has to be connected through the web UI; once it
+is in the SQLite file, the agent sees it on the next `accounts_list`.
+
+1. **Connect at least one account in the web UI.** Cookie-based platforms
+   (Douyin, Xiaohongshu, Kuaishou, Bilibili, WeChat Channel) need a real
+   browser to harvest the session — go to `/#/accounts`, click a platform,
+   and complete the login. OAuth platforms (TikTok, YouTube, Meta, Reddit,
+   Threads, X, Patreon) start their callback from the UI as well.
+2. **Register the MCP server with your AI client.** `sau skill install`
+   patches Claude Desktop / Cursor / Claude Code in one shot (idempotent
+   — safe to re-run). Use `sau skill install --dry-run` to preview, or
+   `sau skill remove` to undo.
+3. **Restart your AI client** so it discovers the new MCP server.
+4. **Sanity-check from the agent:** ask it to call `whoami` (workspace
+   info + DB path) and `accounts_health` (per-platform `{ready, total}`
+   summary). If a platform shows `ready: 0`, finish its login in the web
+   UI and re-run `accounts_check` from the agent.
+
+### What the agent can do end-to-end without touching the UI
+
+Once an account row exists in the DB:
+
+- Full CRUD on profiles, accounts (including `group` reassignment),
+  publish templates, and jobs
+- `publish_submit` / `publish_preview` / `publish_regenerate` against any
+  account already registered
+- Read all job state (`jobs_list` / `jobs_get`); cancel / drain (`jobs_cancel`
+  / `jobs_run` for dev)
+- Register new media files under `videoFile/` via `upload_register`
+- Self-introspection via `whoami` and `supported_platforms`
+
+The MCP server reads from the same SQLite file the web UI writes to.
+Anything you create, edit, regroup, or schedule in `/#/accounts` or
+`/#/profiles` is visible to the agent on its next list call — no
+restart, no resync.
+
+### What still needs the UI
+
+- The first cookie / OAuth login for each platform (cookie files require a
+  browser session; OAuth callbacks hit `/oauth/<platform>/callback` on the
+  Flask backend)
+- The very first schema bootstrap (`python db/createTable.py` or
+  `alembic upgrade head`)
+- Manual edits to media assets (watermark configs, video processing)
+  unless you wire them through the REST API
+
 ## Transports
 
 | Transport          | Use case                                | Config                                       |

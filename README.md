@@ -132,6 +132,25 @@ sau-mcp
 SAU_MCP_TRANSPORT=http SAU_MCP_HOST=0.0.0.0 SAU_MCP_PORT=8765 sau-mcp
 ```
 
+**首次設定流程：**
+
+1. 在 Web UI 至少綁定一個帳號（`/#/accounts` 點選平台並完成登入）。
+   Cookie 平台（抖音、小紅書、快手、B 站、微信視頻號）需要瀏覽器登入；
+   OAuth 平台（TikTok、YouTube、Meta、Reddit、Threads、X）的 callback
+   也由 Flask 後端處理，所以第一次一定會經過 UI。
+2. 跑 `sau skill install`，把 `sau-mcp` 註冊到 Claude Desktop / Cursor /
+   Claude Code（冪等，可重跑）。
+3. **重啟 AI 客戶端**，讓它發現新的 MCP 伺服器。
+4. 在 Agent 對話裡下：`whoami` 確認工作區，再下 `accounts_health`
+   看每個平台有幾個 `ready`。`ready: 0` 表示該平台還沒在 UI 登入。
+
+之後在 `/#/accounts` 改 nickname、分組、新增/刪除帳號，或者在 `/#/profiles`
+調整 profile，Agent 下一次呼叫 `accounts_list` / `profiles_list` 就會看到
+新的結果 —— MCP 跟 UI 共用同一個 SQLite 檔，不需要重啟或同步。
+
+什麼仍然需要 UI：每個平台的第一次登入、媒體素材處理（浮水印、縮圖）、
+初次 schema 初始化（`python db/createTable.py`）。
+
 完整工具列表、傳輸設定、Claude Desktop 設定範例請見 [docs/mcp.md](./docs/mcp.md)。
 
 ## 快速開始

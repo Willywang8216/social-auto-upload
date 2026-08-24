@@ -26,6 +26,11 @@
 sau skill install --client cursor --dry-run   # preview changes
 sau skill remove           # unregister everywhere
 sau skill list             # show detection status</pre>
+        <ol class="mcp-onboarding-list">
+          <li>Connect at least one account in the web UI (<code>#/accounts</code>) — the first cookie/OAuth login always happens there.</li>
+          <li>Run <code>sau skill install</code>, then restart your AI client.</li>
+          <li>From the agent: <code>whoami</code> &rarr; <code>accounts_health</code>. Any account CRUD you do in the UI is visible on the next list call.</li>
+        </ol>
         <p class="mcp-meta">
           Stdio transport by default (no public port). HTTP opt-in via
           <code>SAU_MCP_TRANSPORT=http</code>. Tools: <code>accounts_*</code>,
@@ -417,6 +422,23 @@ const sections = ref([
   line-height: 1.6;
   margin: 0 0 12px;
   overflow-x: auto;
+}
+.mcp-onboarding-list {
+  margin: 0 0 14px;
+  padding-left: 22px;
+  font-size: 13.5px;
+  color: #1f2937;
+  line-height: 1.65;
+}
+.mcp-onboarding-list li {
+  margin: 3px 0;
+}
+.mcp-onboarding-list code {
+  background: rgba(99, 102, 241, 0.12);
+  color: #312e81;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
 }
 .mcp-meta {
   font-size: 12.5px !important;
