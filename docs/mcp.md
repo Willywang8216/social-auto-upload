@@ -84,6 +84,27 @@ held by the running agent (e.g. the cursor returned from one tool call
 referenced by the next) resets, but the *workspace state* on disk does
 not.
 
+#### Custom groups (multi-bucket accounts)
+
+`account_group` is a single free-form TEXT column, so an account belongs
+to exactly one group filter chip at a time. When a single account needs
+to surface under multiple buckets (for example, a YouTube identity that
+posts both under the `nakedwill` *and* `sexualwill` editorial lines),
+set a custom group label such as `both` (or any operator-chosen tag)
+and put the per-bucket detail in the `nickname`:
+
+```
+# accounts_update on id=110
+accounts_update(account_id=110, account_group="both", nickname="Itswill_YT (both naked+sexual)")
+```
+
+The custom group then appears as its own chip in `accounts_groups()`
+and the Accounts tab filter; consumers that want the account under
+both buckets fan out by `accounts_list` (no group) and post-filter on
+`nickname` instead. This is intentionally simpler than a join table:
+the single-column design keeps the Accounts tab UI fast and lets a
+later revision add a multi-bucket join without breaking existing rows.
+
 ### What still needs the UI
 
 - The first cookie / OAuth login for each platform (cookie files require a
