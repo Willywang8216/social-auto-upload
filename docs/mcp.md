@@ -63,6 +63,27 @@ Anything you create, edit, regroup, or schedule in `/#/accounts` or
 `/#/profiles` is visible to the agent on its next list call — no
 restart, no resync.
 
+#### Live sync (no resync step required)
+
+Because every MCP tool calls `myUtils.profiles` / `myUtils.publish_templates`
+/ `myUtils.account_events` against the project SQLite directly, the
+agent sees UI-driven changes the next time it issues a list/get call —
+no MCP restart, no cache flush, no manual signal needed.
+
+| UI action                                           | Agent sees it on               |
+| --------------------------------------------------- | ------------------------------ |
+| Add / edit / delete an account in `/#/accounts`     | `accounts_list` / `accounts_get` |
+| Reassign an account to a different group            | `accounts_list` / `accounts_groups` |
+| Create / rename / delete a profile in `/#/profiles` | `profiles_list` / `profiles_get` |
+| Save / edit a Publish Center template               | `publish_templates_list`       |
+| Schedule a video from `/#/publish-center`           | `jobs_list` (after worker picks it up) |
+| Connect a brand-new platform account               | `accounts_list` + `accounts_health` |
+
+The only exception is a hard MCP-server restart: in-process state
+held by the running agent (e.g. the cursor returned from one tool call
+referenced by the next) resets, but the *workspace state* on disk does
+not.
+
 ### What still needs the UI
 
 - The first cookie / OAuth login for each platform (cookie files require a

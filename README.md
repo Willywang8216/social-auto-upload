@@ -148,6 +148,11 @@ SAU_MCP_TRANSPORT=http SAU_MCP_HOST=0.0.0.0 SAU_MCP_PORT=8765 sau-mcp
 調整 profile，Agent 下一次呼叫 `accounts_list` / `profiles_list` 就會看到
 新的結果 —— MCP 跟 UI 共用同一個 SQLite 檔，不需要重啟或同步。
 
+任何 UI 上的 CRUD（帳號/Profile/分組/Template/排程）都會在 agent 下一個
+list/get 呼叫時自動可見；只有 server 端重啟才會清掉 agent process 內
+的 in-memory cursor，磁碟上的 workspace 狀態不受影響。詳見
+[docs/mcp.md](./docs/mcp.md) 的「Live sync」段。
+
 什麼仍然需要 UI：每個平台的第一次登入、媒體素材處理（浮水印、縮圖）、
 初次 schema 初始化（`python db/createTable.py`）。
 
