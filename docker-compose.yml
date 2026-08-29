@@ -1,8 +1,35 @@
 services:
   social-auto-upload:
-    build: .
+    # Pull the published image rather than building it locally so Watchtower
+    # can actually update it (the previous `build: .` produced
+    # `social-auto-upload-social-auto-upload:latest`, which lives on Docker
+    # Hub under nobody — Watchtower would 401 every cycle). The GHCR image
+    # is published by `.github/workflows/image.yml` on every push to main.
+    image: ghcr.io/willywang8216/social-auto-upload:latest
+    pull_policy: always
     container_name: social-auto-upload
     restart: always
+    # Watchtower:
+    #  * `com.centurylinklabs.watchtower.enable=true` opts the container in
+    #    to Watchtower polling (the host already runs `Watchtower` with
+    #    `--interval 3600 --cleanup` and no WATCHTOWER_LABEL_ENABLE flag, so
+    #    by default it watches everything — but opt-in is the convention
+    #    used by sibling stacks and keeps the intent explicit).
+    #  * `com.centurylinklabs.watchtower.monitor-only=false` lets Watchtower
+    #    both restart the container on crash AND pull a fresh image every
+    #    hour. Set to `true` if you'd rather Watchtower only alert.
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+      com.centurylinklabs.watchtower.monitor-only: "false"
+    healthcheck:
+      # Cheap probe: a 200 from the static SPA proves the container is
+      # serving traffic and can reach its bound port. Watchtower's own
+      # monitor-only health check relies on this HEALTHCHECK firing.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5409/', timeout=3).status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     ports:
       - "5409:5409"
     volumes:

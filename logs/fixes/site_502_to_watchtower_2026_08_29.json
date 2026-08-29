@@ -1,0 +1,51 @@
+{
+  "fix_id": "site_502_to_watchtower_2026_08_29",
+  "completed_at": "2026-08-29T15:02:00Z",
+  "session": "social-auto-upload-51 (594d8c)",
+  "status": "wired-and-verified",
+  "commit": null,
+  "root_cause": "socialupload.iamwillywang.com returned 502 because the `social-auto-upload` backend container was missing entirely; openresty's upstream `proxy_pass http://social-auto-upload:5409` was failing with `connect() failed (113: No route to host)`. The previous restart manager had been Watchtower, but Watchtower had no GHCR credentials — so even after restoring the container, Watchtower could not pull image updates from `ghcr.io/willywang8216/social-auto-upload:latest`.",
+  "fix": {
+    "step_1_bring_backend_up": "docker compose up -d social-auto-upload (from /home/will/social-auto-upload) — restored the missing container; gunicorn listening on 0.0.0.0:5409.",
+    "step_2_switch_compose_to_ghcr_image": {
+      "file": "docker-compose.yml",
+      "change": "Replaced `build: .` with `image: ghcr.io/willywang8216/social-auto-upload:latest` + `pull_policy: always`. The locally-built image was named `social-auto-upload-social-auto-upload:latest`, which doesn't exist on any registry and caused Watchtower 401s.",
+      "why": "Watchtower needs a registry-reachable image reference to detect updates; the GHCR image is published by .github/workflows/image.yml on every push to main."
+    },
+    "step_3_add_watchtower_labels": {
+      "file": "docker-compose.yml",
+      "labels": {
+        "com.centurylinklabs.watchtower.enable": "true",
+        "com.centurylinklabs.watchtower.monitor-only": "false"
+      },
+      "healthcheck": "python http probe to http://127.0.0.1:5409/ — interval 30s, retries 3, start_period 60s"
+    },
+    "step_4_add_label_enable_to_watchtower": {
+      "file": "/opt/1panel/apps/watchtower/watchtower/.env",
+      "change": "Added `--label-enable` to COMMAND1 so Watchtower only scans opted-in containers instead of every running container on the host."
+    },
+    "step_5_provide_ghcr_credentials": {
+      "files": [
+        "/opt/1panel/apps/watchtower/watchtower/data/config.json (new, chmod 600) — {auths:{ghcr.io:{auth:<base64 user:pat>}}}",
+        "/opt/1panel/apps/watchtower/watchtower/docker-compose.yml — added DOCKER_CONFIG=/config env + bind mount of the config.json"
+      ],
+      "why": "Watchtower only reads registry creds from a config.json file mounted at the location pointed to by DOCKER_CONFIG. Passing the PAT as env would have surfaced it in `docker inspect` output and was rejected for that reason."
+    }
+  },
+  "verification": {
+    "backend_container": "Up, healthcheck healthy, IP 172.18.0.12 on 1panel-network.",
+    "watchtower_one_shot": "Loaded auth credentials for user willywang8216 on registry ghcr.io from file /config/config.json. Session done, Scanned=1 Updated=0 (no upstream image change yet).",
+    "public_site": "https://socialupload.iamwillywang.com/ -> 200; /api/version -> 401 (token-protected, expected)."
+  },
+  "files_changed": [
+    "/home/will/social-auto-upload/docker-compose.yml",
+    "/opt/1panel/apps/watchtower/watchtower/.env",
+    "/opt/1panel/apps/watchtower/watchtower/docker-compose.yml",
+    "/opt/1panel/apps/watchtower/watchtower/data/config.json (new)"
+  ],
+  "next_action_for_next_agent": [
+    "git add + commit + push /home/will/social-auto-upload/docker-compose.yml once you confirm the staging area.",
+    "The /opt/1panel/apps/watchtower/ changes are 1panel-managed; backing them up is at the operator's discretion (1panel stores its own snapshot).",
+    "If a future GHCR PAT rotation is needed, edit /opt/1panel/apps/watchtower/watchtower/data/config.json (re-encode with `echo -n user:pat | base64 -w0`). The .env PAT field can be left empty or removed."
+  ]
+}
