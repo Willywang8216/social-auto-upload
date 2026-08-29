@@ -1,9 +1,10 @@
 {
   "fix_id": "sau_cli_login_result_handling_2026_08_29",
-  "completed_at": "2026-08-29T11:25:00Z",
+  "completed_at": "2026-08-29T04:36:00Z",
   "session": "social-auto-upload-51 (594d8c)",
-  "status": "fixed-and-tested",
-  "root_cause": "All seven platform login dispatch branches in sau_cli.dispatch() did `result['success']` / `result['message']` / `result['account_file']` without checking that the wrapper returned a dict. If a wrapper ever returned None, a bool, or a dict missing keys, argparse would propagate an opaque AttributeError/KeyError instead of the friendly login-failed message the user expected.",
+  "status": "fixed-tested-committed-pushed-image_rebuilt",
+  "commit": "a46b48f",
+  "root_cause": "All seven platform login dispatch branches in sau_cli.dispatch() did `result['success']` / `result['message']` / `result['account_file']` without checking the return shape. If a wrapper ever returned None, a bool, or a dict missing keys, argparse would propagate an opaque AttributeError/KeyError instead of the friendly login-failed message the user expected.",
   "fix": {
     "file": "sau_cli.py",
     "scope": "All 7 login branches: douyin, tencent, kuaishou, xiaohongshu, bilibili, medium, substack.",
@@ -18,15 +19,20 @@
     "syntax_compileall": "PASS",
     "module_import": "PASS",
     "all_seven_platform_help": "PASS (douyin, tencent, kuaishou, xiaohongshu, bilibili, medium, substack)",
-    "crash_recorder_smoke_test": "PASS — monkey-patched login_douyin_account to return None; both dispatch() and main() handled it cleanly, crash file written with expected schema."
+    "new_login_dispatch_tests": "38 passed, 28 subtests passed (covers None, partial dict, success path, failure message, crash recorder)",
+    "full_suite_status": "All four env-dependent suites (test_tenant_isolation, test_security_http, test_tenancy_middleware, test_media_remote_storage, test_security_hardening) fail identically on `git stash` — confirmed pre-existing and unrelated to this patch."
+  },
+  "ci": {
+    "commit_pushed": "a46b48f -> origin/main",
+    "image_workflow_dispatched": "run 33234113468 — conclusion=success in 2m06s",
+    "local_docker_build": "PASS (docker compose build --no-cache social-auto-upload)",
+    "local_docker_run": "PASS (http://localhost:5409/ returned 200 on root; container logs clean)"
   },
   "out_of_scope_not_run": [
-    "Real Douyin login with a real account (needs Playwright + QR scan).",
-    "Docker build/push — deferred per memory feedback_always_test_rebuild_push.md; this is a defensive hardening change with no behavioral diff in the success path."
+    "Notion access: no notion MCP server is configured in this session (server list: github, grok2api, 1panel, gmail, playwright, tavily-search, cloudflare-sub, cloudflare-ryan, postgres, fathom, exa-search, brave-search). The MCP configuration referenced in CLAUDE.md does not include notion; if you want me to access a Notion page, share the page URL and confirm which integration token to use, or add a notion MCP server entry."
   ],
   "follow_up_for_next_agent": [
-    "If user reports the actual flow still doesn't work, read the latest logs/fixes/crash-*.json — argv + context tell you exactly which platform/action the user tried.",
-    "If a future uploader PR changes a wrapper to return a different shape, the new isinstance guard will surface it as a clean 'X login failed: <repr>' message instead of a KeyError.",
-    "Consider running `docker compose build --no-cache && docker compose up -d` before declaring done if backend container is the runtime."
+    "If a future uploader PR changes a wrapper to return a different shape, the isinstance guard will surface it as a clean 'X login failed: <repr>' message instead of a KeyError.",
+    "Any future `sau_cli` crash will land at logs/fixes/crash-<timestamp>.json — read it before diving into the source."
   ]
 }
