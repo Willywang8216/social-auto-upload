@@ -7,7 +7,7 @@ import os
 import shutil
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -947,9 +947,11 @@ async def dispatch(args: argparse.Namespace) -> int:
     if args.platform == "douyin":
         if args.action == "login":
             result = await login_douyin_account(args.account, headless=args.headless)
-            if not result["success"]:
-                raise RuntimeError(result["message"])
-            print(f"Douyin login flow completed: {result['account_file']}")
+            if not isinstance(result, dict) or not result.get("success", False):
+                raise RuntimeError(
+                    f"Douyin login failed: {result if not isinstance(result, dict) else result.get('message', 'Unknown error')}"
+                )
+            print(f"Douyin login flow completed: {result.get('account_file')}")
             return 0
 
         if args.action == "check":
@@ -1001,9 +1003,11 @@ async def dispatch(args: argparse.Namespace) -> int:
     if args.platform == "tencent":
         if args.action == "login":
             result = await login_tencent_account(args.account, headless=args.headless)
-            if not result["success"]:
-                raise RuntimeError(result["message"])
-            print(f"Tencent login flow completed: {result['account_file']}")
+            if not isinstance(result, dict) or not result.get("success", False):
+                raise RuntimeError(
+                    f"Tencent login failed: {result if not isinstance(result, dict) else result.get('message', 'Unknown error')}"
+                )
+            print(f"Tencent login flow completed: {result.get('account_file')}")
             return 0
 
         if args.action == "check":
@@ -1036,9 +1040,11 @@ async def dispatch(args: argparse.Namespace) -> int:
     if args.platform == "kuaishou":
         if args.action == "login":
             result = await login_kuaishou_account(args.account, headless=args.headless)
-            if not result["success"]:
-                raise RuntimeError(result["message"])
-            print(f"Kuaishou login flow completed: {result['account_file']}")
+            if not isinstance(result, dict) or not result.get("success", False):
+                raise RuntimeError(
+                    f"Kuaishou login failed: {result if not isinstance(result, dict) else result.get('message', 'Unknown error')}"
+                )
+            print(f"Kuaishou login flow completed: {result.get('account_file')}")
             return 0
 
         if args.action == "check":
@@ -1086,9 +1092,11 @@ async def dispatch(args: argparse.Namespace) -> int:
     if args.platform == "xiaohongshu":
         if args.action == "login":
             result = await login_xiaohongshu_account(args.account, headless=args.headless)
-            if not result["success"]:
-                raise RuntimeError(result["message"])
-            print(f"Xiaohongshu login flow completed: {result['account_file']}")
+            if not isinstance(result, dict) or not result.get("success", False):
+                raise RuntimeError(
+                    f"Xiaohongshu login failed: {result if not isinstance(result, dict) else result.get('message', 'Unknown error')}"
+                )
+            print(f"Xiaohongshu login flow completed: {result.get('account_file')}")
             return 0
 
         if args.action == "check":
@@ -1138,9 +1146,11 @@ async def dispatch(args: argparse.Namespace) -> int:
     if args.platform == "bilibili":
         if args.action == "login":
             result = await login_bilibili_account(args.account)
-            if not result["success"]:
-                raise RuntimeError(result["message"])
-            print(f"Bilibili login flow completed: {result['account_file']}")
+            if not isinstance(result, dict) or not result.get("success", False):
+                raise RuntimeError(
+                    f"Bilibili login failed: {result if not isinstance(result, dict) else result.get('message', 'Unknown error')}"
+                )
+            print(f"Bilibili login flow completed: {result.get('account_file')}")
             return 0
 
         if args.action == "check":
@@ -1167,9 +1177,11 @@ async def dispatch(args: argparse.Namespace) -> int:
     if args.platform == "medium":
         if args.action == "login":
             result = await login_medium_account(args.account, profile=args.profile, headless=args.headless)
-            if not result["success"]:
-                raise RuntimeError(result["message"])
-            print(f"Medium login flow completed: {result['account_file']}")
+            if not isinstance(result, dict) or not result.get("success", False):
+                raise RuntimeError(
+                    f"Medium login failed: {result if not isinstance(result, dict) else result.get('message', 'Unknown error')}"
+                )
+            print(f"Medium login flow completed: {result.get('account_file')}")
             return 0
 
         if args.action == "check":
@@ -1201,9 +1213,11 @@ async def dispatch(args: argparse.Namespace) -> int:
     if args.platform == "substack":
         if args.action == "login":
             result = await login_substack_account(args.account, profile=args.profile, headless=args.headless)
-            if not result["success"]:
-                raise RuntimeError(result["message"])
-            print(f"Substack login flow completed: {result['account_file']}")
+            if not isinstance(result, dict) or not result.get("success", False):
+                raise RuntimeError(
+                    f"Substack login failed: {result if not isinstance(result, dict) else result.get('message', 'Unknown error')}"
+                )
+            print(f"Substack login flow completed: {result.get('account_file')}")
             return 0
 
         if args.action == "check":
@@ -1607,13 +1621,59 @@ def _skill_remove(client: str) -> int:
     return 0
 
 
+def _record_crash(exc: BaseException, argv: Sequence[str] | None, context: dict) -> None:
+    """Persist a structured crash report so other agents can resume.
+
+    Every unexpected ``Exception`` raised inside ``dispatch`` is written to
+    ``logs/fixes/crash-<UTC-timestamp>.json`` alongside the argv the user ran
+    and a small context dict (platform/action/account when known). The
+    function never raises — recording must not mask the original error.
+    """
+
+    try:
+        fix_dir = BASE_DIR / "logs" / "fixes"
+        fix_dir.mkdir(parents=True, exist_ok=True)
+        utc_now = datetime.now(timezone.utc)
+        timestamp = utc_now.strftime("%Y%m%dT%H%M%S%fZ")
+        payload = {
+            "captured_at": utc_now.isoformat().replace("+00:00", "Z"),
+            "argv": list(argv) if argv is not None else sys.argv[1:],
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+            "context": context,
+        }
+        (fix_dir / f"crash-{timestamp}.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        # Recording must never mask the original failure.
+        pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
+    context: dict = {}
     try:
+        # Record only the fields that survived argparse validation; missing
+        # attributes mean the user passed something so broken argparse rejected
+        # it before reaching here.
+        context = {
+            "platform": getattr(args, "platform", None),
+            "action": getattr(args, "action", None),
+            "account": getattr(args, "account", None),
+        }
         return asyncio.run(dispatch(args))
+    except SystemExit:
+        raise
     except Exception as exc:
-        print(str(exc), file=sys.stderr)
+        _record_crash(exc, argv, context)
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        print(
+            f"(crash recorded under logs/fixes/ — run `python3 -m sau_cli "
+            f"--help` to confirm argparse still works, then re-run after fixing)",
+            file=sys.stderr,
+        )
         return 1
 
 

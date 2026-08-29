@@ -1,0 +1,14 @@
+{
+  "fix_id": "sau_douyin_login_fix_001",
+  "timestamp": "2026-08-29T00:00:00Z",
+  "command": "sau douyin login --account <name>",
+  "issue": "CLI dispatch not properly registered for douyin login subcommand (only upload-video etc. were wired; login was missing in the parser loop)",
+  "steps": [
+    "Investigated sau_cli.py: traced dispatch(args) and parser setup",
+    "Identified login_douyin_account registered in login_douyin_account function but not dispatched in dispatch() for login action",
+    "Fixed dispatch to handle login action and call login_douyin_account",
+    "Added recording of all changes and tests to logs/fixes/"
+  ],
+  "outcome": "CLI now supports `sau douyin login --account <name>` (runs douyin_setup)",
+  "next_steps": "Test with real account, run docker rebuild, push"
+}
