@@ -72,7 +72,8 @@ class MetaAuthTests(unittest.TestCase):
             _ErrorResponse({'error': {'message': 'bad token'}}),
             _FakeResponse({'access_token': 'fb-tok', 'expires_in': 5183944}),
         ])
-        payload = meta_auth.refresh_instagram_user_token(access_token='long-lived', session=session)
+        with patch.dict(os.environ, {'META_APP_ID': 'app-id', 'META_APP_SECRET': 'app-secret'}, clear=False):
+            payload = meta_auth.refresh_instagram_user_token(access_token='long-lived', session=session)
         self.assertEqual(payload['access_token'], 'fb-tok')
         self.assertEqual(session.calls[1][1], meta_auth.META_TOKEN_URL)
 
