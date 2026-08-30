@@ -441,6 +441,183 @@ class PreparedPublisherTests(unittest.TestCase):
             value = prepared_publishers._config_value({"botTokenEnv": "TOKEN_ENV"}, "botToken")
         self.assertEqual(value, "abc")
 
+    def test_facebook_publish_returns_updated_config_with_re_derived_page_token(self):
+        session = _RecordingSession([
+            _FakeResponse({"id": "video-1"}),
+        ])
+        account = SimpleNamespace(config={
+            "pageId": "p1",
+            "accessToken": "",
+            "metaUserAccessToken": "user-token",
+            "metaUserAccessTokenExpiresAt": "2000-01-01T00:00:00",
+            "accessTokenExpiresAt": "2000-01-01T00:00:00",
+        })
+        with patch("myUtils.meta_auth.fetch_managed_pages", return_value={
+            "data": [{"id": "p1", "name": "Brand", "access_token": "new-page-token"}]
+        }) as fetch_pages, \
+             patch("myUtils.meta_auth.exchange_for_long_lived_token", return_value={"access_token": "user-token", "expires_in": 5183944}), \
+             patch("myUtils.meta_auth.refresh_instagram_user_token", return_value={"access_token": "user-token", "expires_in": 5183944}), \
+             patch.object(prepared_publishers, "_check_meta_token_not_expired", lambda *a, **kw: None):
+            result = prepared_publishers.publish_facebook_sync(
+                account,
+                {
+                    "message": "hi",
+                    "artifacts": [{"public_url": "https://cdn.example/v.mp4", "artifact_kind": "watermarked_video"}],
+                },
+                session=session,
+            )
+        fetch_pages.assert_called_once()
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["updated_config"]["metaUserAccessToken"], "user-token")
+        self.assertEqual(result["updated_config"]["accessToken"], "new-page-token")
+        self.assertEqual(session.calls[0][2]["data"]["access_token"], "new-page-token")
+
+    def test_instagram_publish_returns_updated_config_with_re_derived_page_token(self):
+        session = _RecordingSession([
+            _FakeResponse({"id": "ig-container"}),
+            _FakeResponse({"id": "ig-media"}),
+        ])
+        account = SimpleNamespace(config={
+            "igUserId": "ig-1",
+            "pageId": "p1",
+            "accessToken": "",
+            "metaUserAccessToken": "user-token",
+            "metaUserAccessTokenExpiresAt": "2000-01-01T00:00:00",
+            "accessTokenExpiresAt": "2000-01-01T00:00:00",
+        })
+        with patch("myUtils.meta_auth.fetch_managed_pages", return_value={
+            "data": [{
+                "id": "p2",
+                "name": "Brand Page",
+                "access_token": "new-page-token",
+                "instagram_business_account": {"id": "ig-1", "username": "brand_ig"},
+            }]
+        }), \
+             patch("myUtils.meta_auth.exchange_for_long_lived_token", return_value={"access_token": "user-token", "expires_in": 5183944}), \
+             patch("myUtils.meta_auth.refresh_instagram_user_token", return_value={"access_token": "user-token", "expires_in": 5183944}), \
+             patch.object(prepared_publishers, "_check_meta_token_not_expired", lambda *a, **kw: None):
+            result = prepared_publishers.publish_instagram_sync(
+                account,
+                {
+                    "message": "hi",
+                    "artifacts": [{"public_url": "https://cdn.example/i.jpg", "artifact_kind": "watermarked_image"}],
+                },
+                session=session,
+            )
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["updated_config"]["accessToken"], "new-page-token")
+        self.assertEqual(result["updated_config"]["pageId"], "p2")
+
+    def test_is_recoverable_oauth_error_detects_subcode(self):
+        from myUtils.prepared_publishers import _is_recoverable_oauth_error, PreparedPublishError
+        ok = PreparedPublishError("HTTP 401: Token expired code=190 error_subcode=463 type=OAuthException")
+        self.assertTrue(_is_recoverable_oauth_error(ok))
+        bad = PreparedPublishError("HTTP 400: invalid params")
+        self.assertFalse(_is_recoverable_oauth_error(bad))
+        grant = PreparedPublishError("HTTP 401: invalid_grant Token has been expired or revoked")
+        self.assertTrue(_is_recoverable_oauth_error(grant))
+
+    def test_is_youtube_refresh_token_expired(self):
+        from myUtils.prepared_publishers import _is_youtube_refresh_token_expired
+        self.assertFalse(_is_youtube_refresh_token_expired({}))
+        self.assertFalse(_is_youtube_refresh_token_expired({"refreshTokenExpiresAt": ""}))
+        self.assertTrue(_is_youtube_refresh_token_expired({"refreshTokenExpiresAt": "2000-01-01T00:00:00"}))
+        self.assertFalse(_is_youtube_refresh_token_expired({"refreshTokenExpiresAt": "2099-01-01T00:00:00"}))
+
+    def test_facebook_publish_retries_on_recoverable_401(self):
+        class _AuthError(_FakeResponse):
+            status_code = 401
+            def __init__(self):
+                super().__init__({"error": {"code": 190, "error_subcode": 463, "message": "Token expired"}})
+            def raise_for_status(self):
+                from myUtils.prepared_publishers import PreparedPublishError
+                raise PreparedPublishError("HTTP 401: Token expired code=190 error_subcode=463 type=OAuthException")
+        # First response is the 401 that triggers the retry; second response is success.
+        session = _RecordingSession([
+            _AuthError(),
+            _FakeResponse({"id": "video-1"}),
+        ])
+        account = SimpleNamespace(config={
+            "pageId": "p1",
+            "accessToken": "page-token",
+            "metaUserAccessToken": "user-token",
+            "metaUserAccessTokenExpiresAt": "2099-01-01T00:00:00",
+            "accessTokenExpiresAt": "2099-01-01T00:00:00",
+        })
+        with patch.object(prepared_publishers, "_maybe_refresh_facebook_token", lambda config, **kw: config), \
+             patch("myUtils.meta_auth.fetch_managed_pages", return_value={"data": [{"id": "p1", "name": "P", "access_token": "page-token"}]}), \
+             patch.object(prepared_publishers, "_check_meta_token_not_expired", lambda *a, **kw: None), \
+             patch.object(prepared_publishers, "_rederive_meta_page_token", side_effect=lambda config, platform, **kw: {**config, "accessToken": "page-token"}):
+            result = prepared_publishers.publish_facebook_sync(
+                account,
+                {
+                    "message": "hi",
+                    "artifacts": [{"public_url": "https://cdn.example/v.mp4", "artifact_kind": "watermarked_video"}],
+                },
+                session=session,
+            )
+        self.assertEqual(result["results"][-1]["id"], "video-1")
+        self.assertEqual(len(session.calls), 2)  # 1 failure + 1 success after retry
+
+    def test_facebook_publish_does_not_retry_twice_on_persistent_401(self):
+        class _AuthError(_FakeResponse):
+            status_code = 401
+            def __init__(self):
+                super().__init__({"error": {"code": 190, "error_subcode": 463, "message": "Token expired"}})
+            def raise_for_status(self):
+                from myUtils.prepared_publishers import PreparedPublishError
+                raise PreparedPublishError("HTTP 401: Token expired code=190 error_subcode=463 type=OAuthException")
+        session = _RecordingSession([
+            _AuthError(),
+            _AuthError(),
+        ])
+        account = SimpleNamespace(config={
+            "pageId": "p1",
+            "accessToken": "page-token",
+            "metaUserAccessToken": "user-token",
+            "metaUserAccessTokenExpiresAt": "2099-01-01T00:00:00",
+            "accessTokenExpiresAt": "2099-01-01T00:00:00",
+        })
+        with patch.object(prepared_publishers, "_maybe_refresh_facebook_token", lambda config, **kw: config), \
+             patch("myUtils.meta_auth.fetch_managed_pages", return_value={"data": [{"id": "p1", "name": "P", "access_token": "page-token"}]}), \
+             patch.object(prepared_publishers, "_check_meta_token_not_expired", lambda *a, **kw: None), \
+             patch.object(prepared_publishers, "_rederive_meta_page_token", side_effect=lambda config, platform, **kw: {**config, "accessToken": "page-token"}):
+            with self.assertRaises(prepared_publishers.PreparedPublishError):
+                prepared_publishers.publish_facebook_sync(
+                    account,
+                    {
+                        "message": "hi",
+                        "artifacts": [{"public_url": "https://cdn.example/v.mp4", "artifact_kind": "watermarked_video"}],
+                    },
+                    session=session,
+                )
+        self.assertEqual(len(session.calls), 2)  # original + 1 retry, then propagated
+
+    def test_facebook_publish_does_not_retry_on_400(self):
+        class _BadRequest(_FakeResponse):
+            status_code = 400
+            def raise_for_status(self):
+                from myUtils.prepared_publishers import PreparedPublishError
+                raise PreparedPublishError("HTTP 400: bad request")
+        session = _RecordingSession([_BadRequest()])
+        account = SimpleNamespace(config={
+            "pageId": "p1",
+            "accessToken": "page-token",
+            "metaUserAccessToken": "user-token",
+            "metaUserAccessTokenExpiresAt": "2099-01-01T00:00:00",
+            "accessTokenExpiresAt": "2099-01-01T00:00:00",
+        })
+        with self.assertRaises(prepared_publishers.PreparedPublishError):
+            prepared_publishers.publish_facebook_sync(
+                account,
+                {
+                    "message": "hi",
+                    "artifacts": [{"public_url": "https://cdn.example/v.mp4", "artifact_kind": "watermarked_video"}],
+                },
+                session=session,
+            )
+        self.assertEqual(len(session.calls), 1)
+
     def test_tiktok_video_rejects_pull_from_url_file_over_one_gb(self):
         session = _RecordingSession([
             _FakeResponse({'data': {'creator_avatar_url': 'x'}}),

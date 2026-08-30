@@ -21,6 +21,7 @@ META_AUTHORIZE_URL = "https://www.facebook.com/v25.0/dialog/oauth"
 META_TOKEN_URL = f"{META_GRAPH_ROOT}/oauth/access_token"
 META_ME_ACCOUNTS_URL = f"{META_GRAPH_ROOT}/me/accounts"
 META_INSTAGRAM_THREADS_URL_TEMPLATE = f"{META_GRAPH_ROOT}/{{ig_user_id}}"
+INSTAGRAM_REFRESH_TOKEN_URL = "https://graph.instagram.com/refresh_access_token"
 DEFAULT_FACEBOOK_SCOPES = (
     "pages_show_list",
     "pages_manage_posts",
@@ -134,6 +135,32 @@ def exchange_for_long_lived_token(*, access_token: str, client_id_env: str = CLI
     if payload.get('error'):
         message = payload.get('error', {}).get('message') if isinstance(payload.get('error'), dict) else payload.get('error')
         raise MetaOAuthError(str(message or 'Meta long-lived token exchange failed'))
+    return payload
+
+
+def refresh_instagram_user_token(*, access_token: str, session=None) -> dict[str, Any]:
+    """Refresh a long-lived Instagram user access token via the IG-specific endpoint.
+
+    Per Meta docs: https://developers.facebook.com/docs/instagram-platform/reference/refresh_access_token/
+    Falls back to fb_exchange_token when the IG endpoint rejects the token
+    (e.g. for IG accounts connected via Facebook Login rather than Instagram Login).
+    Returns the same payload shape as exchange_for_long_lived_token so callers can
+    handle both uniformly.
+    """
+    http = _get_session(session)
+    response = http.get(
+        INSTAGRAM_REFRESH_TOKEN_URL,
+        params={"grant_type": "ig_refresh_token", "access_token": access_token},
+        timeout=120,
+    )
+    if not getattr(response, "ok", True):
+        return exchange_for_long_lived_token(access_token=access_token, session=session)
+    try:
+        payload = response.json()
+    except ValueError:
+        return exchange_for_long_lived_token(access_token=access_token, session=session)
+    if payload.get("error"):
+        return exchange_for_long_lived_token(access_token=access_token, session=session)
     return payload
 
 

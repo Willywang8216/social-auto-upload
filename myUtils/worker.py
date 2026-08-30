@@ -267,17 +267,60 @@ class PublishWorker:
                 if not meta_user_token:
                     return
                 from myUtils import meta_auth
-                refreshed = meta_auth.exchange_for_long_lived_token(access_token=meta_user_token)
-                config.update({
-                    "metaUserAccessToken": refreshed.get("access_token") or meta_user_token,
-                    "accessTokenUpdatedAt": now,
-                    "lastAutoRefreshAt": now,
-                })
+                if platform == "instagram":
+                    refreshed = meta_auth.refresh_instagram_user_token(access_token=meta_user_token)
+                else:
+                    refreshed = meta_auth.exchange_for_long_lived_token(access_token=meta_user_token)
+                new_user_token = str(refreshed.get("access_token") or meta_user_token)
+                config["metaUserAccessToken"] = new_user_token
                 expires_in = refreshed.get("expires_in")
                 if expires_in:
                     config["metaUserAccessTokenExpiresAt"] = (
                         datetime.now() + timedelta(seconds=int(expires_in))
                     ).isoformat(timespec="seconds")
+
+                # Re-derive the page-level access_token from the freshly-refreshed
+                # user token. Page tokens inherit the user token's lifecycle, so
+                # without this publishing breaks ~60 days after connect.
+                try:
+                    pages_payload = meta_auth.fetch_managed_pages(access_token=new_user_token)
+                    pages = pages_payload.get("data", []) if isinstance(pages_payload, dict) else []
+                    if isinstance(pages, list) and pages:
+                        target_page = None
+                        if platform == "facebook":
+                            wanted = str(config.get("pageId") or "").strip()
+                            if wanted:
+                                target_page = next(
+                                    (p for p in pages if str(p.get("id") or "") == wanted),
+                                    None,
+                                )
+                            if target_page is None:
+                                target_page = pages[0]
+                        else:  # instagram
+                            wanted_ig = str(config.get("igUserId") or "").strip()
+                            for p in pages:
+                                ig = p.get("instagram_business_account") if isinstance(p, dict) else None
+                                if not isinstance(ig, dict):
+                                    continue
+                                if wanted_ig and str(ig.get("id") or "") == wanted_ig:
+                                    target_page = p
+                                    break
+                                if not wanted_ig and target_page is None:
+                                    target_page = p
+                        if target_page is not None:
+                            page_token = str(target_page.get("access_token") or "").strip()
+                            if page_token:
+                                config["accessToken"] = page_token
+                            if platform == "instagram" and target_page.get("id"):
+                                config["pageId"] = str(target_page["id"])
+                except Exception as exc:
+                    _logger.warning(
+                        f"worker self-maintenance: failed to re-derive page token "
+                        f"for {platform} account id={account.id}: {exc}"
+                    )
+
+                config["accessTokenUpdatedAt"] = now
+                config["lastAutoRefreshAt"] = now
 
             elif platform == "twitter":
                 refresh_token = str(config.get("refreshToken") or "").strip()
@@ -952,7 +995,14 @@ async def _publish_prepared_facebook(
 ) -> None:
     if account is None:
         raise ValueError("Prepared Facebook publish requires a structured account")
-    await asyncio.to_thread(prepared_publishers.publish_facebook_sync, account, payload)
+    result = await asyncio.to_thread(prepared_publishers.publish_facebook_sync, account, payload)
+    updated_config = result.get('updated_config') if isinstance(result, dict) else None
+    if isinstance(updated_config, dict) and updated_config:
+        profile_registry.update_account(
+            account.id,
+            config=updated_config,
+            auth_type='oauth',
+        )
 
 
 async def _publish_prepared_instagram(
@@ -965,7 +1015,14 @@ async def _publish_prepared_instagram(
 ) -> None:
     if account is None:
         raise ValueError("Prepared Instagram publish requires a structured account")
-    await asyncio.to_thread(prepared_publishers.publish_instagram_sync, account, payload)
+    result = await asyncio.to_thread(prepared_publishers.publish_instagram_sync, account, payload)
+    updated_config = result.get('updated_config') if isinstance(result, dict) else None
+    if isinstance(updated_config, dict) and updated_config:
+        profile_registry.update_account(
+            account.id,
+            config=updated_config,
+            auth_type='oauth',
+        )
 
 
 async def _publish_prepared_threads(

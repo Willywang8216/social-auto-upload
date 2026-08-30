@@ -12,6 +12,7 @@ from myUtils import meta_auth
 class _FakeResponse:
     def __init__(self, payload):
         self._payload = payload
+        self.ok = True
 
     def raise_for_status(self):
         return None
@@ -55,6 +56,25 @@ class MetaAuthTests(unittest.TestCase):
         payload = meta_auth.fetch_managed_pages(access_token='token', session=session)
         self.assertEqual(payload['data'][0]['name'], 'Brand Page')
         self.assertEqual(session.calls[0][1], meta_auth.META_ME_ACCOUNTS_URL)
+
+    def test_refresh_instagram_user_token_uses_ig_endpoint(self):
+        session = _FakeSession([_FakeResponse({'access_token': 'ig-tok', 'expires_in': 5183944})])
+        payload = meta_auth.refresh_instagram_user_token(access_token='long-lived', session=session)
+        self.assertEqual(payload['access_token'], 'ig-tok')
+        self.assertEqual(session.calls[0][1], meta_auth.INSTAGRAM_REFRESH_TOKEN_URL)
+        self.assertEqual(session.calls[0][2]['params']['grant_type'], 'ig_refresh_token')
+        self.assertEqual(session.calls[0][2]['params']['access_token'], 'long-lived')
+
+    def test_refresh_instagram_user_token_falls_back_on_error(self):
+        class _ErrorResponse(_FakeResponse):
+            ok = False
+        session = _FakeSession([
+            _ErrorResponse({'error': {'message': 'bad token'}}),
+            _FakeResponse({'access_token': 'fb-tok', 'expires_in': 5183944}),
+        ])
+        payload = meta_auth.refresh_instagram_user_token(access_token='long-lived', session=session)
+        self.assertEqual(payload['access_token'], 'fb-tok')
+        self.assertEqual(session.calls[1][1], meta_auth.META_TOKEN_URL)
 
 
 if __name__ == '__main__':

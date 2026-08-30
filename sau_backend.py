@@ -2590,6 +2590,18 @@ def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_sec
     config = dict(account.config or {})
     if account.platform == profile_registry.PLATFORM_TIKTOK:
         return prepared_publishers._is_tiktok_access_token_stale(config, skew_seconds=skew_seconds)
+    if account.platform == profile_registry.PLATFORM_YOUTUBE:
+        # Google OAuth Testing-mode apps issue 7-day refresh tokens; the
+        # access token can be refreshed, but the refresh token itself dies.
+        if prepared_publishers._is_youtube_refresh_token_expired(config):
+            return True
+        access_token = str(config.get('accessToken') or '').strip()
+        if not access_token:
+            return True
+        expires_at = prepared_publishers._parse_iso_datetime(str(config.get('accessTokenExpiresAt') or ''))
+        if expires_at is None:
+            return False
+        return expires_at <= (prepared_publishers._utc_now() + timedelta(seconds=skew_seconds))
     if account.platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
         meta_user_access_token = str(config.get('metaUserAccessToken') or '').strip()
         if not meta_user_access_token:
@@ -4072,6 +4084,14 @@ def youtube_oauth_callback():
         expires_in = token_payload.get('expires_in')
         if expires_in not in (None, ''):
             merged_config['accessTokenExpiresAt'] = (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+        # Capture the refresh-token expiry so we can warn the user before the
+        # 7-day Testing-mode cliff. Apps in `In production` mode omit this
+        # field → non-expiring refresh token.
+        refresh_expires_in = token_payload.get('refresh_token_expires_in')
+        if refresh_expires_in not in (None, '', 0):
+            merged_config['refreshTokenExpiresAt'] = (datetime.now(timezone.utc) + timedelta(seconds=int(refresh_expires_in))).isoformat(timespec='seconds')
+        else:
+            merged_config['refreshTokenExpiresAt'] = ''
         if first.get('id'):
             merged_config['channelId'] = first.get('id')
         if snippet.get('title'):
