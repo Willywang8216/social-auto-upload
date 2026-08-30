@@ -154,6 +154,11 @@ def _raise_for_status(response) -> None:
         response.raise_for_status()
     except Exception as exc:  # noqa: BLE001
         status = getattr(response, "status_code", "?")
+        # Only surface the body detail for actual error responses (>=400); for
+        # 2xx we re-raise the original library exception so callers don't get
+        # a misleading "HTTP 200: …" string from a non-fatal parse step.
+        if isinstance(status, int) and status < 400:
+            raise
         detail = ""
         try:
             body = response.json()
@@ -703,6 +708,25 @@ def _is_meta_token_stale(config: dict[str, Any], *, skew_seconds: int = 300) -> 
     return expires_at <= (_utc_now() + timedelta(seconds=skew_seconds))
 
 
+def _is_youtube_refresh_token_expired(config: dict[str, Any]) -> bool:
+    """Return True if the YouTube refresh token itself has expired.
+
+    Google OAuth apps in ``Testing`` publishing status issue refresh tokens that
+    expire after 7 days. Apps moved to ``In production`` get non-expiring refresh
+    tokens. We capture ``refresh_token_expires_in`` from the initial exchange as
+    ``refreshTokenExpiresAt`` so we can detect the cliff and surface a clear
+    "reconnect required" instead of letting publishing fail with a confusing
+    ``invalid_grant`` error at the next publish.
+    """
+    expires_at = str(config.get("refreshTokenExpiresAt") or "").strip()
+    if not expires_at:
+        return False  # non-expiring (production mode) — assume ok
+    parsed = _parse_iso_datetime(expires_at)
+    if parsed is None:
+        return False
+    return parsed <= _utc_now()
+
+
 def _maybe_refresh_meta_token(config: dict[str, Any], platform: str, *, session=None) -> dict[str, Any]:
     """Refresh the Meta user access token for Facebook or Instagram if stale.
 
@@ -719,7 +743,10 @@ def _maybe_refresh_meta_token(config: dict[str, Any], platform: str, *, session=
         return config  # still valid
 
     try:
-        refreshed = _meta_auth.exchange_for_long_lived_token(access_token=meta_user_token)
+        if platform == "instagram":
+            refreshed = _meta_auth.refresh_instagram_user_token(access_token=meta_user_token, session=session)
+        else:
+            refreshed = _meta_auth.exchange_for_long_lived_token(access_token=meta_user_token, session=session)
     except Exception:
         return config  # best-effort: keep using the old token
 
@@ -737,6 +764,80 @@ def _maybe_refresh_meta_token(config: dict[str, Any], platform: str, *, session=
     return updated
 
 
+def _rederive_meta_page_token(config: dict[str, Any], platform: str, *, session=None) -> dict[str, Any]:
+    """Re-derive the page-level access_token from the current user token.
+
+    Page tokens inherit the lifecycle of the user token that minted them, so
+    whenever the user token rotates we must fetch a fresh page token via
+    /me/accounts. Updates ``config["accessToken"]`` in place and returns the
+    updated dict. Returns the config unchanged on any failure (best-effort).
+    """
+    from myUtils import meta_auth as _meta_auth
+
+    user_token = str(config.get("metaUserAccessToken") or "").strip()
+    if not user_token:
+        return config
+    try:
+        payload = _meta_auth.fetch_managed_pages(access_token=user_token, session=session)
+    except Exception:
+        return config
+    pages = payload.get("data", []) if isinstance(payload, dict) else []
+    if not isinstance(pages, list) or not pages:
+        return config
+
+    target = None
+    if platform == "facebook":
+        wanted = str(config.get("pageId") or "").strip()
+        if wanted:
+            target = next((p for p in pages if str(p.get("id") or "") == wanted), None)
+        if target is None:
+            target = pages[0]
+    else:  # instagram
+        wanted_ig = str(config.get("igUserId") or "").strip()
+        for page in pages:
+            ig = page.get("instagram_business_account") if isinstance(page, dict) else None
+            if not isinstance(ig, dict):
+                continue
+            if wanted_ig and str(ig.get("id") or "") == wanted_ig:
+                target = page
+                break
+            if not wanted_ig and target is None:
+                target = page
+
+    if target is None:
+        return config
+
+    updated = dict(config)
+    page_token = str(target.get("access_token") or "").strip()
+    if page_token:
+        updated["accessToken"] = page_token
+    if platform == "instagram" and target.get("id"):
+        updated["pageId"] = str(target["id"])
+    return updated
+
+
+_OAUTH_RETRY_SUBCODES = {460, 463, 467}
+_OAUTH_RETRY_CODES = {190}
+
+
+def _is_recoverable_oauth_error(exc: Exception) -> bool:
+    """Return True if a PreparedPublishError looks like a token that can be rotated."""
+    text = str(exc) if exc else ""
+    if "HTTP 401" not in text and "HTTP 400" not in text:
+        return False
+    for sub in _OAUTH_RETRY_SUBCODES:
+        if f"error_subcode={sub}" in text:
+            return True
+    for code in _OAUTH_RETRY_CODES:
+        if f"code={code}" in text:
+            return True
+    if "Token has been expired or revoked" in text:
+        return True
+    if "invalid_grant" in text or "Invalid OAuth" in text:
+        return True
+    return False
+
+
 def _maybe_refresh_facebook_token(config: dict[str, Any], *, session=None) -> dict[str, Any]:
     """Refresh Facebook user token if expired or about to expire."""
     return _maybe_refresh_meta_token(config, "facebook", session=session)
@@ -747,9 +848,18 @@ def _maybe_refresh_instagram_token(config: dict[str, Any], *, session=None) -> d
     return _maybe_refresh_meta_token(config, "instagram", session=session)
 
 
-def publish_facebook_sync(account, payload: dict, *, session=None) -> list[Any]:
+def publish_facebook_sync(account, payload: dict, *, session=None) -> dict[str, Any]:
     config = dict(account.config or {})
+    prior_user_token = str(config.get("metaUserAccessToken") or "").strip()
+    prior_page_token = str(config.get("accessToken") or "").strip()
     config = _maybe_refresh_facebook_token(config, session=session)
+    # Re-derive page-level access_token when:
+    #   (a) the user token rotated, or
+    #   (b) the page token is missing/empty (e.g. from a partial OAuth callback).
+    # Page tokens inherit the user token's lifecycle, so without this publishing
+    # silently breaks ~60 days after connect.
+    if (config.get("metaUserAccessToken") != prior_user_token) or not prior_page_token:
+        config = _rederive_meta_page_token(config, "facebook", session=session)
     _check_meta_token_not_expired(config, "Facebook")
     page_id = str(config.get("pageId") or "").strip()
     access_token = str(_config_value(config, "accessToken") or "").strip()
@@ -762,98 +872,109 @@ def publish_facebook_sync(account, payload: dict, *, session=None) -> list[Any]:
     message = _payload_message(payload)
     title = _message_title(payload)
     media = _extract_media(payload)
-    results = []
 
-    def _post(edge: str, *, data: dict, files=None, timeout=120):
-        response = http.post(
-            f"{FACEBOOK_GRAPH_ROOT}/{page_id}/{edge}",
-            data=data,
-            files=files,
-            timeout=timeout,
-        )
-        _raise_for_status(response)
-        body = _response_payload(response)
-        results.append(body)
-        return body
+    def _do_post():
+        results = []
+        def _post(edge: str, *, data: dict, files=None, timeout=120):
+            response = http.post(
+                f"{FACEBOOK_GRAPH_ROOT}/{page_id}/{edge}",
+                data=data,
+                files=files,
+                timeout=timeout,
+            )
+            _raise_for_status(response)
+            body = _response_payload(response)
+            results.append(body)
+            return body
 
-    if media["videos"]:
-        item = media["videos"][0]
-        data = {"access_token": access_token, "description": message, "title": title}
-        local_path = item.get("local_path")
-        public_url = item.get("public_url")
-        if public_url:
-            data["file_url"] = public_url
-            _post("videos", data=data, timeout=600)
-        elif local_path:
-            with Path(local_path).open("rb") as handle:
-                _post("videos", data=data, files={"source": (Path(local_path).name, handle)}, timeout=1800)
-        else:
-            raise PreparedPublishError("Facebook video publish requires a public_url or local_path")
-        return results
+        if media["videos"]:
+            item = media["videos"][0]
+            data = {"access_token": access_token, "description": message, "title": title}
+            local_path = item.get("local_path")
+            public_url = item.get("public_url")
+            if public_url:
+                data["file_url"] = public_url
+                _post("videos", data=data, timeout=600)
+            elif local_path:
+                with Path(local_path).open("rb") as handle:
+                    _post("videos", data=data, files={"source": (Path(local_path).name, handle)}, timeout=1800)
+            else:
+                raise PreparedPublishError("Facebook video publish requires a public_url or local_path")
+            return results
 
-    if len(media["images"]) > 1:
-        attached_media = []
-        for item in media["images"][:10]:
-            data = {"access_token": access_token, "published": "false"}
+        if len(media["images"]) > 1:
+            attached_media = []
+            for item in media["images"][:10]:
+                data = {"access_token": access_token, "published": "false"}
+                local_path = item.get("local_path")
+                public_url = item.get("public_url")
+                if public_url:
+                    data["url"] = public_url
+                    body = _post("photos", data=data)
+                elif local_path:
+                    with Path(local_path).open("rb") as handle:
+                        body = _post("photos", data=data, files={"source": (Path(local_path).name, handle)}, timeout=600)
+                else:
+                    raise PreparedPublishError("Facebook image publish requires a public_url or local_path")
+                media_id = body.get("id")
+                if not media_id:
+                    raise PreparedPublishError("Facebook photo upload did not return an id")
+                attached_media.append({"media_fbid": media_id})
+
+            _post(
+                "feed",
+                data={
+                    "access_token": access_token,
+                    "message": message,
+                    "attached_media": json.dumps(attached_media, ensure_ascii=False),
+                },
+            )
+            return results
+
+        if media["images"]:
+            item = media["images"][0]
+            data = {"access_token": access_token, "caption": message}
             local_path = item.get("local_path")
             public_url = item.get("public_url")
             if public_url:
                 data["url"] = public_url
-                body = _post("photos", data=data)
+                _post("photos", data=data)
             elif local_path:
                 with Path(local_path).open("rb") as handle:
-                    body = _post("photos", data=data, files={"source": (Path(local_path).name, handle)}, timeout=600)
+                    _post("photos", data=data, files={"source": (Path(local_path).name, handle)}, timeout=600)
             else:
                 raise PreparedPublishError("Facebook image publish requires a public_url or local_path")
-            media_id = body.get("id")
-            if not media_id:
-                raise PreparedPublishError("Facebook photo upload did not return an id")
-            attached_media.append({"media_fbid": media_id})
+            return results
 
-        _post(
-            "feed",
-            data={
-                "access_token": access_token,
-                "message": message,
-                "attached_media": json.dumps(attached_media, ensure_ascii=False),
-            },
-        )
+        _post("feed", data={"access_token": access_token, "message": message})
+        first_comment = _first_comment_text(payload)
+        if first_comment:
+            last = results[-1] if results else {}
+            post_id = last.get("post_id") or last.get("id")
+
+            def _poster(pid, text):
+                response = http.post(
+                    f"{FACEBOOK_GRAPH_ROOT}/{pid}/comments",
+                    data={"access_token": access_token, "message": text},
+                    timeout=60,
+                )
+                _raise_for_status(response)
+                results.append(_response_payload(response))
+            _try_post_first_comment(platform="facebook", post_id=post_id, text=first_comment, poster=_poster)
         return results
 
-    if media["images"]:
-        item = media["images"][0]
-        data = {"access_token": access_token, "caption": message}
-        local_path = item.get("local_path")
-        public_url = item.get("public_url")
-        if public_url:
-            data["url"] = public_url
-            _post("photos", data=data)
-        elif local_path:
-            with Path(local_path).open("rb") as handle:
-                _post("photos", data=data, files={"source": (Path(local_path).name, handle)}, timeout=600)
-        else:
-            raise PreparedPublishError("Facebook image publish requires a public_url or local_path")
-        return results
+    try:
+        results = _do_post()
+    except PreparedPublishError as exc:
+        if not _is_recoverable_oauth_error(exc):
+            raise
+        # Single retry: force a user-token + page-token rotation then try again.
+        config = _maybe_refresh_facebook_token(config, session=session)
+        config = _rederive_meta_page_token(config, "facebook", session=session)
+        access_token = str(config.get("accessToken") or access_token).strip()
+        results = _do_post()
 
-    _post("feed", data={"access_token": access_token, "message": message})
-    first_comment = _first_comment_text(payload)
-    if first_comment:
-        # Extract the post_id from the last response; on /feed Facebook
-        # returns "{page_id}_{post_id}" already; on /photos it's two
-        # separate keys.
-        last = results[-1] if results else {}
-        post_id = last.get("post_id") or last.get("id")
-
-        def _poster(pid, text):
-            response = http.post(
-                f"{FACEBOOK_GRAPH_ROOT}/{pid}/comments",
-                data={"access_token": access_token, "message": text},
-                timeout=60,
-            )
-            _raise_for_status(response)
-            results.append(_response_payload(response))
-        _try_post_first_comment(platform="facebook", post_id=post_id, text=first_comment, poster=_poster)
-    return results
+    return {"results": results, "updated_config": config}
 
 
 def _instagram_create_container(http, ig_user_id: str, access_token: str, data: dict) -> str:
@@ -889,7 +1010,11 @@ def validate_instagram_config_live(config: dict[str, Any], *, session=None) -> d
 
 def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
     config = dict(account.config or {})
+    prior_user_token = str(config.get("metaUserAccessToken") or "").strip()
+    prior_page_token = str(config.get("accessToken") or "").strip()
     config = _maybe_refresh_instagram_token(config, session=session)
+    if (config.get("metaUserAccessToken") != prior_user_token) or not prior_page_token:
+        config = _rederive_meta_page_token(config, "instagram", session=session)
     _check_meta_token_not_expired(config, "Instagram")
     ig_user_id = str(config.get("igUserId") or "").strip()
     access_token = str(_config_value(config, "accessToken") or "").strip()
@@ -902,56 +1027,69 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
     message = _payload_message(payload)
     media = _extract_media(payload)
 
-    if media["videos"]:
-        public_url = media["videos"][0].get("public_url") or ""
-        if not public_url:
-            raise PreparedPublishError("Instagram video publish requires a public_url")
-        container_id = _instagram_create_container(
-            http,
-            ig_user_id,
-            access_token,
-            {"media_type": "REELS", "video_url": public_url, "caption": message},
-        )
-    elif len(media["images"]) > 1:
-        child_ids = []
-        for item in media["images"][:10]:
-            public_url = item.get("public_url") or ""
+    def _do_post():
+        if media["videos"]:
+            public_url = media["videos"][0].get("public_url") or ""
             if not public_url:
-                raise PreparedPublishError("Instagram carousel publish requires public image URLs")
-            child_ids.append(
-                _instagram_create_container(
-                    http,
-                    ig_user_id,
-                    access_token,
-                    {"image_url": public_url, "is_carousel_item": "true"},
-                )
+                raise PreparedPublishError("Instagram video publish requires a public_url")
+            container_id = _instagram_create_container(
+                http,
+                ig_user_id,
+                access_token,
+                {"media_type": "REELS", "video_url": public_url, "caption": message},
             )
-        container_id = _instagram_create_container(
-            http,
-            ig_user_id,
-            access_token,
-            {"media_type": "CAROUSEL", "children": ",".join(child_ids), "caption": message},
-        )
-    elif media["images"]:
-        public_url = media["images"][0].get("public_url") or ""
-        if not public_url:
-            raise PreparedPublishError("Instagram image publish requires a public_url")
-        container_id = _instagram_create_container(
-            http,
-            ig_user_id,
-            access_token,
-            {"image_url": public_url, "caption": message},
-        )
-    else:
-        raise PreparedPublishError("Instagram publish requires at least one image or video")
+        elif len(media["images"]) > 1:
+            child_ids = []
+            for item in media["images"][:10]:
+                public_url = item.get("public_url") or ""
+                if not public_url:
+                    raise PreparedPublishError("Instagram carousel publish requires public image URLs")
+                child_ids.append(
+                    _instagram_create_container(
+                        http,
+                        ig_user_id,
+                        access_token,
+                        {"image_url": public_url, "is_carousel_item": "true"},
+                    )
+                )
+            container_id = _instagram_create_container(
+                http,
+                ig_user_id,
+                access_token,
+                {"media_type": "CAROUSEL", "children": ",".join(child_ids), "caption": message},
+            )
+        elif media["images"]:
+            public_url = media["images"][0].get("public_url") or ""
+            if not public_url:
+                raise PreparedPublishError("Instagram image publish requires a public_url")
+            container_id = _instagram_create_container(
+                http,
+                ig_user_id,
+                access_token,
+                {"image_url": public_url, "caption": message},
+            )
+        else:
+            raise PreparedPublishError("Instagram publish requires at least one image or video")
 
-    publish_response = http.post(
-        f"{FACEBOOK_GRAPH_ROOT}/{ig_user_id}/media_publish",
-        data={"creation_id": container_id, "access_token": access_token},
-        timeout=120,
-    )
-    _raise_for_status(publish_response)
-    publish_body = _response_payload(publish_response)
+        publish_response = http.post(
+            f"{FACEBOOK_GRAPH_ROOT}/{ig_user_id}/media_publish",
+            data={"creation_id": container_id, "access_token": access_token},
+            timeout=120,
+        )
+        _raise_for_status(publish_response)
+        return {"container_id": container_id, "publish": _response_payload(publish_response)}
+
+    try:
+        post_result = _do_post()
+    except PreparedPublishError as exc:
+        if not _is_recoverable_oauth_error(exc):
+            raise
+        config = _maybe_refresh_instagram_token(config, session=session)
+        config = _rederive_meta_page_token(config, "instagram", session=session)
+        access_token = str(config.get("accessToken") or access_token).strip()
+        post_result = _do_post()
+
+    publish_body = post_result.get("publish", {}) if isinstance(post_result, dict) else {}
     first_comment = _first_comment_text(payload)
     if first_comment:
         media_id = publish_body.get("id") if isinstance(publish_body, dict) else None
@@ -964,7 +1102,7 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
             )
             _raise_for_status(response)
         _try_post_first_comment(platform="instagram", post_id=media_id, text=first_comment, poster=_poster)
-    return {"container_id": container_id, "publish": publish_body}
+    return {"container_id": post_result.get("container_id", ""), "publish": publish_body, "updated_config": config}
 
 
 def _threads_create_container(http, user_id: str, access_token: str, data: dict) -> str:
