@@ -142,6 +142,10 @@ class Account:
     nickname: str = ""
     # Operator-defined group/segment tag for filtering the Accounts tab.
     account_group: str = ""
+    # Profile metadata (joined from the profiles table when available) so the
+    # UI can show "Profile: NW" without a second roundtrip.
+    profile_name: str = ""
+    profile_slug: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -184,6 +188,11 @@ def _row_to_account(row: sqlite3.Row) -> Account:
     # to empty strings so the dataclass type stays simple.
     payload["nickname"] = payload.get("nickname") or ""
     payload["account_group"] = payload.get("account_group") or ""
+    # When ``list_accounts`` JOINs on the profiles table we get the human
+    # profile name and slug attached; downstream payloads surface them so the
+    # UI can show "Profile: NW" instead of "Profile: default".
+    payload["profile_name"] = payload.get("profile_name") or ""
+    payload["profile_slug"] = payload.get("profile_slug") or ""
     payload = {k: v for k, v in payload.items() if k in _ACCOUNT_FIELDS}
     return Account(**payload)
 
@@ -504,12 +513,17 @@ def get_account(account_id: int, *, workspace_id: str | None = None, db_path: Pa
     with _connect(db_path) as conn:
         if workspace_id is not None:
             row = conn.execute(
-                "SELECT * FROM accounts WHERE id = ? AND workspace_id = ?",
+                "SELECT accounts.*, profiles.name AS profile_name, profiles.slug AS profile_slug "
+                "FROM accounts LEFT JOIN profiles ON profiles.id = accounts.profile_id "
+                "WHERE accounts.id = ? AND accounts.workspace_id = ?",
                 (account_id, workspace_id),
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT * FROM accounts WHERE id = ?", (account_id,)
+                "SELECT accounts.*, profiles.name AS profile_name, profiles.slug AS profile_slug "
+                "FROM accounts LEFT JOIN profiles ON profiles.id = accounts.profile_id "
+                "WHERE accounts.id = ?",
+                (account_id,),
             ).fetchone()
     if row is None:
         raise LookupError(f"Account not found: id={account_id}")
@@ -522,8 +536,9 @@ def find_account(
     with _connect(db_path) as conn:
         row = conn.execute(
             """
-            SELECT * FROM accounts
-            WHERE profile_id = ? AND platform = ? AND account_name = ?
+            SELECT accounts.*, profiles.name AS profile_name, profiles.slug AS profile_slug
+            FROM accounts LEFT JOIN profiles ON profiles.id = accounts.profile_id
+            WHERE accounts.profile_id = ? AND platform = ? AND account_name = ?
             """,
             (profile_id, platform, account_name),
         ).fetchone()
@@ -546,40 +561,89 @@ def list_accounts(
     ``nickname`` or ``account_name`` (UI surfaces both, so the operator can
     find accounts by either label). Whitespace is trimmed; an empty / blank
     ``search`` is treated as no filter.
+
+    The query JOINs the ``profiles`` table so callers get the human-friendly
+    profile name and slug attached to each row — without that the UI shows
+    "default" everywhere and operators can't tell which profile owns the
+    account they're looking at.
     """
-    query = "SELECT * FROM accounts"
+    query = (
+        "SELECT accounts.*, profiles.name AS profile_name, profiles.slug AS profile_slug "
+        "FROM accounts LEFT JOIN profiles ON profiles.id = accounts.profile_id"
+    )
     clauses: list[str] = []
     params: list[object] = []
     if profile_id is not None:
-        clauses.append("profile_id = ?")
+        clauses.append("accounts.profile_id = ?")
         params.append(profile_id)
     if platform is not None:
-        clauses.append("platform = ?")
+        clauses.append("accounts.platform = ?")
         params.append(platform)
     if enabled is not None:
-        clauses.append("enabled = ?")
+        clauses.append("accounts.enabled = ?")
         params.append(int(enabled))
     if account_group is not None:
         # Match the literal group (case-sensitive) so empty groups can be
         # filtered out with `account_group=""` while leaving ungrouped rows
         # (stored as the empty string) easy to find when desired.
-        clauses.append("account_group = ?")
+        clauses.append("accounts.account_group = ?")
         params.append(account_group)
     if search is not None:
         needle = search.strip().lower()
         if needle:
             like = f"%{needle}%"
-            clauses.append("(LOWER(nickname) LIKE ? OR LOWER(account_name) LIKE ?)")
+            clauses.append("(LOWER(accounts.nickname) LIKE ? OR LOWER(accounts.account_name) LIKE ?)")
             params.extend([like, like])
     if workspace_id is not None:
-        clauses.append("workspace_id = ?")
+        # ``accounts`` and ``profiles`` both carry ``workspace_id`` (the JOIN
+        # adds profiles.workspace_id as a column). Disambiguate to the
+        # tenancy column that actually scopes account reads.
+        clauses.append("accounts.workspace_id = ?")
         params.append(workspace_id)
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
-    query += " ORDER BY platform, account_name"
+    query += " ORDER BY profiles.name, accounts.platform, accounts.account_name"
     with _connect(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
     return [_row_to_account(row) for row in rows]
+
+
+def list_account_profiles(
+    *,
+    workspace_id: str | None = None,
+    db_path: Path = DB_PATH,
+) -> list[dict]:
+    """Distinct profile IDs that actually own at least one account.
+
+    Returns ``[{"id": int, "name": str, "slug": str, "count": int}]`` so the
+    Accounts tab can show a per-profile filter with a real platform/account
+    count. Profiles that don't own any account are omitted — they're not
+    useful as an Account filter bucket.
+
+    When ``workspace_id`` is provided, the count is filtered to accounts in
+    that workspace — this keeps the count consistent with what the UI sees
+    from ``/api/accounts``. Profiles with zero matching accounts are dropped
+    for the same reason (we don't want ghost profiles in the filter).
+    """
+    query = (
+        "SELECT profiles.id AS id, profiles.name AS name, profiles.slug AS slug, "
+        "COUNT(accounts.id) AS count "
+        "FROM profiles LEFT JOIN accounts ON accounts.profile_id = profiles.id"
+    )
+    params: list[object] = []
+    clauses: list[str] = []
+    if workspace_id is not None:
+        clauses.append("(accounts.workspace_id IS NULL OR accounts.workspace_id = ?)")
+        params.append(workspace_id)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " GROUP BY profiles.id, profiles.name, profiles.slug HAVING COUNT(accounts.id) > 0 ORDER BY profiles.name"
+    with _connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [
+        {"id": row["id"], "name": row["name"], "slug": row["slug"], "count": row["count"]}
+        for row in rows
+    ]
 
 
 def list_account_groups(

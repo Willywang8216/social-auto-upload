@@ -7957,13 +7957,36 @@ def api_accounts():
             "accountGroup": getattr(a, "account_group", "") or "",
             "handle": handle,
             "avatarUrl": avatar_url,
-            "profile": getattr(a, "profile_name", "") or "default",
+            # Surface the actual profile name + slug + id so the UI can render a
+            # real "Profile: NW" chip and a working profile filter. Previously
+            # the SQL didn't JOIN the profiles table, so this always fell back
+            # to "default" — operators couldn't tell which profile owned the
+            # account they were reconnecting.
+            "profileId": a.profile_id,
+            "profileName": getattr(a, "profile_name", "") or "",
+            "profileSlug": getattr(a, "profile_slug", "") or "",
+            "profile": getattr(a, "profile_name", "") or "",
             "authType": getattr(a, "auth_type", "") or "cookie",
             "posts": 0,
             "cookieStatus": cookie_status,
             "expiresAt": expires_human,
         })
     return jsonify({"code": 200, "data": out, "msg": "ok"})
+
+
+@app.route("/api/accounts/profiles", methods=["GET"])
+def api_account_profiles():
+    """Return distinct profiles that own at least one account.
+
+    Used by the Accounts tab UI to populate the profile filter dropdown with
+    per-profile platform/account counts. Profiles that own zero accounts are
+    omitted — they're not useful as a filter bucket.
+    """
+    db_path = _current_db_path()
+    profiles = profile_registry.list_account_profiles(
+        workspace_id=_workspace_scope(), db_path=db_path
+    )
+    return jsonify({"code": 200, "data": profiles, "msg": "ok"})
 
 
 @app.route("/api/accounts/groups", methods=["GET"])
@@ -8045,7 +8068,11 @@ def accounts_import_cookies():
         b = request.get_json(force=True) or {}
         platform = b.get("platform")
         account = b.get("account") or "imported"
-        profile = b.get("profile") or "default"
+        # Prefer profileId over the (free-text) profile name — that way the
+        # operator picks the right row and we don't silently fall through to
+        # the first profile in the list, which used to be "default".
+        profile_id_input = b.get("profileId")
+        profile_name = b.get("profile") or ""
         fmt = b.get("format", "json")
         payload = b.get("payload", "")
         if not platform:
@@ -8066,13 +8093,26 @@ def accounts_import_cookies():
         except Exception:
             pass
 
+        # Resolve the target profile id: explicit id wins, otherwise match by
+        # name/slug, otherwise fall back to the first profile.
+        profiles = profile_registry.list_profiles(db_path=db_path)
+        target_profile_id = None
+        if isinstance(profile_id_input, int):
+            target_profile_id = profile_id_input
+        elif profile_name:
+            for p in profiles:
+                if p.name == profile_name or p.slug == profile_name:
+                    target_profile_id = p.id
+                    break
+        if target_profile_id is None and profiles:
+            target_profile_id = profiles[0].id
+        if target_profile_id is None:
+            target_profile_id = 1
+
         if existing is None:
-            # Get or create a default profile
-            profiles = profile_registry.list_profiles(db_path=db_path)
-            profile_id = profiles[0].id if profiles else 1
             try:
                 existing = profile_registry.add_account(
-                    profile_id=profile_id,
+                    profile_id=target_profile_id,
                     platform=platform,
                     account_name=account,
                     auth_type="cookie",
@@ -8091,10 +8131,32 @@ def accounts_import_cookies():
             logging.getLogger(__name__).error("accounts_import_cookies: could not create or find account platform=%s account=%s", platform, account)
             return jsonify({"code": 500, "msg": "Failed to create or find account", "data": None}), 500
 
+        # If the existing account was created earlier under a different
+        # profile, move it to the profile the operator actually picked here.
+        if existing.profile_id != target_profile_id and target_profile_id:
+            try:
+                profile_registry.update_account(
+                    existing.id, profile_id=target_profile_id, db_path=db_path
+                )
+            except Exception:
+                pass
+
+        # Use the (resolved) profile name as the cookie-file slug so each
+        # profile gets its own cookie bucket — matches what the OAuth/manual
+        # flows already do.
+        resolved_profile = profile_name
+        if not resolved_profile:
+            for p in profiles:
+                if p.id == target_profile_id:
+                    resolved_profile = p.name
+                    break
+        if not resolved_profile:
+            resolved_profile = "default"
+
         # Import cookies
-        result = _import_cookies_for_account(platform, account, profile, fmt, payload, db_path=db_path)
+        result = _import_cookies_for_account(platform, account, resolved_profile, fmt, payload, db_path=db_path)
         # Update account cookie_path and status
-        safe_name = f"{profile}__{platform}__{account}".replace("/", "_")
+        safe_name = f"{resolved_profile}__{platform}__{account}".replace("/", "_")
         cookie_path = Path(BASE_DIR / "cookiesFile" / f"{safe_name}.cookie")
         profile_registry.update_account(
             existing.id,
