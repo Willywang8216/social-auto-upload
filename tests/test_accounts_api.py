@@ -84,7 +84,7 @@ class AccountsApiTests(unittest.TestCase):
         sau_backend.app.config["TESTING"] = True
         self.client = sau_backend.app.test_client()
 
-        # Seed: a single profile with three accounts across platforms + groups.
+        # Seed: a single profile with four accounts across platforms + groups.
         # OAuth-style auth_type="oauth" so the registry doesn't try to create
         # cookie directories under BASE_DIR/cookies/<platform>/<profile>/.
         self.profile = prof.create_profile(
@@ -243,6 +243,68 @@ class AccountsApiTests(unittest.TestCase):
     def test_patch_unknown_account_returns_404(self) -> None:
         response = self._patch_account(99999, nickname="x")
         self.assertEqual(response.status_code, 404)
+
+    # ----- profile metadata surfaces through /api/accounts ------------------
+
+    def test_list_accounts_includes_profile_name_slug_and_id(self) -> None:
+        """The Accounts tab used to show "Profile: default" for every row
+        because /api/accounts didn't JOIN the profiles table. Verify the
+        shape now exposes profileId, profileName, and profileSlug so the UI
+        can render real profile chips.
+        """
+        response = self._list()
+        rows = response.get_json()["data"]
+        self.assertGreater(len(rows), 0)
+        first = rows[0]
+        self.assertIn("profileId", first)
+        self.assertIn("profileName", first)
+        self.assertIn("profileSlug", first)
+        self.assertEqual(first["profileId"], self.profile.id)
+        self.assertEqual(first["profileName"], self.profile.name)
+        self.assertEqual(first["profileSlug"], self.profile.slug)
+
+    def test_api_account_profiles_returns_per_profile_count(self) -> None:
+        """The profile filter dropdown is fed by /api/accounts/profiles."""
+        response = self.client.get("/api/accounts/profiles")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        rows = response.get_json()["data"]
+        # One profile owns four accounts in this fixture.
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], self.profile.id)
+        self.assertEqual(rows[0]["name"], self.profile.name)
+        self.assertEqual(rows[0]["count"], 4)
+
+    def test_api_account_profiles_omits_empty_profiles(self) -> None:
+        """Profiles that own zero accounts should NOT show up in the filter."""
+        self.prof.create_profile("Empty", db_path=self.db_path)
+        rows = self.client.get("/api/accounts/profiles").get_json()["data"]
+        names = {row["name"] for row in rows}
+        self.assertNotIn("Empty", names)
+
+    def test_patch_can_move_account_between_profiles(self) -> None:
+        """Reassigning an account via PATCH profileId must persist + show up
+        in /api/accounts/profiles with new counts. Use the ungrouped Medium
+        account — it has the most minimal config and won't trip the
+        validator's "missing accessToken" warning when we change only the
+        profile.
+
+        Note: Douyin/TikTok aren't validated here because the validator is
+        a no-op for them in SUPPORTED_VALIDATION_PLATFORMS, but they share
+        the same exact code path through update_account — moving one is the
+        same operation, the choice of platform is just to avoid any future
+        validator rules.
+        """
+        target = self.prof.create_profile("Target", db_path=self.db_path)
+        response = self._patch_account(self.acct_blog.id, profileId=target.id)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        # Verify via the registry directly so we don't depend on the
+        # /api/accounts/profiles endpoint working in test isolation.
+        rows = self.prof.list_account_profiles(db_path=self.db_path)
+        counts = {row["name"]: row["count"] for row in rows}
+        # Acme Media originally owned four accounts; moving acct_blog leaves
+        # it with three. Target now owns the single acct_blog account.
+        self.assertEqual(counts["Acme Media"], 3)
+        self.assertEqual(counts["Target"], 1)
 
 
 if __name__ == "__main__":

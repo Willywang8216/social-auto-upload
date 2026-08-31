@@ -265,6 +265,54 @@ class ProfileRegistryTests(unittest.TestCase):
             profiles.list_accounts(profile_id=profile.id, db_path=self.db_path), []
         )
 
+    def test_list_accounts_joins_profile_metadata(self) -> None:
+        """list_accounts() should attach profile name + slug via JOIN so the
+        UI doesn't have to fall back to "default" everywhere.
+
+        Previously this returned Account rows with empty profile_name, which
+        caused the Accounts tab to render "Profile: default" for every card
+        regardless of the actual owner.
+        """
+        brand = profiles.create_profile("Brand", db_path=self.db_path)
+        teaching = profiles.create_profile("Teaching", db_path=self.db_path)
+        profiles.add_account(brand.id, profiles.PLATFORM_MEDIUM, "alice", db_path=self.db_path)
+        profiles.add_account(teaching.id, profiles.PLATFORM_MEDIUM, "bob", db_path=self.db_path)
+
+        rows = profiles.list_accounts(db_path=self.db_path)
+        by_name = {row.account_name: row for row in rows}
+        self.assertEqual(set(by_name), {"alice", "bob"})
+        self.assertEqual(by_name["alice"].profile_name, "Brand")
+        self.assertEqual(by_name["alice"].profile_slug, "brand")
+        self.assertEqual(by_name["alice"].profile_id, brand.id)
+        self.assertEqual(by_name["bob"].profile_name, "Teaching")
+        self.assertEqual(by_name["bob"].profile_id, teaching.id)
+
+    def test_get_account_joins_profile_metadata(self) -> None:
+        brand = profiles.create_profile("Brand", db_path=self.db_path)
+        acc = profiles.add_account(
+            brand.id, profiles.PLATFORM_MEDIUM, "alice", db_path=self.db_path
+        )
+        fetched = profiles.get_account(acc.id, db_path=self.db_path)
+        self.assertEqual(fetched.profile_name, "Brand")
+        self.assertEqual(fetched.profile_slug, "brand")
+
+    def test_list_account_profiles_returns_counts(self) -> None:
+        """The Accounts tab profile filter needs per-profile account counts."""
+        brand = profiles.create_profile("Brand", db_path=self.db_path)
+        teaching = profiles.create_profile("Teaching", db_path=self.db_path)
+        # Empty profile should NOT show up in the filter.
+        empty = profiles.create_profile("Empty", db_path=self.db_path)
+        profiles.add_account(brand.id, profiles.PLATFORM_MEDIUM, "a", db_path=self.db_path)
+        profiles.add_account(brand.id, profiles.PLATFORM_SUBSTACK, "a", db_path=self.db_path)
+        profiles.add_account(teaching.id, profiles.PLATFORM_MEDIUM, "b", db_path=self.db_path)
+
+        rows = profiles.list_account_profiles(db_path=self.db_path)
+        by_id = {row["id"]: row for row in rows}
+        self.assertEqual(set(by_id), {brand.id, teaching.id})
+        self.assertEqual(by_id[brand.id]["count"], 2)
+        self.assertEqual(by_id[teaching.id]["count"], 1)
+        self.assertNotIn(empty.id, by_id)
+
 
 if __name__ == "__main__":
     unittest.main()

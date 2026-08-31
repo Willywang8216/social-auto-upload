@@ -65,6 +65,12 @@ export const accountApi = {
     return http.get('/api/accounts/groups')
   },
 
+  // Distinct profiles that own at least one account — used by the profile
+  // filter dropdown. Each row carries id, name, slug, and count.
+  getAccountProfiles() {
+    return http.get('/api/accounts/profiles')
+  },
+
   // Update nickname and/or group via the PATCH endpoint.
   updateAccountMeta(accountId, payload) {
     return http.patch(`/accounts/${accountId}`, payload)

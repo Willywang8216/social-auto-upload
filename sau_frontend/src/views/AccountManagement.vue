@@ -39,7 +39,23 @@
         >
           <option value="">All groups</option>
           <option value="__none__">Ungrouped</option>
-          <option v-for="g in groups" :key="g" :value="g">{{ g }}</option>
+          <option v-for="g in groupsWithPlatforms" :key="g.name" :value="g.name">
+            {{ g.name }} · {{ g.platformsLabel }}
+          </option>
+        </select>
+      </div>
+      <div class="filter-field" title="Filter by profile">
+        <component :is="icons.users" :width="14" :height="14" class="filter-icon" />
+        <select
+          class="filter-select filter-select-padded"
+          :value="profileFilter"
+          @change="onProfileFilterChange"
+          aria-label="Filter by profile"
+        >
+          <option value="">All profiles</option>
+          <option v-for="p in profiles" :key="p.id" :value="String(p.id)">
+            {{ p.name }} ({{ p.count }})
+          </option>
         </select>
       </div>
       <button
@@ -69,6 +85,89 @@
       <button class="btn-primary" @click="openConnect()">
         <component :is="icons.plus" /> Connect Account
       </button>
+    </div>
+
+    <!-- Profile summary strip — makes it obvious what's actually inside
+         each profile (and per-group bucket) at a glance, instead of forcing
+         the operator to mentally JOIN profile/group/platform from the card
+         chips below. Collapsed by default; click [▾] to expand a profile and
+         see its group × platform breakdown. -->
+    <div v-if="profileSummary.length > 0" class="profile-summary">
+      <div class="profile-summary-head">
+        <component :is="icons.users" :width="13" :height="13" />
+        <span class="profile-summary-title">Profiles</span>
+        <span class="profile-summary-meta">{{ profileSummary.length }} profile{{ profileSummary.length === 1 ? '' : 's' }}</span>
+      </div>
+      <ul class="profile-summary-list">
+        <li
+          v-for="p in profileSummary"
+          :key="p.id"
+          class="profile-summary-row"
+          :class="{ on: profileFilter === String(p.id) }"
+        >
+          <button
+            class="profile-summary-name"
+            type="button"
+            :title="`Filter to ${p.name}`"
+            @click="setProfileFilter(p.id)"
+          >
+            {{ p.name }}
+            <span class="profile-summary-count">{{ p.count }} acct{{ p.count === 1 ? '' : 's' }}</span>
+          </button>
+          <span class="profile-summary-platforms" :title="p.platformsLabel">
+            <span
+              v-for="slug in p.visiblePlatformSlugs"
+              :key="slug"
+              class="platform-chip"
+              :style="{ background: platformBg(slug) }"
+              :title="platformLabel(slug)"
+            >
+              {{ platformShort(slug) }}
+            </span>
+            <span v-if="p.overflowPlatformCount > 0" class="platform-chip platform-chip-more" :title="p.overflowPlatformLabel">
+              +{{ p.overflowPlatformCount }}
+            </span>
+          </span>
+          <button
+            type="button"
+            class="profile-summary-toggle"
+            :aria-expanded="expandedProfiles.has(p.id)"
+            :aria-label="`Toggle ${p.name} group breakdown`"
+            @click="toggleProfileExpanded(p.id)"
+          >
+            <span class="profile-summary-toggle-arrow" :class="{ open: expandedProfiles.has(p.id) }">▾</span>
+          </button>
+          <ul v-if="expandedProfiles.has(p.id)" class="profile-summary-groups">
+            <li
+              v-for="g in p.groups"
+              :key="`${p.id}:${g.name}`"
+              class="profile-summary-group"
+              :class="{ on: groupFilter === g.name }"
+            >
+              <button
+                type="button"
+                class="profile-summary-group-name"
+                @click="setGroupFilter(g.name)"
+                :title="`Filter to group ${g.name}`"
+              >
+                {{ g.displayName }}
+              </button>
+              <span class="profile-summary-group-count">{{ g.count }}</span>
+              <span class="profile-summary-platforms" :title="g.platformsLabel">
+                <span
+                  v-for="slug in g.platformSlugs"
+                  :key="`${p.id}:${g.name}:${slug}`"
+                  class="platform-chip platform-chip-mini"
+                  :style="{ background: platformBg(slug) }"
+                  :title="platformLabel(slug)"
+                >
+                  {{ platformShort(slug) }}
+                </span>
+              </span>
+            </li>
+          </ul>
+        </li>
+      </ul>
     </div>
 
     <!-- Datalist shared by all inline group editors — typing into the input
@@ -113,7 +212,26 @@
             </div>
             <div class="acct-handle">{{ acct.connectionDetail || acct.platform }}</div>
             <div class="acct-tags">
+              <span
+                v-if="acct.profileName && !isEditing(acct)"
+                class="acct-tag acct-tag-profile"
+                :title="acct.profileSlug ? `slug: ${acct.profileSlug}` : ''"
+              >
+                <component :is="icons.users" :width="10" :height="10" />
+                {{ acct.profileName }}
+              </span>
               <span v-if="acct.accountGroup && !isEditing(acct)" class="acct-tag">{{ acct.accountGroup }}</span>
+              <select
+                v-if="isEditing(acct)"
+                class="input inline-input profile-select"
+                v-model="editDraft.profileId"
+                @click.stop
+                @keyup.enter="saveEdit(acct)"
+                @keyup.esc="cancelEdit"
+              >
+                <option value="">— pick profile —</option>
+                <option v-for="p in profiles" :key="p.id" :value="String(p.id)">{{ p.name }}</option>
+              </select>
               <input
                 v-if="isEditing(acct)"
                 class="input inline-input group-input"
@@ -128,8 +246,8 @@
                 <button
                   class="link-btn edit-btn"
                   @click.stop="startEdit(acct)"
-                  title="Edit nickname and group"
-                  aria-label="Edit nickname and group"
+                  title="Edit nickname, profile, and group"
+                  aria-label="Edit nickname, profile, and group"
                 >
                   <component :is="icons.pencil" :width="12" :height="12" />
                   Edit
@@ -225,7 +343,10 @@
               </div>
               <div class="field" style="flex:1;margin-top:0">
                 <label>Profile</label>
-                <input class="input" v-model="connectData.profile" />
+                <select class="input" v-model="connectData.profileId">
+                  <option :value="null">— pick profile —</option>
+                  <option v-for="p in profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
+                </select>
               </div>
             </div>
 
@@ -465,10 +586,15 @@ const allPlatforms = computed(() =>
 const filter = ref('all')
 const platformFilter = ref('')
 const groupFilter = ref('')
+const profileFilter = ref('')
 const searchFilter = ref('')
 const groups = ref([])
+const profiles = ref([])
+// Profile summary strip state — keep IDs that the operator has expanded so
+// they survive a filter change (but reset when accounts reload).
+const expandedProfiles = ref(new Set())
 const editingId = ref(null)
-const editDraft = ref({ nickname: '', accountGroup: '' })
+const editDraft = ref({ nickname: '', accountGroup: '', profileId: '' })
 const editSaving = ref(false)
 const flashId = ref(null)
 const editNameInput = ref(null)
@@ -477,7 +603,12 @@ const isEditing = (acct) => editingId.value === acct.id
 
 function startEdit(acct) {
   editingId.value = acct.id
-  editDraft.value = { nickname: acct.nickname || '', accountGroup: acct.accountGroup || '' }
+  editDraft.value = {
+    nickname: acct.nickname || '',
+    accountGroup: acct.accountGroup || '',
+    // Profile id is a number on the backend; the <select> binds to strings.
+    profileId: acct.profileId != null ? String(acct.profileId) : '',
+  }
   // Focus the nickname input after Vue flushes the DOM
   nextTick(() => {
     const inputs = editNameInput.value
@@ -490,7 +621,7 @@ function startEdit(acct) {
 }
 function cancelEdit() {
   editingId.value = null
-  editDraft.value = { nickname: '', accountGroup: '' }
+  editDraft.value = { nickname: '', accountGroup: '', profileId: '' }
 }
 function onCardClick(acct) {
   // Click on the card itself toggles edit mode (excluding inner controls,
@@ -502,15 +633,35 @@ async function saveEdit(acct) {
   if (editSaving.value) return
   const nextNick = (editDraft.value.nickname || '').trim()
   const nextGroup = (editDraft.value.accountGroup || '').trim()
-  if (nextNick === (acct.nickname || '') && nextGroup === (acct.accountGroup || '')) {
+  const nextProfileId = editDraft.value.profileId
+    ? parseInt(editDraft.value.profileId, 10) || null
+    : acct.profileId
+  const profileChanged = nextProfileId != null && nextProfileId !== acct.profileId
+  if (
+    nextNick === (acct.nickname || '') &&
+    nextGroup === (acct.accountGroup || '') &&
+    !profileChanged
+  ) {
     cancelEdit()
     return
   }
   editSaving.value = true
   try {
-    await accountApi.updateAccountMeta(acct.id, { nickname: nextNick, accountGroup: nextGroup })
+    const payload = { nickname: nextNick, accountGroup: nextGroup }
+    if (profileChanged) payload.profileId = nextProfileId
+    await accountApi.updateAccountMeta(acct.id, payload)
     acct.nickname = nextNick
     acct.accountGroup = nextGroup
+    if (profileChanged) {
+      acct.profileId = nextProfileId
+      const newProfile = profiles.value.find(p => p.id === nextProfileId)
+      if (newProfile) {
+        acct.profileName = newProfile.name
+        acct.profileSlug = newProfile.slug
+      }
+      // Profile assignments affect the per-profile count, so reload.
+      await loadProfiles()
+    }
     // Refresh groups list if a new group name was added (including clearing a
     // group — reloading from the server keeps the dropdown in sync).
     await loadGroups()
@@ -528,18 +679,68 @@ function onGroupFilterChange(e) {
   const v = e.target.value
   groupFilter.value = v === '__none__' ? '__none__' : v
 }
+function onProfileFilterChange(e) {
+  profileFilter.value = e.target.value
+}
 
 function resetFilters() {
   filter.value = 'all'
   platformFilter.value = ''
   groupFilter.value = ''
+  profileFilter.value = ''
   searchFilter.value = ''
+}
+
+function setProfileFilter(profileId) {
+  // Toggle off when clicking the currently-active profile so the strip
+  // behaves like a quick-jump rather than a sticky state.
+  const wanted = String(profileId)
+  profileFilter.value = profileFilter.value === wanted ? '' : wanted
+}
+
+function setGroupFilter(name) {
+  groupFilter.value = groupFilter.value === name ? '' : name
+}
+
+function toggleProfileExpanded(profileId) {
+  // Use a new Set so Vue's reactivity picks up add/delete; a plain Set
+  // mutation via .add/.delete won't trigger re-render of the conditional
+  // v-for bindings inside the row.
+  const next = new Set(expandedProfiles.value)
+  if (next.has(profileId)) {
+    next.delete(profileId)
+  } else {
+    next.add(profileId)
+  }
+  expandedProfiles.value = next
+}
+
+const PLATFORM_CHIP_LIMIT = 4
+
+function summarisePlatforms(slugSet) {
+  // Stable, label-ordered platform list — used in the chip strip and in the
+  // group dropdown suffix so operators can spot duplicates (e.g. "sexualwill"
+  // exists in multiple profiles with different platform sets) at a glance.
+  const slugs = [...slugSet]
+  const labelBySlug = new Map(allPlatforms.value.map(p => [p.slug, p.label]))
+  slugs.sort((a, b) => (labelBySlug.get(a) || a).localeCompare(labelBySlug.get(b) || b))
+  const visible = slugs.slice(0, PLATFORM_CHIP_LIMIT)
+  const overflow = slugs.length - visible.length
+  return {
+    slugs,
+    visibleSlugs: visible,
+    overflowCount: overflow,
+    overflowLabel: overflow > 0 ? slugs.slice(PLATFORM_CHIP_LIMIT).map(s => platformLabel(s)).join(' · ') : '',
+    label: slugs.map(s => platformLabel(s)).join(' · '),
+    shortLabel: visible.map(s => platformShort(s)).join(' · '),
+  }
 }
 
 const hasActiveFilters = computed(() =>
   filter.value !== 'all' ||
   Boolean(platformFilter.value) ||
   Boolean(groupFilter.value) ||
+  Boolean(profileFilter.value) ||
   Boolean((searchFilter.value || '').trim())
 )
 
@@ -562,6 +763,10 @@ const filteredAccounts = computed(() => {
       list = list.filter(a => a.accountGroup === groupFilter.value)
     }
   }
+  if (profileFilter.value) {
+    const wanted = parseInt(profileFilter.value, 10)
+    if (!Number.isNaN(wanted)) list = list.filter(a => a.profileId === wanted)
+  }
   const q = (searchFilter.value || '').trim().toLowerCase()
   if (q) {
     list = list.filter(a => {
@@ -578,6 +783,89 @@ const filteredAccounts = computed(() => {
   return list
 })
 const platformCount = computed(() => new Set(filteredAccounts.value.map(a => a.platformSlug)).size)
+
+/* Profile summary strip — per-profile and per-(profile × group) breakdown of
+   platforms + counts. Derived client-side from the already-fetched accounts so
+   we don't need an extra round-trip. */
+const profileSummary = computed(() => {
+  const byId = new Map()
+  for (const p of profiles.value) {
+    byId.set(p.id, {
+      id: p.id,
+      name: p.name,
+      count: 0,
+      platformSet: new Set(),
+      groupMap: new Map(),
+    })
+  }
+  for (const acct of accounts.value) {
+    const bucket = byId.get(acct.profileId)
+    if (!bucket) continue
+    bucket.count += 1
+    if (acct.platformSlug) bucket.platformSet.add(acct.platformSlug)
+    const groupKey = acct.accountGroup || '__none__'
+    if (!bucket.groupMap.has(groupKey)) {
+      bucket.groupMap.set(groupKey, { name: groupKey, count: 0, platformSet: new Set() })
+    }
+    const g = bucket.groupMap.get(groupKey)
+    g.count += 1
+    if (acct.platformSlug) g.platformSet.add(acct.platformSlug)
+  }
+  return [...byId.values()]
+    .filter((bucket) => bucket.count > 0)
+    .map((bucket) => {
+      const platformSummary = summarisePlatforms(bucket.platformSet)
+      const groups = [...bucket.groupMap.values()]
+        .map((g) => {
+          const summary = summarisePlatforms(g.platformSet)
+          return {
+            name: g.name,
+            displayName: g.name === '__none__' ? 'Ungrouped' : g.name,
+            count: g.count,
+            platformSlugs: summary.slugs,
+            platformsLabel: summary.label,
+          }
+        })
+        .sort((a, b) => a.displayName.localeCompare(b.displayName))
+      return {
+        id: bucket.id,
+        name: bucket.name,
+        count: bucket.count,
+        platformSlugs: platformSummary.slugs,
+        visiblePlatformSlugs: platformSummary.visibleSlugs,
+        overflowPlatformCount: platformSummary.overflowCount,
+        overflowPlatformLabel: platformSummary.overflowLabel,
+        platformsLabel: platformSummary.label,
+        groups,
+      }
+    })
+    .sort((a, b) => a.name.localeCompare(b.name))
+})
+
+/* Group dropdown suffix — surface the platforms under each group name so the
+   dropdown tells the operator where each group actually appears. Ungrouped is
+   a UI-only bucket (accountGroup === '') and therefore has its own entry. */
+const groupsWithPlatforms = computed(() => {
+  const groupsMap = new Map()
+  for (const acct of accounts.value) {
+    const key = acct.accountGroup || ''
+    if (!key) continue  // The dropdown has its own "Ungrouped" option.
+    if (!groupsMap.has(key)) groupsMap.set(key, new Set())
+    if (acct.platformSlug) groupsMap.get(key).add(acct.platformSlug)
+  }
+  // Also surface the explicit groups list (which is workspace-scoped via the
+  // /api/accounts/groups endpoint), so newly-created groups appear in the
+  // dropdown even before they have any matching account loaded.
+  for (const g of groups.value) {
+    if (!groupsMap.has(g)) groupsMap.set(g, new Set())
+  }
+  return [...groupsMap.entries()]
+    .map(([name, set]) => ({
+      name,
+      platformsLabel: summarisePlatforms(set).label,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+})
 
 /* Helpers */
 const platformBg = (slug) => PLATFORM_META[slug]?.color || '#888'
@@ -610,7 +898,16 @@ const expiryLabel = (acct) => {
 const flash = (msg) => { toast.value = msg; setTimeout(() => { toast.value = null }, 3000) }
 
 const onReauth = (acct) => {
-  openConnect({ platform: acct.platformSlug, account: acct.accountName, profile: acct.profileName })
+  // Pass the actual profile (name + id) so the connect modal pre-selects the
+  // right profile instead of "default". Previously this always sent
+  // `profile: acct.profileName` which was the literal string "default"
+  // because /api/accounts never JOINed the profiles table.
+  openConnect({
+    platform: acct.platformSlug,
+    account: acct.accountName,
+    profile: acct.profileName || acct.profileNameLegacy || '',
+    profileId: acct.profileId,
+  })
 }
 const onRefreshToken = async (acct) => {
   try {
@@ -665,7 +962,7 @@ const runHealthCheck = async () => {
 /* Connect modal */
 const showConnect = ref(false)
 const connectMethod = ref('qr')
-const connectData = ref({ platform: null, account: '', profile: 'default', paste: '', config: {} })
+const connectData = ref({ platform: null, account: '', profile: '', profileId: null, paste: '', config: {} })
 const importBusy = ref(false)
 const oauthBusy = ref(false)
 const manualBusy = ref(false)
@@ -707,7 +1004,17 @@ const loginStatusLabel = computed(() => {
 })
 
 const openConnect = (initial = {}) => {
-  connectData.value = { platform: initial.platform || null, account: initial.account || '', profile: initial.profile || 'default', paste: '', config: {} }
+  connectData.value = {
+    platform: initial.platform || null,
+    account: initial.account || '',
+    // Prefer the explicit profile id when the caller has one (e.g. onReauth
+    // from an existing card) — that way the modal lands on the right profile
+    // immediately, not the first profile in the list.
+    profileId: initial.profileId ?? null,
+    profile: initial.profile || '',
+    paste: '',
+    config: {},
+  }
   // Default to OAuth for platforms that support it
   connectMethod.value = initial.platform && OAUTH_PLATFORMS.includes(initial.platform) ? 'oauth' : 'qr'
   loginStatus.value = 'pending'
@@ -725,12 +1032,24 @@ const doOAuthConnect = async () => {
   try {
     const platform = connectData.value.platform
     const accountName = connectData.value.account || `${platform}-oauth`
-    const profile = connectData.value.profile || 'default'
+    const profileName = connectData.value.profile || ''
 
-    // Step 1: Get profiles
+    // Step 1: Get profiles. If the modal already has a profileId (e.g.
+    // reauth from an existing card), prefer that exact id — otherwise fall
+    // back to matching by name, and finally the first profile in the list.
     const profilesRes = await profilesApi.list()
-    const profiles = profilesRes?.data || profilesRes || []
-    const profileId = profiles[0]?.id || 1
+    const allProfiles = profilesRes?.data || profilesRes || []
+    let profileId = null
+    if (connectData.value.profileId != null) {
+      const matched = allProfiles.find(p => p.id === connectData.value.profileId)
+      if (matched) profileId = matched.id
+    }
+    if (profileId == null && profileName) {
+      const matched = allProfiles.find(p => p.name === profileName || p.slug === profileName)
+      if (matched) profileId = matched.id
+    }
+    if (profileId == null && allProfiles.length > 0) profileId = allProfiles[0].id
+    if (!profileId) throw new Error('No profiles available — create a profile first')
 
     // Step 2: Find existing account or create new one
     let accountId = null
@@ -742,12 +1061,12 @@ const doOAuthConnect = async () => {
       // Reuse existing account for reauth
       accountId = existingAccount.id
     } else {
-      // Create new account
+      // Create new account — backend uses the profile id as the parent.
       const createRes = await profilesApi.createAccount(profileId, {
         accountName,
         platform,
         authType: 'oauth',
-        profile,
+        profile: profileName,
       })
       const newAccount = createRes?.data || createRes
       accountId = newAccount?.id
@@ -826,10 +1145,20 @@ const doManualConnect = async () => {
   try {
     const platform = connectData.value.platform
     const accountName = connectData.value.account || `${platform}-manual`
+    const profileName = connectData.value.profile || ''
 
     const profilesRes = await profilesApi.list()
-    const profiles = profilesRes?.data || profilesRes || []
-    const profileId = profiles[0]?.id
+    const allProfiles = profilesRes?.data || profilesRes || []
+    let profileId = null
+    if (connectData.value.profileId != null) {
+      const matched = allProfiles.find(p => p.id === connectData.value.profileId)
+      if (matched) profileId = matched.id
+    }
+    if (profileId == null && profileName) {
+      const matched = allProfiles.find(p => p.name === profileName || p.slug === profileName)
+      if (matched) profileId = matched.id
+    }
+    if (profileId == null && allProfiles.length > 0) profileId = allProfiles[0].id
     if (!profileId) throw new Error('No profiles available — create a profile first')
 
     // Filter empty values so we don't push blanks into config_json.
@@ -841,7 +1170,7 @@ const doManualConnect = async () => {
       accountName,
       platform,
       authType: 'manual',
-      profile: connectData.value.profile || 'default',
+      profile: profileName,
       config,
     })
     flash(`Saved ${accountName} · ${platformLabel(platform)} (manual)`)
@@ -874,7 +1203,13 @@ const loadAccounts = async () => {
         // For OAuth accounts, show "Token expired" instead of "Missing"
         connectionLabel: isExpired ? (isOAuth ? 'Token expired' : 'Missing') : 'Ready',
         connectionDetail: a.handle || '',
-        profileName: a.profile || 'default',
+        // Profile metadata — id is the join key, name/slug come straight from
+        // the profiles table so the UI can show "Profile: NW" instead of the
+        // hard-coded "default" placeholder we used before the JOIN landed.
+        profileId: a.profileId ?? null,
+        profileName: a.profileName || '',
+        profileSlug: a.profileSlug || '',
+        profileNameLegacy: a.profile || '',
         isOverdue: isExpired,
         isExpiringWithin24h: isSoon,
         isExpiringWithin7d: isSoon,
@@ -894,12 +1229,19 @@ const loadGroups = async () => {
   } catch (e) { console.warn('Failed to load groups:', e) }
 }
 
+const loadProfiles = async () => {
+  try {
+    const res = await accountApi.getAccountProfiles()
+    profiles.value = (res?.data || res || []).slice().sort((a, b) => a.name.localeCompare(b.name))
+  } catch (e) { console.warn('Failed to load profiles:', e) }
+}
+
 // Local reactive accounts (not using the store's normalization since we
 // get pre-enriched data from /api/accounts)
 const accounts = ref([])
 
 onMounted(async () => {
-  await Promise.all([loadAccounts(), loadGroups()])
+  await Promise.all([loadAccounts(), loadGroups(), loadProfiles()])
 })
 </script>
 
@@ -1097,4 +1439,187 @@ onMounted(async () => {
   height: 32px;
 }
 .btn-ghost:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Profile summary strip — sits directly under the toolbar so operators can
+   see, at a glance, which profiles own accounts on which platforms (and how
+   those accounts are bucketed into groups) before they dive into the cards. */
+.profile-summary {
+  margin: -6px 0 18px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow);
+}
+.profile-summary-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 10px;
+}
+.profile-summary-title {
+  color: var(--text);
+}
+.profile-summary-meta {
+  margin-left: 4px;
+  color: var(--text-3);
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.profile-summary-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.profile-summary-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 200px) 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+  background: var(--panel-2, rgba(255, 255, 255, 0.02));
+  transition: background 0.15s, border-color 0.15s;
+}
+.profile-summary-row.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.profile-summary-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.profile-summary-name:hover { color: var(--accent); }
+.profile-summary-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  font-weight: 500;
+}
+.profile-summary-platforms {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.profile-summary-toggle {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--text-2);
+  border-radius: var(--r-md);
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.profile-summary-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.profile-summary-toggle-arrow {
+  font-size: 13px;
+  line-height: 1;
+  transition: transform 0.18s var(--ease, ease-out);
+  display: inline-block;
+}
+.profile-summary-toggle-arrow.open { transform: rotate(180deg); }
+.platform-chip {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: var(--r-full);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+.platform-chip-mini {
+  min-width: 18px;
+  height: 18px;
+  font-size: 9.5px;
+  padding: 0 4px;
+}
+.platform-chip-more {
+  background: var(--panel-2, rgba(255, 255, 255, 0.06));
+  color: var(--text-2);
+  border: 1px dashed var(--line-2);
+  letter-spacing: 0;
+}
+.profile-summary-groups {
+  grid-column: 1 / -1;
+  list-style: none;
+  margin: 4px 0 -2px;
+  padding: 6px 0 0 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px dashed var(--line);
+}
+.profile-summary-group {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto 2fr;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px;
+  border-radius: var(--r-md);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.profile-summary-group.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.profile-summary-group-name {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.profile-summary-group-name:hover { color: var(--accent); }
+.profile-summary-group-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+@media (max-width: 760px) {
+  .profile-summary-row {
+    grid-template-columns: 1fr auto;
+  }
+  .profile-summary-platforms {
+    grid-column: 1 / -1;
+  }
+  .profile-summary-group {
+    grid-template-columns: 1fr auto;
+  }
+  .profile-summary-group .profile-summary-platforms {
+    grid-column: 1 / -1;
+  }
+}
 </style>
