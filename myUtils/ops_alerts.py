@@ -21,6 +21,7 @@ Supported channels (all optional):
 
 from __future__ import annotations
 
+import html
 import os
 import smtplib
 import ssl
@@ -52,19 +53,38 @@ def _send_telegram(subject: str, body: str) -> bool:
     chat = _env("SAU_ALERT_TELEGRAM_CHAT_ID")
     if not token or not chat or requests is None:
         return False
-    text = f"*{subject}*\n{body}"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    # Operator alerts routinely contain Markdown-special characters: the "[SAU]"
+    # subject tag ("[" starts Markdown link syntax), account names with "_", and
+    # exception reprs. Legacy Markdown 400s on an unbalanced "_", "*" or "[",
+    # which would silently drop exactly the reconnect alerts this channel exists
+    # to deliver. Send HTML with escaped content (only < > & are special, and we
+    # escape them) and fall back to unformatted text if the API still rejects
+    # the payload — delivery matters more than the bold subject.
+    html_text = f"<b>{html.escape(subject)}</b>\n{html.escape(body)}"
+    plain_text = f"{subject}\n{body}"
     sent = False
     for chat_id in _split_recipients(chat):
         resp = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
+            url,
             json={
                 "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "Markdown",
+                "text": html_text,
+                "parse_mode": "HTML",
                 "disable_web_page_preview": True,
             },
             timeout=30,
         )
+        if resp.status_code == 400:
+            resp = requests.post(
+                url,
+                json={
+                    "chat_id": chat_id,
+                    "text": plain_text,
+                    "disable_web_page_preview": True,
+                },
+                timeout=30,
+            )
         resp.raise_for_status()
         sent = True
     return sent
