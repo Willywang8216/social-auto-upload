@@ -2014,7 +2014,17 @@ def refresh_twitter_access_token(config: dict[str, Any], *, session=None) -> dic
     if not access_token:
         raise PreparedPublishError("Twitter token response did not include access_token")
 
-    user_info = _x_auth.fetch_user_info(access_token=access_token, session=http) if access_token else {}
+    # The token endpoint has ALREADY rotated the refresh token — the old one is
+    # now dead at Twitter. Fetching profile metadata is a nice-to-have; a failure
+    # here must never propagate, or the caller discards the freshly-issued tokens
+    # and the refresh chain snaps permanently (invalid_grant on every future
+    # refresh — the root cause of accounts silently dying).
+    user_info: dict = {}
+    if access_token:
+        try:
+            user_info = _x_auth.fetch_user_info(access_token=access_token, session=http)
+        except Exception:  # noqa: BLE001
+            user_info = {}
 
     return {
         "access_token": access_token,
