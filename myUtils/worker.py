@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -81,6 +82,26 @@ class PublishWorker:
     _REFRESHABLE_PLATFORMS: frozenset = frozenset({
         "tiktok", "reddit", "youtube", "threads", "facebook", "instagram", "twitter",
     })
+    # Platforms whose primary tracked credential is a long-lived (~60 day) token.
+    # They are refreshed with a generous buffer (see sau_backend for rationale)
+    # so a restart / transient upstream error near expiry can't strand the
+    # account. Short-lived-access-token platforms keep the small 5-min skew.
+    _LONG_LIVED_TOKEN_PLATFORMS: frozenset = frozenset({"facebook", "instagram", "threads"})
+    try:
+        _LONG_LIVED_REFRESH_MARGIN_SECONDS: int = int(
+            os.environ.get("SAU_LONG_LIVED_REFRESH_MARGIN_SECONDS", str(7 * 24 * 3600)) or str(7 * 24 * 3600)
+        )
+    except ValueError:
+        _LONG_LIVED_REFRESH_MARGIN_SECONDS = 7 * 24 * 3600
+
+    # After a refresh fails we back off exponentially instead of retrying every
+    # tick — a dead credential used to be hammered hundreds of times a day.
+    # Base doubles per consecutive failure up to the cap; once the failure
+    # count crosses the threshold the account is flagged for manual reconnect
+    # (``_needsReconnect``) and skipped entirely until a human re-authorises it.
+    _MAINTENANCE_BACKOFF_BASE_SECONDS: int = 30 * 60      # 30 min after 1st failure
+    _MAINTENANCE_BACKOFF_CAP_SECONDS: int = 6 * 3600      # cap at 6 h
+    _MAINTENANCE_RECONNECT_THRESHOLD: int = 5             # give up → flag for human
 
     def __init__(
         self,
@@ -152,6 +173,20 @@ class PublishWorker:
         if platform == "twitter" and auth_type == "cookie":
             return False  # cookie-based Twitter is not refreshable via API
 
+        # Accounts flagged for manual reconnect are waiting on a human — never
+        # auto-refresh them. This is what stops a dead credential from being
+        # hammered hundreds of times a day. The flag is cleared automatically
+        # on the next successful refresh (or when the operator reconnects).
+        if config.get("_needsReconnect"):
+            return False
+        # Respect exponential back-off after consecutive refresh failures.
+        if self._in_backoff(config):
+            return False
+
+        skew = 300
+        if platform in self._LONG_LIVED_TOKEN_PLATFORMS:
+            skew = max(skew, self._LONG_LIVED_REFRESH_MARGIN_SECONDS)
+
         if platform in {"facebook", "instagram"}:
             meta_user_token = str(config.get("metaUserAccessToken") or "").strip()
             if not meta_user_token:
@@ -163,16 +198,33 @@ class PublishWorker:
                 str(config.get("metaUserAccessTokenExpiresAt") or config.get("accessTokenExpiresAt") or "")
             )
             if expires_at is None:
-                return False
-            return expires_at <= (self._utc_now() + timedelta(seconds=300))
+                # No expiry recorded (legacy/imported connect) — refresh once to
+                # establish one, otherwise the 60-day long-lived token silently
+                # dies because nothing ever renews it. Back-off keeps a failing
+                # refresh from looping.
+                return True
+            return expires_at <= (self._utc_now() + timedelta(seconds=skew))
 
         access_token = str(config.get("accessToken") or "").strip()
         if not access_token:
             return True
         expires_at = self._parse_iso_datetime(str(config.get("accessTokenExpiresAt") or ""))
         if expires_at is None:
+            # A refreshable token with no recorded expiry: refresh once to set
+            # one. Long-lived platforms (threads) renew via the access token
+            # itself; the rest only when we actually hold a refresh credential,
+            # so genuinely non-refreshable tokens are left untouched.
+            if platform in self._LONG_LIVED_TOKEN_PLATFORMS:
+                return True
+            return bool(str(config.get("refreshToken") or "").strip())
+        return expires_at <= (self._utc_now() + timedelta(seconds=skew))
+
+    def _in_backoff(self, config: dict) -> bool:
+        """True while the account is inside its post-failure back-off window."""
+        nxt = self._parse_iso_datetime(str(config.get("_nextMaintenanceAttemptAt") or ""))
+        if nxt is None:
             return False
-        return expires_at <= (self._utc_now() + timedelta(seconds=300))
+        return self._utc_now() < nxt
 
     @staticmethod
     def _utc_now() -> "datetime":
@@ -181,13 +233,20 @@ class PublishWorker:
 
     @staticmethod
     def _parse_iso_datetime(value: str):
-        from datetime import datetime
+        from datetime import datetime, timezone
         if not value:
             return None
         try:
-            return datetime.fromisoformat(value)
+            parsed = datetime.fromisoformat(value)
         except (ValueError, TypeError):
             return None
+        # Normalise to naive-UTC so comparisons against `_utc_now()` (also
+        # naive-UTC) never mix offset-aware and offset-naive datetimes. Stored
+        # expiry strings are written inconsistently across callbacks — some tz
+        # aware ("+00:00"), some naive — so coerce here rather than at each site.
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
 
     def _refresh_account(self, account: profile_registry.Account) -> None:
         """Refresh a stale account token using prepared_publishers helpers."""
@@ -342,6 +401,14 @@ class PublishWorker:
             else:
                 return  # unknown platform
 
+            # Success: clear any prior failure / back-off / reconnect markers so
+            # the account returns to the normal refresh cadence.
+            for _key in (
+                "_maintenanceFailures", "_nextMaintenanceAttemptAt",
+                "_lastMaintenanceError", "_lastMaintenanceAttemptAt",
+                "_needsReconnect", "_reconnectAlertedAt",
+            ):
+                config.pop(_key, None)
             # Persist updated config back to the database
             profile_registry.update_account(
                 account.id,
@@ -353,7 +420,73 @@ class PublishWorker:
             _logger.info(f"worker self-maintenance: refreshed {platform} account id={account.id}")
 
         except Exception as exc:
-            _logger.warning(f"worker self-maintenance: failed to refresh {platform} account id={account.id}: {exc}")
+            self._handle_refresh_failure(account, config, exc)
+
+    def _handle_refresh_failure(
+        self, account: profile_registry.Account, config: dict, exc: Exception
+    ) -> None:
+        """Record a failed refresh: bump the failure count, schedule an
+        exponential back-off, and after ``_MAINTENANCE_RECONNECT_THRESHOLD``
+        consecutive failures flag the account for manual reconnect and alert
+        the operator (once). All state lives in ``config_json`` so no schema
+        migration is needed."""
+        now_dt = self._utc_now()
+        now_iso = now_dt.isoformat(timespec="seconds")
+        failures = int(config.get("_maintenanceFailures") or 0) + 1
+        backoff = min(
+            self._MAINTENANCE_BACKOFF_BASE_SECONDS * (2 ** (failures - 1)),
+            self._MAINTENANCE_BACKOFF_CAP_SECONDS,
+        )
+        config["_maintenanceFailures"] = failures
+        config["_lastMaintenanceError"] = str(exc)[:300]
+        config["_lastMaintenanceAttemptAt"] = now_iso
+        config["_nextMaintenanceAttemptAt"] = (
+            now_dt + timedelta(seconds=backoff)
+        ).isoformat(timespec="seconds")
+
+        needs_reconnect = failures >= self._MAINTENANCE_RECONNECT_THRESHOLD
+        should_alert = needs_reconnect and not config.get("_reconnectAlertedAt")
+        if needs_reconnect:
+            config["_needsReconnect"] = True
+        if should_alert:
+            config["_reconnectAlertedAt"] = now_iso
+
+        try:
+            profile_registry.update_account(
+                account.id, config=config, db_path=self._db_path,
+            )
+        except Exception as persist_exc:  # noqa: BLE001
+            _logger.error(
+                f"worker self-maintenance: could not persist failure state for "
+                f"account id={account.id}: {persist_exc!r}"
+            )
+
+        _logger.warning(
+            f"worker self-maintenance: failed to refresh {account.platform} "
+            f"account id={account.id} (attempt {failures}, retry in {backoff}s"
+            f"{', FLAGGED for reconnect' if needs_reconnect else ''}): {exc}"
+        )
+        if should_alert:
+            self._alert_needs_reconnect(account, failures, exc)
+
+    def _alert_needs_reconnect(
+        self, account: profile_registry.Account, failures: int, exc: Exception
+    ) -> None:
+        """Best-effort operator alert; never raises into the maintenance loop."""
+        try:
+            from myUtils import ops_alerts
+            ops_alerts.send_ops_alert(
+                subject=f"[SAU] {account.platform} account #{account.id} needs reconnect",
+                body=(
+                    f"Account #{account.id} ({account.platform}, "
+                    f"{getattr(account, 'account_name', '?')}) failed automatic token "
+                    f"refresh {failures} times in a row and has been flagged for "
+                    f"manual reconnect. Re-authorise it via the Connect button.\n\n"
+                    f"Last error: {str(exc)[:500]}"
+                ),
+            )
+        except Exception as alert_exc:  # noqa: BLE001 — alerting must never break maintenance
+            _logger.warning(f"worker self-maintenance: ops alert failed: {alert_exc!r}")
 
     async def _run_maintenance_tick(self) -> None:
         """Background scan-and-refresh for stale OAuth accounts."""
@@ -363,7 +496,18 @@ class PublishWorker:
             _logger.warning(f"worker self-maintenance: could not list accounts: {exc}")
             return
 
-        stale = [a for a in accounts if self._is_account_stale(a)]
+        stale = []
+        for account in accounts:
+            try:
+                if self._is_account_stale(account):
+                    stale.append(account)
+            except Exception as exc:  # noqa: BLE001 — one bad config must not
+                # strand every other account's refresh. Log and skip it.
+                _logger.warning(
+                    f"worker self-maintenance: staleness check failed for "
+                    f"account {getattr(account, 'id', '?')} "
+                    f"({getattr(account, 'platform', '?')}): {exc}"
+                )
         if not stale:
             return
 

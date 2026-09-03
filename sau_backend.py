@@ -2585,9 +2585,37 @@ _REFRESHABLE_PLATFORMS = (
     profile_registry.PLATFORM_TWITTER,
 )
 
+# Platforms whose primary tracked credential is a long-lived (~60 day) token
+# rather than a short-lived (1-2h) access token. These must be refreshed with a
+# generous buffer: refreshing only in the final hour before a 60-day expiry
+# leaves ~6 retry attempts, so a deploy/restart or a transient upstream error in
+# that window strands the account and forces a manual OAuth reconnect. A 7-day
+# margin gives ~1000 attempts (at a 10-min loop) while still refreshing only
+# every ~53 days. Short-lived platforms (reddit/youtube/twitter/tiktok) keep the
+# caller's small skew so they are not refreshed on every single loop.
+_LONG_LIVED_TOKEN_PLATFORMS = frozenset({
+    profile_registry.PLATFORM_FACEBOOK,
+    profile_registry.PLATFORM_INSTAGRAM,
+    profile_registry.PLATFORM_THREADS,
+})
+try:
+    _LONG_LIVED_REFRESH_MARGIN_SECONDS = int(
+        os.environ.get('SAU_LONG_LIVED_REFRESH_MARGIN_SECONDS', str(7 * 24 * 3600)) or str(7 * 24 * 3600)
+    )
+except ValueError:
+    _LONG_LIVED_REFRESH_MARGIN_SECONDS = 7 * 24 * 3600
+
+
+def _effective_refresh_skew(platform: str, skew_seconds: int) -> int:
+    """Widen the staleness window for long-lived-token platforms only."""
+    if platform in _LONG_LIVED_TOKEN_PLATFORMS:
+        return max(skew_seconds, _LONG_LIVED_REFRESH_MARGIN_SECONDS)
+    return skew_seconds
+
 
 def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_seconds: int = 300) -> bool:
     config = dict(account.config or {})
+    effective_skew = _effective_refresh_skew(account.platform, skew_seconds)
     if account.platform == profile_registry.PLATFORM_TIKTOK:
         return prepared_publishers._is_tiktok_access_token_stale(config, skew_seconds=skew_seconds)
     if account.platform == profile_registry.PLATFORM_YOUTUBE:
@@ -2612,7 +2640,7 @@ def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_sec
         expires_at = prepared_publishers._parse_iso_datetime(str(config.get('metaUserAccessTokenExpiresAt') or config.get('accessTokenExpiresAt') or ''))
         if expires_at is None:
             return False
-        return expires_at <= (prepared_publishers._utc_now() + timedelta(seconds=skew_seconds))
+        return expires_at <= (prepared_publishers._utc_now() + timedelta(seconds=effective_skew))
     # Cookie-based accounts don't have API tokens to refresh
     auth_type = str(config.get("twitterAuthType") or account.auth_type or "").strip().lower()
     if account.platform == profile_registry.PLATFORM_TWITTER and auth_type == "cookie":
@@ -2623,7 +2651,7 @@ def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_sec
     expires_at = prepared_publishers._parse_iso_datetime(str(config.get('accessTokenExpiresAt') or ''))
     if expires_at is None:
         return False
-    return expires_at <= (prepared_publishers._utc_now() + timedelta(seconds=skew_seconds))
+    return expires_at <= (prepared_publishers._utc_now() + timedelta(seconds=effective_skew))
 
 
 def _run_refreshable_account_maintenance(
