@@ -125,6 +125,54 @@ class TestBuildGenerationContext:
         assert "unknown_platform" in user_prompt
 
 
+class TestLanguageRouting:
+    def test_parse_languages_single(self):
+        assert content_generator._parse_languages("en") == ["English"]
+
+    def test_parse_languages_blank(self):
+        assert content_generator._parse_languages("") == []
+        assert content_generator._parse_languages(None) == []
+
+    def test_parse_languages_delimited_and_deduped(self):
+        # comma / plus / whitespace all split; duplicates collapse; order kept.
+        labels = content_generator._parse_languages("en, zh-Hant + en")
+        assert labels[0] == "English"
+        assert any("繁體中文" in x for x in labels)
+        assert len(labels) == 2
+
+    def test_parse_languages_bilingual_keyword(self):
+        labels = content_generator._parse_languages("bilingual")
+        assert labels[0] == "English"
+        assert any("繁體中文" in x for x in labels[1:])
+
+    def test_single_language_injects_requirement(self):
+        profile = {"name": "T", "system_prompt": "s"}
+        _, user_prompt = content_generator.build_generation_context(
+            profile, {"topic": "x"}, "twitter", {"language": "zh-Hant"}
+        )
+        assert "LANGUAGE REQUIREMENT" in user_prompt
+        assert "繁體中文" in user_prompt
+        assert "BILINGUAL" not in user_prompt
+
+    def test_bilingual_injects_both_versions(self):
+        profile = {"name": "T", "system_prompt": "s"}
+        _, user_prompt = content_generator.build_generation_context(
+            profile, {"topic": "x"}, "nw_sw_blog", {"language": "en,zh-Hant"}
+        )
+        assert "BILINGUAL" in user_prompt
+        assert "English" in user_prompt
+        assert "繁體中文" in user_prompt
+        # Body must carry two complete versions separated by a rule.
+        assert "---" in user_prompt
+
+    def test_no_language_leaves_prompt_untouched(self):
+        profile = {"name": "T", "system_prompt": "s"}
+        _, user_prompt = content_generator.build_generation_context(
+            profile, {"topic": "x"}, "twitter", {}
+        )
+        assert "LANGUAGE REQUIREMENT" not in user_prompt
+
+
 class TestPreparedPostCRUD:
     def _create_campaign(self, tmp_db):
         """Helper: create a campaign row for FK reference."""
