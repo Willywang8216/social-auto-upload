@@ -572,6 +572,18 @@ def get_platform_prompt_builder(platform: str):
     return PLATFORM_PROMPTS.get(platform)
 
 
+def _language_label(code: str) -> str:
+    """Map an audience_language code to a human instruction label."""
+    key = (code or "").strip().lower().replace("_", "-")
+    if key in ("zh-hant", "zh-tw", "zh-hk", "zh", "zht", "cht"):
+        return "Traditional Chinese (Taiwan Mandarin, 繁體中文)"
+    if key in ("zh-hans", "zh-cn", "zhs", "chs"):
+        return "Simplified Chinese (简体中文)"
+    if key in ("en", "en-us", "en-gb", "eng"):
+        return "English"
+    return code.strip()
+
+
 def build_generation_context(
     profile: dict,
     media_info: dict,
@@ -603,6 +615,21 @@ Notes: {(context or {}).get('user_notes', '')}
 Return ONLY a JSON object with "message" field."""
     else:
         user_prompt = builder(profile, media_info, context or {})
+
+    # Per-account language override (bilingual routing). When an account sets
+    # audience_language, the route passes it as context["language"]; this takes
+    # priority over the profile's default_language so EN and zh-Hant accounts on
+    # the same profile each get on-target copy.
+    language = (context or {}).get("language")
+    if language:
+        label = _language_label(str(language))
+        if label:
+            user_prompt = (
+                f"{user_prompt}\n\n"
+                f"LANGUAGE REQUIREMENT (highest priority): Write the ENTIRE output — "
+                f"title, description, message and every sentence — in {label}. "
+                f"Do not mix in any other language or add a translation."
+            )
 
     return system_prompt, user_prompt
 

@@ -7574,6 +7574,7 @@ def api_campaign_generate(campaign_id):
         context = {
             "user_notes": mg_dict.get("notes", "") or mg_dict.get("user_notes", ""),
             "subreddit": acc.config.get("subreddits", [""])[0] if acc.platform == "reddit" else "",
+            "language": acc.config.get("audience_language") or profile_dict.get("default_language") or "",
         }
 
         system_prompt, user_prompt = content_generator.build_generation_context(
