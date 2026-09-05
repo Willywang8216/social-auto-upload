@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -13,10 +14,17 @@ except ModuleNotFoundError:  # pragma: no cover - environment-specific
     requests = None
 
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_CHAT_MODEL = os.environ.get("SAU_LLM_MODEL", "gpt-4.1-mini")
 DEFAULT_TRANSCRIPTION_MODEL = "whisper-1"
 DEFAULT_BASE_URL_ENV = "SAU_LLM_API_BASE_URL"
 DEFAULT_API_KEY_ENV = "SAU_LLM_API_KEY"
+# JSON array of endpoints for rotation, e.g.
+#   [{"base_url": "...", "api_key": "...", "model": "...", "headers": {...}}]
+# When unset/empty the client falls back to the single DEFAULT_* env vars, so
+# existing single-endpoint deployments behave exactly as before.
+POOL_ENV = "SAU_LLM_POOL"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +80,65 @@ def _extract_message_content(message_content) -> str:
     return str(message_content or "")
 
 
+def _load_pool() -> list[dict]:
+    """Return the endpoint rotation pool.
+
+    Prefers the ``SAU_LLM_POOL`` env var (a JSON array of
+    ``{"base_url","api_key","model"?,"headers"?}`` entries). Falls back to a
+    single-entry pool built from the legacy ``SAU_LLM_*`` env vars so existing
+    deployments keep working unchanged.
+    """
+    raw = os.environ.get(POOL_ENV, "").strip()
+    entries: list[dict] = []
+    if raw:
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("%s is not valid JSON; ignoring the pool", POOL_ENV)
+            data = None
+        if isinstance(data, dict):
+            data = [data]
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and item.get("base_url") and item.get("api_key"):
+                    entries.append(
+                        {
+                            "base_url": str(item["base_url"]).strip(),
+                            "api_key": str(item["api_key"]).strip(),
+                            "model": (str(item["model"]).strip() if item.get("model") else None),
+                            "headers": item.get("headers") if isinstance(item.get("headers"), dict) else None,
+                        }
+                    )
+    if entries:
+        return entries
+
+    base = os.environ.get(DEFAULT_BASE_URL_ENV, "").strip()
+    key = os.environ.get(DEFAULT_API_KEY_ENV, "").strip()
+    if base and key:
+        return [
+            {
+                "base_url": base,
+                "api_key": key,
+                "model": os.environ.get("SAU_LLM_MODEL", "").strip() or None,
+                "headers": None,
+            }
+        ]
+    return []
+
+
+def _resolve_endpoints(api_base_url: str | None, api_key: str | None, model: str) -> list[dict]:
+    # An explicit endpoint (e.g. injected by a caller or test) is used as-is and
+    # never rotated — this preserves the original single-shot contract.
+    if api_base_url or api_key:
+        return [{"base_url": api_base_url, "api_key": api_key, "model": model, "headers": None}]
+    pool = _load_pool()
+    if pool:
+        return pool
+    # No configuration anywhere: keep one entry so _normalise raises the
+    # canonical "No LLM API base URL configured" error.
+    return [{"base_url": None, "api_key": None, "model": model, "headers": None}]
+
+
 def generate_chat_completion(
     system_prompt: str,
     user_prompt: str,
@@ -84,18 +151,7 @@ def generate_chat_completion(
     session=None,
     timeout_seconds: int = 120,
 ) -> ChatCompletionResult:
-    base_url = _normalise_api_base_url(api_base_url)
-    resolved_api_key = _resolve_api_key(api_key)
-    payload = {
-        "model": model,
-        "temperature": temperature,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-    if response_json:
-        payload["response_format"] = {"type": "json_object"}
+    endpoints = _resolve_endpoints(api_base_url, api_key, model)
 
     if session is None:
         if requests is None:
@@ -103,28 +159,59 @@ def generate_chat_completion(
         http = requests.Session()
     else:
         http = session
-    response = http.post(
-        f"{base_url}/chat/completions",
-        headers={
-            **_headers(resolved_api_key),
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=timeout_seconds,
-    )
-    response.raise_for_status()
-    response_payload = response.json()
-    content = _extract_message_content(
-        response_payload.get("choices", [{}])[0].get("message", {}).get("content", "")
-    ).strip()
-    parsed_json = None
-    if response_json and content:
-        parsed_json = json.loads(content)
-    return ChatCompletionResult(
-        content=content,
-        payload=response_payload,
-        parsed_json=parsed_json,
-    )
+
+    last_error: Exception | None = None
+    total = len(endpoints)
+    for index, entry in enumerate(endpoints):
+        try:
+            base_url = _normalise_api_base_url(entry.get("base_url"))
+            resolved_api_key = _resolve_api_key(entry.get("api_key"))
+            headers = {**_headers(resolved_api_key), "Content-Type": "application/json"}
+            extra_headers = entry.get("headers")
+            if isinstance(extra_headers, dict):
+                headers.update(extra_headers)
+            payload = {
+                "model": entry.get("model") or model,
+                "temperature": temperature,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            }
+            if response_json:
+                payload["response_format"] = {"type": "json_object"}
+            response = http.post(
+                f"{base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=timeout_seconds,
+            )
+            response.raise_for_status()
+            response_payload = response.json()
+            content = _extract_message_content(
+                response_payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+            ).strip()
+            parsed_json = json.loads(content) if (response_json and content) else None
+            return ChatCompletionResult(
+                content=content,
+                payload=response_payload,
+                parsed_json=parsed_json,
+            )
+        except Exception as exc:  # noqa: BLE001 - rotate to the next endpoint on any failure
+            last_error = exc
+            # Log the failure without leaking the API key (base_url only).
+            logger.warning(
+                "LLM endpoint %d/%d (%s) failed: %s: %s",
+                index + 1,
+                total,
+                entry.get("base_url") or "<unset>",
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            continue
+
+    assert last_error is not None  # loop always runs at least once
+    raise last_error
 
 
 def transcribe_audio(

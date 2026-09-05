@@ -513,6 +513,44 @@ User notes: {context.get('user_notes', '')}
 Return ONLY a JSON object: {{"message": "..."}}"""
 
 
+def _build_blog_prompt(profile: dict, media_info: dict, context: dict) -> str:
+    return f"""Generate a complete, long-form SEO- and GEO-optimized blog article.
+
+Rules:
+- Length: 1000-1800 words of substantive, original content.
+- Format the body as Markdown: exactly one H1 (# Title) that matches the title,
+  then H2/H3 section headings. Use short paragraphs and bullet lists where useful.
+- ANSWER-FIRST (GEO): the opening 2 sentences must directly answer the core
+  question/topic so AI answer engines and featured snippets can extract them.
+- Include 3-6 well-structured sections with descriptive, question-style H2s.
+- Include a short FAQ section (2-4 Q&A) near the end using question headings;
+  this matters for generative-engine optimization.
+- End with a natural conclusion and the profile's call-to-action, linking to the
+  site once.
+- SEO: weave the primary keyword and related terms in naturally (no stuffing).
+  Provide a meta description of at most 155 characters.
+- Write entirely in the profile's voice and language. Do NOT sound like generic
+  AI marketing copy.
+
+Profile brand: {profile.get('name', '')}
+Writing style: {profile.get('writing_style_prompt', '')}
+Contact: {profile.get('contact_details', '')}
+CTA: {profile.get('default_cta', '')}
+Link (use once as the CTA target): {profile.get('default_link', '')}
+
+Content topic: {media_info.get('topic', '')}
+Key points: {media_info.get('key_points', '')}
+Transcript/source: {media_info.get('transcript', 'N/A')}
+User notes: {context.get('user_notes', '')}
+
+Return ONLY a valid JSON object with these fields:
+{{"title": "SEO headline containing the primary keyword",
+  "description": "meta description, at most 155 chars",
+  "message": "the full Markdown article body",
+  "hashtags": ["keyword1", "keyword2", "keyword3"]}}
+In the message field, escape newlines as \\n so the JSON stays valid."""
+
+
 PLATFORM_PROMPTS = {
     "twitter": _build_twitter_prompt,
     "threads": _build_threads_prompt,
@@ -524,12 +562,26 @@ PLATFORM_PROMPTS = {
     "telegram": _build_telegram_prompt,
     "patreon": _build_patreon_prompt,
     "discord": _build_discord_prompt,
+    "teaching_blog": _build_blog_prompt,
+    "nw_sw_blog": _build_blog_prompt,
 }
 
 
 def get_platform_prompt_builder(platform: str):
     """Get the prompt builder function for a platform."""
     return PLATFORM_PROMPTS.get(platform)
+
+
+def _language_label(code: str) -> str:
+    """Map an audience_language code to a human instruction label."""
+    key = (code or "").strip().lower().replace("_", "-")
+    if key in ("zh-hant", "zh-tw", "zh-hk", "zh", "zht", "cht"):
+        return "Traditional Chinese (Taiwan Mandarin, 繁體中文)"
+    if key in ("zh-hans", "zh-cn", "zhs", "chs"):
+        return "Simplified Chinese (简体中文)"
+    if key in ("en", "en-us", "en-gb", "eng"):
+        return "English"
+    return code.strip()
 
 
 def build_generation_context(
@@ -563,6 +615,21 @@ Notes: {(context or {}).get('user_notes', '')}
 Return ONLY a JSON object with "message" field."""
     else:
         user_prompt = builder(profile, media_info, context or {})
+
+    # Per-account language override (bilingual routing). When an account sets
+    # audience_language, the route passes it as context["language"]; this takes
+    # priority over the profile's default_language so EN and zh-Hant accounts on
+    # the same profile each get on-target copy.
+    language = (context or {}).get("language")
+    if language:
+        label = _language_label(str(language))
+        if label:
+            user_prompt = (
+                f"{user_prompt}\n\n"
+                f"LANGUAGE REQUIREMENT (highest priority): Write the ENTIRE output — "
+                f"title, description, message and every sentence — in {label}. "
+                f"Do not mix in any other language or add a translation."
+            )
 
     return system_prompt, user_prompt
 
