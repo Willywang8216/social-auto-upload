@@ -18,6 +18,14 @@ FROM ghcr.io/willywang8216/sau-base:slim
 
 WORKDIR /app
 
+# CJK fonts so ffmpeg drawtext + Pillow can render Chinese watermark/overlay
+# text (e.g. Teaching's "威威教育"); the slim base only ships Latin fonts, which
+# rendered CJK glyphs as tofu boxes. Placed before `COPY . .` for layer reuse.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk \
+    && fc-cache -f \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY . .
 
 # Copy the built SPA into the exact path Flask prefers first.

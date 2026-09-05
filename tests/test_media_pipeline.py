@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 if "conf" not in sys.modules:
     conf_module = types.ModuleType("conf")
@@ -92,6 +94,94 @@ class MediaPipelineTests(unittest.TestCase):
                 output,
                 watermark_text="Brand",
                 seed=5,
+            )
+            self.assertEqual(result, output)
+            self.assertTrue(output.exists())
+
+
+class WatermarkFontTests(unittest.TestCase):
+    """CJK-capable font resolution and threading into the renderers.
+
+    The slim runtime image only ships Latin fonts, so Chinese watermark text
+    (e.g. Teaching's "威威教育") rendered as tofu. resolve_watermark_font()
+    picks a CJK font and both renderers must actually use it.
+    """
+
+    def test_resolve_honours_env_when_file_exists(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".ttf") as fake_font:
+            with mock.patch.dict(os.environ, {"SAU_WATERMARK_FONT": fake_font.name}):
+                self.assertEqual(
+                    media_pipeline.resolve_watermark_font(), fake_font.name
+                )
+
+    def test_resolve_ignores_env_when_missing_and_falls_back(self) -> None:
+        with mock.patch.dict(os.environ, {"SAU_WATERMARK_FONT": "/no/such/font.ttf"}):
+            with mock.patch("os.path.exists") as exists:
+                # env path missing; first CJK candidate present.
+                exists.side_effect = lambda p: p != "/no/such/font.ttf"
+                resolved = media_pipeline.resolve_watermark_font()
+                self.assertEqual(resolved, media_pipeline._CJK_FONT_CANDIDATES[0])
+
+    def test_resolve_returns_none_when_nothing_exists(self) -> None:
+        env = {k: v for k, v in os.environ.items() if k != "SAU_WATERMARK_FONT"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch("os.path.exists", return_value=False):
+                self.assertIsNone(media_pipeline.resolve_watermark_font())
+
+    def test_drawtext_builders_embed_fontfile_when_given(self) -> None:
+        timeline = media_pipeline.build_video_overlay_timeline(6, seed=1)
+        static = media_pipeline._build_text_filter(
+            "威威教育", timeline, opacity=0.2, fontsize=48, font_path="/f/noto.ttc"
+        )
+        moving = media_pipeline._build_moving_text_filter(
+            "威威教育", 6.0, opacity=0.2, fontsize=48, font_path="/f/noto.ttc"
+        )
+        repeated = media_pipeline._build_repeated_text_filter(
+            "威威教育", opacity=0.2, fontsize=48, font_path="/f/noto.ttc"
+        )
+        for chain in (static, moving, repeated):
+            self.assertIn("fontfile='/f/noto.ttc'", chain)
+
+    def test_drawtext_builders_omit_fontfile_when_absent(self) -> None:
+        timeline = media_pipeline.build_video_overlay_timeline(6, seed=1)
+        chain = media_pipeline._build_text_filter(
+            "Brand", timeline, opacity=0.2, fontsize=48
+        )
+        self.assertNotIn("fontfile=", chain)
+
+    def test_apply_video_watermark_injects_resolved_font(self) -> None:
+        recorded: list[list[str]] = []
+
+        def fake_runner(command, **kwargs):
+            recorded.append(list(command))
+            if command[0] == media_pipeline.FFPROBE_COMMAND:
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=json.dumps({"format": {"duration": "9"}}), stderr=""
+                )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with mock.patch.object(
+            media_pipeline, "resolve_watermark_font", return_value="/f/noto.ttc"
+        ):
+            media_pipeline.apply_video_watermark(
+                "/tmp/source.mp4",
+                "/tmp/watermarked.mp4",
+                watermark_text="威威教育",
+                seed=11,
+                runner=fake_runner,
+            )
+        vf = recorded[1][recorded[1].index("-vf") + 1]
+        self.assertIn("fontfile='/f/noto.ttc'", vf)
+
+    @unittest.skipUnless(Image is not None, "Pillow is not installed")
+    def test_apply_image_watermark_accepts_cjk_with_font(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source = Path(tmp_dir) / "source.png"
+            output = Path(tmp_dir) / "out.png"
+            Image.new("RGB", (320, 200), color="black").save(source)
+            # No CJK font on the test host: fall back path must still succeed.
+            result = media_pipeline.apply_image_watermark(
+                source, output, watermark_text="威威教育", seed=5
             )
             self.assertEqual(result, output)
             self.assertTrue(output.exists())
