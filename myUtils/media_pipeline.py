@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import random
@@ -16,6 +17,41 @@ from utils.conf_defaults import BASE_DIR
 FFMPEG_COMMAND = "ffmpeg"
 FFPROBE_COMMAND = "ffprobe"
 GENERATED_MEDIA_ROOT = Path(BASE_DIR) / "generated" / "campaigns"
+
+# Watermark/overlay text needs a font file that actually contains the glyphs.
+# The slim runtime image only ships Latin fonts (DejaVu), so CJK watermark text
+# such as Teaching's "威威教育" rendered as empty tofu boxes. The image installs
+# fonts-noto-cjk and both renderers (ffmpeg drawtext and Pillow) point at a
+# CJK-capable font. Override the path with SAU_WATERMARK_FONT.
+_CJK_FONT_CANDIDATES = (
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-VF.otf",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Latin-only last resort
+)
+
+
+def resolve_watermark_font() -> str | None:
+    """Return a path to a watermark font, preferring a CJK-capable one.
+
+    Honours ``SAU_WATERMARK_FONT`` when it points at an existing file, then the
+    first bundled candidate that exists, then a glob for any Noto CJK / WenQuanYi
+    font (the exact filename drifts across Debian versions, e.g. the newer
+    variable-font ``.ttc``). Returns ``None`` when nothing is found, in which
+    case ffmpeg falls back to its fontconfig default.
+    """
+    env = os.environ.get("SAU_WATERMARK_FONT", "").strip()
+    if env and os.path.exists(env):
+        return env
+    for candidate in _CJK_FONT_CANDIDATES:
+        if os.path.exists(candidate):
+            return candidate
+    for pattern in ("/usr/share/fonts/**/*CJK*", "/usr/share/fonts/**/*wqy*"):
+        matches = sorted(glob.glob(pattern, recursive=True))
+        if matches:
+            return matches[0]
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +396,18 @@ def _escape_drawtext(value: str) -> str:
     )
 
 
+def _drawtext_font_prefix(font_path: str | None) -> str:
+    """Return a ``fontfile='...':`` prefix for a drawtext filter, or ''.
+
+    Without it ffmpeg picks a fontconfig default that only covers Latin, so
+    CJK watermark text renders as tofu. Wrapped in quotes and escaped so paths
+    with special characters do not break the filter parser.
+    """
+    if not font_path:
+        return ""
+    return f"fontfile='{_escape_drawtext(font_path)}':"
+
+
 def _build_text_filter(
     watermark_text: str,
     timeline: Sequence[OverlayWindow],
@@ -368,13 +416,16 @@ def _build_text_filter(
     fontsize: int,
     color: str = "white",
     angle: float = 0.0,
+    font_path: str | None = None,
 ) -> str:
     escaped = _escape_drawtext(watermark_text)
+    font_prefix = _drawtext_font_prefix(font_path)
     parts = []
     for window in timeline:
         angle_part = f":angle={angle:.4f}" if angle else ""
         parts.append(
             "drawtext="
+            f"{font_prefix}"
             f"text='{escaped}':"
             f"fontcolor={color}@{opacity:.2f}:"
             f"fontsize={fontsize}:"
@@ -394,9 +445,11 @@ def _build_moving_text_filter(
     fontsize: int,
     color: str = "white",
     seed: int = 0,
+    font_path: str | None = None,
 ) -> str:
     """Build a drawtext filter with continuously moving position."""
     escaped = _escape_drawtext(watermark_text)
+    font_prefix = _drawtext_font_prefix(font_path)
     rng = random.Random(seed)
     period = rng.uniform(3.0, 8.0)
     x_speed = rng.uniform(20, 80)
@@ -411,6 +464,7 @@ def _build_moving_text_filter(
 
     return (
         "drawtext="
+        f"{font_prefix}"
         f"text='{escaped}':"
         f"fontcolor={color}@{opacity:.2f}:"
         f"fontsize={fontsize}:"
@@ -428,9 +482,11 @@ def _build_repeated_text_filter(
     cols: int = 3,
     rows: int = 3,
     angle: float = -0.52,
+    font_path: str | None = None,
 ) -> str:
     """Build a tiled drawtext filter with fixed grid positions."""
     escaped = _escape_drawtext(watermark_text)
+    font_prefix = _drawtext_font_prefix(font_path)
     parts = []
     for r in range(rows):
         for c in range(cols):
@@ -439,6 +495,7 @@ def _build_repeated_text_filter(
             angle_part = f":angle={angle:.4f}" if angle else ""
             parts.append(
                 "drawtext="
+                f"{font_prefix}"
                 f"text='{escaped}':"
                 f"fontcolor={color}@{opacity:.2f}:"
                 f"fontsize={fontsize}:"
@@ -478,11 +535,15 @@ def apply_video_watermark(
     color: str = "white",
     style: str = "static",
     angle: float = -0.52,
+    font_path: str | None = None,
     runner=run_subprocess,
     duration_reader=probe_video_duration,
 ) -> VideoWatermarkPlan:
     if not watermark_text and not watermark_image_path:
         raise ValueError("watermark_text or watermark_image_path is required")
+
+    if font_path is None:
+        font_path = resolve_watermark_font()
 
     source = Path(source_path).expanduser().resolve()
     output = Path(output_path).expanduser().resolve()
@@ -530,6 +591,7 @@ def apply_video_watermark(
                 fontsize=fontsize,
                 color=color,
                 seed=seed,
+                font_path=font_path,
             )
         elif style == "repeated":
             filter_chain = _build_repeated_text_filter(
@@ -538,6 +600,7 @@ def apply_video_watermark(
                 fontsize=fontsize,
                 color=color,
                 angle=angle,
+                font_path=font_path,
             )
         else:
             use_angle = angle if style == "slanted" else 0.0
@@ -548,6 +611,7 @@ def apply_video_watermark(
                 fontsize=fontsize,
                 color=color,
                 angle=use_angle,
+                font_path=font_path,
             )
         command = [
             FFMPEG_COMMAND,
@@ -578,9 +642,13 @@ def apply_image_watermark(
     color: str = "white",
     cols: int = 3,
     rows: int = 3,
+    font_path: str | None = None,
 ) -> Path:
     if not watermark_text and not watermark_image_path:
         raise ValueError("watermark_text or watermark_image_path is required")
+
+    if font_path is None:
+        font_path = resolve_watermark_font()
 
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -640,10 +708,21 @@ def apply_image_watermark(
                     overlay.alpha_composite(resized, (x, y))
         else:
             font_size = max(18, int(min(base.size) * 0.045))
-            try:
-                font = ImageFont.truetype("DejaVuSans.ttf", font_size)
-            except OSError:
-                font = ImageFont.load_default()
+            font = None
+            # Prefer a CJK-capable font so Chinese watermark text (e.g. Teaching's
+            # "威威教育") renders as glyphs, not tofu. DejaVu (Latin-only) is the
+            # last resort inside resolve_watermark_font(); truetype by bare name is
+            # the final fallback for local runs where the resolver found nothing.
+            if font_path:
+                try:
+                    font = ImageFont.truetype(font_path, font_size)
+                except OSError:
+                    font = None
+            if font is None:
+                try:
+                    font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+                except OSError:
+                    font = ImageFont.load_default()
             drawer = ImageDraw.Draw(overlay)
             text = watermark_text or ""
             fill_color = _parse_color(color, opacity)
