@@ -513,6 +513,44 @@ User notes: {context.get('user_notes', '')}
 Return ONLY a JSON object: {{"message": "..."}}"""
 
 
+def _build_blog_prompt(profile: dict, media_info: dict, context: dict) -> str:
+    return f"""Generate a complete, long-form SEO- and GEO-optimized blog article.
+
+Rules:
+- Length: 1000-1800 words of substantive, original content.
+- Format the body as Markdown: exactly one H1 (# Title) that matches the title,
+  then H2/H3 section headings. Use short paragraphs and bullet lists where useful.
+- ANSWER-FIRST (GEO): the opening 2 sentences must directly answer the core
+  question/topic so AI answer engines and featured snippets can extract them.
+- Include 3-6 well-structured sections with descriptive, question-style H2s.
+- Include a short FAQ section (2-4 Q&A) near the end using question headings;
+  this matters for generative-engine optimization.
+- End with a natural conclusion and the profile's call-to-action, linking to the
+  site once.
+- SEO: weave the primary keyword and related terms in naturally (no stuffing).
+  Provide a meta description of at most 155 characters.
+- Write entirely in the profile's voice and language. Do NOT sound like generic
+  AI marketing copy.
+
+Profile brand: {profile.get('name', '')}
+Writing style: {profile.get('writing_style_prompt', '')}
+Contact: {profile.get('contact_details', '')}
+CTA: {profile.get('default_cta', '')}
+Link (use once as the CTA target): {profile.get('default_link', '')}
+
+Content topic: {media_info.get('topic', '')}
+Key points: {media_info.get('key_points', '')}
+Transcript/source: {media_info.get('transcript', 'N/A')}
+User notes: {context.get('user_notes', '')}
+
+Return ONLY a valid JSON object with these fields:
+{{"title": "SEO headline containing the primary keyword",
+  "description": "meta description, at most 155 chars",
+  "message": "the full Markdown article body",
+  "hashtags": ["keyword1", "keyword2", "keyword3"]}}
+In the message field, escape newlines as \\n so the JSON stays valid."""
+
+
 PLATFORM_PROMPTS = {
     "twitter": _build_twitter_prompt,
     "threads": _build_threads_prompt,
@@ -524,6 +562,8 @@ PLATFORM_PROMPTS = {
     "telegram": _build_telegram_prompt,
     "patreon": _build_patreon_prompt,
     "discord": _build_discord_prompt,
+    "teaching_blog": _build_blog_prompt,
+    "nw_sw_blog": _build_blog_prompt,
 }
 
 
