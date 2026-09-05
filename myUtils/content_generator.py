@@ -584,6 +584,30 @@ def _language_label(code: str) -> str:
     return code.strip()
 
 
+def _parse_languages(value: str) -> list[str]:
+    """Split an audience_language value into ordered, de-duplicated labels.
+
+    Accepts a single code ("en"), a delimited list ("en,zh-Hant" /
+    "en+zh-Hant" / "en zh-Hant") or the keyword "bilingual"/"both" (which
+    expands to English + Traditional Chinese, the only pair these personas
+    use). Returns human instruction labels, preserving order and dropping
+    blanks/duplicates.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return []
+    if raw.lower() in ("bilingual", "both"):
+        tokens = ["en", "zh-Hant"]
+    else:
+        tokens = [t for t in re.split(r"[,+/&]+|\s+", raw) if t]
+    labels: list[str] = []
+    for tok in tokens:
+        label = _language_label(tok)
+        if label and label not in labels:
+            labels.append(label)
+    return labels
+
+
 def build_generation_context(
     profile: dict,
     media_info: dict,
@@ -622,13 +646,27 @@ Return ONLY a JSON object with "message" field."""
     # the same profile each get on-target copy.
     language = (context or {}).get("language")
     if language:
-        label = _language_label(str(language))
-        if label:
+        labels = _parse_languages(str(language))
+        if len(labels) == 1:
             user_prompt = (
                 f"{user_prompt}\n\n"
                 f"LANGUAGE REQUIREMENT (highest priority): Write the ENTIRE output — "
-                f"title, description, message and every sentence — in {label}. "
+                f"title, description, message and every sentence — in {labels[0]}. "
                 f"Do not mix in any other language or add a translation."
+            )
+        elif len(labels) >= 2:
+            primary, *rest = labels
+            joined = " and ".join(labels)
+            user_prompt = (
+                f"{user_prompt}\n\n"
+                f"LANGUAGE REQUIREMENT (highest priority): This piece is BILINGUAL — "
+                f"produce it in {joined}. Keep the EXACT JSON structure specified above. "
+                f"Inside the long body/message field, write the COMPLETE {primary} version "
+                f"first, then a Markdown horizontal rule alone on its line (---), then the "
+                f"COMPLETE {' then '.join(rest)} version. Each version must carry its own "
+                f"heading and read naturally on its own — not a word-for-word translation. "
+                f"For short fields such as title and description, include every language "
+                f"separated by ' ｜ '."
             )
 
     return system_prompt, user_prompt
