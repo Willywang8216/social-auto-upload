@@ -78,5 +78,56 @@ class MetaAuthTests(unittest.TestCase):
         self.assertEqual(session.calls[1][1], meta_auth.META_TOKEN_URL)
 
 
+class ResolveAccessTokenExpiryTests(unittest.TestCase):
+    """Never-expiring Meta tokens (expires_at == 0, no expires_in) must resolve
+    to a far-future sentinel so SAU never marks a healthy account "expired".
+    """
+
+    def _assert_far_future(self, iso: str) -> None:
+        import datetime as _dt
+        bound = (_dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None) + _dt.timedelta(days=365 * 9)).isoformat()
+        self.assertGreater(iso, bound)
+
+    def test_never_expiring_token_gets_far_future_sentinel(self):
+        with patch.object(meta_auth, 'debug_token_info', return_value={
+            'expires_at': 0, 'is_valid': True, 'type': 'USER',
+        }):
+            res = meta_auth.resolve_access_token_expiry(access_token='never-tok')
+        self.assertEqual(res['mode'], 'never')
+        self.assertEqual(res['expires_at_epoch'], 0)
+        self._assert_far_future(res['expires_at_iso'])
+
+    def test_expiring_token_gets_exact_iso(self):
+        import datetime as _dt
+        epoch = int(_dt.datetime(2030, 6, 1, tzinfo=_dt.timezone.utc).timestamp())
+        with patch.object(meta_auth, 'debug_token_info', return_value={'expires_at': epoch}):
+            res = meta_auth.resolve_access_token_expiry(access_token='expiring-tok')
+        self.assertEqual(res['mode'], 'expiring')
+        self.assertEqual(res['expires_at_epoch'], epoch)
+        self.assertEqual(res['expires_at_iso'], '2030-06-01T00:00:00')
+
+    def test_debug_unavailable_falls_back_to_expires_in(self):
+        import datetime as _dt
+        with patch.object(meta_auth, 'debug_token_info', return_value={}):
+            res = meta_auth.resolve_access_token_expiry(access_token='tok', expires_in=3600)
+        self.assertEqual(res['mode'], 'expiring')
+        got = _dt.datetime.fromisoformat(res['expires_at_iso'])
+        now = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
+        # ISO must be ~now + 3600s (tolerance for test runtime skew)
+        self.assertLess(abs((got - now).total_seconds() - 3600), 300)
+
+    def test_invalid_token_verdict_is_not_masked(self):
+        from myUtils.meta_auth import MetaOAuthError
+        with patch.object(meta_auth, 'debug_token_info', side_effect=MetaOAuthError('Invalid OAuth access token')):
+            with self.assertRaises(MetaOAuthError):
+                meta_auth.resolve_access_token_expiry(access_token='dead-tok')
+
+    def test_no_debug_and_no_expires_in_defaults_to_never(self):
+        with patch.object(meta_auth, 'debug_token_info', return_value={}):
+            res = meta_auth.resolve_access_token_expiry(access_token='tok')
+        self.assertEqual(res['mode'], 'never')
+        self._assert_far_future(res['expires_at_iso'])
+
+
 if __name__ == '__main__':
     unittest.main()

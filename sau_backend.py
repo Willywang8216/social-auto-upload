@@ -3827,11 +3827,18 @@ def meta_oauth_callback():
             merged_config['metaUserAccessToken'] = user_access_token
             now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')
             merged_config['accessTokenUpdatedAt'] = now_utc
-            expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
-            if expires_in not in (None, ''):
-                expiry = (datetime.now(tz=timezone.utc).replace(tzinfo=None) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
-                merged_config['metaUserAccessTokenExpiresAt'] = expiry
-                merged_config['accessTokenExpiresAt'] = expiry
+            # Persist a *truthful* expiry: this Meta app reports tokens as
+            # never-expiring (expires_at == 0) and omits expires_in, so the
+            # legacy 60-day model left a stale/past expiry that made the
+            # account read "Token expired" forever. Resolve from debug_token.
+            resolved_expiry = meta_auth.resolve_access_token_expiry(
+                access_token=user_access_token,
+                expires_in=long_lived_payload.get('expires_in') or token_payload.get('expires_in'),
+            )
+            merged_config['metaUserAccessTokenExpiresAt'] = resolved_expiry['expires_at_iso']
+            merged_config['accessTokenExpiresAt'] = resolved_expiry['expires_at_iso']
+            merged_config['metaTokenExpiryMode'] = resolved_expiry['mode']
+            merged_config['metaTokenExpiresAtEpoch'] = resolved_expiry['expires_at_epoch']
             merged_config['connectedAt'] = merged_config.get('connectedAt') or now_utc
             updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
             callback_payload = {
@@ -3930,11 +3937,16 @@ def meta_oauth_callback():
             merged_config['metaUserAccessToken'] = user_access_token
             now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')
             merged_config['accessTokenUpdatedAt'] = now_utc
-            expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
-            if expires_in not in (None, ''):
-                expiry = (datetime.now(tz=timezone.utc).replace(tzinfo=None) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
-                merged_config['metaUserAccessTokenExpiresAt'] = expiry
-                merged_config['accessTokenExpiresAt'] = expiry
+            # Persist a truthful expiry (same rationale as the Facebook branch):
+            # never-expiring Meta tokens must not be left with no / past expiry.
+            resolved_expiry = meta_auth.resolve_access_token_expiry(
+                access_token=user_access_token,
+                expires_in=long_lived_payload.get('expires_in') or token_payload.get('expires_in'),
+            )
+            merged_config['metaUserAccessTokenExpiresAt'] = resolved_expiry['expires_at_iso']
+            merged_config['accessTokenExpiresAt'] = resolved_expiry['expires_at_iso']
+            merged_config['metaTokenExpiryMode'] = resolved_expiry['mode']
+            merged_config['metaTokenExpiresAtEpoch'] = resolved_expiry['expires_at_epoch']
             merged_config['connectedAt'] = merged_config.get('connectedAt') or now_utc
             print(f"🔍 Meta callback IG: saving config for account {account.id}: igUserId={merged_config.get('igUserId')} accessToken={'present' if merged_config.get('accessToken') else 'MISSING'} keys={list(merged_config.keys())}")
             updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
@@ -7968,12 +7980,13 @@ def api_accounts():
                             expires_human = f"in {d} days"
             except Exception:
                 pass
-        elif is_meta and config.get("accessToken"):
-            # Meta tokens ALWAYS have an expiry. If there's no expiry timestamp
-            # but there IS an access token, the token is from an old format
-            # that predates proper OAuth — mark as expired to force re-auth.
-            cookie_status = "expired"
-            expires_human = "reauth needed"
+        # A Meta account that holds an access token but has no recorded expiry
+        # is deliberately NOT force-labelled "expired". Tokens issued by some
+        # Meta apps never expire (debug_token ``expires_at == 0``) and carry no
+        # ``expires_in``; the OAuth callback now resolves and persists a
+        # truthful expiry (far-future sentinel for never-expiring tokens), so a
+        # missing field is at most a legacy row — flagging it "reauth needed"
+        # was what made healthy accounts demand a reconnect forever.
 
         # Extract avatar URL from config (stored by OAuth callbacks / token refreshes)
         avatar_url = config.get("avatarUrl") or config.get("avatar_url") or config.get("profileImageUrl") or ""
