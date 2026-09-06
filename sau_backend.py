@@ -2421,7 +2421,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                     debug = None
 
                 needs_rotate = False
-                if debug is not None:
+                if debug:  # non-empty, authoritative debug payload
                     is_valid = debug.get('is_valid', True) is not False
                     exp = debug.get('expires_at')
                     if not is_valid:
@@ -2430,9 +2430,17 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                         needs_rotate = True
                     # valid + expires_at == 0 (never-expiring) -> nothing to rotate
                 else:
+                    # Cannot live-verify right now (transient debug failure, or the
+                    # app's debug credentials are unavailable, e.g. in tests). Fall
+                    # back to the stored expiry: an already-past stored expiry keeps
+                    # its meaning ("expired; reconnect required"), while a far /
+                    # missing expiry proceeds without rotating — a healthy
+                    # never-expiring token must not be churned just because one
+                    # verification call could not run.
                     stored_exp = prepared_publishers._parse_iso_datetime(str(config.get('metaUserAccessTokenExpiresAt') or config.get('accessTokenExpiresAt') or ''))
-                    if stored_exp is None or stored_exp <= (prepared_publishers._utc_now() + timedelta(seconds=_LONG_LIVED_REFRESH_MARGIN_SECONDS)):
-                        needs_rotate = True
+                    if stored_exp is not None and stored_exp <= prepared_publishers._utc_now():
+                        raise ValueError(f"{platform_label} Meta user access token expired; reconnect required")
+                    needs_rotate = stored_exp is None or stored_exp <= (prepared_publishers._utc_now() + timedelta(seconds=_LONG_LIVED_REFRESH_MARGIN_SECONDS))
 
                 refreshed_payload = {}
                 if needs_rotate:
