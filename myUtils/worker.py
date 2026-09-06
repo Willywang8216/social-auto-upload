@@ -332,11 +332,17 @@ class PublishWorker:
                     refreshed = meta_auth.exchange_for_long_lived_token(access_token=meta_user_token)
                 new_user_token = str(refreshed.get("access_token") or meta_user_token)
                 config["metaUserAccessToken"] = new_user_token
-                expires_in = refreshed.get("expires_in")
-                if expires_in:
-                    config["metaUserAccessTokenExpiresAt"] = (
-                        datetime.now() + timedelta(seconds=int(expires_in))
-                    ).isoformat(timespec="seconds")
+                # Persist a truthful expiry. Some Meta apps issue never-expiring
+                # tokens (debug_token ``expires_at == 0``) and omit ``expires_in``
+                # from every response; the old 60-day model then left a stale/past
+                # expiry that read as "expired / reconnect required" forever.
+                resolved_expiry = meta_auth.resolve_access_token_expiry(
+                    access_token=new_user_token,
+                    expires_in=refreshed.get("expires_in"),
+                )
+                config["metaUserAccessTokenExpiresAt"] = resolved_expiry["expires_at_iso"]
+                config["metaTokenExpiryMode"] = resolved_expiry["mode"]
+                config["metaTokenExpiresAtEpoch"] = resolved_expiry["expires_at_epoch"]
 
                 # Re-derive the page-level access_token from the freshly-refreshed
                 # user token. Page tokens inherit the user token's lifecycle, so
