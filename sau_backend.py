@@ -2395,72 +2395,125 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
             )
             summary = f"Threads refreshed: {config.get('threadsUserName') or updated.account_name}"
         elif account.platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
-            meta_user_access_token = str(config.get('metaUserAccessToken') or '').strip()
-            if not meta_user_access_token:
-                raise ValueError(f"{account.platform.capitalize()} account is missing metaUserAccessToken; reconnect required")
-            meta_expiry = prepared_publishers._parse_iso_datetime(str(config.get('metaUserAccessTokenExpiresAt') or config.get('accessTokenExpiresAt') or ''))
-            if meta_expiry is not None and meta_expiry <= prepared_publishers._utc_now():
-                raise ValueError(f"{account.platform.capitalize()} Meta user access token expired; reconnect required")
-            pages_payload = meta_auth.fetch_managed_pages(access_token=meta_user_access_token)
-            pages = pages_payload.get('data', []) if isinstance(pages_payload, dict) else []
-            if not isinstance(pages, list):
-                pages = []
-            config['accessTokenUpdatedAt'] = now
-            config[('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt')] = now
-            if account.platform == profile_registry.PLATFORM_FACEBOOK:
-                wanted_page_id = str(config.get('pageId') or '').strip()
-                selected_page = next((page for page in pages if str(page.get('id') or '') == wanted_page_id), None) if wanted_page_id else None
-                if selected_page is None and pages:
-                    selected_page = pages[0]
-                if selected_page is None:
-                    raise ValueError('Meta refresh did not return any manageable Facebook Pages')
-                config['pageId'] = str(selected_page.get('id') or config.get('pageId') or '')
-                config['facebookPageName'] = str(selected_page.get('name') or config.get('facebookPageName') or '')
-                config['accessToken'] = str(selected_page.get('access_token') or config.get('accessToken') or '')
-                if config.get('metaUserAccessTokenExpiresAt'):
-                    config['accessTokenExpiresAt'] = str(config.get('metaUserAccessTokenExpiresAt'))
-                # Fetch Facebook page profile picture
+            # Live self-check + refresh for Meta accounts. Facebook reports some
+            # app tokens as never-expiring (debug_token expires_at == 0) and omits
+            # expires_in from every response; the old code only refreshed when a
+            # *stored* expiry was near/past, so those accounts were never live-
+            # verified and a revoked token surfaced only at publish time. Here the
+            # token is checked against Facebook:
+            #   * valid + never-expiring (or far from expiry) -> no rotation, just
+            #     re-derive the page token and record a successful self-check;
+            #   * invalid or within the expiry margin -> re-exchange the token;
+            #   * refresh keeps failing -> the account is flagged "expired" (past
+            #     expiry so the UI shows Token expired) and the operator alerted.
+            try:
+                platform_label = account.platform.capitalize()
+                meta_user_access_token = str(config.get('metaUserAccessToken') or '').strip()
+                if not meta_user_access_token:
+                    raise ValueError(f"{platform_label} account is missing metaUserAccessToken; reconnect required")
+
+                debug = None
                 try:
-                    import requests as _requests
-                    pic_resp = _requests.get(f"{meta_auth.META_GRAPH_ROOT}/{config['pageId']}", params={"fields": "picture.type(large)", "access_token": config['accessToken']}, timeout=15)
-                    pic_url = pic_resp.json().get("picture", {}).get("data", {}).get("url")
-                    if pic_url:
-                        config['avatarUrl'] = pic_url
-                except Exception:
-                    pass
-                updated = profile_registry.update_account(account_id, config=config, auth_type='oauth', status=1, db_path=db_path)
-                summary = f"Facebook credentials re-synced: {config.get('facebookPageName') or updated.account_name}"
-            else:
-                wanted_ig_user_id = str(config.get('igUserId') or '').strip()
-                selected_pair = None
-                for page in pages:
-                    ig_user = page.get('instagram_business_account') if isinstance(page, dict) else None
-                    if not isinstance(ig_user, dict):
-                        continue
-                    if wanted_ig_user_id and str(ig_user.get('id') or '') != wanted_ig_user_id:
-                        continue
-                    selected_pair = (page, ig_user)
-                    break
-                if selected_pair is None:
+                    debug = meta_auth.debug_token_info(access_token=meta_user_access_token)
+                except meta_auth.MetaOAuthError:
+                    debug = {'is_valid': False}  # Facebook rejected the token outright
+                except Exception:  # noqa: BLE001 — transient; fall back to stored expiry
+                    debug = None
+
+                needs_rotate = False
+                if debug is not None:
+                    is_valid = debug.get('is_valid', True) is not False
+                    exp = debug.get('expires_at')
+                    if not is_valid:
+                        needs_rotate = True
+                    elif isinstance(exp, int) and exp > 0 and exp <= (int(datetime.now(timezone.utc).timestamp()) + _LONG_LIVED_REFRESH_MARGIN_SECONDS):
+                        needs_rotate = True
+                    # valid + expires_at == 0 (never-expiring) -> nothing to rotate
+                else:
+                    stored_exp = prepared_publishers._parse_iso_datetime(str(config.get('metaUserAccessTokenExpiresAt') or config.get('accessTokenExpiresAt') or ''))
+                    if stored_exp is None or stored_exp <= (prepared_publishers._utc_now() + timedelta(seconds=_LONG_LIVED_REFRESH_MARGIN_SECONDS)):
+                        needs_rotate = True
+
+                refreshed_payload = {}
+                if needs_rotate:
+                    if account.platform == profile_registry.PLATFORM_INSTAGRAM:
+                        refreshed_payload = meta_auth.refresh_instagram_user_token(access_token=meta_user_access_token)
+                    else:
+                        refreshed_payload = meta_auth.exchange_for_long_lived_token(access_token=meta_user_access_token)
+                    new_user_token = str(refreshed_payload.get('access_token') or meta_user_access_token).strip()
+                    config['metaUserAccessToken'] = new_user_token
+                    meta_user_access_token = new_user_token
+
+                pages_payload = meta_auth.fetch_managed_pages(access_token=meta_user_access_token)
+                pages = pages_payload.get('data', []) if isinstance(pages_payload, dict) else []
+                if not isinstance(pages, list):
+                    pages = []
+                config['accessTokenUpdatedAt'] = now
+                config[('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt')] = now
+                if account.platform == profile_registry.PLATFORM_FACEBOOK:
+                    wanted_page_id = str(config.get('pageId') or '').strip()
+                    selected_page = next((page for page in pages if str(page.get('id') or '') == wanted_page_id), None) if wanted_page_id else None
+                    if selected_page is None and pages:
+                        selected_page = pages[0]
+                    if selected_page is None:
+                        raise ValueError('Meta refresh did not return any manageable Facebook Pages')
+                    config['pageId'] = str(selected_page.get('id') or config.get('pageId') or '')
+                    config['facebookPageName'] = str(selected_page.get('name') or config.get('facebookPageName') or '')
+                    config['accessToken'] = str(selected_page.get('access_token') or config.get('accessToken') or '')
+                    # Fetch Facebook page profile picture
+                    try:
+                        import requests as _requests
+                        pic_resp = _requests.get(f"{meta_auth.META_GRAPH_ROOT}/{config['pageId']}", params={"fields": "picture.type(large)", "access_token": config['accessToken']}, timeout=15)
+                        pic_url = pic_resp.json().get("picture", {}).get("data", {}).get("url")
+                        if pic_url:
+                            config['avatarUrl'] = pic_url
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    wanted_ig_user_id = str(config.get('igUserId') or '').strip()
+                    selected_pair = None
                     for page in pages:
                         ig_user = page.get('instagram_business_account') if isinstance(page, dict) else None
-                        if isinstance(ig_user, dict):
-                            selected_pair = (page, ig_user)
-                            break
-                if selected_pair is None:
-                    raise ValueError('Meta refresh did not return a page-linked Instagram business account')
-                page, ig_user = selected_pair
-                config['pageId'] = str(page.get('id') or config.get('pageId') or '')
-                config['facebookPageName'] = str(page.get('name') or config.get('facebookPageName') or '')
-                config['igUserId'] = str(ig_user.get('id') or config.get('igUserId') or '')
-                config['instagramUserName'] = str(ig_user.get('username') or config.get('instagramUserName') or '')
-                if ig_user.get('profile_picture_url'):
-                    config['avatarUrl'] = str(ig_user.get('profile_picture_url'))
-                config['accessToken'] = str(page.get('access_token') or config.get('accessToken') or '')
-                if config.get('metaUserAccessTokenExpiresAt'):
-                    config['accessTokenExpiresAt'] = str(config.get('metaUserAccessTokenExpiresAt'))
+                        if not isinstance(ig_user, dict):
+                            continue
+                        if wanted_ig_user_id and str(ig_user.get('id') or '') != wanted_ig_user_id:
+                            continue
+                        selected_pair = (page, ig_user)
+                        break
+                    if selected_pair is None:
+                        for page in pages:
+                            ig_user = page.get('instagram_business_account') if isinstance(page, dict) else None
+                            if isinstance(ig_user, dict):
+                                selected_pair = (page, ig_user)
+                                break
+                    if selected_pair is None:
+                        raise ValueError('Meta refresh did not return a page-linked Instagram business account')
+                    page, ig_user = selected_pair
+                    config['pageId'] = str(page.get('id') or config.get('pageId') or '')
+                    config['facebookPageName'] = str(page.get('name') or config.get('facebookPageName') or '')
+                    config['igUserId'] = str(ig_user.get('id') or config.get('igUserId') or '')
+                    config['instagramUserName'] = str(ig_user.get('username') or config.get('instagramUserName') or '')
+                    if ig_user.get('profile_picture_url'):
+                        config['avatarUrl'] = str(ig_user.get('profile_picture_url'))
+                    config['accessToken'] = str(page.get('access_token') or config.get('accessToken') or '')
+
+                # Persist a truthful expiry (never-expiring -> far-future sentinel).
+                resolved = meta_auth.resolve_access_token_expiry(
+                    access_token=meta_user_access_token,
+                    expires_in=refreshed_payload.get('expires_in'),
+                )
+                config['metaUserAccessTokenExpiresAt'] = resolved['expires_at_iso']
+                config['accessTokenExpiresAt'] = resolved['expires_at_iso']
+                config['metaTokenExpiryMode'] = resolved['mode']
+                config['metaTokenExpiresAtEpoch'] = resolved['expires_at_epoch']
+                # Successful self-check: clear failure / reconnect markers.
+                _clear_meta_selfcheck_markers(config)
+                config['_lastTokenSelfCheckAt'] = _utc_now_naive().isoformat(timespec='seconds')
                 updated = profile_registry.update_account(account_id, config=config, auth_type='oauth', status=1, db_path=db_path)
-                summary = f"Instagram credentials re-synced: {config.get('instagramUserName') or updated.account_name}"
+                summary = f"{platform_label} credentials re-synced: {config.get('facebookPageName') or config.get('instagramUserName') or updated.account_name}"
+            except Exception as exc:  # noqa: BLE001 — record the failure, then re-raise
+                _record_meta_selfcheck_failure(account=account, config=config, db_path=db_path, error_text=str(exc))
+                raise
         elif account.platform == profile_registry.PLATFORM_TWITTER:
             twitter_auth_type = str(config.get("twitterAuthType") or account.auth_type or "cookie").strip().lower()
             if twitter_auth_type == "cookie":
@@ -2605,6 +2658,101 @@ try:
 except ValueError:
     _LONG_LIVED_REFRESH_MARGIN_SECONDS = 7 * 24 * 3600
 
+# ---------------------------------------------------------------------------
+# Live token self-check for Meta (Facebook / Instagram) accounts.
+#
+# Facebook reports some app tokens as never-expiring (``expires_at == 0``), so
+# SAU stores a far-future expiry and the expiry-based staleness scan never
+# fires again. That is correct for healthy tokens, but it means a token that is
+# later revoked / de-authorised at the Meta end would only surface when a
+# publish fails. To close that gap the maintenance loop live-verifies each Meta
+# user token against Facebook on a regular cadence (``debug_token``), refreshes
+# (re-exchanges) the token when it is invalid or about to expire, and only when
+# refresh keeps failing does it flag the account "expired" (past expiry so the
+# UI shows Token expired) and alerts the operator once.
+# ---------------------------------------------------------------------------
+try:
+    _META_SELFCHECK_HOURS = int(os.environ.get('SAU_META_SELFCHECK_HOURS', '12') or '12')
+except ValueError:
+    _META_SELFCHECK_HOURS = 12
+try:
+    _META_SELFCHECK_RETRY_HOURS = int(os.environ.get('SAU_META_SELFCHECK_RETRY_HOURS', '1') or '1')
+except ValueError:
+    _META_SELFCHECK_RETRY_HOURS = 1
+try:
+    _META_SELFCHECK_FAILURE_THRESHOLD = int(os.environ.get('SAU_META_SELFCHECK_FAILURE_THRESHOLD', '3') or '3')
+except ValueError:
+    _META_SELFCHECK_FAILURE_THRESHOLD = 3
+
+#: Config markers managed by the live self-check (kept together so callers can
+#: reset them on any successful connect / refresh).
+_META_SELFCHECK_MARKER_KEYS = (
+    '_lastTokenSelfCheckAt', '_tokenSelfCheckFailures', '_needsReconnect',
+    '_reconnectAlertedAt',
+)
+
+
+def _utc_now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _meta_self_check_due(config: dict) -> bool:
+    """Local (no network) decision: is this Meta account due a live check?
+
+    Healthy accounts (no recorded failures) are re-verified every
+    ``SAU_META_SELFCHECK_HOURS``; accounts whose last attempt failed are
+    retried sooner (``SAU_META_SELFCHECK_RETRY_HOURS``) so a genuinely dead
+    token reaches the "expired" state within a few hours instead of days.
+    """
+    failures = int(config.get('_tokenSelfCheckFailures') or 0)
+    interval_hours = _META_SELFCHECK_RETRY_HOURS if failures else _META_SELFCHECK_HOURS
+    last = prepared_publishers._parse_iso_datetime(str(config.get('_lastTokenSelfCheckAt') or ''))
+    if last is None:
+        return True
+    # prepared_publishers helpers are aware-UTC; compare against its _utc_now().
+    return (prepared_publishers._utc_now() - last) >= timedelta(hours=interval_hours)
+
+
+def _clear_meta_selfcheck_markers(config: dict) -> None:
+    for key in _META_SELFCHECK_MARKER_KEYS:
+        config.pop(key, None)
+
+
+def _record_meta_selfcheck_failure(*, account, config: dict, db_path: Path, error_text: str) -> None:
+    """Persist one failed live self-check; flag the account expired + alert once
+    after ``_META_SELFCHECK_FAILURE_THRESHOLD`` consecutive failures."""
+    cfg = dict(config)
+    failures = int(cfg.get('_tokenSelfCheckFailures') or 0) + 1
+    cfg['_tokenSelfCheckFailures'] = str(failures)
+    cfg['_lastTokenSelfCheckAt'] = _utc_now_naive().isoformat(timespec='seconds')
+    if failures >= _META_SELFCHECK_FAILURE_THRESHOLD:
+        cfg['_needsReconnect'] = True
+        # Persist a *past* expiry so /api/accounts (which derives status purely
+        # from the stored expiry) shows "Token expired" until the operator
+        # reconnects. The `_needsReconnect` flag keeps the maintenance loop
+        # from hammering the dead credential every interval.
+        past = (_utc_now_naive() - timedelta(seconds=1)).isoformat(timespec='seconds')
+        cfg['metaUserAccessTokenExpiresAt'] = past
+        cfg['accessTokenExpiresAt'] = past
+        if not cfg.get('_reconnectAlertedAt'):
+            cfg['_reconnectAlertedAt'] = _utc_now_naive().isoformat(timespec='seconds')
+            try:
+                from myUtils import ops_alerts
+                ops_alerts.send_ops_alert(
+                    subject=f"[SAU] {account.platform} account #{account.id} token expired",
+                    body=(
+                        f"Account #{account.id} ({account.platform}, {account.account_name}) failed "
+                        f"{failures} live token self-checks in a row and has been marked expired. "
+                        f"Re-authorise it via the Connect button.\n\nLast error: {error_text[:500]}"
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — alerting must never break maintenance
+                pass
+    try:
+        profile_registry.update_account(account.id, config=cfg, auth_type='oauth', status=1, db_path=db_path)
+    except Exception:  # noqa: BLE001 — persistence is best-effort here
+        pass
+
 
 def _effective_refresh_skew(platform: str, skew_seconds: int) -> int:
     """Widen the staleness window for long-lived-token platforms only."""
@@ -2631,9 +2779,17 @@ def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_sec
             return False
         return expires_at <= (prepared_publishers._utc_now() + timedelta(seconds=skew_seconds))
     if account.platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
+        # Accounts flagged for manual reconnect are waiting on a human — never
+        # auto-refresh them (mirrors myUtils.worker).
+        if config.get('_needsReconnect'):
+            return False
         meta_user_access_token = str(config.get('metaUserAccessToken') or '').strip()
         if not meta_user_access_token:
             return False
+        # Live self-check cadence: even a far-future stored expiry (never-
+        # expiring token) must come back for a real verification regularly.
+        if _meta_self_check_due(config):
+            return True
         access_token = str(config.get('accessToken') or '').strip()
         if not access_token:
             return True
@@ -3810,6 +3966,9 @@ def meta_oauth_callback():
             if selected_page is None and not pages:
                 raise ValueError('Meta OAuth did not return any manageable Facebook Pages')
             merged_config = dict(config)
+            # A successful (re)connect supersedes any earlier live self-check
+            # failure: clear the expired / reconnect markers.
+            _clear_meta_selfcheck_markers(merged_config)
             merged_config['pageId'] = str(selected_page.get('id') or merged_config.get('pageId') or '')
             merged_config['facebookPageName'] = str(selected_page.get('name') or merged_config.get('facebookPageName') or '')
             merged_config['accessToken'] = str(selected_page.get('access_token') or user_access_token or '')
@@ -3927,6 +4086,9 @@ def meta_oauth_callback():
                 raise ValueError('Meta OAuth did not return a page-linked Instagram business account')
 
             merged_config = dict(config)
+            # A successful (re)connect supersedes any earlier live self-check
+            # failure: clear the expired / reconnect markers.
+            _clear_meta_selfcheck_markers(merged_config)
             merged_config['pageId'] = selected_ig['pageId']
             merged_config['facebookPageName'] = selected_ig['facebookPageName']
             merged_config['igUserId'] = selected_ig['igUserId']

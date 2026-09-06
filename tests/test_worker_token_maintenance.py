@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from myUtils import profiles as profile_registry
 from myUtils.worker import PublishWorker
@@ -139,6 +140,75 @@ class BackendEffectiveSkewTests(unittest.TestCase):
             "accessToken": "a", "accessTokenExpiresAt": _aware(timedelta(days=3)),
         })
         self.assertFalse(_is_refreshable_account_stale(reddit, skew_seconds=3600))
+
+
+@unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
+class MetaLiveSelfCheckTests(unittest.TestCase):
+    """The 12-hour live self-check that keeps never-expiring Meta tokens honest:
+    due cadence, faster retry after a failure, and "all fail -> expired + alert".
+    """
+
+    def _naive_now(self):
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+
+    def _ago(self, hours):
+        return (self._naive_now() - timedelta(hours=hours)).isoformat(timespec='seconds')
+
+    def test_self_check_due_when_no_stamp(self):
+        from sau_backend import _meta_self_check_due
+        self.assertTrue(_meta_self_check_due({}))
+
+    def test_self_check_not_due_right_after_stamp(self):
+        from sau_backend import _meta_self_check_due
+        cfg = {'_lastTokenSelfCheckAt': self._naive_now().isoformat(timespec='seconds'),
+               '_tokenSelfCheckFailures': '0'}
+        self.assertFalse(_meta_self_check_due(cfg))
+
+    def test_self_check_due_after_healthy_cadence(self):
+        from sau_backend import _meta_self_check_due, _META_SELFCHECK_HOURS
+        cfg = {'_lastTokenSelfCheckAt': self._ago(_META_SELFCHECK_HOURS + 1),
+               '_tokenSelfCheckFailures': '0'}
+        self.assertTrue(_meta_self_check_due(cfg))
+
+    def test_failure_retries_sooner_than_healthy_cadence(self):
+        from sau_backend import _meta_self_check_due
+        # 2h ago, healthy cadence (12h) -> not due yet
+        self.assertFalse(_meta_self_check_due({'_lastTokenSelfCheckAt': self._ago(2), '_tokenSelfCheckFailures': '0'}))
+        # 2h ago with a recorded failure (1h retry) -> due
+        self.assertTrue(_meta_self_check_due({'_lastTokenSelfCheckAt': self._ago(2), '_tokenSelfCheckFailures': '1'}))
+
+    def test_repeated_failures_flag_expired_and_alert_once(self):
+        from pathlib import Path
+        from myUtils import ops_alerts as _ops_alerts
+        from sau_backend import _record_meta_selfcheck_failure, _META_SELFCHECK_FAILURE_THRESHOLD
+
+        acct = profile_registry.Account(
+            id=99, profile_id=1, platform='facebook', account_name='t',
+            cookie_path='', auth_type='oauth', config={},
+        )
+        written: dict = {}
+        alerts = {'n': 0}
+        cfg: dict = {}
+        with patch.object(profile_registry, 'update_account', side_effect=lambda *a, **k: written.update(config=k.get('config', {}))):
+            with patch.object(_ops_alerts, 'send_ops_alert', side_effect=lambda *a, **k: alerts.__setitem__('n', alerts['n'] + 1)):
+                # below the threshold: counted but not yet "expired"
+                for _ in range(_META_SELFCHECK_FAILURE_THRESHOLD - 1):
+                    _record_meta_selfcheck_failure(account=acct, config=cfg, db_path=Path('/tmp/none.db'), error_text='boom')
+                    cfg = written.get('config', cfg)  # next tick re-reads the persisted row
+                self.assertEqual(alerts['n'], 0)
+                self.assertNotIn('_needsReconnect', written.get('config', {}))
+                # threshold failure -> expired + alert once
+                _record_meta_selfcheck_failure(account=acct, config=cfg, db_path=Path('/tmp/none.db'), error_text='boom')
+                self.assertEqual(alerts['n'], 1)
+                expired_cfg = written.get('config', {})
+                self.assertIs(expired_cfg.get('_needsReconnect'), True)
+                past = self._naive_now().isoformat(timespec='seconds')
+                self.assertLess(expired_cfg['metaUserAccessTokenExpiresAt'], past)
+                self.assertLess(expired_cfg['accessTokenExpiresAt'], past)
+                # further failures must not re-alert
+                cfg = expired_cfg
+                _record_meta_selfcheck_failure(account=acct, config=cfg, db_path=Path('/tmp/none.db'), error_text='boom')
+                self.assertEqual(alerts['n'], 1)
 
 
 if __name__ == "__main__":  # pragma: no cover
