@@ -311,6 +311,30 @@ def delete_prepared_post(
 
 # --------------- Platform-specific prompt builders ---------------
 
+def _build_bluesky_prompt(profile: dict, media_info: dict, context: dict) -> str:
+    return f"""Generate a Bluesky post.
+
+Rules:
+- Maximum 300 characters (Bluesky hard limit)
+- Concise, human, first-person voice
+- Up to 3 hashtags
+- No link-shortener; the site link may be included as plain text if relevant
+- Bluesky shows an adult-content label when the account opts in; write
+  naturally without hashtags like #NSFW in the body
+
+Profile brand: {profile.get('name', '')}
+Writing style: {profile.get('writing_style_prompt', '')}
+Contact: {profile.get('contact_details', '')}
+CTA: {profile.get('default_cta', '')}
+Default hashtags: {profile.get('default_hashtags', '')}
+
+Content topic: {media_info.get('topic', '')}
+Key points: {media_info.get('key_points', '')}
+User notes: {context.get('user_notes', '')}
+
+Return ONLY a JSON object: {{"message": "...", "hashtags": ["#tag1", "#tag2"]}}"""
+
+
 def _build_twitter_prompt(profile: dict, media_info: dict, context: dict) -> str:
     return f"""Generate a tweet for Twitter/X.
 
@@ -553,6 +577,7 @@ In the message field, escape newlines as \\n so the JSON stays valid."""
 
 PLATFORM_PROMPTS = {
     "twitter": _build_twitter_prompt,
+    "bluesky": _build_bluesky_prompt,
     "threads": _build_threads_prompt,
     "instagram": _build_instagram_prompt,
     "facebook": _build_facebook_prompt,

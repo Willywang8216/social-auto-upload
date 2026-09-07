@@ -114,6 +114,13 @@ const PROFILE_PLATFORM_METADATA = [
     label: 'NW/SW Blog',
     tagType: 'danger',
     aliases: ['nw_sw_blog', 'nwswblog']
+  },
+  {
+    accountType: null,
+    publishSlug: 'bluesky',
+    label: 'Bluesky',
+    tagType: 'primary',
+    aliases: ['bluesky', 'bsky']
   }
 ]
 

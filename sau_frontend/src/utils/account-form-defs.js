@@ -41,6 +41,12 @@ export const telegramFieldDefs = [
   { key: 'sessionStringEnv', label: '本人帳號：Session String Env（可選）', placeholder: '例如：SAU_TELEGRAM_STRING_SESSION', hint: 'Telethon StringSession 的環境變數名稱（僅存 .env 不入庫）。' }
 ]
 
+export const blueskyFieldDefs = [
+  { key: 'handle', label: 'Handle', placeholder: '例如：sexualwill.bsky.social', hint: 'Bluesky 帳號 handle（含 .bsky.social）。' },
+  { key: 'appPasswordEnv', label: 'App Password Env', placeholder: '例如：BLUESKY_SW_EN_APP_PASSWORD', hint: '對應 .env 的 app password 環境變數名稱。App password 由 Bluesky「App Passwords」產生，僅存 .env 不入庫。' },
+  { key: 'label', label: 'Adult Content Label', placeholder: 'sexual / nudity / 留空', hint: '成人內容 self-label：sexual（性內容）、nudity（藝術裸體）、留空則不設。' }
+]
+
 export const tiktokTokenFieldDefs = [
   { key: 'accessToken', label: 'Access Token', placeholder: '由 TikTok Connect 自動填入，或手動貼上', type: 'textarea', rows: 2 },
   { key: 'refreshToken', label: 'Refresh Token', placeholder: '由 TikTok Connect 自動填入', type: 'textarea', rows: 2 },
