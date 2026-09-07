@@ -8458,5 +8458,82 @@ def _database_readiness_check():
 register_readiness_check(app, "database", _database_readiness_check)
 
 
+# ---------------------------------------------------------------------------
+# Telegram: list targets the operator's own account can post to
+# ---------------------------------------------------------------------------
+_tg_targets_cache: dict = {"at": 0.0, "items": []}
+_TG_TARGETS_TTL_SECONDS = 30 * 60
+
+
+@app.route("/api/telegram/available-targets", methods=["GET"])
+def telegram_available_targets():
+    """List chats the logged-in Telegram account can publish to.
+
+    Returns every group the account is a member of plus every channel it is
+    an admin of (channels require admin to post; groups only membership).
+    Results are cached for 30 minutes so opening the publish center doesn't
+    re-list ~600 dialogs every time.
+    """
+    import time as _time
+
+    now = _time.time()
+    if now - _tg_targets_cache["at"] < _TG_TARGETS_TTL_SECONDS and _tg_targets_cache["items"]:
+        return jsonify({"code": 200, "data": _tg_targets_cache["items"], "msg": "ok"}), 200
+
+    session_string = str(os.environ.get("SAU_TELEGRAM_STRING_SESSION") or "").strip()
+    api_id_raw = str(os.environ.get("TELEGRAM_API_ID") or "").strip()
+    api_hash = str(os.environ.get("TELEGRAM_API_HASH") or "").strip()
+    if not (session_string and api_id_raw and api_hash):
+        return jsonify({"code": 400, "msg": "Telegram MTProto session not configured", "data": []}), 400
+
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    from telethon.tl.functions.channels import GetParticipantRequest
+    from telethon.tl.types import ChannelParticipantCreator, ChannelParticipantAdmin
+
+    async def _collect():
+        client = TelegramClient(StringSession(session_string), int(api_id_raw), api_hash)
+        await client.connect()
+        items = []
+        try:
+            dialogs = await client.get_dialogs(limit=600)
+            for d in dialogs:
+                if not (d.is_group or d.is_channel):
+                    continue
+                ent = d.entity
+                is_mega = bool(getattr(ent, "megagroup", False)) or d.is_group
+                is_channel = d.is_channel and not is_mega
+                try:
+                    part = await client(GetParticipantRequest(ent, "me"))
+                    p = part.participant
+                    can_post = is_channel and isinstance(p, (ChannelParticipantCreator, ChannelParticipantAdmin))
+                    if not (can_post or (not is_channel)):
+                        continue  # channel without admin -> skip
+                except Exception:
+                    if is_channel:
+                        continue  # can't resolve membership on a channel -> skip
+                chat_id = getattr(ent, "id", "")
+                items.append({
+                    "chatId": str(getattr(ent, "username", "") or chat_id or ""),
+                    "title": d.name or "",
+                    "username": getattr(ent, "username", "") or "",
+                    "kind": "channel" if is_channel else "group",
+                })
+        finally:
+            await client.disconnect()
+        return items
+
+    loop = asyncio.new_event_loop()
+    try:
+        items = loop.run_until_complete(_collect())
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"code": 500, "msg": f"Failed to list Telegram targets: {exc}", "data": []}), 500
+    finally:
+        loop.close()
+    _tg_targets_cache["at"] = now
+    _tg_targets_cache["items"] = items
+    return jsonify({"code": 200, "data": items, "msg": "ok"}), 200
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5409, threaded=True)
