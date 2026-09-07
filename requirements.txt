@@ -73,6 +73,7 @@ sortedcontainers==2.4.0
 SQLAlchemy==2.0.41
 stream-gears==0.2.2
 streamlink==7.3.0
+telethon==1.44.0
 tomli==2.2.1
 tomli_w==1.2.0
 trio==0.30.0

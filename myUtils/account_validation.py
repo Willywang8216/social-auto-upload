@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -127,15 +128,28 @@ def validate_structured_account_config(
                 errors.append("Reddit 帳號缺少 clientSecret 或 clientSecretEnv")
 
     if platform == profiles.PLATFORM_TELEGRAM:
-        from myUtils.prepared_publishers import _telegram_chat_id_list
+        from myUtils.prepared_publishers import _telegram_chat_id_list, _telegram_is_mtproto
         chat_targets = (
             _telegram_chat_id_list(config.get("chatIds"))
             or _telegram_chat_id_list(config.get("chatId"))
         )
         if not chat_targets:
             errors.append("Telegram 帳號缺少 chatId 或 chatIds")
-        if not _present(_config_value(config, "botToken")):
-            errors.append("Telegram 帳號缺少 botToken 或 botTokenEnv")
+        is_mtproto = _telegram_is_mtproto(config)
+        if is_mtproto:
+            if not _present(_config_value(config, "apiId")):
+                errors.append("Telegram 本人帳號模式需要 apiId 或 apiIdEnv")
+            if not _present(_config_value(config, "apiHash")):
+                errors.append("Telegram 本人帳號模式需要 apiHash 或 apiHashEnv")
+            session_string = str(config.get("sessionString") or "").strip()
+            session_file = str(config.get("sessionFile") or "").strip()
+            env_name = str(config.get("sessionStringEnv") or "").strip()
+            has_env_session = bool(env_name) and bool(os.environ.get(env_name, "").strip())
+            if not (session_string or has_env_session or session_file):
+                errors.append("Telegram 本人帳號模式需要 sessionString / sessionStringEnv / sessionFile")
+        else:
+            if not _present(_config_value(config, "botToken")):
+                errors.append("Telegram 帳號缺少 botToken 或 botTokenEnv")
 
     if platform == profiles.PLATFORM_YOUTUBE:
         has_channel_id = _present(config.get("channelId"))

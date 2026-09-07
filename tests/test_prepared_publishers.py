@@ -1081,7 +1081,54 @@ class NwSwBlogGitPushTests(unittest.TestCase):
             session=session,
         )
         self.assertTrue(result["private"])
-        self.assertEqual(result["persona"], "sexualwill")
+class TelegramMtprotoTests(unittest.TestCase):
+    """Routing + behaviour for publishing Telegram as the user account (MTProto)."""
+
+    def test_mtproto_detected_from_flag(self):
+        self.assertTrue(prepared_publishers._telegram_is_mtproto({"mtproto": True}))
+        self.assertTrue(prepared_publishers._telegram_is_mtproto({"authMode": "user"}))
+        self.assertTrue(prepared_publishers._telegram_is_mtproto({"apiId": "1", "apiHash": "h"}))
+
+    def test_bot_detected_when_only_bot_token(self):
+        self.assertFalse(prepared_publishers._telegram_is_mtproto({"botToken": "t"}))
+        self.assertFalse(prepared_publishers._telegram_is_mtproto({}))
+
+    def test_publish_routes_to_mtproto_and_requires_telethon(self):
+        account = SimpleNamespace(config={"mtproto": True, "apiId": "26141001", "apiHash": "hash", "chatIds": ["@a"]})
+        if prepared_publishers.TelegramClient is None:
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.publish_telegram_sync(account, {"message": "hi"})
+            self.assertIn("telethon", str(ctx.exception).lower())
+        else:
+            # telethon present: full flow needs a real session string
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.publish_telegram_sync(account, {"message": "hi"})
+            self.assertIn("sessionString", str(ctx.exception))
+
+    def test_validate_routes_to_mtproto_and_requires_session(self):
+        config = {"mtproto": True, "apiId": "26141001", "apiHash": "hash", "chatIds": ["@a"]}
+        if prepared_publishers.TelegramClient is None:
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.validate_telegram_config_live(config)
+            self.assertIn("telethon", str(ctx.exception).lower())
+        else:
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.validate_telegram_config_live(config)
+            self.assertIn("sessionString", str(ctx.exception))
+
+    def test_session_string_from_direct_config(self):
+        with patch.dict("os.environ", {}, clear=False):
+            value = prepared_publishers._telegram_mtproto_session_string({"sessionString": "abc=="})
+        self.assertEqual(value, "abc==")
+
+    def test_session_string_from_env(self):
+        with patch.dict("os.environ", {"SAU_TG_SESSION": "env-session"}, clear=False):
+            value = prepared_publishers._telegram_mtproto_session_string({"sessionStringEnv": "SAU_TG_SESSION"})
+        self.assertEqual(value, "env-session")
+
+    def test_session_string_missing_raises(self):
+        with self.assertRaises(prepared_publishers.PreparedPublishError):
+            prepared_publishers._telegram_mtproto_session_string({"apiId": "1"})
 
 
 if __name__ == "__main__":

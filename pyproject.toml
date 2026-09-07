@@ -37,6 +37,10 @@ dependencies = [
   # MCP entry point is importable on every install, matching the cookie /
   # config encryption pattern above.
   "fastmcp==3.4.7",
+  # `telethon` powers publishing to Telegram as the user's own account
+  # (MTProto / api_id+api_hash) rather than via a bot token. Imported
+  # lazily so non-Telegram installs stay light.
+  "telethon>=1.36,<2",
 ]
 
 [project.scripts]
