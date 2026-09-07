@@ -35,7 +35,10 @@ export const threadsFieldDefs = [
 export const telegramFieldDefs = [
   { key: 'chatId', label: 'Chat ID (legacy)', placeholder: '例如：@channel_name 或 -100123456（單一目標）', hint: '單一目標時使用。需多個請改填下方的 Chat IDs（多個）。' },
   { key: 'chatIds', label: 'Chat IDs（多個，逗號分隔）', placeholder: '例如：@channel_a, -100123456, @group_b', hint: '同一支 bot 會依序送出至每個 chat id。多 channel / group 場景推薦使用。' },
-  { key: 'botTokenEnv', label: 'Bot Token Env', placeholder: '例如：TELEGRAM_BOT_TOKEN', hint: '對應 .env 裡的環境變數名稱。Bot token 由 @BotFather 取得，僅存於 .env 不入庫。' }
+  { key: 'botTokenEnv', label: 'Bot Token Env', placeholder: '例如：TELEGRAM_BOT_TOKEN', hint: '對應 .env 裡的環境變數名稱。Bot token 由 @BotFather 取得，僅存於 .env 不入庫。' },
+  { key: 'apiIdEnv', label: '本人帳號：API ID Env（可選）', placeholder: '例如：TELEGRAM_API_ID', hint: '填寫此欄＋下方 API Hash Env＋Session Env，即以你本人帳號（MTProto）發布，而非 bot。' },
+  { key: 'apiHashEnv', label: '本人帳號：API Hash Env（可選）', placeholder: '例如：TELEGRAM_API_HASH', hint: '對應 .env 的 API hash。' },
+  { key: 'sessionStringEnv', label: '本人帳號：Session String Env（可選）', placeholder: '例如：SAU_TELEGRAM_STRING_SESSION', hint: 'Telethon StringSession 的環境變數名稱（僅存 .env 不入庫）。' }
 ]
 
 export const tiktokTokenFieldDefs = [

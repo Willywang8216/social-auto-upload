@@ -27,6 +27,18 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - environment-specific
     requests = None
 
+# Telethon is imported lazily: it is only needed when an account publishes to
+# Telegram with its own MTProto user session (config["mtproto"]). Keeping the
+# import optional lets non-Telegram installs / test runs stay light.
+try:  # pragma: no cover - exercised where telethon is installed
+    from telethon import TelegramClient, functions, types
+    from telethon.sessions import StringSession
+except ModuleNotFoundError:  # pragma: no cover - environment-specific
+    TelegramClient = None
+    functions = None
+    types = None
+    StringSession = None
+
 TELEGRAM_API_ROOT = "https://api.telegram.org/bot{token}/{method}"
 REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 REDDIT_SUBMIT_URL = "https://oauth.reddit.com/api/submit"
@@ -401,6 +413,9 @@ def _telegram_resolve_chat_ids(config: dict[str, Any], payload: dict | None = No
 
 
 def validate_telegram_config_live(config: dict[str, Any], *, session=None) -> dict:
+    if _telegram_is_mtproto(config):
+        return _validate_telegram_mtproto_config_live(config)
+
     token = str(_config_value(config, "botToken", default_env="TELEGRAM_BOT_TOKEN") or "").strip()
     chat_ids = _telegram_resolve_chat_ids(config)
     if not token:
@@ -431,6 +446,39 @@ def validate_telegram_config_live(config: dict[str, Any], *, session=None) -> di
         "bot": bot_payload,
         "chats": chat_payloads,
         "chat": chat_payloads[0]["result"] if chat_payloads else {},
+    }
+
+
+def _validate_telegram_mtproto_config_live(config: dict[str, Any]) -> dict:
+    """Validate an MTProto (user-account) Telegram config without a server call.
+
+    The StringSession encodes the login, so a cheap validation is: every
+    required key present, and — when a string session is provided — that it
+    round-trips through Telethon's ``StringSession`` constructor. Full live
+    connectivity checks happen on the first real publish.
+    """
+    if TelegramClient is None:
+        raise PreparedPublishError(
+            "Telegram MTProto validation requires the 'telethon' package to be installed"
+        )
+    chat_ids = _telegram_resolve_chat_ids(config)
+    if not chat_ids:
+        raise PreparedPublishError("Telegram MTProto validation requires chatId or chatIds")
+    api_id_raw = str(_config_value(config, "apiId") or "").strip()
+    api_hash = str(_config_value(config, "apiHash") or "").strip()
+    if not api_id_raw or not api_hash:
+        raise PreparedPublishError("Telegram MTProto validation requires apiId and apiHash in config")
+    try:
+        api_id = int(api_id_raw)
+    except (TypeError, ValueError) as exc:
+        raise PreparedPublishError(f"Telegram MTProto apiId must be an integer, got {api_id_raw!r}") from exc
+    session_string = _telegram_mtproto_session_string(config)
+    session_obj = StringSession(session_string)
+    return {
+        "mode": "mtproto",
+        "api_id": api_id,
+        "has_session": bool(str(session_obj.save())),
+        "chats": chat_ids,
     }
 
 
@@ -563,8 +611,28 @@ def _publish_telegram_to_one(
     }
 
 
+def _telegram_is_mtproto(config: dict[str, Any]) -> bool:
+    """True when a Telegram account publishes as the user (MTProto) not a bot.
+
+    Detected from an explicit ``mtproto: true`` / ``authMode: user`` flag, or
+    (for accounts configured through the UI form, which has no flag) from the
+    presence of apiId/apiHash credentials. botToken-only accounts stay on the
+    Bot API path.
+    """
+    if bool(config.get("mtproto")):
+        return True
+    if str(config.get("authMode") or "").strip().lower() == "user":
+        return True
+    api_id = str(_config_value(config, "apiId") or "").strip()
+    api_hash = str(_config_value(config, "apiHash") or "").strip()
+    return bool(api_id and api_hash)
+
+
 def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
     config = account.config or {}
+    if _telegram_is_mtproto(config):
+        return _publish_telegram_mtproto_sync(account, payload, session=session)
+
     token = str(_config_value(config, "botToken", default_env="TELEGRAM_BOT_TOKEN") or "").strip()
     chat_ids = _telegram_resolve_chat_ids(config, payload)
     if not token:
@@ -608,6 +676,164 @@ def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
         )
         raise PreparedPublishError(f"Telegram publish failed for all chats: {joined}")
     return results
+
+
+def _telegram_mtproto_session_string(config: dict[str, Any]) -> str:
+    """Resolve the Telethon StringSession for a user-account Telegram publish.
+
+    Precedence: ``config.sessionString`` (direct) -> ``config.sessionStringEnv``
+    (named env var) -> ``config.sessionFile`` (path to a .session file).
+    """
+    session_string = str(config.get("sessionString") or "").strip()
+    if session_string:
+        return session_string
+    env_name = str(config.get("sessionStringEnv") or "").strip()
+    if env_name:
+        value = os.environ.get(env_name, "")
+        if value:
+            return str(value).strip()
+    session_file = str(config.get("sessionFile") or "").strip()
+    if session_file:
+        from telethon.sessions import StringSession
+
+        return StringSession.read_file(session_file)
+    raise PreparedPublishError(
+        "Telegram MTProto publish requires sessionString / sessionStringEnv "
+        "(a Telethon StringSession) or sessionFile"
+    )
+
+
+def _publish_telegram_mtproto_one(
+    client,
+    *,
+    chat_id: str,
+    message: str,
+    caption: str,
+    overflow_message: str,
+    silent: bool,
+    media: dict[str, list[dict[str, str]]],
+) -> dict[str, Any]:
+    """Send the payload to a single chat over MTProto (as the user account).
+
+    Mirror of ``_publish_telegram_to_one`` for the Bot API, but driven through
+    Telethon so posts appear from the logged-in user rather than a bot.
+    """
+    from telethon.tl.types import InputMessagesFilterEmpty  # noqa: F401
+
+    attachments = [*media["videos"], *media["images"]]
+    errors: list[str] = []
+
+    async def _send():
+        peer = await client.get_input_entity(chat_id)
+        if not attachments:
+            text = message
+            if caption and caption != text:
+                text = caption
+            await client.send_message(peer, text, silent=silent)
+            if overflow_message and overflow_message != text:
+                await client.send_message(peer, overflow_message, silent=silent)
+            return
+        # First image/video carries the caption; send it as an album when there
+        # is more than one image so they group, otherwise a single media file.
+        first = attachments[0]
+        first_path = first.get("local_path") or first.get("public_url")
+        if not first_path:
+            errors.append("MTProto publish requires a local_path or public_url per media item")
+            return
+        remaining = attachments[1:]
+        if len(attachments) == 1:
+            await client.send_file(peer, first_path, caption=caption or None, silent=silent)
+        elif all(item in media["images"] for item in attachments):
+            # Multi-image album.
+            paths = [item.get("local_path") or item.get("public_url") for item in attachments]
+            await client.send_file(
+                peer,
+                [p for p in paths if p],
+                caption=caption or None,
+                silent=silent,
+            )
+        else:
+            await client.send_file(peer, first_path, caption=caption or None, silent=silent)
+            for item in remaining:
+                item_path = item.get("local_path") or item.get("public_url")
+                if item_path:
+                    await client.send_file(peer, item_path, silent=silent)
+        if overflow_message:
+            await client.send_message(peer, overflow_message, silent=silent)
+
+    try:
+        client.loop.run_until_complete(_send())
+    except PreparedPublishError as exc:
+        errors.append(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        errors.append(str(exc))
+
+    return {
+        "chatId": chat_id,
+        "ok": not errors,
+        "errors": errors,
+        "mode": "mtproto",
+    }
+
+
+def _publish_telegram_mtproto_sync(account, payload: dict, *, session=None) -> list[Any]:
+    """Publish to Telegram chat(s) as the account's own Telegram user.
+
+    Uses Telethon with an api_id/api_hash + StringSession (see config) so the
+    post is attributed to the personal account rather than a bot.
+    """
+    if TelegramClient is None:
+        raise PreparedPublishError(
+            "Telegram MTProto publish requires the 'telethon' package to be installed"
+        )
+    config = account.config or {}
+    chat_ids = _telegram_resolve_chat_ids(config, payload)
+    if not chat_ids:
+        raise PreparedPublishError("Telegram MTProto publish requires chatId or chatIds")
+
+    api_id_raw = str(_config_value(config, "apiId") or "").strip()
+    api_hash = str(_config_value(config, "apiHash") or "").strip()
+    if not api_id_raw:
+        raise PreparedPublishError("Telegram MTProto publish requires apiId in config")
+    if not api_hash:
+        raise PreparedPublishError("Telegram MTProto publish requires apiHash in config")
+    try:
+        api_id = int(api_id_raw)
+    except (TypeError, ValueError) as exc:
+        raise PreparedPublishError(f"Telegram MTProto apiId must be an integer, got {api_id_raw!r}") from exc
+
+    session_string = _telegram_mtproto_session_string(config)
+    message = _payload_message(payload)
+    caption, overflow_message = _telegram_caption_chunks(message)
+    silent = bool(config.get("silent", False))
+    media = _extract_media(payload)
+
+    client = TelegramClient(StringSession(session_string), api_id, api_hash)
+    client.start()
+    try:
+        results: list[dict[str, Any]] = []
+        for chat_id in chat_ids:
+            results.append(
+                _publish_telegram_mtproto_one(
+                    client,
+                    chat_id=chat_id,
+                    message=message,
+                    caption=caption,
+                    overflow_message=overflow_message,
+                    silent=silent,
+                    media=media,
+                )
+            )
+        failures = [item for item in results if not item["ok"]]
+        if failures and len(failures) == len(results):
+            joined = "; ".join(
+                f"{item['chatId']}: {'; '.join(item['errors']) or 'unknown error'}"
+                for item in failures
+            )
+            raise PreparedPublishError(f"Telegram MTProto publish failed for all chats: {joined}")
+        return results
+    finally:
+        client.disconnect()
 
 
 def validate_discord_config_live(config: dict[str, Any], *, session=None) -> dict:
