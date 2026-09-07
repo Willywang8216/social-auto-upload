@@ -3009,18 +3009,42 @@ def _bluesky_create_session(http, cfg: dict[str, str]) -> dict[str, str]:
     return {"accessJwt": access_jwt, "did": did, "handle": data.get("handle") or cfg["handle"]}
 
 
-def _bluesky_upload_blob(http, *, jwt: str, service: str, local_path: str) -> dict:
+def _bluesky_upload_blob(http, *, jwt: str, service: str, local_path: str, mime: str | None = None) -> dict:
     from pathlib import Path
-    mime = mimetypes.guess_type(local_path)[0] or "application/octet-stream"
+    content_type = mime or mimetypes.guess_type(local_path)[0] or "application/octet-stream"
     with Path(local_path).open("rb") as handle:
         resp = http.post(
             f"{service}/xrpc/com.atproto.repo.uploadBlob",
-            headers={"Authorization": f"Bearer {jwt}", "Content-Type": mime},
+            headers={"Authorization": f"Bearer {jwt}", "Content-Type": content_type},
             data=handle,
-            timeout=300,
+            timeout=600,
         )
     _raise_for_status(resp)
     return resp.json().get("blob") or {}
+
+
+def _bluesky_video_aspect_ratio(local_path: str) -> dict | None:
+    """Best-effort width/height for a local video via ffprobe.
+
+    Bluesky's embed.video aspectRatio is optional; when ffprobe is unavailable
+    or the file is missing we return None and let the service infer it.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", local_path],
+            capture_output=True, text=True, timeout=20,
+        )
+        if result.returncode != 0:
+            return None
+        text = result.stdout.strip()
+        if not text:
+            return None
+        width, height = text.split("x")
+        return {"width": int(width), "height": int(height)}
+    except Exception:  # noqa: BLE001 — best-effort
+        return None
 
 
 def _bluesky_fetch_to_temp(http, *, url: str) -> str:
@@ -3035,7 +3059,13 @@ def _bluesky_fetch_to_temp(http, *, url: str) -> str:
     return tmp.name
 
 
-def _bluesky_message_and_media(payload: dict) -> tuple[str, list[dict]]:
+def _bluesky_message_and_media(payload: dict) -> tuple[str, list[dict], list[dict]]:
+    """Return (message, image_items, video_items) extracted from a publish payload.
+
+    Videos and images are split because Bluesky embeds them differently:
+    a single video uses ``app.bsky.embed.video`` (up to 300MB mp4), while
+    images use ``app.bsky.embed.images`` (up to 4 images).
+    """
     draft = payload.get("draft") or {}
     message = str(draft.get("message") or payload.get("message") or "").strip()
     if not message:
@@ -3051,56 +3081,86 @@ def _bluesky_message_and_media(payload: dict) -> tuple[str, list[dict]]:
     if len(message) > 300:
         message = message[:297].rstrip() + "…"
     media = _extract_media(payload)
-    return message, [*media["images"], *media["videos"]]
+    return message, list(media["images"]), list(media["videos"])
 
 
 def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[str, Any]]:
-    """Publish a text/image post to Bluesky via the AT Protocol."""
+    """Publish a text/image/video post to Bluesky via the AT Protocol."""
     config = account.config or {}
     cfg = _bluesky_config(config)
     http = _get_session(session)
 
-    message, media_items = _bluesky_message_and_media(payload)
+    message, image_items, video_items = _bluesky_message_and_media(payload)
     auth = _bluesky_create_session(http, cfg)
-
-    blobs: list[dict] = []
-    alt_texts: list[str] = []
-    for item in media_items[:4]:
-        local_path = item.get("local_path") or ""
-        public_url = item.get("public_url") or ""
-        tmp_path: str | None = None
-        try:
-            if local_path and Path(local_path).exists():
-                upload_src = local_path
-            elif public_url:
-                upload_src = _bluesky_fetch_to_temp(http, url=public_url)
-                tmp_path = upload_src
-            else:
-                continue
-            blob = _bluesky_upload_blob(http, jwt=auth["accessJwt"], service=cfg["service"], local_path=upload_src)
-            if blob:
-                blobs.append(blob)
-                alt_texts.append(str(item.get("alt_text") or "").strip())
-        finally:
-            if tmp_path:
-                Path(tmp_path).unlink(missing_ok=True)
 
     record: dict[str, Any] = {
         "text": message,
         "createdAt": datetime.now(timezone.utc).isoformat(),
     }
-    if blobs:
-        images = [
-            {
-                "image": blob,
-                "alt": alt_texts[i] or "",
+
+    uploaded_media: dict[str, Any] = {"images": 0, "videos": 0}
+
+    def _resolve_local(item: dict) -> tuple[str | None, str | None]:
+        local_path = item.get("local_path") or ""
+        public_url = item.get("public_url") or ""
+        if local_path and Path(local_path).exists():
+            return local_path, None
+        if public_url:
+            tmp = _bluesky_fetch_to_temp(http, url=public_url)
+            return tmp, tmp
+        return None, None
+
+    if video_items:
+        # Bluesky allows a single video per post.
+        video = video_items[0]
+        local_path, tmp_path = _resolve_local(video)
+        if local_path:
+            try:
+                blob = _bluesky_upload_blob(
+                    http, jwt=auth["accessJwt"], service=cfg["service"],
+                    local_path=local_path, mime="video/mp4",
+                )
+                if blob:
+                    embed: dict[str, Any] = {
+                        "$type": "app.bsky.embed.video",
+                        "video": blob,
+                    }
+                    ratio = _bluesky_video_aspect_ratio(local_path)
+                    if ratio:
+                        embed["aspectRatio"] = ratio
+                    if str(video.get("alt_text") or "").strip():
+                        embed["alt"] = str(video["alt_text"]).strip()
+                    record["embed"] = embed
+                    uploaded_media["videos"] = 1
+            finally:
+                if tmp_path:
+                    Path(tmp_path).unlink(missing_ok=True)
+    elif image_items:
+        blobs: list[dict] = []
+        alt_texts: list[str] = []
+        for item in image_items[:4]:
+            local_path, tmp_path = _resolve_local(item)
+            if not local_path:
+                continue
+            try:
+                blob = _bluesky_upload_blob(http, jwt=auth["accessJwt"], service=cfg["service"], local_path=local_path)
+                if blob:
+                    blobs.append(blob)
+                    alt_texts.append(str(item.get("alt_text") or "").strip())
+            finally:
+                if tmp_path:
+                    Path(tmp_path).unlink(missing_ok=True)
+        if blobs:
+            images = [
+                {"image": blob, "alt": alt_texts[i] or ""}
+                for i, blob in enumerate(blobs)
+            ]
+            record["embed"] = {
+                "$type": "app.bsky.embed.images",
+                "images": images,
             }
-            for i, blob in enumerate(blobs)
-        ]
-        record["embed"] = {
-            "$type": "app.bsky.embed.images",
-            "images": images,
-        }
+            uploaded_media["images"] = len(blobs)
+
     if cfg["label"]:
         record["labels"] = {
             "$type": "com.atproto.label.defs#selfLabels",
@@ -3115,7 +3175,7 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
             "collection": "app.bsky.feed.post",
             "record": record,
         },
-        timeout=60,
+        timeout=120,
     )
     _raise_for_status(create_resp)
     result = create_resp.json()
@@ -3125,7 +3185,7 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
         "handle": auth["handle"],
         "did": auth["did"],
         "chars": len(message),
-        "images": len(blobs),
+        **uploaded_media,
     }]
 
 
