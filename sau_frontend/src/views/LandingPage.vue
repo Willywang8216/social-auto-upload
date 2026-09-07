@@ -54,6 +54,8 @@
             <span class="platform-chip">Kuaishou</span>
             <span class="platform-chip">Telegram</span>
             <span class="platform-chip">Discord</span>
+            <span class="platform-chip">Bluesky</span>
+            <span class="platform-chip">Patreon</span>
           </div>
         </div>
       </div>

@@ -44,6 +44,7 @@ export const telegramFieldDefs = [
 export const blueskyFieldDefs = [
   { key: 'handle', label: 'Handle', placeholder: '例如：sexualwill.bsky.social', hint: 'Bluesky 帳號 handle（含 .bsky.social）。' },
   { key: 'appPasswordEnv', label: 'App Password Env', placeholder: '例如：BLUESKY_SW_EN_APP_PASSWORD', hint: '對應 .env 的 app password 環境變數名稱。App password 由 Bluesky「App Passwords」產生，僅存 .env 不入庫。' },
+  { key: 'audienceLanguage', label: 'Audience Language', placeholder: 'en 或 zh-Hant', hint: '產文語系：en（英文）或 zh-Hant（繁體中文）。此帳號發哪種語言的內容就填哪個。' },
   { key: 'label', label: 'Adult Content Label', placeholder: 'sexual / nudity / 留空', hint: '成人內容 self-label：sexual（性內容）、nudity（藝術裸體）、留空則不設。' }
 ]
 

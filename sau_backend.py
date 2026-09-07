@@ -8111,6 +8111,10 @@ def api_accounts():
             handle = config.get("redditUserName") or ""
         elif platform == "twitter":
             handle = config.get("twitterUserName") or ""
+        elif platform == "bluesky":
+            handle = config.get("handle") or ""
+        elif platform in ("telegram", "discord", "nw_sw_blog", "teaching_blog", "patreon"):
+            handle = account_name or ""
 
         # Derive cookie status from expiry
         expiry_raw = ""
