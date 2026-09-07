@@ -1017,8 +1017,18 @@ const openConnect = (initial = {}) => {
     paste: '',
     config: {},
   }
-  // Default to OAuth for platforms that support it
-  connectMethod.value = initial.platform && OAUTH_PLATFORMS.includes(initial.platform) ? 'oauth' : 'qr'
+  // Default to OAuth for platforms that support it; manual-capable platforms
+  // (bluesky, telegram, discord, reddit…) default to the "Configure manually"
+  // tab; only cookie-first platforms fall back to QR/browser login.
+  const platformKey = initial.platform || ''
+  const hasManualFields = (platformManualFieldDefs[platformKey] || []).length > 0
+  if (OAUTH_PLATFORMS.includes(platformKey)) {
+    connectMethod.value = 'oauth'
+  } else if (hasManualFields) {
+    connectMethod.value = 'manual'
+  } else {
+    connectMethod.value = 'qr'
+  }
   loginStatus.value = 'pending'
   showConnect.value = true
 }

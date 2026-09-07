@@ -200,7 +200,7 @@ const lastExport = ref(null)
 
 const availablePlatforms = [
   'twitter', 'instagram', 'facebook', 'threads', 'tiktok',
-  'youtube', 'reddit', 'telegram', 'discord', 'patreon',
+  'youtube', 'reddit', 'telegram', 'discord', 'patreon', 'bluesky',
 ]
 
 const selectedProfile = computed(() =>
