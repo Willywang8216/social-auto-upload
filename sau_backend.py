@@ -3847,6 +3847,41 @@ def meta_oauth_start():
     return jsonify({'code': 200, 'msg': 'ok', 'data': {'authorizeUrl': authorize_url, 'state': state_token}}), 200
 
 
+def _render_oauth_closer(*, ok: bool, message: str, data=None, msg_type: str = 'sau:meta-oauth') -> str:
+    """Return a small HTML page that reliably closes the OAuth popup.
+
+    The original callbacks did ``window.opener.postMessage(...)`` then
+    ``window.close()``. When the popup's ``opener`` is null (some browsers /
+    redirect chains detach it) or the payload is large, ``postMessage`` throws
+    and the later ``window.close()`` never runs — the popup stays open after a
+    successful connect. This helper guards the send and always closes the
+    window, with a short auto-close fallback for browsers that block
+    ``window.close()`` from a non-script top frame.
+    """
+    import json as _json
+    data_json = _json.dumps(data or {}, ensure_ascii=False).replace('</', '<\\/')
+    ok_js = 'true' if ok else 'false'
+    return f"""<html><head><meta charset="utf-8"></head><body>
+<p style="font-family:sans-serif;padding:24px;text-align:center">{message}</p>
+<script>
+  (function() {{
+    var msg = {{ type: {msg_type!r}, ok: {ok_js}, data: {data_json} }};
+    try {{
+      if (window.opener && !window.opener.closed) window.opener.postMessage(msg, '*');
+    }} catch (e) {{
+      try {{ window.opener.postMessage({{ type: {msg_type!r}, ok: {ok_js} }}, '*'); }} catch (e2) {{}}
+    }}
+    var tries = 0;
+    (function attemptClose() {{
+      try {{ window.close(); }} catch (e) {{}}
+      tries += 1;
+      if (!window.closed && tries < 8) setTimeout(attemptClose, 400);
+    }})();
+  }})();
+</script>
+</body></html>"""
+
+
 @app.route('/oauth/meta/callback', methods=['GET'])
 def meta_oauth_callback():
     db_path = _current_db_path()
@@ -3881,13 +3916,10 @@ def meta_oauth_callback():
             pass
         # Remove picker_html from the result before sending to frontend
         result.pop('picker_html', None)
-        html = f"""<html><body><script>
-        if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:meta-oauth', ok: true, data: {json.dumps(result, ensure_ascii=False)} }}, '*');
-        }}
-        window.close();
-        </script><p>Already completed. You may close this window.</p></body></html>"""
-        return Response(html, mimetype='text/html')
+        return Response(
+            _render_oauth_closer(ok=True, message="Already connected ✓ You can close this window.", data=result),
+            mimetype='text/html',
+        )
 
     if error:
         meta_review.complete_oauth_request(state_token, status='error', error_text=error, result={'state': state_token, 'error': error}, db_path=db_path)
@@ -3904,12 +3936,10 @@ def meta_oauth_callback():
                 metadata={'state': state_token},
                 db_path=db_path,
             )
-        return Response("""<html><body><script>
-            if (window.opener) {
-              window.opener.postMessage({ type: 'sau:meta-oauth', ok: false, error: %r }, '*');
-            }
-            window.close();
-            </script><p>Meta authorization failed. You may close this window.</p></body></html>""" % error, mimetype='text/html')
+        return Response(
+            _render_oauth_closer(ok=False, message=f"Authorization failed: {error}", data={'error': error}),
+            mimetype='text/html',
+        )
 
     try:
         if not request_state.account_id:
@@ -3962,9 +3992,11 @@ def meta_oauth_callback():
               cards.appendChild(card);
             }});
             function selectPage(p) {{
-              if (window.opener) {{
-                window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'facebook',accountId:ACCOUNT_ID,selectedPage:p,pages:PAGES,tokenData:TOKEN_DATA}}}}, '*');
-              }}
+              try {{
+                if (window.opener && !window.opener.closed) {{
+                  window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'facebook',accountId:ACCOUNT_ID,selectedPage:p,pages:PAGES,tokenData:TOKEN_DATA}}}}, '*');
+                }}
+              }} catch (e) {{}}
               window.close();
             }}
             </script>
@@ -4080,9 +4112,11 @@ def meta_oauth_callback():
               cards.appendChild(card);
             }});
             function selectIG(ig) {{
-              if (window.opener) {{
-                window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'instagram',accountId:ACCOUNT_ID,selectedPage:{{id:ig.pageId,name:ig.facebookPageName,access_token:ig.pageAccessToken,igUserId:ig.igUserId,instagramUserName:ig.instagramUserName}},tokenData:TOKEN_DATA}}}}, '*');
-              }}
+              try {{
+                if (window.opener && !window.opener.closed) {{
+                  window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'instagram',accountId:ACCOUNT_ID,selectedPage:{{id:ig.pageId,name:ig.facebookPageName,access_token:ig.pageAccessToken,igUserId:ig.igUserId,instagramUserName:ig.instagramUserName}},tokenData:TOKEN_DATA}}}}, '*');
+                }}
+              }} catch (e) {{}}
               window.close();
             }}
             </script>
@@ -4161,13 +4195,10 @@ def meta_oauth_callback():
             metadata={'state': state_token},
             db_path=db_path,
         )
-        html = f"""<html><body><script>
-        if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:meta-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
-        }}
-        window.close();
-        </script><p>Meta authorization completed. You may close this window.</p></body></html>"""
-        return Response(html, mimetype='text/html')
+        return Response(
+            _render_oauth_closer(ok=True, message="Authorization completed ✓ You can close this window.", data=callback_payload),
+            mimetype='text/html',
+        )
     except Exception as exc:  # noqa: BLE001
         meta_review.complete_oauth_request(state_token, status='error', error_text=str(exc), result={'state': state_token, 'error': str(exc)}, db_path=db_path)
         if request_state.account_id:
