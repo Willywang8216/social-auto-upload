@@ -67,6 +67,7 @@ PLATFORM_RULES: dict[str, PlatformRule] = {
     "discord": PlatformRule("discord"),
     "teaching_blog": PlatformRule("teaching_blog", long_form=True),
     "nw_sw_blog": PlatformRule("nw_sw_blog", long_form=True),
+    "bluesky": PlatformRule("bluesky", max_chars=300, hashtag_count=3),
 }
 
 

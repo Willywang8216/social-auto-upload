@@ -1285,6 +1285,19 @@ async def _publish_prepared_nw_sw_blog(
     await asyncio.to_thread(prepared_publishers.publish_nw_sw_blog_sync, account, payload)
 
 
+async def _publish_prepared_bluesky(
+    platform: str,
+    payload: dict,
+    target: jobs.Target,
+    *,
+    account,
+    account_file: Path | None,
+) -> None:
+    if account is None:
+        raise ValueError("Prepared Bluesky publish requires a structured account")
+    await asyncio.to_thread(prepared_publishers.publish_bluesky_sync, account, payload)
+
+
 async def _publish_prepared_not_implemented(
     platform: str,
     payload: dict,
@@ -1313,6 +1326,7 @@ PREPARED_PUBLISHER_REGISTRY: dict[str, Callable[..., Awaitable[None]]] = {
     "patreon": _publish_prepared_patreon,
     "teaching_blog": _publish_prepared_teaching_blog,
     "nw_sw_blog": _publish_prepared_nw_sw_blog,
+    "bluesky": _publish_prepared_bluesky,
 }
 
 

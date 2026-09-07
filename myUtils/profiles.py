@@ -52,6 +52,7 @@ PLATFORM_DISCORD = "discord"
 PLATFORM_PATREON = "patreon"
 PLATFORM_TEACHING_BLOG = "teaching_blog"
 PLATFORM_NW_SW_BLOG = "nw_sw_blog"
+PLATFORM_BLUESKY = "bluesky"
 
 SUPPORTED_PLATFORMS: tuple[str, ...] = (
     PLATFORM_DOUYIN,
@@ -74,6 +75,7 @@ SUPPORTED_PLATFORMS: tuple[str, ...] = (
     PLATFORM_PATREON,
     PLATFORM_TEACHING_BLOG,
     PLATFORM_NW_SW_BLOG,
+    PLATFORM_BLUESKY,
 )
 
 # Legacy numeric platform codes still used by the Flask backend's `type` column.
@@ -218,6 +220,7 @@ DIRECT_PUBLISH_PLATFORMS: frozenset[str] = frozenset(
         PLATFORM_DISCORD,
         PLATFORM_TEACHING_BLOG,
         PLATFORM_NW_SW_BLOG,
+        PLATFORM_BLUESKY,
     }
 )
 

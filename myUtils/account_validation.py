@@ -42,6 +42,7 @@ SUPPORTED_VALIDATION_PLATFORMS = {
     profiles.PLATFORM_SUBSTACK,
     profiles.PLATFORM_TEACHING_BLOG,
     profiles.PLATFORM_NW_SW_BLOG,
+    profiles.PLATFORM_BLUESKY,
 }
 
 
@@ -271,6 +272,15 @@ def validate_structured_account_config(
             if locale and locale not in ("en", "zh"):
                 errors.append(f"NW/SW Blog locale 必須為 en 或 zh，目前為 '{locale}'")
 
+    if platform == profiles.PLATFORM_BLUESKY:
+        if not _present(_config_value(config, "handle")):
+            errors.append("Bluesky 帳號缺少 handle")
+        if not _present(_config_value(config, "appPassword", default_env="BLUESKY_APP_PASSWORD")):
+            errors.append("Bluesky 帳號缺少 appPassword 或 appPasswordEnv")
+        label = str(config.get("label") or "").strip().lower()
+        if label and label not in ("sexual", "nudity", "porn", "graphic-media", "suggestive"):
+            errors.append(f"Bluesky label 必須為 sexual/nudity/porn/graphic-media/suggestive，目前為 '{label}'")
+
     if perform_live_checks and not errors:
         try:
             if platform == profiles.PLATFORM_TELEGRAM:
@@ -333,6 +343,11 @@ def validate_structured_account_config(
                     metadata["nw_sw_blog"] = prepared_publishers.validate_nw_sw_blog_config_live(config, session=session)
                 else:
                     warnings.append('NW/SW Blog live 驗證已略過，等待 githubToken / repoOwner / repoName / persona')
+            elif platform == profiles.PLATFORM_BLUESKY:
+                if _present(_config_value(config, 'handle')) and _present(_config_value(config, 'appPassword', default_env="BLUESKY_APP_PASSWORD")):
+                    metadata["bluesky"] = prepared_publishers.validate_bluesky_config_live(config, session=session)
+                else:
+                    warnings.append('Bluesky live 驗證已略過，等待 handle / appPassword')
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{platform} live 驗證失敗: {exc}")
 

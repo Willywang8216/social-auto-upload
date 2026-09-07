@@ -531,6 +531,7 @@ import {
   tiktokTokenFieldDefs,
   discordFieldDefs,
   twitterFieldDefs,
+  blueskyFieldDefs,
 } from '@/utils/account-form-defs'
 import AccountTextFieldList from '@/components/AccountTextFieldList.vue'
 
@@ -576,6 +577,7 @@ const platformManualFieldDefs = {
   tiktok: tiktokTokenFieldDefs,
   discord: discordFieldDefs,
   twitter: twitterFieldDefs,
+  bluesky: blueskyFieldDefs,
 }
 
 const allPlatforms = computed(() =>

@@ -1129,6 +1129,78 @@ class TelegramMtprotoTests(unittest.TestCase):
     def test_session_string_missing_raises(self):
         with self.assertRaises(prepared_publishers.PreparedPublishError):
             prepared_publishers._telegram_mtproto_session_string({"apiId": "1"})
+class BlueskyPublisherTests(unittest.TestCase):
+    """Bluesky (AT Protocol) publisher: session -> blob upload -> createRecord."""
+
+    def _session(self):
+        session = _RecordingSession([
+            _FakeResponse({"accessJwt": "jwt1", "did": "did:plc:abc", "handle": "sexualwill.bsky.social"}),
+            _FakeResponse({"blob": {"$type": "blob", "ref": {"$link": "baf1"}, "mimeType": "image/jpeg", "size": 3}}),
+            _FakeResponse({"uri": "at://did:plc:abc/app.bsky.feed.post/1", "cid": "cid1"}),
+        ])
+        return session
+
+    def test_publish_text_with_self_label(self):
+        session = self._session()
+        with tempfile.TemporaryDirectory() as tmp:
+            img = Path(tmp) / "cover.jpg"
+            img.write_bytes(b"jpg")
+            account = SimpleNamespace(config={
+                "handle": "sexualwill.bsky.social",
+                "appPassword": "app-pass",
+                "label": "sexual",
+            })
+            results = prepared_publishers.publish_bluesky_sync(
+                account,
+                {
+                    "draft": {"message": "Body of the post", "hashtags": ["#art"]},
+                    "message": "Body of the post",
+                    "artifacts": [{"local_path": str(img), "artifact_kind": "watermarked_image"}],
+                },
+                session=session,
+            )
+        # createSession, uploadBlob, createRecord
+        self.assertEqual(len(session.calls), 3)
+        self.assertEqual(session.calls[0][0], "POST")
+        self.assertIn("com.atproto.server.createSession", session.calls[0][1])
+        create_call = session.calls[2]
+        self.assertIn("com.atproto.repo.createRecord", create_call[1])
+        body = create_call[2]["json"]
+        self.assertEqual(body["repo"], "did:plc:abc")
+        self.assertEqual(body["collection"], "app.bsky.feed.post")
+        record = body["record"]
+        self.assertEqual(record["labels"]["$type"], "com.atproto.label.defs#selfLabels")
+        self.assertEqual(record["labels"]["values"][0]["val"], "sexual")
+        self.assertEqual(results[0]["handle"], "sexualwill.bsky.social")
+
+    def test_publish_requires_message(self):
+        account = SimpleNamespace(config={"handle": "h", "appPassword": "p"})
+        with self.assertRaises(prepared_publishers.PreparedPublishError):
+            prepared_publishers.publish_bluesky_sync(account, {}, session=_RecordingSession())
+
+    def test_config_requires_handle_and_password(self):
+        with self.assertRaises(prepared_publishers.PreparedPublishError):
+            prepared_publishers._bluesky_config({})
+        with self.assertRaises(prepared_publishers.PreparedPublishError):
+            prepared_publishers._bluesky_config({"handle": "h"})
+        with self.assertRaises(prepared_publishers.PreparedPublishError):
+            prepared_publishers._bluesky_config({"handle": "h", "appPassword": "p", "label": "bad-label"})
+
+    def test_message_truncated_to_300(self):
+        draft = {"message": "x" * 500}
+        msg, media = prepared_publishers._bluesky_message_and_media({"draft": draft})
+        self.assertLessEqual(len(msg), 300)
+
+    def test_validate_creates_session(self):
+        session = _RecordingSession([
+            _FakeResponse({"accessJwt": "j", "did": "did:plc:x", "handle": "nw.bsky.social"}),
+        ])
+        result = prepared_publishers.validate_bluesky_config_live(
+            {"handle": "nw.bsky.social", "appPassword": "p", "label": "nudity"},
+            session=session,
+        )
+        self.assertEqual(result["did"], "did:plc:x")
+        self.assertEqual(result["label"], "nudity")
 
 
 if __name__ == "__main__":

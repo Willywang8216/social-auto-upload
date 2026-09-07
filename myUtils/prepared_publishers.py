@@ -40,6 +40,7 @@ except ModuleNotFoundError:  # pragma: no cover - environment-specific
     StringSession = None
 
 TELEGRAM_API_ROOT = "https://api.telegram.org/bot{token}/{method}"
+BLUESKY_API_ROOT = "https://bsky.social/xrpc"
 REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 REDDIT_SUBMIT_URL = "https://oauth.reddit.com/api/submit"
 REDDIT_ME_URL = "https://oauth.reddit.com/api/v1/me"
@@ -2970,4 +2971,172 @@ def validate_nw_sw_blog_config_live(config: dict[str, Any], *, session=None) -> 
         "default_branch": data.get("default_branch"),
         "private": data.get("private"),
         "persona": persona,
+    }
+
+
+# ---- Bluesky (AT Protocol) ----
+
+BLUESKY_DEFAULT_SERVICE = "https://bsky.social"
+BLUESKY_LABELS = ("sexual", "nudity", "porn", "graphic-media", "suggestive")
+
+
+def _bluesky_config(config: dict[str, Any]) -> dict[str, str]:
+    handle = str(_config_value(config, "handle") or "").strip()
+    password = str(_config_value(config, "appPassword", default_env="BLUESKY_APP_PASSWORD") or "").strip()
+    service = str(config.get("service") or BLUESKY_DEFAULT_SERVICE).strip().rstrip("/")
+    label = str(config.get("label") or "").strip().lower()
+    if not handle:
+        raise PreparedPublishError("Bluesky account requires handle in config")
+    if not password:
+        raise PreparedPublishError("Bluesky account requires appPassword or appPasswordEnv")
+    if label and label not in BLUESKY_LABELS:
+        raise PreparedPublishError(f"Bluesky label must be one of {BLUESKY_LABELS}, got '{label}'")
+    return {"handle": handle, "password": password, "service": service, "label": label}
+
+
+def _bluesky_create_session(http, cfg: dict[str, str]) -> dict[str, str]:
+    resp = http.post(
+        f"{cfg['service']}/xrpc/com.atproto.server.createSession",
+        json={"identifier": cfg["handle"], "password": cfg["password"]},
+        timeout=30,
+    )
+    _raise_for_status(resp)
+    data = resp.json()
+    access_jwt = data.get("accessJwt") or ""
+    did = data.get("did") or ""
+    if not access_jwt or not did:
+        raise PreparedPublishError(f"Bluesky session missing accessJwt/did for {cfg['handle']}")
+    return {"accessJwt": access_jwt, "did": did, "handle": data.get("handle") or cfg["handle"]}
+
+
+def _bluesky_upload_blob(http, *, jwt: str, service: str, local_path: str) -> dict:
+    from pathlib import Path
+    mime = mimetypes.guess_type(local_path)[0] or "application/octet-stream"
+    with Path(local_path).open("rb") as handle:
+        resp = http.post(
+            f"{service}/xrpc/com.atproto.repo.uploadBlob",
+            headers={"Authorization": f"Bearer {jwt}", "Content-Type": mime},
+            data=handle,
+            timeout=300,
+        )
+    _raise_for_status(resp)
+    return resp.json().get("blob") or {}
+
+
+def _bluesky_fetch_to_temp(http, *, url: str) -> str:
+    """Download a remote media item to a temp file (for uploadBlob)."""
+    import tempfile
+    resp = http.get(url, timeout=300)
+    resp.raise_for_status()
+    suffix = Path(urlparse(url).path).suffix or ".bin"
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    tmp.write(resp.content)
+    tmp.close()
+    return tmp.name
+
+
+def _bluesky_message_and_media(payload: dict) -> tuple[str, list[dict]]:
+    draft = payload.get("draft") or {}
+    message = str(draft.get("message") or payload.get("message") or "").strip()
+    if not message:
+        raise PreparedPublishError("Bluesky publish requires a message (300 char max)")
+    hashtags = draft.get("hashtags") or []
+    if isinstance(hashtags, str):
+        hashtags = [h.strip() for h in hashtags.split(",") if h.strip()]
+    for tag in hashtags:
+        tag_text = str(tag).lstrip("#")
+        if tag_text and f"#{tag_text}" not in message:
+            message = f"{message} #{tag_text}"
+    # Bluesky's hard post length is 300 chars (graphemes).
+    if len(message) > 300:
+        message = message[:297].rstrip() + "…"
+    media = _extract_media(payload)
+    return message, [*media["images"], *media["videos"]]
+
+
+def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[str, Any]]:
+    """Publish a text/image post to Bluesky via the AT Protocol."""
+    config = account.config or {}
+    cfg = _bluesky_config(config)
+    http = _get_session(session)
+
+    message, media_items = _bluesky_message_and_media(payload)
+    auth = _bluesky_create_session(http, cfg)
+
+    blobs: list[dict] = []
+    alt_texts: list[str] = []
+    for item in media_items[:4]:
+        local_path = item.get("local_path") or ""
+        public_url = item.get("public_url") or ""
+        tmp_path: str | None = None
+        try:
+            if local_path and Path(local_path).exists():
+                upload_src = local_path
+            elif public_url:
+                upload_src = _bluesky_fetch_to_temp(http, url=public_url)
+                tmp_path = upload_src
+            else:
+                continue
+            blob = _bluesky_upload_blob(http, jwt=auth["accessJwt"], service=cfg["service"], local_path=upload_src)
+            if blob:
+                blobs.append(blob)
+                alt_texts.append(str(item.get("alt_text") or "").strip())
+        finally:
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
+
+    record: dict[str, Any] = {
+        "text": message,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    if blobs:
+        images = [
+            {
+                "image": blob,
+                "alt": alt_texts[i] or "",
+            }
+            for i, blob in enumerate(blobs)
+        ]
+        record["embed"] = {
+            "$type": "app.bsky.embed.images",
+            "images": images,
+        }
+    if cfg["label"]:
+        record["labels"] = {
+            "$type": "com.atproto.label.defs#selfLabels",
+            "values": [{"val": cfg["label"]}],
+        }
+
+    create_resp = http.post(
+        f"{cfg['service']}/xrpc/com.atproto.repo.createRecord",
+        headers={"Authorization": f"Bearer {auth['accessJwt']}", "Content-Type": "application/json"},
+        json={
+            "repo": auth["did"],
+            "collection": "app.bsky.feed.post",
+            "record": record,
+        },
+        timeout=60,
+    )
+    _raise_for_status(create_resp)
+    result = create_resp.json()
+    return [{
+        "uri": result.get("uri"),
+        "cid": result.get("cid"),
+        "handle": auth["handle"],
+        "did": auth["did"],
+        "chars": len(message),
+        "images": len(blobs),
+    }]
+
+
+def validate_bluesky_config_live(config: dict[str, Any], *, session=None) -> dict:
+    """Validate Bluesky config by creating a session (read-only check)."""
+    cfg = _bluesky_config(config)
+    http = _get_session(session)
+    auth = _bluesky_create_session(http, cfg)
+    return {
+        "handle": auth["handle"],
+        "did": auth["did"],
+        "authenticated": True,
+        "label": cfg["label"] or None,
     }
