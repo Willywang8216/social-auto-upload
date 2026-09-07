@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import types
@@ -948,6 +949,139 @@ class RedditPublisherTests(unittest.TestCase):
         data = session.calls[1][2]["data"]
         self.assertEqual(data["kind"], "link")
         self.assertEqual(data["url"], "https://cdn.example/video.mp4")
+
+
+class NwSwBlogGitPushTests(unittest.TestCase):
+    """NW/SW Blog publishes MDX straight into the sexualwill_static GitHub repo."""
+
+    def _nwsw_config(self, **overrides):
+        cfg = {
+            "repoOwner": "Willywang8216",
+            "repoName": "sexualwill_static",
+            "branch": "main",
+            "persona": "sexualwill",
+            "githubToken": "gh-token",
+            "locales": "en,zh",
+        }
+        cfg.update(overrides)
+        return cfg
+
+    def test_locale_resolution_falls_back_to_en(self):
+        self.assertEqual(prepared_publishers._nw_sw_blog_locales({}), ["en"])
+        self.assertEqual(prepared_publishers._nw_sw_blog_locales({"locales": "en,zh"}), ["en", "zh"])
+        self.assertEqual(prepared_publishers._nw_sw_blog_locales({"locale": "zh"}), ["zh"])
+        # per-publish override wins
+        self.assertEqual(
+            prepared_publishers._nw_sw_blog_locales({"locales": "en"}, {"draft": {"locales": "zh"}}),
+            ["zh"],
+        )
+
+    def test_lang_sections_single_and_bilingual(self):
+        single = "One English post body."
+        self.assertEqual(prepared_publishers._nw_sw_blog_lang_sections(single), [single])
+        bilingual = "English full version.\n\n---\n\n中文完整版。"
+        sections = prepared_publishers._nw_sw_blog_lang_sections(bilingual)
+        self.assertEqual(len(sections), 2)
+        self.assertEqual(sections[0], "English full version.")
+        self.assertEqual(sections[1], "中文完整版。")
+
+    def test_frontmatter_includes_persona_and_18plus(self):
+        fm = prepared_publishers._nw_sw_blog_frontmatter(
+            title='He said "hi"',
+            slug="he-said-hi",
+            persona="sexualwill",
+            description="meta desc",
+            category="Health",
+            tags=["a", "b"],
+        )
+        self.assertIn('persona: "sexualwill"', fm)
+        self.assertIn('audience: "18+"', fm)
+        self.assertIn('slug: "he-said-hi"', fm)
+        self.assertIn('translationKey: "he-said-hi"', fm)
+        self.assertIn('category: "Health"', fm)
+        self.assertIn('title: "He said \\"hi\\""', fm)
+
+    def test_publish_writes_english_file_with_github_api(self):
+        session = _RecordingSession([
+            _FakeResponse({}, status_code=404),   # GET existing -> not found
+            _FakeResponse({"content": {"sha": "abc123"}, "commit": {"sha": "def456"}}),  # PUT
+        ])
+        account = SimpleNamespace(config=self._nwsw_config(persona="nakedwill", locales="en"))
+        results = prepared_publishers.publish_nw_sw_blog_sync(
+            account,
+            {
+                "draft": {"title": "Why Naturism Is Not Exhibitionism", "category": "Advocacy", "tags": ["naturism"]},
+                "message": "# Naturism\n\nBody of the EN post.",
+            },
+            session=session,
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["locale"], "en")
+        self.assertEqual(results[0]["path"], "content/posts/why-naturism-is-not-exhibitionism.mdx")
+        # GET then PUT to the same contents URL
+        get_call = session.calls[0]
+        put_call = session.calls[1]
+        self.assertEqual(get_call[0], "GET")
+        self.assertEqual(put_call[0], "PUT")
+        expected_url = "https://api.github.com/repos/Willywang8216/sexualwill_static/contents/content/posts/why-naturism-is-not-exhibitionism.mdx"
+        self.assertEqual(get_call[1], expected_url)
+        self.assertEqual(put_call[1], expected_url)
+        body = put_call[2]["json"]
+        self.assertEqual(body["branch"], "main")
+        self.assertNotIn("sha", body)  # 404 GET -> no existing sha
+        decoded = base64.b64decode(body["content"]).decode("utf-8")
+        self.assertIn('persona: "nakedwill"', decoded)
+        self.assertIn("Body of the EN post.", decoded)
+
+    def test_publish_writes_bilingual_en_and_zh_files(self):
+        session = _RecordingSession([
+            _FakeResponse({}, status_code=404),
+            _FakeResponse({"content": {"sha": "e1"}}),
+            _FakeResponse({}, status_code=404),
+            _FakeResponse({"content": {"sha": "z1"}}),
+        ])
+        account = SimpleNamespace(config=self._nwsw_config())
+        results = prepared_publishers.publish_nw_sw_blog_sync(
+            account,
+            {
+                "draft": {"title": "English ｜ 中文", "locales": "en,zh"},
+                "message": "# English\n\nEN body.\n\n---\n\n# 中文\n\n中文內文。",
+            },
+            session=session,
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual([r["locale"] for r in results], ["en", "zh"])
+        self.assertEqual(results[0]["path"], "content/posts/english.mdx")
+        self.assertEqual(results[1]["path"], "content/posts/zh/english.mdx")
+        # zh PUT body carries the zh section
+        zh_put = session.calls[3][2]["json"]
+        zh_decoded = base64.b64decode(zh_put["content"]).decode("utf-8")
+        self.assertIn("# 中文", zh_decoded)
+        self.assertIn("中文內文。", zh_decoded)
+        self.assertIn('persona: "sexualwill"', zh_decoded)
+
+    def test_publish_updates_existing_file_when_present(self):
+        session = _RecordingSession([
+            _FakeResponse({"sha": "old-sha", "content": ""}),  # GET 200 -> existing
+            _FakeResponse({"content": {"sha": "new-sha"}}),
+        ])
+        account = SimpleNamespace(config=self._nwsw_config(locales="en"))
+        prepared_publishers.publish_nw_sw_blog_sync(
+            account,
+            {"draft": {"title": "Existing Post"}, "message": "# Existing\n\nBody"},
+            session=session,
+        )
+        put_body = session.calls[1][2]["json"]
+        self.assertEqual(put_body["sha"], "old-sha")
+
+    def test_validate_checks_repo_access(self):
+        session = _RecordingSession([_FakeResponse({"full_name": "Willywang8216/sexualwill_static", "private": True, "default_branch": "main"})])
+        result = prepared_publishers.validate_nw_sw_blog_config_live(
+            {"repoOwner": "Willywang8216", "repoName": "sexualwill_static", "persona": "sexualwill", "githubToken": "gh"},
+            session=session,
+        )
+        self.assertTrue(result["private"])
+        self.assertEqual(result["persona"], "sexualwill")
 
 
 if __name__ == "__main__":

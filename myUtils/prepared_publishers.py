@@ -2497,7 +2497,111 @@ def validate_teaching_blog_config_live(config: dict[str, Any], *, session=None) 
     return {"repo_full_name": data.get("full_name"), "default_branch": data.get("default_branch"), "private": data.get("private")}
 
 
-# ---- NW/SW Blog (sexualwill.com REST API) ----
+# ---- NW/SW Blog (sexualwill.com — git-pushed MDX posts) ----
+
+NW_SW_BLOG_VALID_PERSONAS = ("sexualwill", "nakedwill")
+NW_SW_BLOG_VALID_LOCALES = ("en", "zh")
+_NW_SW_BLOG_TOKEN_ENV = "SAU_NW_SW_BLOG_GITHUB_TOKEN"
+
+
+def _nw_sw_blog_locales(config: dict[str, Any], payload: dict | None = None) -> list[str]:
+    """Resolve the ordered list of locales this publish should produce.
+
+    Precedence:
+      1. ``payload.draft.locales`` (per-publish override; csv or list)
+      2. ``config.locales`` / ``config.locale`` (account default)
+      3. fall back to ``en``
+    """
+    payload = payload or {}
+    draft = payload.get("draft") or {}
+    raw = draft.get("locales") or config.get("locales") or config.get("locale") or "en"
+    if isinstance(raw, list):
+        items = [str(item).strip().lower() for item in raw]
+    else:
+        items = [part.strip().lower() for part in str(raw).replace("；", ";").replace(";", ",").replace("+", ",").split(",")]
+    out: list[str] = []
+    for item in items:
+        if item and item not in out:
+            out.append(item)
+    return out or ["en"]
+
+
+def _nw_sw_blog_lang_sections(message: str) -> list[str]:
+    """Split a possibly-bilingual Markdown body on a standalone ``---`` rule.
+
+    The bilingual blog builder writes the COMPLETE primary-language version,
+    then a Markdown horizontal rule alone on its line (``---``), then the
+    second-language version.  A single-language body has no standalone rule
+    and is returned whole.
+    """
+    if not message:
+        return []
+    lines = message.splitlines()
+    split_at = None
+    for i, line in enumerate(lines):
+        if line.strip() == "---":
+            split_at = i
+            break
+    if split_at is None:
+        return [message.strip()]
+    first = "\n".join(lines[:split_at]).strip()
+    rest = "\n".join(lines[split_at + 1:]).strip()
+    sections = [first]
+    if rest:
+        sections.append(rest)
+    return [section for section in sections if section]
+
+
+def _nw_sw_blog_yaml_quote(value: str) -> str:
+    """Quote a scalar for YAML frontmatter, escaping embedded double quotes."""
+    text = str(value or "").strip()
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _nw_sw_blog_yaml_list(values) -> str:
+    items = [str(v).strip().strip('"').strip("'") for v in (values or []) if str(v).strip()]
+    if not items:
+        return "[]"
+    return "[" + ", ".join(_nw_sw_blog_yaml_quote(item) for item in items) + "]"
+
+
+def _nw_sw_blog_frontmatter(*, title, slug, persona, description="", category="", tags=None,
+                            date_iso=None, content_warning="") -> str:
+    """Build the frontmatter block matching sexualwill_static's _TEMPLATE.mdx."""
+    from datetime import datetime, timezone
+    date_str = date_iso or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    lines = [
+        "---",
+        f"title: {_nw_sw_blog_yaml_quote(title)}",
+        f"slug: {_nw_sw_blog_yaml_quote(slug)}",
+        f"translationKey: {_nw_sw_blog_yaml_quote(slug)}",
+        f"description: {_nw_sw_blog_yaml_quote(description)}",
+        f'date: "{date_str}"',
+        f"category: {_nw_sw_blog_yaml_quote(category or 'General Topics')}",
+        f"tags: {_nw_sw_blog_yaml_list(tags)}",
+        f"audience: \"18+\"",
+        f"persona: {_nw_sw_blog_yaml_quote(persona)}",
+        f"seoIndex: true",
+    ]
+    if content_warning:
+        lines.append(f"contentWarning: {_nw_sw_blog_yaml_quote(content_warning)}")
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def _nw_sw_blog_title_for(payload: dict, message: str, index: int, locale: str) -> str:
+    """Pick a title for one locale out of a possibly ｜-separated multi-title string."""
+    draft = payload.get("draft") or {}
+    raw_title = str(draft.get("title") or "").strip()
+    if not raw_title:
+        parsed_fm, _body = _parse_frontmatter(message)
+        raw_title = str(parsed_fm.get("title") or _message_title(payload)).strip()
+    # The bilingual builder separates short fields with "｜".
+    parts = [p.strip() for p in raw_title.split("｜") if p.strip()]
+    if parts and index < len(parts):
+        return parts[index]
+    return raw_title or f"{locale} post"
+
 
 def publish_nw_sw_blog_sync(
     account,
@@ -2505,62 +2609,139 @@ def publish_nw_sw_blog_sync(
     *,
     session=None,
 ) -> list[dict[str, Any]]:
-    """Publish an MDX post to the NW/SW blog REST API."""
-    config = account.config or {}
-    api_base = str(_config_value(config, "apiBase") or "").strip().rstrip("/")
-    api_token = str(_config_value(config, "apiToken", default_env="SAU_NW_SW_BLOG_API_TOKEN") or "").strip()
-    persona = str(_config_value(config, "persona") or "").strip()
-    locale = str(_config_value(config, "locale") or "en").strip()
+    """Publish an MDX post by committing it to the sexualwill_static GitHub repo.
 
-    if not api_base:
-        raise PreparedPublishError("NW/SW Blog account requires apiBase in config")
-    if not api_token:
-        raise PreparedPublishError("NW/SW Blog account requires apiToken or apiTokenEnv")
-    if persona not in ("sexualwill", "nakedwill"):
+    Each account maps to one persona and one or more locales; every locale is
+    written as a separate ``.mdx`` file under ``content/posts`` (en) or
+    ``content/posts/zh`` (zh) in the target repo, sharing the same slug /
+    ``translationKey`` so the site links the two versions.
+    """
+    config = account.config or {}
+    owner = str(_config_value(config, "repoOwner") or "").strip()
+    repo = str(_config_value(config, "repoName") or "").strip()
+    branch = str(_config_value(config, "branch") or "main").strip()
+    token = str(_config_value(config, "githubToken", default_env=_NW_SW_BLOG_TOKEN_ENV) or "").strip()
+    persona = str(_config_value(config, "persona") or "").strip().lower()
+    locales = _nw_sw_blog_locales(config, payload)
+
+    if not owner or not repo:
+        raise PreparedPublishError("NW/SW Blog account requires repoOwner and repoName in config")
+    if not token:
+        raise PreparedPublishError("NW/SW Blog account requires githubToken or githubTokenEnv")
+    if persona not in NW_SW_BLOG_VALID_PERSONAS:
         raise PreparedPublishError(f"NW/SW Blog persona must be 'sexualwill' or 'nakedwill', got '{persona}'")
-    if locale not in ("en", "zh"):
-        raise PreparedPublishError(f"NW/SW Blog locale must be 'en' or 'zh', got '{locale}'")
+    for locale in locales:
+        if locale not in NW_SW_BLOG_VALID_LOCALES:
+            raise PreparedPublishError(f"NW/SW Blog locale must be 'en' or 'zh', got '{locale}'")
 
     message = _payload_message(payload)
     if not message:
         raise PreparedPublishError("NW/SW Blog publish requires a message (MDX body)")
 
-    title = str((payload.get("draft") or {}).get("title") or "").strip()
-    if not title:
-        title = _message_title(payload)
+    # A single message may carry multiple language sections (bilingual build);
+    # zip them onto the requested locales. If counts differ, repeat the last
+    # section for trailing locales (safer than dropping content).
+    sections = _nw_sw_blog_lang_sections(message)
+    if len(sections) < len(locales) and len(sections) == 1:
+        sections = sections * len(locales)
 
     http = _get_session(session)
     headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "title": title,
-        "content": message,
-        "persona": persona,
-        "locale": locale,
-        "status": "published",
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
-    resp = http.post(f"{api_base}/api/admin/posts", headers=headers, json=body, timeout=60)
-    _raise_for_status(resp)
-    result = resp.json()
-    return [result]
+    draft = payload.get("draft") or {}
+    category = str(draft.get("category") or config.get("category") or "").strip()
+    tags = draft.get("tags") or config.get("tags") or []
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    content_warning = str(draft.get("contentWarning") or config.get("contentWarning") or "").strip()
+    hero_image = str(draft.get("heroImage") or config.get("heroImage") or "").strip()
+
+    results: list[dict[str, Any]] = []
+    # A bilingual account shares one slug / translationKey across locales; base
+    # it on the primary (first-locale) title so en & zh files line up.
+    explicit_slug = str(draft.get("slug") or "").strip()
+    primary_title = _nw_sw_blog_title_for(payload, message, 0, locales[0] if locales else "en")
+    shared_slug = explicit_slug or _slugify_title(primary_title)
+
+    for index, locale in enumerate(locales):
+        locale_message = sections[min(index, len(sections) - 1)] if sections else message
+
+        title = _nw_sw_blog_title_for(payload, locale_message, index, locale)
+        slug = shared_slug
+
+        # Re-parse frontmatter already present in the section so round-trips
+        # (SAU → file → edit → re-publish) keep author-set fields.
+        parsed_fm, parsed_body = _parse_frontmatter(locale_message)
+        body = parsed_body or locale_message.strip()
+
+        description = str(draft.get("description") or parsed_fm.get("description") or "").strip()
+        fm = _nw_sw_blog_frontmatter(
+            title=title,
+            slug=slug,
+            persona=persona,
+            description=description,
+            category=str(parsed_fm.get("category") or category),
+            tags=parsed_fm.get("tags") or tags,
+            content_warning=str(parsed_fm.get("contentWarning") or content_warning),
+        )
+        mdx = f"{fm}\n\n{body}\n"
+
+        content_dir = "content/posts/zh" if locale == "zh" else "content/posts"
+        file_path = f"{content_dir}/{slug}.mdx"
+        content_b64 = base64.b64encode(mdx.encode("utf-8")).decode("ascii")
+
+        # Idempotent upsert: read existing file SHA when present, then PUT.
+        get_url = f"{GITHUB_API_ROOT}/repos/{owner}/{repo}/contents/{file_path}"
+        get_resp = http.get(get_url, headers=headers, params={"ref": branch}, timeout=30)
+        existing_sha = None
+        if get_resp.status_code == 200:
+            existing_sha = (get_resp.json() or {}).get("sha")
+        put_body: dict[str, Any] = {
+            "message": f"publish: {slug} ({locale})",
+            "content": content_b64,
+            "branch": branch,
+        }
+        if existing_sha:
+            put_body["sha"] = existing_sha
+        put_resp = http.put(get_url, headers=headers, json=put_body, timeout=30)
+        _raise_for_status(put_resp)
+        put_json = put_resp.json() if hasattr(put_resp, "json") else {}
+        results.append({
+            "locale": locale,
+            "path": file_path,
+            "sha": (put_json.get("content") or {}).get("sha") or put_json.get("commit", {}).get("sha"),
+            "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{file_path}",
+            "persona": persona,
+        })
+    return results
 
 
 def validate_nw_sw_blog_config_live(config: dict[str, Any], *, session=None) -> dict:
-    """Validate NW/SW Blog config by listing posts (read-only check)."""
-    api_base = str(_config_value(config, "apiBase") or "").strip().rstrip("/")
-    api_token = str(_config_value(config, "apiToken", default_env="SAU_NW_SW_BLOG_API_TOKEN") or "").strip()
-    if not api_base or not api_token:
-        raise PreparedPublishError("NW/SW Blog validation requires apiBase and apiToken")
+    """Validate NW/SW Blog config by checking read access to the target repo."""
+    owner = str(_config_value(config, "repoOwner") or "").strip()
+    repo = str(_config_value(config, "repoName") or "").strip()
+    token = str(_config_value(config, "githubToken", default_env=_NW_SW_BLOG_TOKEN_ENV) or "").strip()
+    persona = str(_config_value(config, "persona") or "").strip().lower()
+    if not owner or not repo or not token:
+        raise PreparedPublishError("NW/SW Blog validation requires repoOwner, repoName, and githubToken")
+    if persona not in NW_SW_BLOG_VALID_PERSONAS:
+        raise PreparedPublishError(f"NW/SW Blog persona must be 'sexualwill' or 'nakedwill', got '{persona}'")
     http = _get_session(session)
-    resp = http.get(
-        f"{api_base}/api/admin/posts",
-        headers={"Authorization": f"Bearer {api_token}"},
-        params={"limit": 1},
-        timeout=30,
-    )
+    url = f"{GITHUB_API_ROOT}/repos/{owner}/{repo}"
+    resp = http.get(url, headers={
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }, timeout=30)
     _raise_for_status(resp)
     data = resp.json()
-    return {"posts_accessible": True, "count": len(data) if isinstance(data, list) else data.get("total", 0)}
+    return {
+        "repo_full_name": data.get("full_name"),
+        "default_branch": data.get("default_branch"),
+        "private": data.get("private"),
+        "persona": persona,
+    }

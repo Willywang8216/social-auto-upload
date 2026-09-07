@@ -242,16 +242,20 @@ def validate_structured_account_config(
             errors.append("Teaching Blog 帳號缺少 githubToken 或 githubTokenEnv")
 
     if platform == profiles.PLATFORM_NW_SW_BLOG:
-        if not _present(config.get("apiBase")):
-            errors.append("NW/SW Blog 帳號缺少 apiBase")
-        if not _present(_config_value(config, "apiToken", default_env="SAU_NW_SW_BLOG_API_TOKEN")):
-            errors.append("NW/SW Blog 帳號缺少 apiToken 或 apiTokenEnv")
+        if not _present(config.get("repoOwner")):
+            errors.append("NW/SW Blog 帳號缺少 repoOwner")
+        if not _present(config.get("repoName")):
+            errors.append("NW/SW Blog 帳號缺少 repoName")
+        if not _present(_config_value(config, "githubToken", default_env="SAU_NW_SW_BLOG_GITHUB_TOKEN")):
+            errors.append("NW/SW Blog 帳號缺少 githubToken 或 githubTokenEnv")
         persona = str(config.get("persona") or "").strip()
         if persona and persona not in ("sexualwill", "nakedwill"):
             errors.append(f"NW/SW Blog persona 必須為 sexualwill 或 nakedwill，目前為 '{persona}'")
-        locale = str(config.get("locale") or "").strip()
-        if locale and locale not in ("en", "zh"):
-            errors.append(f"NW/SW Blog locale 必須為 en 或 zh，目前為 '{locale}'")
+        locales = str(config.get("locales") or config.get("locale") or "en").strip()
+        for raw_locale in locales.replace("；", ";").replace(";", ",").replace("+", ",").split(","):
+            locale = raw_locale.strip().lower()
+            if locale and locale not in ("en", "zh"):
+                errors.append(f"NW/SW Blog locale 必須為 en 或 zh，目前為 '{locale}'")
 
     if perform_live_checks and not errors:
         try:
@@ -309,10 +313,12 @@ def validate_structured_account_config(
                 else:
                     warnings.append('Teaching Blog live 驗證已略過，等待 githubToken / repoOwner / repoName')
             elif platform == profiles.PLATFORM_NW_SW_BLOG:
-                if _present(_config_value(config, 'apiToken', default_env="SAU_NW_SW_BLOG_API_TOKEN")) and _present(config.get('apiBase')):
+                if (_present(_config_value(config, 'githubToken', default_env="SAU_NW_SW_BLOG_GITHUB_TOKEN"))
+                        and _present(config.get('repoOwner')) and _present(config.get('repoName'))
+                        and _present(config.get('persona'))):
                     metadata["nw_sw_blog"] = prepared_publishers.validate_nw_sw_blog_config_live(config, session=session)
                 else:
-                    warnings.append('NW/SW Blog live 驗證已略過，等待 apiToken / apiBase')
+                    warnings.append('NW/SW Blog live 驗證已略過，等待 githubToken / repoOwner / repoName / persona')
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{platform} live 驗證失敗: {exc}")
 
