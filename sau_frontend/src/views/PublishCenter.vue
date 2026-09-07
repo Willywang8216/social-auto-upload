@@ -325,19 +325,29 @@
                 filterable
                 allow-create
                 default-first-option
-                placeholder="@channel_name 或 -100123456，Enter 新增"
+                :loading="telegramTargetsLoading"
+                placeholder="搜尋目標名稱，Enter 可直接新增"
                 size="small"
                 style="width: 100%"
+                @visible-change="(open) => open && loadTelegramTargets()"
               >
+                <!-- Account-default targets first (named), then every chat the
+                     account can post to (groups I'm in + channels I admin). -->
                 <el-option
                   v-for="(chatId, index) in (account.configChatIds || [])"
-                  :key="chatId"
+                  :key="'cfg-' + chatId"
                   :label="(account.configChatTitles || [])[index] || chatId"
                   :value="chatId"
                 />
+                <el-option
+                  v-for="t in telegramTargets"
+                  :key="'all-' + (t.chatId || t.username)"
+                  :label="t.title ? `${t.title}${t.username ? ' (@' + t.username + ')' : ''} · ${t.kind}` : (t.chatId || t.username)"
+                  :value="t.chatId || t.username"
+                />
               </el-select>
               <el-text size="small" type="info" style="margin-top:4px;display:block">
-                可貼上多個 chat id 並按 Enter 新增。留空時沿用帳號預設。同一個 bot 會依序送出。
+                預設為此帳號目標；下拉可搜尋你加入的所有群組 / 管理的頻道，勾選後即改發選中目標。
               </el-text>
             </div>
             <!-- TikTok per-post settings (audit compliance) -->
@@ -544,6 +554,27 @@ const uploadingFiles = reactive([]) // [{name, percent}]
 const selectedProfileIds = ref([])
 const selectedAccountIds = ref([])
 const profileAccountCache = reactive({}) // profileId -> [account]
+const telegramTargets = ref([]) // every chat the operator's TG account can post to
+const telegramTargetsLoading = ref(false)
+let telegramTargetsFetched = false
+
+async function loadTelegramTargets() {
+  if (telegramTargetsFetched) return
+  telegramTargetsLoading.value = true
+  try {
+    const res = await fetch(buildApiUrl('/api/telegram/available-targets'), { headers: authHeaders.value })
+    const json = await res.json()
+    if (json?.code === 200) {
+      telegramTargets.value = json.data || []
+      telegramTargetsFetched = true
+    }
+  } catch (e) {
+    // Non-fatal: the config targets still show; user can type a chat id manually.
+    console.error('Failed to load Telegram targets', e)
+  } finally {
+    telegramTargetsLoading.value = false
+  }
+}
 
 const options = reactive({
   watermark: true,
