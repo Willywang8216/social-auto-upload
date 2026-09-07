@@ -1188,8 +1188,43 @@ class BlueskyPublisherTests(unittest.TestCase):
 
     def test_message_truncated_to_300(self):
         draft = {"message": "x" * 500}
-        msg, media = prepared_publishers._bluesky_message_and_media({"draft": draft})
+        msg, images, videos = prepared_publishers._bluesky_message_and_media({"draft": draft})
         self.assertLessEqual(len(msg), 300)
+        self.assertEqual(images, [])
+        self.assertEqual(videos, [])
+
+    def test_publish_video_uses_embed_video(self):
+        session = _RecordingSession([
+            _FakeResponse({"accessJwt": "jwt1", "did": "did:plc:abc", "handle": "sexualwill.bsky.social"}),
+            _FakeResponse({"blob": {"$type": "blob", "ref": {"$link": "bafv1"}, "mimeType": "video/mp4", "size": 3}}),
+            _FakeResponse({"uri": "at://did:plc:abc/app.bsky.feed.post/v1", "cid": "cidv"}),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            vid = Path(tmp) / "clip.mp4"
+            vid.write_bytes(b"mp4")
+            account = SimpleNamespace(config={
+                "handle": "sexualwill.bsky.social",
+                "appPassword": "app-pass",
+                "label": "sexual",
+            })
+            results = prepared_publishers.publish_bluesky_sync(
+                account,
+                {
+                    "draft": {"message": "Watch this", "alt_text": "video alt"},
+                    "message": "Watch this",
+                    "artifacts": [{"local_path": str(vid), "artifact_kind": "watermarked_video"}],
+                },
+                session=session,
+            )
+        # createSession, uploadBlob(video/mp4), createRecord
+        self.assertEqual(len(session.calls), 3)
+        blob_call = session.calls[1]
+        self.assertEqual(blob_call[2]["headers"]["Content-Type"], "video/mp4")
+        create_call = session.calls[2]
+        record = create_call[2]["json"]["record"]
+        self.assertEqual(record["embed"]["$type"], "app.bsky.embed.video")
+        self.assertEqual(record["embed"]["video"]["ref"]["$link"], "bafv1")
+        self.assertEqual(results[0]["videos"], 1)
 
     def test_validate_creates_session(self):
         session = _RecordingSession([
