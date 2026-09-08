@@ -359,6 +359,19 @@ const sections = ref([
     ]
   },
   {
+    title: '✈️ Telegram',
+    open: false,
+    endpoints: [
+      { method: 'GET', path: '/api/telegram/available-targets', description: 'List every group the MTProto user belongs to + every channel it administers ({chatId,title,username,kind}) for publish-target picking', },
+      { method: 'POST', path: '/publish-center/submit', description: 'Publish to Telegram as your own account (MTProto) or a bot, fanning out to multiple chatIds',
+        params: [
+          { name: 'accountDrafts[id].chatIds', type: 'array', desc: 'Override targets per account, e.g. ["@channel_a", "@my_group", "-100123456"]. Falls back to account.config.chatIds, then legacy config.chatId.' },
+          { name: 'accountDrafts[id].message', type: 'string', desc: 'Caption / body (auto-splits over 1024 chars). Sends media/video when artifacts present.' },
+        ]
+      },
+    ]
+  },
+  {
     title: '📈 Analytics',
     open: false,
     endpoints: [
