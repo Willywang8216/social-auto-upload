@@ -52,7 +52,9 @@
 | Threads | ✅ | ✅ | — | — | ✅ | ❌ | ✅ | Threads API |
 | Medium | ✅ | — | — | ✅ | ❌ (草稿/立即) | ✅ | — | 瀏覽器自動化 |
 | Substack | ✅ | — | — | ✅ | ✅ (定時) | ✅ | — | 瀏覽�器自動化 |
-| Telegram | — | — | — | ✅ | ❌ | ❌ | ✅ | Bot API；單帳號目前只支援單一 `chatId` |
+| Telegram | ✅ | — | — | ✅ | ✅ | ❌ | ✅ | 本人 MTProto（Telethon，api_id/hash/session）或 Bot API；單帳號多 `chatIds` fan-out，UI 列出可發群組/頻道勾選 |
+| Bluesky | ✅ | ✅ | — | ✅ | ✅ | ❌ | ✅ | AT Protocol；文字/圖片/影片（至 300MB），成人內容 self-label |
+| Sexualwill.com | — | — | — | ✅ | ✅ | ❌ | — | git-push MDX 到 `sexualwill_static` repo（NW/SW persona、en/zh 雙語） |
 
 ### Profile 模型（多帳號管理）
 
@@ -212,7 +214,7 @@ curl -X POST https://socialupload.iamwillywang.com/publish-center/submit \
 
 ### Telegram
 
-> 📋 詳見 [Backlog → Telegram 多目標發佈與訂閱管理](#telegram-多目標發佈與訂閱管理)。
+> ✅ **已實作**：本人 MTProto 發布（PR #44）+ 發布目標選擇器（PR #49）+ 多 chatIds fan-out（PR #49）。更多詳見 [Backlog → Telegram 多目標發佈與訂閱管理](#telegram-多目標發佈與訂閱管理)。
 
 ### Reddit
 

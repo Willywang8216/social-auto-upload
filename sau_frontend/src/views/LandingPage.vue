@@ -81,7 +81,8 @@
               <p>
                 Upload once, publish everywhere. Support for TikTok, YouTube, Instagram,
                 Facebook, Threads, Reddit, X, Bilibili, Douyin, Xiaohongshu, Kuaishou,
-                Telegram, Discord, and more.
+                Telegram, Discord, Bluesky, and more — across your full brand matrix
+                (each persona can fan a post out to its own channels, groups &amp; feeds).
               </p>
             </div>
 
@@ -269,7 +270,9 @@
             <h3>Connect your accounts</h3>
             <p>
               Link your social media accounts using secure OAuth flows &mdash; TikTok Login Kit,
-              YouTube OAuth, Meta Login, and more. Each connection is verified before use.
+              YouTube OAuth, Meta Login, and more. App-password platforms (Bluesky) and
+              your own Telegram account are set up in a minute without a browser flow.
+              Each connection is verified before use.
             </p>
           </div>
           <div class="step">
@@ -626,13 +629,18 @@ const platforms = [
   },
   {
     name: 'Telegram',
-    desc: 'Channel and group messaging with rich media and scheduled delivery.',
-    capabilities: ['Channel Posts', 'Media Upload', 'Rich Text', 'Scheduling']
+    desc: 'Channel and group messaging as your own account (MTProto) or a bot, fanning out to any group you join / channel you manage.',
+    capabilities: ['Post as Yourself', 'Multi-Target Fan-out', 'Media & Video', 'Named Target Picker']
   },
   {
     name: 'Discord',
     desc: 'Webhook-based message delivery to Discord channels with embed support.',
     capabilities: ['Channel Posts', 'Embeds', 'Media', 'Webhook Integration']
+  },
+  {
+    name: 'Bluesky',
+    desc: 'AT Protocol posts with text, images and video — including adult-content self-labels for nude / explicit accounts.',
+    capabilities: ['Text', 'Images', 'Video up to 300MB', 'Adult Content Labels']
   },
   {
     name: 'Patreon',
