@@ -87,6 +87,11 @@ def _media_role_for_path(path: str | Path) -> str:
     return media_group_store.ROLE_VIDEO
 
 
+def _clean_text(value) -> str:
+    """Return a stripped string, or "" for anything that is not a real string."""
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _request_data_for_options(
     *,
     brief: str,
@@ -114,6 +119,21 @@ def _request_data_for_options(
         "transcribe": bool(options.get("transcribe", False)),
         "useLlm": bool(options.get("useLlm", True)),
     }
+
+    # Contact details / CTA: explicit option, else the profile column, else
+    # the legacy settings key. Threads' platform rule *requires* both; when
+    # they were missing draft generation raised and the orchestrator fell
+    # back to posting the raw brief text.
+    request_data["contactDetails"] = (
+        _clean_text(options.get("contactDetails"))
+        or _clean_text(getattr(profile, "contact_details", ""))
+        or _clean_text(profile_settings.get("contactDetails"))
+    )
+    request_data["cta"] = (
+        _clean_text(options.get("cta"))
+        or _clean_text(getattr(profile, "default_cta", ""))
+        or _clean_text(profile_settings.get("ctaText"))
+    )
 
     if options.get("watermark"):
         request_data["watermark"] = options.get("watermarkOverride") or profile_settings.get("watermark")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -78,6 +79,37 @@ def _extract_message_content(message_content) -> str:
                 text_parts.append(str(item.get("text", "")))
         return "".join(text_parts)
     return str(message_content or "")
+
+
+_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
+
+
+def coerce_json_object(content: str | None) -> dict | None:
+    """Best-effort extraction of a JSON object from an LLM reply.
+
+    Models asked to "return JSON" routinely wrap it in a ```json fence or
+    add a sentence around it. Callers that did not request
+    ``response_format=json_object`` (several proxies reject it) still need
+    the object back - otherwise the raw JSON text ends up posted verbatim
+    as the caption.
+    """
+    if not content:
+        return None
+    text = str(content).strip()
+    candidates = [text, _JSON_FENCE_RE.sub("", text).strip()]
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(text[start:end + 1])
+    for candidate in candidates:
+        if not candidate.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def _load_pool() -> list[dict]:

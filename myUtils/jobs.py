@@ -151,6 +151,30 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
+def _claimable_clause(now: str) -> tuple[str, list]:
+    """SQL fragment + params selecting targets that may be claimed *now*.
+
+    A target is claimable when it is pending/retrying AND its ``schedule_at``
+    is empty or already due. ``schedule_at`` is stored as a tz-naive UTC ISO
+    string (see ``publish_orchestrator._resolve_base_time``), the same shape
+    ``_now_iso`` produces, so a plain string comparison is chronological.
+    """
+    return (
+        "status IN (?, ?) AND (schedule_at IS NULL OR schedule_at = '' OR schedule_at <= ?)",
+        [TARGET_PENDING, TARGET_RETRYING, now],
+    )
+
+
+def has_claimable_targets(*, db_path: Path | None = None) -> bool:
+    """Cheap existence check: is any target due for pickup right now?"""
+    clause, params = _claimable_clause(_now_iso())
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT 1 FROM publish_job_targets WHERE {clause} LIMIT 1", params
+        ).fetchone()
+    return row is not None
+
+
 def _row_to_job(row: sqlite3.Row) -> Job:
     return Job(
         id=row["id"],
@@ -426,6 +450,7 @@ def claim_next_targets(
 
     excluded = list(excluded_accounts)
     now = _now_iso()
+    clause, clause_params = _claimable_clause(now)
     claimed: list[Target] = []
 
     with _connect(db_path) as conn:
@@ -435,12 +460,12 @@ def claim_next_targets(
             placeholders = ",".join("?" * len(excluded)) if excluded else ""
             sql = f"""
                 SELECT * FROM publish_job_targets
-                WHERE status IN (?, ?)
+                WHERE {clause}
                 {f'AND account_ref NOT IN ({placeholders})' if excluded else ''}
                 ORDER BY id
                 LIMIT ?
             """
-            params: list = [TARGET_PENDING, TARGET_RETRYING]
+            params: list = list(clause_params)
             params.extend(excluded)
             params.append(int(limit))
 

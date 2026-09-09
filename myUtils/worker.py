@@ -143,15 +143,10 @@ class PublishWorker:
             await asyncio.sleep(self._config.poll_interval)
 
     def _has_pending(self) -> bool:
-        # Cheap existence check; jobs.list_targets is more informative but heavier.
-        import sqlite3
-
-        with sqlite3.connect(self._db_path) as conn:
-            row = conn.execute(
-                "SELECT 1 FROM publish_job_targets WHERE status IN (?, ?) LIMIT 1",
-                (jobs.TARGET_PENDING, jobs.TARGET_RETRYING),
-            ).fetchone()
-        return row is not None
+        # Only targets that are due *now* count. A target scheduled for later
+        # must not keep drain() spinning; the backend's publish scheduler
+        # re-triggers a drain once it becomes claimable.
+        return jobs.has_claimable_targets(db_path=self._db_path)
 
     # -------------------------------------------------------------------------
     # Self-maintenance — OAuth token refresh for structured accounts

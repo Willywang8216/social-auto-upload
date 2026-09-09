@@ -340,3 +340,45 @@ class PublishCenterSubmitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RequestDataContactDefaultsTests(unittest.TestCase):
+    """contactDetails / cta fall back to the profile so Threads drafts do not raise."""
+
+    def _profile(self, **overrides):
+        profile = MagicMock()
+        profile.settings = overrides.pop("settings", {})
+        profile.contact_details = overrides.pop("contact_details", "")
+        profile.default_cta = overrides.pop("default_cta", "")
+        return profile
+
+    def test_option_overrides_profile(self):
+        result = publish_orchestrator._request_data_for_options(
+            brief="b", options={"contactDetails": "TG @opt", "cta": "Opt CTA"},
+            profile=self._profile(contact_details="TG @col", default_cta="Col CTA"),
+        )
+        self.assertEqual(result["contactDetails"], "TG @opt")
+        self.assertEqual(result["cta"], "Opt CTA")
+
+    def test_profile_columns_used_when_no_option(self):
+        result = publish_orchestrator._request_data_for_options(
+            brief="b", options={},
+            profile=self._profile(contact_details=" TG @col ", default_cta="Col CTA"),
+        )
+        self.assertEqual(result["contactDetails"], "TG @col")
+        self.assertEqual(result["cta"], "Col CTA")
+
+    def test_legacy_settings_keys_used_last(self):
+        result = publish_orchestrator._request_data_for_options(
+            brief="b", options={},
+            profile=self._profile(settings={"contactDetails": "IG @legacy", "ctaText": "Legacy CTA"}),
+        )
+        self.assertEqual(result["contactDetails"], "IG @legacy")
+        self.assertEqual(result["cta"], "Legacy CTA")
+
+    def test_non_string_values_become_empty(self):
+        profile = MagicMock()  # attributes are MagicMocks, not strings
+        profile.settings = {}
+        result = publish_orchestrator._request_data_for_options(brief="b", options={}, profile=profile)
+        self.assertEqual(result["contactDetails"], "")
+        self.assertEqual(result["cta"], "")
