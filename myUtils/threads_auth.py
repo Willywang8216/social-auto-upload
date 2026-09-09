@@ -17,7 +17,12 @@ THREADS_TOKEN_URL = "https://graph.threads.net/oauth/access_token"
 THREADS_LONG_LIVED_TOKEN_URL = "https://graph.threads.net/access_token"
 THREADS_REFRESH_TOKEN_URL = "https://graph.threads.net/refresh_access_token"
 THREADS_ME_URL = "https://graph.threads.net/v1.0/me"
-DEFAULT_SCOPES = ("threads_basic", "threads_content_publish")
+DEFAULT_SCOPES = (
+    "threads_basic",
+    "threads_content_publish",
+    # Allows deleting own Threads posts via DELETE /{threads-media-id}.
+    "threads_delete",
+)
 CLIENT_ID_ENV = "THREADS_APP_ID"
 CLIENT_SECRET_ENV = "THREADS_APP_SECRET"
 REDIRECT_URI_ENV = "THREADS_REDIRECT_URI"
