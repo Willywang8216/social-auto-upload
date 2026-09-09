@@ -1218,6 +1218,62 @@ def _instagram_create_container(http, ig_user_id: str, access_token: str, data: 
     return str(container_id)
 
 
+def _wait_for_container_status(
+    http,
+    container_id: str,
+    access_token: str,
+    *,
+    platform: str,
+    timeout: float = 90.0,
+    interval: float = 2.0,
+) -> None:
+    """Poll a created media container until it is FINISHED (or PUBLISHED).
+
+    Meta (Instagram) and Threads video / carousel containers take a few
+    seconds to fetch and transcode the remote media URL. Publishing before
+    the container reaches ``FINISHED`` fails with Instagram error 9007
+    "Media ID is not available" or Threads error code 24 ("resource does
+    not exist"). This helper polls the container status — Instagram exposes
+    it as ``status_code``, Threads as ``status`` — and surfaces the
+    container's ``error_message`` when it lands in an ERROR state.
+    """
+    root, field = _container_status_field(platform)
+    deadline = time.monotonic() + timeout
+    last_status = "UNKNOWN"
+    last_body: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        response = http.get(
+            f"{root}/{container_id}",
+            params={"fields": field, "access_token": access_token},
+            timeout=30,
+        )
+        _raise_for_status(response)
+        body = _response_payload(response) or {}
+        last_body = body
+        status = str(body.get(field) or body.get("status") or "").upper()
+        last_status = status
+        if status in ("FINISHED", "PUBLISHED"):
+            return
+        if status in ("ERROR", "EXPIRED", "FAILED"):
+            detail = body.get("error_message") or body.get("status") or body.get("error") or ""
+            raise PreparedPublishError(
+                f"{platform.title()} container {container_id} failed to process: {detail}"
+            )
+        time.sleep(interval)
+    detail = last_body.get("error_message") or last_status
+    raise PreparedPublishError(
+        f"{platform.title()} container {container_id} not ready after {int(timeout)}s "
+        f"(last status {last_status})"
+    )
+
+
+def _container_status_field(platform: str) -> tuple[str, str]:
+    """Status endpoint root and status field name for Instagram vs Threads."""
+    if platform == "instagram":
+        return FACEBOOK_GRAPH_ROOT, "status_code"
+    return THREADS_GRAPH_ROOT, "status"
+
+
 def validate_instagram_config_live(config: dict[str, Any], *, session=None) -> dict:
     ig_user_id = str(config.get("igUserId") or "").strip()
     access_token = str(_config_value(config, "accessToken") or "").strip()
@@ -1298,6 +1354,7 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
         else:
             raise PreparedPublishError("Instagram publish requires at least one image or video")
 
+        _wait_for_container_status(http, container_id, access_token, platform="instagram")
         publish_response = http.post(
             f"{FACEBOOK_GRAPH_ROOT}/{ig_user_id}/media_publish",
             data={"creation_id": container_id, "access_token": access_token},
@@ -1456,6 +1513,11 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
             access_token,
             {"media_type": "TEXT", "text": message},
         )
+
+    # Text-only posts publish instantly; media (video/image/carousel)
+    # containers need a moment to fetch/transcode the remote URL.
+    if media["videos"] or media["images"]:
+        _wait_for_container_status(http, container_id, access_token, platform="threads")
 
     publish_response = http.post(
         f"{THREADS_GRAPH_ROOT}/{user_id}/threads_publish",

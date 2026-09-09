@@ -274,9 +274,10 @@ class PreparedPublisherTests(unittest.TestCase):
         attached = json.loads(session.calls[2][2]["data"]["attached_media"])
         self.assertEqual(attached[0]["media_fbid"], "photo-1")
 
-    def test_instagram_single_image_creates_container_then_publishes(self):
+    def test_instagram_single_image_waits_for_container_then_publishes(self):
         session = _RecordingSession([
             _FakeResponse({"id": "ig-container"}),
+            _FakeResponse({"status_code": "FINISHED"}),
             _FakeResponse({"id": "ig-media"}),
         ])
         account = SimpleNamespace(config={"igUserId": "1789", "accessToken": "ig-token"})
@@ -290,7 +291,27 @@ class PreparedPublisherTests(unittest.TestCase):
         )
         self.assertEqual(result["container_id"], "ig-container")
         self.assertEqual(session.calls[0][1], f"{prepared_publishers.FACEBOOK_GRAPH_ROOT}/1789/media")
-        self.assertEqual(session.calls[1][1], f"{prepared_publishers.FACEBOOK_GRAPH_ROOT}/1789/media_publish")
+        # container status is polled before media_publish
+        self.assertEqual(session.calls[1][0], "GET")
+        self.assertEqual(session.calls[1][1], f"{prepared_publishers.FACEBOOK_GRAPH_ROOT}/ig-container")
+        self.assertEqual(session.calls[2][1], f"{prepared_publishers.FACEBOOK_GRAPH_ROOT}/1789/media_publish")
+
+    def test_instagram_video_container_not_finished_raises(self):
+        session = _RecordingSession([
+            _FakeResponse({"id": "ig-container"}),
+            _FakeResponse({"status_code": "ERROR", "error_message": "media timed out"}),
+        ])
+        account = SimpleNamespace(config={"igUserId": "1789", "accessToken": "ig-token"})
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers.publish_instagram_sync(
+                account,
+                {
+                    "message": "Instagram reel",
+                    "artifacts": [{"public_url": "https://cdn.example/video.mp4", "artifact_kind": "watermarked_video"}],
+                },
+                session=session,
+            )
+        self.assertIn("media timed out", str(ctx.exception))
 
     def test_threads_text_only_creates_container_then_publishes(self):
         session = _RecordingSession([
@@ -305,7 +326,29 @@ class PreparedPublisherTests(unittest.TestCase):
         )
         self.assertEqual(result["container_id"], "threads-container")
         self.assertEqual(session.calls[0][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads")
+        # text-only: no container-status poll, straight to publish
         self.assertEqual(session.calls[1][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads_publish")
+
+    def test_threads_video_waits_for_container_then_publishes(self):
+        session = _RecordingSession([
+            _FakeResponse({"id": "tv-container"}),
+            _FakeResponse({"status": "FINISHED"}),
+            _FakeResponse({"id": "tv-post"}),
+        ])
+        account = SimpleNamespace(config={"threadUserId": "42", "accessToken": "threads-token", "accessTokenExpiresAt": "2099-01-01T00:00:00"})
+        result = prepared_publishers.publish_threads_sync(
+            account,
+            {
+                "message": "Threads video",
+                "artifacts": [{"public_url": "https://cdn.example/video.mp4", "artifact_kind": "watermarked_video"}],
+            },
+            session=session,
+        )
+        self.assertEqual(result["container_id"], "tv-container")
+        self.assertEqual(session.calls[0][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads")
+        self.assertEqual(session.calls[1][0], "GET")
+        self.assertEqual(session.calls[1][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/tv-container")
+        self.assertEqual(session.calls[2][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads_publish")
 
     def test_tiktok_publish_auto_refreshes_stale_token(self):
         session = _RecordingSession([
@@ -476,6 +519,7 @@ class PreparedPublisherTests(unittest.TestCase):
     def test_instagram_publish_returns_updated_config_with_re_derived_page_token(self):
         session = _RecordingSession([
             _FakeResponse({"id": "ig-container"}),
+            _FakeResponse({"status_code": "FINISHED"}),
             _FakeResponse({"id": "ig-media"}),
         ])
         account = SimpleNamespace(config={
