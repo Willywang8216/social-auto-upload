@@ -34,6 +34,10 @@ DEFAULT_INSTAGRAM_SCOPES = (
     "pages_show_list",
     "instagram_basic",
     "instagram_content_publish",
+    # Allows deleting published IG media via DELETE /{ig-media-id}
+    # (requires a Facebook User access token; dev-mode grant is enough for
+    # admin/test accounts). Needed to unpublish test posts programmatically.
+    "instagram_manage_contents",
     "business_management",
 )
 CLIENT_ID_ENV = "META_APP_ID"
