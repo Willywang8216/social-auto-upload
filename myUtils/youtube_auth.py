@@ -18,6 +18,10 @@ YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 DEFAULT_SCOPES = (
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
+    # youtube.force-ssl (manage) lets us update existing videos' metadata /
+    # visibility after upload. youtube.upload alone can only push new videos,
+    # so edits like rich-meta backfills or privacy changes 403 without it.
+    "https://www.googleapis.com/auth/youtube.force-ssl",
 )
 CLIENT_ID_ENV = "YT_CLIENT_ID"
 CLIENT_SECRET_ENV = "YT_CLIENT_SECRET"
