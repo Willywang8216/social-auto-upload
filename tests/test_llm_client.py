@@ -160,3 +160,24 @@ class LlmRotationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoerceJsonObjectTests(unittest.TestCase):
+    def test_plain_json(self) -> None:
+        self.assertEqual(
+            llm_client.coerce_json_object('{"message": "hi", "hashtags": []}'),
+            {"message": "hi", "hashtags": []},
+        )
+
+    def test_fenced_json(self) -> None:
+        text = "```json\n{\"message\": \"hi\"}\n```"
+        self.assertEqual(llm_client.coerce_json_object(text), {"message": "hi"})
+
+    def test_json_with_surrounding_prose(self) -> None:
+        text = "Sure! Here is the draft:\n{\"message\": \"hi\", \"cta\": \"go\"}\nLet me know."
+        self.assertEqual(llm_client.coerce_json_object(text), {"message": "hi", "cta": "go"})
+
+    def test_non_json_returns_none(self) -> None:
+        self.assertIsNone(llm_client.coerce_json_object("just a caption {not json"))
+        self.assertIsNone(llm_client.coerce_json_object(""))
+        self.assertIsNone(llm_client.coerce_json_object("[1, 2, 3]"))

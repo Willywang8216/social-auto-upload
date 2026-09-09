@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import db.createTable as create_table
@@ -267,3 +267,38 @@ class ListJobsLimitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _utc_iso(delta: timedelta) -> str:
+    return (datetime.now(tz=timezone.utc) + delta).replace(tzinfo=None, microsecond=0).isoformat()
+
+
+class ScheduleGateTests(unittest.TestCase):
+    """claim_next_targets / has_claimable_targets honour schedule_at."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "jobs.db"
+        create_table.bootstrap(self.db_path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_future_scheduled_target_is_not_claimable(self) -> None:
+        future = _utc_iso(timedelta(hours=1))
+        job = jobs.enqueue_job(_spec(targets=[("acct-1", "file-1", future)]), db_path=self.db_path)
+        self.assertFalse(jobs.has_claimable_targets(db_path=self.db_path))
+        self.assertEqual(jobs.claim_next_targets(limit=5, db_path=self.db_path), [])
+        target = jobs.list_targets(job.id, db_path=self.db_path)[0]
+        self.assertEqual(target.status, jobs.TARGET_PENDING)
+        self.assertEqual(target.attempts, 0)
+
+    def test_due_and_unscheduled_targets_are_claimable(self) -> None:
+        past = _utc_iso(timedelta(minutes=-1))
+        jobs.enqueue_job(
+            _spec(targets=[("acct-1", "file-1", past), ("acct-2", "file-1", None)]),
+            db_path=self.db_path,
+        )
+        self.assertTrue(jobs.has_claimable_targets(db_path=self.db_path))
+        claimed = jobs.claim_next_targets(limit=5, db_path=self.db_path)
+        self.assertEqual({t.account_ref for t in claimed}, {"acct-1", "acct-2"})

@@ -3733,7 +3733,11 @@ def _generate_platform_draft(
             if ai_config["model"]:
                 kwargs["model"] = ai_config["model"]
             result = llm_client.generate_chat_completion(system_prompt, user_prompt, **kwargs)
-            raw_draft = result.parsed_json or {"message": result.content}
+            raw_draft = (
+                result.parsed_json
+                or llm_client.coerce_json_object(result.content)
+                or {"message": result.content}
+            )
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).warning(
                 "LLM generation failed for %s: %s",
@@ -6797,6 +6801,49 @@ def _start_worker_drain_thread():
     threading.Thread(target=_run, daemon=True).start()
 
 
+_PUBLISH_SCHEDULER_THREAD: threading.Thread | None = None
+
+
+def _publish_scheduler_loop(interval_seconds: int) -> None:
+    """Wake the drain worker whenever a scheduled target becomes due.
+
+    ``/publish-center/submit`` only drains once, right after enqueueing, and
+    ``drain()`` returns as soon as nothing is claimable. Targets whose
+    ``schedule_at`` lies in the future therefore need something to kick the
+    worker later - this loop does that, and its first pass also picks up
+    anything that came due while the process was down.
+    """
+    import time as _time
+
+    while True:
+        try:
+            if job_runtime.has_claimable_targets():
+                _start_worker_drain_thread()
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).exception("Publish scheduler tick failed")
+        _time.sleep(interval_seconds)
+
+
+def _maybe_start_publish_scheduler() -> None:
+    """Start the scheduler thread when SAU_PUBLISH_SCHEDULER_INTERVAL_SECONDS > 0."""
+    global _PUBLISH_SCHEDULER_THREAD
+    if _PUBLISH_SCHEDULER_THREAD is not None:
+        return
+    try:
+        interval_seconds = int(os.environ.get("SAU_PUBLISH_SCHEDULER_INTERVAL_SECONDS", "0") or "0")
+    except ValueError:
+        interval_seconds = 0
+    if interval_seconds <= 0:
+        return
+    _PUBLISH_SCHEDULER_THREAD = threading.Thread(
+        target=_publish_scheduler_loop,
+        args=(interval_seconds,),
+        daemon=True,
+        name="publish-scheduler",
+    )
+    _PUBLISH_SCHEDULER_THREAD.start()
+
+
 @app.route("/publish-center/submit", methods=["POST"])
 def publish_center_submit():
     db_path = _current_db_path()
@@ -8010,6 +8057,7 @@ def api_list_sheet_exports():
 
 
 _maybe_start_account_maintenance_scheduler()
+_maybe_start_publish_scheduler()
 
 # Ensure DO Spaces bucket exists on startup
 try:
