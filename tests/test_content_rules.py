@@ -28,6 +28,17 @@ class ContentRulesTests(unittest.TestCase):
         self.assertIn("contact@example.com", draft["message"])
         self.assertIn("Reply for details", draft["message"])
 
+    def test_prepare_threads_trims_to_500_characters(self) -> None:
+        # Threads API rejects text longer than 500 characters (code 100).
+        draft = content_rules.prepare_platform_draft(
+            "threads",
+            {"message": "x" * 900},
+            contact_details="c@example.com",
+            cta="Reply",
+        )
+        self.assertLessEqual(len(draft["message"]), 500)
+        self.assertEqual(draft["charCount"], len(draft["message"]))
+
     def test_build_sheet_row_maps_schedule_and_story(self) -> None:
         row = content_rules.build_sheet_row(
             message="Hello",

@@ -56,7 +56,7 @@ class PlatformRule:
 
 PLATFORM_RULES: dict[str, PlatformRule] = {
     "twitter": PlatformRule("twitter", max_chars=280, hashtag_count=3, require_emoji=True),
-    "threads": PlatformRule("threads", require_contact_details=True, require_cta=True),
+    "threads": PlatformRule("threads", max_chars=500, require_contact_details=True, require_cta=True),
     "patreon": PlatformRule("patreon", long_form=True),
     "instagram": PlatformRule("instagram", max_chars=2200, long_form=True),
     "facebook": PlatformRule("facebook", max_chars=63206, long_form=True),
