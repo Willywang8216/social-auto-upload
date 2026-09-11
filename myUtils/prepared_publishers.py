@@ -2198,12 +2198,7 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
 
     # Check if we have OAuth 2.0 token (from PKCE flow)
     oauth2_token = str(config.get("accessToken") or "").strip()
-    has_oauth1 = all([
-        str(_config_value(config, "apiKey", default_env="X_API_KEY") or "").strip(),
-        str(_config_value(config, "apiKeySecret", default_env="X_API_KEY_SECRET") or "").strip(),
-        str(_config_value(config, "accessToken", default_env="X_ACCESS_TOKEN") or "").strip(),
-        str(_config_value(config, "accessTokenSecret", default_env="X_ACCESS_TOKEN_SECRET") or "").strip(),
-    ])
+    has_oauth1 = all(_twitter_oauth1_credentials(config))
 
     if not oauth2_token and not has_oauth1:
         raise PreparedPublishError(
@@ -2217,13 +2212,11 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
     # Upload media first (v1.1 endpoint requires OAuth 1.0a)
     media_ids = []
     if media["images"][:4] + media["videos"][:1]:
-        api_key = str(_config_value(config, "apiKey", default_env="X_API_KEY") or "").strip()
-        api_key_secret = str(_config_value(config, "apiKeySecret", default_env="X_API_KEY_SECRET") or "").strip()
-        access_token = str(_config_value(config, "accessToken", default_env="X_ACCESS_TOKEN") or "").strip()
-        access_token_secret = str(_config_value(config, "accessTokenSecret", default_env="X_ACCESS_TOKEN_SECRET") or "").strip()
+        api_key, api_key_secret, access_token, access_token_secret = _twitter_oauth1_credentials(config)
         if not all([api_key, api_key_secret, access_token, access_token_secret]):
             raise PreparedPublishError(
-                "Twitter media upload requires OAuth 1.0a credentials (apiKey, apiKeySecret, accessToken, accessTokenSecret)"
+                "Twitter media upload requires OAuth 1.0a credentials for the posting account "
+                "(oauth1ApiKey, oauth1ApiKeySecret, oauth1AccessToken, oauth1AccessTokenSecret)"
             )
         for item in media["images"][:4] + media["videos"][:1]:
             local_path = item.get("local_path")
@@ -2253,6 +2246,34 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
     return {"results": [_response_payload(resp)], "updated_config": config}
 
 
+def _twitter_oauth1_credentials(config: dict[str, Any]) -> tuple[str, str, str, str]:
+    """Return ``(api_key, api_key_secret, access_token, access_token_secret)``.
+
+    Media upload only exists on the v1.1 endpoint, which speaks OAuth 1.0a, so
+    these four values are needed even for accounts that authenticate to the v2
+    write endpoints with an OAuth 2.0 bearer token.
+
+    Per-account values come first because one deployment can drive several X
+    accounts and each needs its own user context — an access token minted for
+    account A cannot attach media to a tweet posted as account B. The
+    ``oauth1*`` keys are the per-account home for them: the plain
+    ``accessToken`` key already holds the OAuth 2.0 token, so reusing it here
+    would shadow one credential set with the other. Env stays as the
+    single-account fallback it has always been.
+    """
+    api_key = str(_config_value(config, "oauth1ApiKey", default_env="X_API_KEY") or "").strip()
+    api_key_secret = str(
+        _config_value(config, "oauth1ApiKeySecret", default_env="X_API_KEY_SECRET") or ""
+    ).strip()
+    access_token = str(
+        _config_value(config, "oauth1AccessToken", default_env="X_ACCESS_TOKEN") or ""
+    ).strip()
+    access_token_secret = str(
+        _config_value(config, "oauth1AccessTokenSecret", default_env="X_ACCESS_TOKEN_SECRET") or ""
+    ).strip()
+    return api_key, api_key_secret, access_token, access_token_secret
+
+
 def _twitter_auth_headers(config: dict[str, Any], *, method: str, url: str) -> dict[str, str]:
     """Return Authorization headers for Twitter, preferring OAuth 2.0 over 1.0a."""
     # OAuth 2.0 Bearer token (from OAuth PKCE flow stored in config)
@@ -2260,11 +2281,8 @@ def _twitter_auth_headers(config: dict[str, Any], *, method: str, url: str) -> d
     if oauth2_token:
         return {"Authorization": f"Bearer {oauth2_token}"}
 
-    # OAuth 1.0a (from env vars or config overrides)
-    api_key = str(_config_value(config, "apiKey", default_env="X_API_KEY") or "").strip()
-    api_key_secret = str(_config_value(config, "apiKeySecret", default_env="X_API_KEY_SECRET") or "").strip()
-    access_token = str(_config_value(config, "accessToken", default_env="X_ACCESS_TOKEN") or "").strip()
-    access_token_secret = str(_config_value(config, "accessTokenSecret", default_env="X_ACCESS_TOKEN_SECRET") or "").strip()
+    # OAuth 1.0a (per-account oauth1* keys, else env)
+    api_key, api_key_secret, access_token, access_token_secret = _twitter_oauth1_credentials(config)
 
     if all([api_key, api_key_secret, access_token, access_token_secret]):
         return {
@@ -2276,7 +2294,8 @@ def _twitter_auth_headers(config: dict[str, Any], *, method: str, url: str) -> d
         }
 
     raise PreparedPublishError(
-        "Twitter requires either OAuth 2.0 tokens (via Connect button) or OAuth 1.0a credentials (apiKey, apiKeySecret, accessToken, accessTokenSecret)"
+        "Twitter requires either OAuth 2.0 tokens (via Connect button) or OAuth 1.0a credentials "
+        "(oauth1ApiKey, oauth1ApiKeySecret, oauth1AccessToken, oauth1AccessTokenSecret)"
     )
 
 
