@@ -139,6 +139,40 @@ def ensure_public_link(
     return public_url
 
 
+def download_artifact(
+    remote_path: str,
+    local_path: str | Path,
+    *,
+    remote_name: str | None = None,
+    remote_root: str | None = None,
+    runner=run_subprocess,
+) -> Path:
+    """Fetch an object back off the rclone remote.
+
+    Counterpart to :func:`upload_artifact`, used to pull media back when the
+    worker finds an artifact missing locally. The byte-moving copy of the
+    cache lives in ``offload_to_drive.sh``; this is the read side the publish
+    path needs so an offloaded file is recoverable rather than simply gone.
+    """
+    resolved_remote_name = _resolve_remote_name(remote_name)
+    root = _resolve_remote_root(remote_root)
+    spec_path = str(PurePosixPath(root, remote_path)) if root else remote_path
+
+    destination = Path(local_path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    runner(
+        [
+            RCLONE_COMMAND,
+            "copyto",
+            f"{resolved_remote_name}:{spec_path}",
+            str(destination),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return destination
+
+
 def upload_artifact(
     local_path: str | Path,
     *,
