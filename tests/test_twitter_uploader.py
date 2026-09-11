@@ -8,12 +8,15 @@ from pathlib import Path
 from uploader.twitter_uploader.main import (
     PreparedTwitterSegment,
     PlannedTwitterSegment,
+    TWITTER_MAX_IMAGES_PER_TWEET,
     TWITTER_MAX_VIDEO_SECONDS,
     TWITTER_SPLIT_SEGMENT_SECONDS,
     extract_created_post_id,
     materialize_thread_segments,
+    plan_image_segments,
     plan_thread_segments,
     plan_video_segments,
+    prepare_image_for_upload,
     publish_thread_segments,
 )
 
@@ -67,6 +70,102 @@ class TwitterUploaderPlanningTests(unittest.TestCase):
             [(segment.segment_index, segment.start_seconds, segment.duration_seconds) for segment in planned],
             [(0, 0.0, 139.0), (1, 139.0, 139.0), (2, 278.0, 2.0)],
         )
+
+    def _image(self, name: str) -> Path:
+        path = self.tmp_path / name
+        path.write_bytes(b"image")
+        return path
+
+    def test_image_batches_are_capped_at_four_per_tweet(self) -> None:
+        images = [self._image(f"shot-{index}.jpg") for index in range(9)]
+
+        planned = plan_image_segments(images)
+
+        self.assertEqual([len(segment.media_paths) for segment in planned], [4, 4, 1])
+        self.assertTrue(all(len(segment.upload_paths) <= TWITTER_MAX_IMAGES_PER_TWEET for segment in planned))
+        self.assertTrue(all(not segment.requires_split for segment in planned))
+        self.assertEqual([segment.source_index for segment in planned], [0, 4, 8])
+
+    def test_mixed_images_and_videos_keep_upload_order(self) -> None:
+        first = self._image("first.jpg")
+        second = self._image("second.png")
+        video = self._video("middle.mp4")
+        third = self._image("third.jpg")
+
+        planned = plan_thread_segments(
+            [first, second, video, third],
+            duration_reader=lambda path: 30.0,
+        )
+
+        self.assertEqual(
+            [(segment.source_index, len(segment.upload_paths)) for segment in planned],
+            [(0, 2), (2, 1), (3, 1)],
+        )
+        # The paired stills share one tweet; the video gets its own.
+        self.assertEqual(planned[0].upload_paths, (first.resolve(), second.resolve()))
+        self.assertEqual(planned[1].upload_paths, (video.resolve(),))
+
+    def test_video_split_still_applies_alongside_images(self) -> None:
+        video = self._video("long.mp4")
+        trailing = self._image("trailing.jpg")
+
+        planned = plan_thread_segments(
+            [video, trailing],
+            duration_reader=lambda path: 280.0,
+        )
+
+        self.assertEqual([segment.requires_split for segment in planned], [True, True, True, False])
+        self.assertEqual(
+            [segment.segment_index for segment in planned if segment.requires_split],
+            [0, 1, 2],
+        )
+
+    def test_materialized_image_posts_expose_all_media_paths(self) -> None:
+        planned = plan_image_segments([self._image(f"m-{index}.jpg") for index in range(4)])
+
+        with materialize_thread_segments(planned) as prepared:
+            self.assertEqual(len(prepared), 1)
+            self.assertEqual(prepared[0].post_index, 0)
+            self.assertTrue(prepared[0].is_image_post)
+            self.assertEqual(len(prepared[0].upload_paths), 4)
+            # upload_path stays the primary media for backwards compatibility.
+            self.assertEqual(prepared[0].upload_path, prepared[0].upload_paths[0])
+
+    def test_materialize_normalizes_oversized_images_via_the_injected_hook(self) -> None:
+        calls: list[tuple[Path, int]] = []
+
+        def fake_normalizer(source: Path, temp_root: Path, index: int) -> Path:
+            calls.append((source, index))
+            replaced = Path(temp_root) / f"shrunk-{index}.jpg"
+            replaced.write_bytes(b"small")
+            return replaced
+
+        planned = plan_image_segments([self._image(f"big-{index}.jpg") for index in range(2)])
+
+        with materialize_thread_segments(planned, image_normalizer=fake_normalizer) as prepared:
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all("shrunk-" in path.name for path in prepared[0].upload_paths))
+
+    def test_prepare_image_for_upload_passes_through_small_files(self) -> None:
+        source = self._image("small.jpg")
+
+        result = prepare_image_for_upload(source, self.tmp_path, 0, max_bytes=1024)
+
+        self.assertEqual(result, source.resolve())
+
+    def test_prepare_image_for_upload_shrinks_oversized_files(self) -> None:
+        from PIL import Image
+
+        source = self.tmp_path / "huge.jpg"
+        Image.new("RGB", (3000, 4000), (12, 34, 56)).save(source, quality=95)
+        # Pad it so the source is genuinely over the injected cap.
+        source.write_bytes(source.read_bytes() + b"\0" * 200_000)
+
+        result = prepare_image_for_upload(source, self.tmp_path, 0, max_bytes=64 * 1024)
+
+        self.assertNotEqual(result, source.resolve())
+        self.assertLessEqual(result.stat().st_size, 64 * 1024)
+        self.assertEqual(result.suffix, ".jpg")
 
     def test_multi_file_order_is_flattened_deterministically(self) -> None:
         first = self._video("first.mp4")

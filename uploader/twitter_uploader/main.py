@@ -21,10 +21,15 @@ TWITTER_COMPOSE_URL = "https://x.com/compose/post"
 TWITTER_STATUS_URL_TEMPLATE = "https://x.com/i/status/{post_id}"
 TWITTER_MAX_VIDEO_SECONDS = 140.0
 TWITTER_SPLIT_SEGMENT_SECONDS = 139.0
+TWITTER_MAX_IMAGES_PER_TWEET = 4
+TWITTER_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+TWITTER_IMAGE_UPLOAD_QUALITY = 88
 TWITTER_POST_BUTTON_READY_TIMEOUT_MS = 45000
 TWITTER_POST_BUTTON_POLL_SECONDS = 0.25
+TWITTER_ATTACHMENT_READY_TIMEOUT_MS = 120000
 TWITTER_TEXTBOX_SELECTOR = "[data-testid='tweetTextarea_0']"
 TWITTER_FILE_INPUT_SELECTOR = "input[data-testid='fileInput']"
+TWITTER_ATTACHMENT_SELECTOR = "[data-testid='attachments']"
 TWITTER_POST_BUTTON_SELECTORS = (
     "[data-testid='tweetButton']",
     "[data-testid='tweetButtonInline']",
@@ -43,6 +48,12 @@ class PlannedTwitterSegment:
     start_seconds: float
     duration_seconds: float
     requires_split: bool
+    media_paths: tuple[Path, ...] = ()
+
+    @property
+    def upload_paths(self) -> tuple[Path, ...]:
+        """Every file this post attaches, in upload order."""
+        return self.media_paths or (self.source_path,)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,11 +65,80 @@ class PreparedTwitterSegment:
     start_seconds: float
     duration_seconds: float
     requires_split: bool
+    media_paths: tuple[Path, ...] = ()
+    post_index: int = 0
+
+    @property
+    def upload_paths(self) -> tuple[Path, ...]:
+        """Every file this post attaches, in upload order."""
+        return self.media_paths or (self.upload_path,)
+
+    @property
+    def is_image_post(self) -> bool:
+        return bool(self.media_paths) and not self.requires_split
 
 
 SubprocessRunner = Callable[..., subprocess.CompletedProcess]
 DurationReader = Callable[[Path], float]
 PublishStep = Callable[[PreparedTwitterSegment, str | None], Awaitable[str]]
+ImageNormalizer = Callable[[Path, Path, int], Path]
+
+
+def is_image_path(file_path: str | Path) -> bool:
+    return Path(file_path).suffix.lower() in BaseVideoUploader.SUPPORTED_IMAGE_EXTENSIONS
+
+
+def is_video_path(file_path: str | Path) -> bool:
+    return Path(file_path).suffix.lower() in BaseVideoUploader.SUPPORTED_VIDEO_EXTENSIONS
+
+
+def prepare_image_for_upload(
+    file_path: str | Path,
+    temp_root: str | Path,
+    index: int,
+    *,
+    max_bytes: int = TWITTER_MAX_IMAGE_BYTES,
+) -> Path:
+    """Return an X-uploadable image, shrinking anything over the size cap.
+
+    X rejects stills larger than 5 MB, which is easy to hit with the camera
+    originals in the Nakedwill / Sexualwill libraries. Anything already within
+    the cap is passed through untouched; the rest is re-encoded as JPEG into
+    ``temp_root`` (the caller's temp dir, cleaned up after publishing).
+    """
+    source = Path(file_path).expanduser().resolve()
+    try:
+        if source.stat().st_size <= max_bytes:
+            return source
+    except OSError:
+        return source
+
+    from PIL import Image
+
+    destination = Path(temp_root) / f"image-{index:03d}.jpg"
+    with Image.open(source) as opened:
+        image = opened.convert("RGB")
+
+    quality = TWITTER_IMAGE_UPLOAD_QUALITY
+    scale = 1.0
+    for _ in range(12):
+        candidate = image
+        if scale < 1.0:
+            candidate = image.resize(
+                (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
+                Image.LANCZOS,
+            )
+        candidate.save(destination, format="JPEG", quality=quality, optimize=True)
+        if destination.stat().st_size <= max_bytes:
+            break
+        # Shave quality first (cheap, keeps dimensions), then fall back to
+        # progressively smaller frames for pathologically large sources.
+        if quality > 45:
+            quality -= 10
+        else:
+            scale *= 0.85
+            quality = TWITTER_IMAGE_UPLOAD_QUALITY
+    return destination
 
 
 def run_subprocess(command: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
@@ -134,25 +214,88 @@ def plan_video_segments(
     return segments
 
 
+def plan_image_segments(
+    file_paths: Sequence[str | Path],
+    *,
+    first_source_index: int = 0,
+    max_images_per_tweet: int = TWITTER_MAX_IMAGES_PER_TWEET,
+) -> list[PlannedTwitterSegment]:
+    """Group stills into posts of at most ``max_images_per_tweet`` images.
+
+    X accepts four images per tweet, so a larger batch becomes a reply chain
+    instead of one oversized post.
+    """
+    resolved = [Path(file_path).expanduser().resolve() for file_path in file_paths]
+    segments: list[PlannedTwitterSegment] = []
+    for offset in range(0, len(resolved), max_images_per_tweet):
+        batch = resolved[offset : offset + max_images_per_tweet]
+        segments.append(
+            PlannedTwitterSegment(
+                source_path=batch[0],
+                source_index=first_source_index + offset,
+                segment_index=0,
+                start_seconds=0.0,
+                duration_seconds=0.0,
+                requires_split=False,
+                media_paths=tuple(batch),
+            )
+        )
+    return segments
+
+
 def plan_thread_segments(
     file_paths: Sequence[str | Path],
     *,
     duration_reader: DurationReader = probe_video_duration,
     max_unsplit_seconds: float = TWITTER_MAX_VIDEO_SECONDS,
     split_segment_seconds: float = TWITTER_SPLIT_SEGMENT_SECONDS,
+    max_images_per_tweet: int = TWITTER_MAX_IMAGES_PER_TWEET,
 ) -> list[PlannedTwitterSegment]:
+    """Plan the reply chain for a batch of videos, stills, or both.
+
+    Consecutive images are batched four to a tweet; every video is probed and
+    split when it runs past the platform limit. Upload order is preserved so
+    the thread reads the same way it was handed to us.
+    """
     planned: list[PlannedTwitterSegment] = []
+    pending_images: list[Path] = []
+    pending_start_index = 0
+
+    def flush_images() -> None:
+        if not pending_images:
+            return
+        planned.extend(
+            plan_image_segments(
+                pending_images,
+                first_source_index=pending_start_index,
+                max_images_per_tweet=max_images_per_tweet,
+            )
+        )
+        pending_images.clear()
+
     for source_index, file_path in enumerate(file_paths):
-        duration_seconds = float(duration_reader(Path(file_path)))
+        resolved = Path(file_path).expanduser().resolve()
+        if is_image_path(resolved):
+            if not pending_images:
+                pending_start_index = source_index
+            pending_images.append(resolved)
+            if len(pending_images) >= max_images_per_tweet:
+                flush_images()
+            continue
+
+        flush_images()
+        duration_seconds = float(duration_reader(resolved))
         planned.extend(
             plan_video_segments(
-                file_path,
+                resolved,
                 duration_seconds=duration_seconds,
                 source_index=source_index,
                 max_unsplit_seconds=max_unsplit_seconds,
                 split_segment_seconds=split_segment_seconds,
             )
         )
+
+    flush_images()
     return planned
 
 
@@ -195,17 +338,25 @@ def materialize_thread_segments(
     planned_segments: Sequence[PlannedTwitterSegment],
     *,
     splitter: Callable[[PlannedTwitterSegment, str | Path], Path] = split_video_segment,
+    image_normalizer: ImageNormalizer = prepare_image_for_upload,
 ) -> Iterator[list[PreparedTwitterSegment]]:
     with tempfile.TemporaryDirectory(prefix="sau-twitter-thread-") as temp_dir:
         temp_root = Path(temp_dir)
         prepared: list[PreparedTwitterSegment] = []
-        for segment in planned_segments:
+        for post_index, segment in enumerate(planned_segments):
+            media_paths: tuple[Path, ...] = ()
             if segment.requires_split:
                 output_path = temp_root / (
                     f"{segment.source_path.stem}-"
                     f"{segment.source_index:02d}-{segment.segment_index:02d}.mp4"
                 )
                 upload_path = splitter(segment, output_path)
+            elif segment.media_paths:
+                media_paths = tuple(
+                    image_normalizer(source, temp_root, post_index * 10 + offset)
+                    for offset, source in enumerate(segment.media_paths)
+                )
+                upload_path = media_paths[0]
             else:
                 upload_path = segment.source_path
 
@@ -218,6 +369,10 @@ def materialize_thread_segments(
                     start_seconds=segment.start_seconds,
                     duration_seconds=segment.duration_seconds,
                     requires_split=segment.requires_split,
+                    media_paths=tuple(
+                        Path(path).expanduser().resolve() for path in media_paths
+                    ),
+                    post_index=post_index,
                 )
             )
         yield prepared
@@ -335,7 +490,7 @@ class TwitterThreadVideo(BaseVideoUploader):
             raise ValueError("Twitter thread upload requires at least one file")
         self.title = (title or "").strip()
         self.tags = [str(tag).strip().lstrip("#") for tag in (tags or []) if str(tag).strip()]
-        self.file_paths = [self.validate_video_file(path) for path in file_paths]
+        self.file_paths = [self._validate_media_file(path) for path in file_paths]
         account_path = Path(account_file).expanduser().resolve()
         if not account_path.exists():
             raise FileNotFoundError(f"Twitter storage_state file not found: {account_path}")
@@ -343,6 +498,13 @@ class TwitterThreadVideo(BaseVideoUploader):
         self.publish_date = self.validate_publish_date(publish_date)
         self.debug = debug
         self.headless = headless
+
+    @classmethod
+    def _validate_media_file(cls, file_path: str | Path) -> Path:
+        """Accept stills as well as videos; X posts both from the composer."""
+        if is_image_path(file_path):
+            return cls.validate_image_file(file_path)
+        return cls.validate_video_file(file_path)
 
     def build_thread_plan(self) -> list[PlannedTwitterSegment]:
         return plan_thread_segments(self.file_paths)
@@ -356,8 +518,7 @@ class TwitterThreadVideo(BaseVideoUploader):
     ) -> str:
         base = self.title
         if total_segments > 1:
-            suffix = f" ({segment.source_index + 1}.{segment.segment_index + 1}/{total_segments})"
-            base = f"{base}{suffix}".strip()
+            base = f"{base} ({segment.post_index + 1}/{total_segments})".strip()
         if is_root and self.tags:
             hashtags = " ".join(f"#{tag}" for tag in self.tags)
             return "\n\n".join(part for part in (base, hashtags) if part)
@@ -371,6 +532,31 @@ class TwitterThreadVideo(BaseVideoUploader):
             await reply_button.click()
         except Exception:
             await page.goto(f"{TWITTER_COMPOSE_URL}?in_reply_to={previous_post_id}")
+
+    async def _wait_for_attachments(self, page: Page, *, expected: int) -> None:
+        """Best-effort wait for X to render every media preview.
+
+        The post button stays disabled while media uploads, but the preview
+        list can still lag behind it. Polling the preview count keeps a
+        multi-image post from being submitted half-attached; a timeout just
+        falls back to the post-button gate rather than failing the publish.
+        """
+        if expected <= 1:
+            return
+
+        deadline = (
+            asyncio.get_running_loop().time() + TWITTER_ATTACHMENT_READY_TIMEOUT_MS / 1000
+        )
+        previews = page.locator(
+            f"{TWITTER_ATTACHMENT_SELECTOR} img, {TWITTER_ATTACHMENT_SELECTOR} video"
+        )
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                if await previews.count() >= expected:
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(TWITTER_POST_BUTTON_POLL_SECONDS)
 
     async def _fill_composer(
         self,
@@ -386,7 +572,9 @@ class TwitterThreadVideo(BaseVideoUploader):
             await page.keyboard.type(text)
 
         file_input = page.locator(TWITTER_FILE_INPUT_SELECTOR).first
-        await file_input.set_input_files(str(segment.upload_path))
+        media_paths = [str(path) for path in segment.upload_paths]
+        await file_input.set_input_files(media_paths)
+        await self._wait_for_attachments(page, expected=len(media_paths))
 
     async def _publish_segment(
         self,
