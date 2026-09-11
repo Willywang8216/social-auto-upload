@@ -13,6 +13,7 @@ from patchright.async_api import Page
 from patchright.async_api import async_playwright
 
 from utils.conf_defaults import DEBUG_MODE, LOCAL_CHROME_HEADLESS
+from utils.log import twitter_logger
 from uploader.base_video import BaseVideoUploader
 from utils.base_social_media import set_init_script
 from utils.browser_hook import get_browser_options
@@ -26,6 +27,8 @@ TWITTER_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 TWITTER_IMAGE_UPLOAD_QUALITY = 88
 TWITTER_POST_BUTTON_READY_TIMEOUT_MS = 45000
 TWITTER_POST_BUTTON_POLL_SECONDS = 0.25
+TWITTER_POST_BUTTON_TOPMOST_BUDGET_MS = 6000
+TWITTER_POST_CLICK_TIMEOUT_MS = 8000
 TWITTER_ATTACHMENT_READY_TIMEOUT_MS = 120000
 TWITTER_TEXTBOX_SELECTOR = "[data-testid='tweetTextarea_0']"
 TWITTER_FILE_INPUT_SELECTOR = "input[data-testid='fileInput']"
@@ -446,32 +449,101 @@ def _find_post_id_in_payload(payload) -> str | None:
     return None
 
 
+async def is_topmost_at_center(locator) -> bool:
+    """True when the element would actually receive a click at its centre.
+
+    X mounts its composer inside a modal whose mask animates in over the
+    dock. ``is_visible``/``is_enabled`` both go true while that mask is
+    still on top, so a click at that moment lands on the mask instead —
+    which closes the composer and silently discards the post.
+    """
+    try:
+        return bool(
+            await locator.evaluate(
+                "(el) => {"
+                "  const r = el.getBoundingClientRect();"
+                "  if (!r.width || !r.height) return false;"
+                "  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);"
+                "  return !!hit && el.contains(hit);"
+                "}"
+            )
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def wait_for_ready_post_button(
     page: Page,
     *,
     timeout_ms: int = TWITTER_POST_BUTTON_READY_TIMEOUT_MS,
     poll_interval_seconds: float = TWITTER_POST_BUTTON_POLL_SECONDS,
+    topmost_budget_ms: int = TWITTER_POST_BUTTON_TOPMOST_BUDGET_MS,
 ):
-    deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
+    started = asyncio.get_running_loop().time()
+    deadline = started + (timeout_ms / 1000)
+    topmost_deadline = started + (topmost_budget_ms / 1000)
     last_error: Exception | None = None
+    fallback = None
 
     while asyncio.get_running_loop().time() < deadline:
         for selector in TWITTER_POST_BUTTON_SELECTORS:
-            locator = page.locator(selector).first
+            locator = page.locator(selector)
             try:
-                if (
-                    await locator.count()
-                    and await locator.is_visible()
-                    and await locator.is_enabled()
-                ):
-                    return locator
+                count = await locator.count()
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
+                continue
+            # Never take .first: the composer's button and the one behind it
+            # on the timeline both match, and only one of them is clickable.
+            for index in range(count):
+                candidate = locator.nth(index)
+                try:
+                    if not await candidate.is_visible() or not await candidate.is_enabled():
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    continue
+                if fallback is None:
+                    fallback = candidate
+                if await is_topmost_at_center(candidate):
+                    return candidate
+        if fallback is not None and asyncio.get_running_loop().time() >= topmost_deadline:
+            # A long draft makes X grow the composer until part of it sits
+            # under a fixed layer, and the overlay may never lift. Waiting the
+            # full budget just lets the browser session expire, so hand the
+            # button back and let the caller click it the overlay-proof way.
+            return fallback
         await asyncio.sleep(poll_interval_seconds)
 
+    if fallback is not None:
+        return fallback
     if last_error is not None:
         raise RuntimeError("Twitter publish button did not become ready in time") from last_error
     raise RuntimeError("Twitter publish button did not become ready in time")
+
+
+async def click_post_button(page: Page, button) -> None:
+    """Press Post in a way that survives X's overlay layers.
+
+    Once a draft is long enough X grows the composer until the button sits
+    under a fixed layer, and Playwright's hit test refuses the click even
+    though the button is visible and enabled. Dispatching the event skips
+    that test and still runs the button's own handler; Ctrl+Enter is the
+    composer's native shortcut and is the last resort.
+    """
+    try:
+        await button.click(timeout=TWITTER_POST_CLICK_TIMEOUT_MS)
+        return
+    except Exception as exc:  # noqa: BLE001
+        twitter_logger.warning(f"⚠️ X 發文按鈕被遮住，改用事件派送: {exc}")
+
+    try:
+        await button.dispatch_event("click")
+        return
+    except Exception as exc:  # noqa: BLE001
+        twitter_logger.warning(f"⚠️ X 事件派送失敗，改用 Ctrl+Enter: {exc}")
+
+    await page.keyboard.press("Control+Enter")
 
 
 class TwitterThreadVideo(BaseVideoUploader):
@@ -576,6 +648,9 @@ class TwitterThreadVideo(BaseVideoUploader):
         await file_input.set_input_files(media_paths)
         await self._wait_for_attachments(page, expected=len(media_paths))
 
+    async def _submit_composer(self, page: Page, button) -> None:
+        await click_post_button(page, button)
+
     async def _publish_segment(
         self,
         page: Page,
@@ -608,7 +683,7 @@ class TwitterThreadVideo(BaseVideoUploader):
             ),
             timeout=TWITTER_POST_BUTTON_READY_TIMEOUT_MS,
         ) as response_info:
-            await button.click()
+            await self._submit_composer(page, button)
 
         response = await response_info.value
         payload = await response.json()
@@ -646,8 +721,17 @@ class TwitterThreadVideo(BaseVideoUploader):
                 return await publish_thread_segments(prepared_segments, publish_step)
             finally:
                 if context is not None:
-                    await context.storage_state(path=self.account_file)
-                    await context.close()
+                    # Refreshing the stored session is a cache update, not part
+                    # of the publish. Letting it raise here would replace the
+                    # real failure with a confusing "target closed" error.
+                    try:
+                        await context.storage_state(path=self.account_file)
+                    except Exception as exc:  # noqa: BLE001
+                        twitter_logger.warning(f"⚠️ 回寫 X cookie 失敗，沿用舊的: {exc}")
+                    try:
+                        await context.close()
+                    except Exception:  # noqa: BLE001
+                        pass
                 await browser.close()
 
     async def main(self) -> list[str]:

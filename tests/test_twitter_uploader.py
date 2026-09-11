@@ -11,14 +11,61 @@ from uploader.twitter_uploader.main import (
     TWITTER_MAX_IMAGES_PER_TWEET,
     TWITTER_MAX_VIDEO_SECONDS,
     TWITTER_SPLIT_SEGMENT_SECONDS,
+    click_post_button,
     extract_created_post_id,
+    is_topmost_at_center,
     materialize_thread_segments,
     plan_image_segments,
     plan_thread_segments,
     plan_video_segments,
     prepare_image_for_upload,
     publish_thread_segments,
+    wait_for_ready_post_button,
 )
+
+
+class _FakeButton:
+    """Minimal stand-in for a Playwright locator over one post button."""
+
+    def __init__(self, *, visible: bool = True, enabled: bool = True, topmost: bool = True) -> None:
+        self.visible = visible
+        self.enabled = enabled
+        self.topmost = topmost
+        self.evaluations = 0
+
+    async def is_visible(self) -> bool:
+        return self.visible
+
+    async def is_enabled(self) -> bool:
+        return self.enabled
+
+    async def evaluate(self, _script: str) -> bool:
+        self.evaluations += 1
+        return self.topmost
+
+
+class _FakeCollection:
+    def __init__(self, buttons: list[_FakeButton]) -> None:
+        self.buttons = buttons
+
+    async def count(self) -> int:
+        return len(self.buttons)
+
+    def nth(self, index: int) -> _FakeButton:
+        return self.buttons[index]
+
+
+class _FakePage:
+    """Maps a selector fragment (``tweetButton``) to the buttons it matches."""
+
+    def __init__(self, by_selector: dict[str, list[_FakeButton]]) -> None:
+        self.by_selector = by_selector
+
+    def locator(self, selector: str) -> _FakeCollection:
+        for fragment, buttons in self.by_selector.items():
+            if fragment in selector:
+                return _FakeCollection(buttons)
+        return _FakeCollection([])
 
 
 class TwitterUploaderPlanningTests(unittest.TestCase):
@@ -282,6 +329,122 @@ class TwitterUploaderPlanningTests(unittest.TestCase):
         }
 
         self.assertEqual(extract_created_post_id(payload), "correct-post-id")
+
+
+class TwitterPostButtonSelectionTests(unittest.TestCase):
+    """The composer sits in a modal whose mask animates over the dock, so a
+    button that is merely visible+enabled can still be unclickable."""
+
+    def _run(self, page: _FakePage):
+        return asyncio.run(wait_for_ready_post_button(page, timeout_ms=2000, poll_interval_seconds=0.01))
+
+    def test_returns_a_button_that_receives_the_click(self) -> None:
+        button = _FakeButton(topmost=True)
+
+        self.assertIs(self._run(_FakePage({"tweetButton": [button]})), button)
+
+    def test_skips_a_covered_button_in_favour_of_the_clickable_one(self) -> None:
+        covered = _FakeButton(topmost=False)
+        clickable = _FakeButton(topmost=True)
+
+        chosen = self._run(_FakePage({"tweetButton": [covered, clickable]}))
+
+        self.assertIs(chosen, clickable)
+        self.assertGreaterEqual(covered.evaluations, 1)
+
+    def test_ignores_disabled_and_hidden_buttons(self) -> None:
+        disabled = _FakeButton(enabled=False, topmost=True)
+        hidden = _FakeButton(visible=False, topmost=True)
+        ready = _FakeButton(topmost=True)
+
+        chosen = self._run(_FakePage({"tweetButton": [disabled, hidden, ready]}))
+
+        self.assertIs(chosen, ready)
+
+    def test_falls_back_to_the_best_candidate_when_nothing_is_topmost(self) -> None:
+        # Better to attempt the click than to fail the publish outright.
+        covered = _FakeButton(topmost=False)
+
+        chosen = self._run(_FakePage({"tweetButton": [covered]}))
+
+        self.assertIs(chosen, covered)
+
+    def test_raises_when_no_button_matches_at_all(self) -> None:
+        with self.assertRaises(RuntimeError):
+            self._run(_FakePage({}))
+
+
+class TwitterTopmostHelperTests(unittest.TestCase):
+    def test_false_when_the_hit_test_throws(self) -> None:
+        class _Broken:
+            async def evaluate(self, _script):
+                raise RuntimeError("detached")
+
+        self.assertFalse(asyncio.run(is_topmost_at_center(_Broken())))
+
+
+class _ClickRecordingButton:
+    def __init__(self, *, click_fails: bool = False, dispatch_fails: bool = False) -> None:
+        self.click_fails = click_fails
+        self.dispatch_fails = dispatch_fails
+        self.clicked = 0
+        self.dispatched = 0
+
+    async def click(self, **_kwargs) -> None:
+        self.clicked += 1
+        if self.click_fails:
+            raise RuntimeError("subtree intercepts pointer events")
+
+    async def dispatch_event(self, _event: str) -> None:
+        self.dispatched += 1
+        if self.dispatch_fails:
+            raise RuntimeError("detached")
+
+
+class _KeyRecordingPage:
+    def __init__(self) -> None:
+        self.keys: list[str] = []
+
+    class _Keyboard:
+        def __init__(self, outer) -> None:
+            self._outer = outer
+
+        async def press(self, key: str) -> None:
+            self._outer.keys.append(key)
+
+    @property
+    def keyboard(self):
+        return _KeyRecordingPage._Keyboard(self)
+
+
+class TwitterSubmitComposerTests(unittest.TestCase):
+    """A long draft leaves the Post button under a fixed layer, so the plain
+    click can fail hit-testing even though the button is enabled."""
+
+    def _click(self, button, page):
+        asyncio.run(click_post_button(page, button))
+
+    def test_plain_click_is_used_when_it_works(self) -> None:
+        button, page = _ClickRecordingButton(), _KeyRecordingPage()
+
+        self._click(button, page)
+
+        self.assertEqual((button.clicked, button.dispatched, page.keys), (1, 0, []))
+
+    def test_falls_back_to_dispatching_when_the_click_is_blocked(self) -> None:
+        button, page = _ClickRecordingButton(click_fails=True), _KeyRecordingPage()
+
+        self._click(button, page)
+
+        self.assertEqual((button.clicked, button.dispatched, page.keys), (1, 1, []))
+
+    def test_falls_back_to_the_keyboard_shortcut_when_both_fail(self) -> None:
+        button = _ClickRecordingButton(click_fails=True, dispatch_fails=True)
+        page = _KeyRecordingPage()
+
+        self._click(button, page)
+
+        self.assertEqual(page.keys, ["Control+Enter"])
 
 
 if __name__ == "__main__":
