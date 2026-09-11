@@ -31,6 +31,7 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from utils.conf_defaults import BASE_DIR
 from myUtils import jobs
+from myUtils import media_remote_storage
 from myUtils import profiles as profile_registry
 from myUtils import prepared_publishers
 from myUtils.job_logging import (
@@ -703,12 +704,12 @@ def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
             ).fetchone()
         if not backend:
             return None
-        from myUtils.do_spaces import client_from_row
-        client = client_from_row(dict(backend))
         local_path = Path(BASE_DIR) / "videoFile" / file_ref
         if local_path.exists():
             return local_path
-        client.download_file(row["storage_key"], local_path)
+        media_remote_storage.download_from_backend(
+            dict(backend), row["storage_key"], local_path
+        )
         return local_path
     except Exception:
         return None
@@ -754,7 +755,7 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             p.parent.mkdir(parents=True, exist_ok=True)
             downloaded = False
 
-            # Try 1: Download via storage backend client (DO Spaces / S3)
+            # Try 1: Download via the backend that stored it (S3 or rclone)
             if row["storage_key"] and row["storage_backend_id"]:
                 try:
                     with sqlite3.connect(db_path) as conn:
@@ -763,9 +764,9 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                             "SELECT * FROM storage_backends WHERE id = ?", (row["storage_backend_id"],)
                         ).fetchone()
                     if backend:
-                        from myUtils.do_spaces import client_from_row
-                        client = client_from_row(dict(backend))
-                        client.download_file(row["storage_key"], p)
+                        media_remote_storage.download_from_backend(
+                            dict(backend), row["storage_key"], p
+                        )
                         downloaded = True
                 except Exception:
                     pass

@@ -67,6 +67,34 @@ def is_backend_configured(name: str) -> bool:
     return False
 
 
+def download_from_backend(backend: dict, storage_key: str, local_path: str | Path) -> Path:
+    """Fetch one stored object back onto local disk.
+
+    Backends register themselves differently in ``storage_backends``: an S3
+    client for DO Spaces / R2, an rclone remote for Drive. The publish path
+    only cares that a missing artifact can be recovered, so the dispatch
+    lives here rather than at each call site.
+
+    For ``rclone`` rows the remote name rides in ``bucket`` and its root in
+    ``endpoint`` — the S3 columns have no meaning for a remote-backed row.
+    """
+    provider = str(backend.get("provider") or "").strip().lower()
+    destination = Path(local_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    if provider == "rclone":
+        return rclone_storage.download_artifact(
+            storage_key,
+            destination,
+            remote_name=str(backend.get("bucket") or "").strip() or None,
+            remote_root=str(backend.get("endpoint") or "").strip() or None,
+        )
+
+    client = do_spaces.client_from_row(backend)
+    client.download_file(storage_key, destination)
+    return destination
+
+
 def is_any_backend_configured() -> bool:
     """True when at least one remote storage backend is usable."""
     return any(is_backend_configured(name) for name in _backend_order())

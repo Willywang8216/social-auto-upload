@@ -198,3 +198,61 @@ def test_is_any_backend_configured(monkeypatch):
     monkeypatch.setenv("DO_SPACES_SECRET", "s")
     assert media_remote_storage.is_any_backend_configured() is True
     assert "do_spaces" in media_remote_storage.configured_backends()
+
+
+def test_download_from_backend_dispatches_rclone_rows(monkeypatch, tmp_path):
+    """A GDrive cache row has no S3 credentials — it must go through rclone,
+    carrying the remote name in `bucket` and its root in `endpoint`."""
+    captured = {}
+
+    def fake_download(remote_path, local_path, **kwargs):
+        captured["remote_path"] = remote_path
+        captured["local_path"] = local_path
+        captured.update(kwargs)
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(local_path).write_bytes(b"bytes")
+        return Path(local_path)
+
+    monkeypatch.setattr(media_remote_storage.rclone_storage, "download_artifact", fake_download)
+
+    def explode(_row):
+        raise AssertionError("rclone rows must not build an S3 client")
+
+    monkeypatch.setattr(media_remote_storage.do_spaces, "client_from_row", explode)
+
+    destination = tmp_path / "nested" / "_batch" / "clip.mp4"
+    media_remote_storage.download_from_backend(
+        {
+            "provider": "rclone",
+            "bucket": "GDrive-willywang8216",
+            "endpoint": "sau/videoFile",
+        },
+        "_batch/clip.mp4",
+        destination,
+    )
+
+    assert destination.read_bytes() == b"bytes"
+    assert captured["remote_path"] == "_batch/clip.mp4"
+    assert captured["remote_name"] == "GDrive-willywang8216"
+    assert captured["remote_root"] == "sau/videoFile"
+
+
+def test_download_from_backend_defaults_to_the_s3_client(monkeypatch, tmp_path):
+    calls = {}
+
+    class _Client:
+        def download_file(self, key, local_path):
+            calls["key"] = key
+            Path(local_path).write_bytes(b"s3")
+
+    monkeypatch.setattr(media_remote_storage.do_spaces, "client_from_row", lambda row: _Client())
+
+    destination = tmp_path / "clip.mp4"
+    media_remote_storage.download_from_backend(
+        {"provider": "do_spaces", "bucket": "sau-media"},
+        "campaigns/1/videos/clip.mp4",
+        destination,
+    )
+
+    assert destination.read_bytes() == b"s3"
+    assert calls["key"] == "campaigns/1/videos/clip.mp4"

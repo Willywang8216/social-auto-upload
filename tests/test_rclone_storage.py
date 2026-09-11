@@ -114,5 +114,59 @@ class RcloneStorageTests(unittest.TestCase):
         self.assertEqual(calls[0], ['rclone', 'link', 'GDrive-willywang8216:socialupload/file.mp4'])
 
 
+class RcloneDownloadTests(unittest.TestCase):
+    """The offload cache needs a read side: media moved to Drive must be
+    recoverable, not merely gone."""
+
+    def test_download_artifact_copies_from_the_remote_root(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_runner(command, **kwargs):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "nested" / "clip.mp4"
+            result = rclone_storage.download_artifact(
+                "_batch/clip.mp4",
+                destination,
+                remote_name="GDrive-willywang8216",
+                remote_root="sau/videoFile",
+                runner=fake_runner,
+            )
+
+            self.assertEqual(result, destination)
+            # The parent has to exist before rclone writes into it.
+            self.assertTrue(destination.parent.is_dir())
+
+        self.assertEqual(
+            calls[0],
+            [
+                "rclone",
+                "copyto",
+                "GDrive-willywang8216:sau/videoFile/_batch/clip.mp4",
+                str(destination),
+            ],
+        )
+
+    def test_download_artifact_without_a_root_uses_the_key_as_given(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_runner(command, **kwargs):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rclone_storage.download_artifact(
+                "clip.mp4",
+                Path(tmp) / "clip.mp4",
+                remote_name="drive",
+                remote_root="",
+                runner=fake_runner,
+            )
+
+        self.assertEqual(calls[0][2], "drive:clip.mp4")
+
+
 if __name__ == "__main__":
     unittest.main()
