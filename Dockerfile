@@ -21,8 +21,13 @@ WORKDIR /app
 # CJK fonts so ffmpeg drawtext + Pillow can render Chinese watermark/overlay
 # text (e.g. Teaching's "威威教育"); the slim base only ships Latin fonts, which
 # rendered CJK glyphs as tofu boxes. Placed before `COPY . .` for layer reuse.
+#
+# rclone is how the worker pulls media back after offload_to_drive.sh has
+# moved it to Google Drive — the publish path needs it at post time, and the
+# offloaded files are the ones already published once. Its config is mounted
+# read-only at /app/rclone-cache.conf (see RCLONE_CONFIG in compose).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fonts-noto-cjk \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk rclone \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
