@@ -40,6 +40,12 @@ services:
       - ${SAU_CONF_FILE:-./conf.py}:/app/conf.py
       - ./data:/app/data
       - ./db:/app/db
+      # rclone config for reading the offload cache back. It holds ONLY the
+      # GDrive remote: the worker never needs anything else, and keeping it
+      # separate from the operator's rclone.conf means a container compromise
+      # cannot reach the other remotes. Writable so rclone can persist a
+      # refreshed OAuth token.
+      - ./rclone-cache.conf:/app/rclone-cache.conf
     networks:
       - 1panel-network
     extra_hosts:
@@ -51,6 +57,9 @@ services:
       - SAU_ACCOUNT_MAINTENANCE_INTERVAL_SECONDS=600
       - SAU_ACCOUNT_MAINTENANCE_EXPIRING_WITHIN_SECONDS=3600
       - BROWSERLESS_URL=http://browserless:3000
+      # Keep rclone away from the operator's own config: the cache read-back
+      # only ever needs the GDrive remote mounted above.
+      - RCLONE_CONFIG=/app/rclone-cache.conf
       # --- Media public-hosting (publish pipeline) ---
       # Backend order tried by myUtils.media_remote_storage. "share" is the
       # self-hosted tgstate host (preferred); "do_spaces" is the S3/R2 backup.
