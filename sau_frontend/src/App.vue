@@ -136,8 +136,8 @@
           <footer class="app-footer">
             <span class="footer-brand">Socialupload</span>
             <div class="footer-links">
-              <router-link to="/privacy">Privacy</router-link>
-              <router-link to="/terms">Terms</router-link>
+              <a href="/privacy">Privacy</a>
+              <a href="/terms">Terms</a>
             </div>
           </footer>
         </div>

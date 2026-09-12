@@ -14,8 +14,8 @@
           <a href="#" @click.prevent="scrollTo('quick-start')">Quick Start</a>
           <a href="#" @click.prevent="scrollTo('mcp')">MCP / Agents</a>
           <a href="#" @click.prevent="scrollTo('api')">API</a>
-          <router-link to="/privacy">Privacy</router-link>
-          <router-link to="/terms">Terms</router-link>
+          <a href="/privacy">Privacy</a>
+          <a href="/terms">Terms</a>
           <router-link class="nav-cta" to="/login">Sign In</router-link>
         </div>
       </div>
@@ -544,8 +544,8 @@ curl /api/campaigns/1/export/csv -o export.csv</pre>
           </div>
           <div class="footer-col">
             <h4>Legal</h4>
-            <router-link to="/privacy">Privacy Policy</router-link>
-            <router-link to="/terms">Terms of Service</router-link>
+            <a href="/privacy">Privacy Policy</a>
+            <a href="/terms">Terms of Service</a>
           </div>
         </div>
         <div class="footer-bottom">

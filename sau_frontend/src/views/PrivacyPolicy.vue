@@ -1,312 +1,33 @@
+<script setup>
+/*
+ * This route used to render its own copy of the privacy policy as a Vue
+ * component. Two copies of a legal document drift apart — this one still said
+ * "Last updated: 2026-05-10" and had no Google user data disclosure long after
+ * the published policy gained both, which is exactly what an OAuth reviewer
+ * checks. The published policy now lives in one place, `privacy-policy.html`,
+ * served from `/privacy` as a plain document so it is readable without
+ * JavaScript. Hand off to it instead of rendering a second copy.
+ */
+import { onMounted } from 'vue'
+
+onMounted(() => {
+  window.location.replace('/privacy')
+})
+</script>
+
 <template>
-  <div class="legal-page">
-    <div class="legal-card">
-      <div class="legal-header">
-        <h1>Socialupload Privacy Policy</h1>
-        <p class="meta">Last updated: 2026-05-10</p>
-        <p class="summary">
-          This Privacy Policy explains what information Socialupload collects, why it is
-          collected, how it is used and shared, and the choices you have to manage, export, or
-          delete information associated with your use of Socialupload.
-        </p>
-      </div>
-
-      <section>
-        <h2>1. Introduction</h2>
-        <p>
-          When you use Socialupload, you trust the service with media files, connected account
-          information, publishing instructions, and operational records. This is a significant
-          responsibility. This policy is intended to help you understand what information is collected,
-          why it is collected, and how you can review, manage, export, or delete information connected
-          to your use of the service.
-        </p>
-        <p>
-          Socialupload helps users upload, prepare, schedule, and publish content to connected
-          social media and publishing platforms. The information processed depends on the features you
-          use, the accounts you connect, the content you upload, and the settings selected in your
-          deployment or workspace.
-        </p>
-      </section>
-
-      <section>
-        <h2>2. When this policy applies</h2>
-        <p>
-          This Privacy Policy applies to the Socialupload web application, backend services,
-          scheduling and worker flows, account-management flows, support interactions, and related
-          services made available through <strong>the Socialupload website</strong>.
-        </p>
-        <p>
-          This policy does not apply to third-party social platforms, cloud providers, payment
-          processors, analytics providers, LLM or transcription providers, linked websites, or other
-          third-party services that have their own privacy policies. Their handling of your information
-          is governed by their own terms and privacy notices.
-        </p>
-      </section>
-
-      <section>
-        <h2>3. Information we collect</h2>
-        <p>
-          The categories of information collected depend on how you use the service and which features
-          or integrations are configured.
-        </p>
-        <ul>
-          <li><strong>Information you provide.</strong> This may include your name, display names, email address or other contact details if provided, account labels, workspace settings, profile configuration, and support messages.</li>
-          <li><strong>Content you create, upload, or import.</strong> This may include videos, images, thumbnails, captions, titles, hashtags, transcripts, prompts, generated copy, campaign assets, and publishing instructions.</li>
-          <li><strong>Connected account and authentication information.</strong> This may include cookies, OAuth tokens, API keys, refresh tokens, browser storage-state files, connected account identifiers, scopes, permissions, login status, and platform account metadata.</li>
-          <li><strong>Publishing and workflow data.</strong> This may include selected platforms, selected accounts, scheduled times, queue status, post status, job attempts, retry history, logs, error messages, and platform response metadata.</li>
-          <li><strong>Device, browser, and technical information.</strong> This may include IP address, browser type, device and operating system metadata, request timestamps, referrer URLs, crash information, server logs, security events, and diagnostic information.</li>
-          <li><strong>Location-related information.</strong> The service may infer approximate location from IP address or receive location-related information from connected platform settings or account metadata. The service does not need precise GPS location for ordinary publishing workflows unless a configured integration separately provides it.</li>
-          <li><strong>Information from third parties.</strong> Connected platforms and providers may return OAuth profile information, page or channel lists, account identifiers, public profile information, upload results, analytics, moderation status, or other response data needed to complete requested workflows.</li>
-          <li><strong>Cookies and local storage.</strong> The service may use session cookies, authentication state, local storage, browser storage, and similar technologies to keep you signed in, remember preferences, secure sessions, and operate the application.</li>
-        </ul>
-      </section>
-
-      <section>
-        <h2>4. Why we collect and use information</h2>
-        <ul>
-          <li><strong>Provide the service.</strong> We use information to support login, connected-account management, media upload, content preparation, scheduling, publishing, status tracking, and workflow automation.</li>
-          <li><strong>Maintain and improve the service.</strong> We use diagnostic and workflow information to troubleshoot upload failures, monitor reliability, fix bugs, improve integrations, and understand which workflows need improvement.</li>
-          <li><strong>Personalize and configure workflows.</strong> We use information to remember preferences, selected accounts, campaign profiles, platform settings, and other choices that make repeated publishing workflows easier.</li>
-          <li><strong>Communicate with you.</strong> We may use contact information to respond to support requests, send security or service notices, and provide updates about important changes to the service or these policies.</li>
-          <li><strong>Protect the service, users, platforms, and the public.</strong> We use information to detect, prevent, and respond to fraud, spam, abuse, unauthorized access, malware, illegal content, platform-policy violations, security risks, and technical issues.</li>
-          <li><strong>Comply with law and enforce terms.</strong> We may use and retain information as needed to comply with applicable law, respond to lawful requests, enforce the Terms of Service, resolve disputes, and protect rights, safety, and property.</li>
-        </ul>
-      </section>
-
-      <section>
-        <h2>5. How information is shared</h2>
-        <p>
-          We share information only as needed to provide the service, follow your instructions, operate and
-          secure the service, comply with law, or protect rights and safety.
-        </p>
-        <ul>
-          <li><strong>With third-party platforms and providers at your direction.</strong> When you connect an account, upload media, request transcription, generate copy, store files, or publish content, the service may send the information required to complete that workflow to the providers you choose.</li>
-          <li><strong>With service providers and processors.</strong> Hosting, storage, monitoring, security, support, analytics, communication, and other operational providers may process information for the service under appropriate confidentiality and security obligations.</li>
-          <li><strong>With workspace or administrative users.</strong> If the service is used in an organization, shared deployment, or managed workspace, administrators or authorized team members may be able to access account configuration, content, publishing jobs, logs, and other workspace records.</li>
-          <li><strong>For legal, security, and safety reasons.</strong> We may access, preserve, or disclose information if reasonably necessary to comply with law, enforce terms, respond to legal process, detect or prevent abuse, protect rights and safety, or investigate security or technical issues.</li>
-          <li><strong>In business transfers.</strong> If the service or its assets are involved in a merger, acquisition, financing, restructuring, or sale, information may be transferred as part of that transaction, subject to appropriate protections.</li>
-          <li><strong>When you publish publicly.</strong> Content you choose to publish may become public on target platforms and may be indexed, copied, shared, downloaded, or retained by other people and services according to the target platform’s settings and policies.</li>
-        </ul>
-        <p>
-          We do not sell personal information in the ordinary sense of selling user data for money.
-        </p>
-      </section>
-
-      <section>
-        <h2>6. Third-party platforms and services</h2>
-        <p>
-          Supported or configured providers may include Douyin, Bilibili, Xiaohongshu, Kuaishou,
-          WeChat Channel, Baijiahao, TikTok, Meta services, Google services, Reddit, Telegram, cloud
-          storage providers, LLM providers, transcription providers, and other publishing-related
-          platforms or tools.
-        </p>
-        <p>
-          You are responsible for reviewing and following the privacy policies, API terms, automation
-          rules, content rules, and security requirements of every platform or provider you connect.
-          Platform changes may affect available permissions, data returned to the service, publishing
-          behavior, retention on those platforms, and whether an integration continues to work.
-        </p>
-        <p>
-          When you connect TikTok, the service may process TikTok data returned through Login Kit and
-          the Content Posting API, including your TikTok open ID, display name, avatar URL, authorized
-          scopes, access tokens, refresh tokens, token expiry, upload or publish status, webhook events,
-          selected privacy settings, captions, hashtags, video URLs, and related publishing metadata.
-          This information is used only to show the connected TikTok account, refresh the connection,
-          upload creator-selected content as a draft when requested, directly publish content when
-          explicitly confirmed by the user, diagnose failures, and maintain an auditable publishing
-          history.
-        </p>
-        <p>
-          TikTok access can be disconnected from the service account-management controls where
-          available. You should also revoke the app directly from your TikTok account settings if you
-          want TikTok to stop honoring previously granted permissions. You may request deletion of
-          TikTok-related profile data, tokens, upload records, and logs through the contact method on
-          the Socialupload website, subject to legal, security, backup, and operational
-          retention needs.
-        </p>
-      </section>
-
-      <section>
-        <h2>7. Your privacy controls and choices</h2>
-        <ul>
-          <li>You can review and update account labels, connected-account configuration, campaign profiles, uploaded assets, drafts, and publishing schedules using available service controls.</li>
-          <li>You can disconnect or revoke connected platform credentials in the service where controls are available. You should also revoke access directly in the third-party platform’s account or security settings when appropriate.</li>
-          <li>You can delete uploaded media, generated drafts, campaign records, and scheduled jobs where the service provides deletion controls.</li>
-          <li>You can request access, export, correction, or deletion of information associated with your use of the service through the official contact method on the Socialupload website.</li>
-          <li>You can manage cookies, local storage, and browser permissions through your browser settings. Blocking cookies or storage may prevent login, session, and application features from working correctly.</li>
-          <li>You can manage third-party provider permissions, platform privacy settings, and device or browser permissions directly with those providers and devices.</li>
-        </ul>
-      </section>
-
-      <section>
-        <h2>8. Exporting and deleting information</h2>
-        <p>
-          You may request a copy of certain account, workflow, content, and publishing records associated
-          with your use of the service. You may also request deletion of information where deletion is
-          technically feasible and not restricted by legal, security, fraud-prevention, backup, accounting,
-          dispute-resolution, or operational requirements.
-        </p>
-        <p>
-          Published content often must be edited or deleted directly on the target platform. Deleting
-          information from Socialupload may not remove copies already published, processed, cached,
-          backed up, or retained by third-party platforms or other users.
-        </p>
-      </section>
-
-      <section>
-        <h2>9. Retaining your information</h2>
-        <p>
-          We retain information for as long as reasonably needed to provide requested workflows, maintain
-          operational records, comply with law, resolve disputes, prevent abuse, protect security, and
-          improve reliability.
-        </p>
-        <ul>
-          <li>Uploaded content, generated drafts, campaign records, scheduled jobs, logs, and connected-account materials may be retained until deleted by you or an administrator, or until no longer needed for the service.</li>
-          <li>Connected account cookies, tokens, or browser storage-state files may be stored locally or on service infrastructure and may be encrypted at rest where supported by deployment configuration.</li>
-          <li>Logs, queue records, backups, and security records may remain for reasonable operational periods after deletion from the main application view.</li>
-          <li>Some information may be retained longer when necessary for legitimate business, legal, security, fraud-prevention, or financial record-keeping purposes.</li>
-        </ul>
-      </section>
-
-      <section>
-        <h2>10. Security</h2>
-        <p>
-          The service may use access controls, transport security where configured, credential-protection
-          measures, optional encryption for stored account session files, least-privilege operational
-          access, logging, monitoring, and incident-response practices to help protect information.
-        </p>
-        <p>
-          No internet-based service, automation tool, or storage system can be guaranteed to be completely
-          secure. You should protect your own platform accounts, use strong authentication, rotate or
-          revoke credentials when needed, and use platform-native security controls.
-        </p>
-      </section>
-
-      <section>
-        <h2>11. Children and age requirements</h2>
-        <p>
-          The service is intended for adults and authorized business users. It is not directed to children
-          under 13 or under the minimum age required by applicable law or connected platform terms. If you
-          are a parent or guardian and believe a child has submitted personal information through the
-          service, please contact the operator through the official contact method.
-        </p>
-      </section>
-
-      <section>
-        <h2>12. International data transfers</h2>
-        <p>
-          Data may be processed in jurisdictions where the operator, hosting providers, workers, connected
-          platforms, or subprocessors operate. Data protection laws vary by location. The protections
-          described in this policy are intended to apply regardless of processing location, subject to
-          applicable law.
-        </p>
-      </section>
-
-      <section>
-        <h2>13. Compliance and cooperation</h2>
-        <p>
-          We review privacy practices and work to process information consistently with this policy.
-          If you submit a privacy request or complaint through the official contact method, we will
-          review it and respond as appropriate. Depending on your location, you may also have the right
-          to contact a local data protection authority.
-        </p>
-      </section>
-
-      <section>
-        <h2>14. Changes to this policy</h2>
-        <p>
-          This Privacy Policy may be updated from time to time. The latest version will be posted on the
-          service with the updated date. If changes are material, notice may be provided through the
-          service or through contact information available to the operator. Continued use of the service
-          after an update means you accept the revised policy.
-        </p>
-      </section>
-
-      <section>
-        <h2>15. Contact</h2>
-        <p>
-          For privacy-related questions, access requests, deletion requests, or legal notices, please use
-          the support or contact method provided on the Socialupload website.
-        </p>
-      </section>
-
-      <div class="legal-links">
-        <router-link to="/terms">View Terms of Service</router-link>
-      </div>
-    </div>
+  <div class="legal-redirect">
+    <p>Opening the <a href="/privacy">Privacy Policy</a>&hellip;</p>
   </div>
 </template>
 
-
-<style lang="scss" scoped>
-.legal-page {
-  min-height: 100vh;
-  background: var(--bg);
-  padding: 32px 16px;
+<style scoped>
+.legal-redirect {
+  max-width: 900px;
+  margin: 80px auto;
+  padding: 0 20px;
+  font-family: 'Inter', system-ui, sans-serif;
+  color: #333844;
 }
-
-.legal-card {
-  max-width: 920px;
-  margin: 0 auto;
-  background: var(--panel);
-  border-radius: 12px;
-  padding: 32px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
-
-  .legal-header {
-    margin-bottom: 28px;
-
-    h1 {
-      margin: 0 0 8px;
-      font-size: 30px;
-      color: var(--text);
-    }
-
-    .meta {
-      margin: 0 0 12px;
-      color: var(--text-3);
-      font-size: 13px;
-    }
-
-    .summary {
-      margin: 0;
-      color: var(--text-2);
-      line-height: 1.8;
-    }
-  }
-
-  section {
-    margin-bottom: 24px;
-
-    h2 {
-      margin: 0 0 10px;
-      font-size: 18px;
-      color: var(--text);
-    }
-
-    p,
-    li {
-      color: var(--text-2);
-      line-height: 1.85;
-      font-size: 15px;
-    }
-
-    ul {
-      margin: 0;
-      padding-left: 20px;
-    }
-  }
-
-  .legal-links {
-    margin-top: 24px;
-    padding-top: 20px;
-    border-top: 1px solid var(--line);
-
-    a {
-      color: var(--accent);
-      text-decoration: none;
-      font-weight: 500;
-    }
-  }
-}
+.legal-redirect a { color: #0b57d0; }
 </style>

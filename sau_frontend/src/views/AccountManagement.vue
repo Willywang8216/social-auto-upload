@@ -398,6 +398,21 @@
                   <component :is="icons.about" />
                   <p>OAuth is the recommended auth method. Your credentials never pass through this app — only the platform's official authorization flow is used.</p>
                 </div>
+                <!-- Google-specific notice. Google's OAuth verification requires the
+                     app to surface, in the product itself, what Google user data it
+                     accesses and how it is used — not just in the published policy. -->
+                <div v-if="connectData.platform === 'youtube'" class="note">
+                  <component :is="icons.about" />
+                  <p>
+                    Connecting YouTube shares your channel name, channel ID, and OAuth
+                    tokens with Socialupload. We use them only to upload, schedule, and
+                    report the status of the videos you choose. We do not read your watch
+                    history, subscriptions, or private messages, and we never sell your
+                    Google data. See the
+                    <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>
+                    for details and deletion instructions.
+                  </p>
+                </div>
               </div>
             </div>
 

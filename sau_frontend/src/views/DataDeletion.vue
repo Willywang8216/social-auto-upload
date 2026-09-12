@@ -92,13 +92,13 @@
         <h2>Contact</h2>
         <p>
           For any privacy-related questions or requests, contact us through the
-          <router-link to="/privacy">Privacy Policy</router-link> page.
+          <a href="/privacy">Privacy Policy</a> page.
         </p>
       </section>
 
       <div class="legal-links">
-        <router-link to="/privacy">Privacy Policy</router-link>
-        <router-link to="/terms">Terms of Service</router-link>
+        <a href="/privacy">Privacy Policy</a>
+        <a href="/terms">Terms of Service</a>
       </div>
     </div>
   </div>
