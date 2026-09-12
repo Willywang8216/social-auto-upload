@@ -81,9 +81,9 @@
         <div class="login-footer">
           <router-link to="/">Home</router-link>
           <span class="dot">·</span>
-          <router-link to="/privacy">Privacy</router-link>
+          <a href="/privacy">Privacy</a>
           <span class="dot">·</span>
-          <router-link to="/terms">Terms</router-link>
+          <a href="/terms">Terms</a>
         </div>
       </div>
     </div>
