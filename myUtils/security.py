@@ -55,6 +55,16 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/terms/",
     "/privacy-policy.html",
     "/terms-of-service.html",
+    # Public legal / discovery documents. These must stay reachable without a
+    # token: platform review teams (Google OAuth verification, TikTok, Meta)
+    # fetch the privacy policy, terms, data-deletion page, robots.txt and
+    # sitemap directly, and a 401 there reads as "the app has no reachable
+    # policy" rather than "this route needs a login".
+    "/data-deletion",
+    "/data-deletion/",
+    "/data-deletion.html",
+    "/robots.txt",
+    "/sitemap.xml",
     "/favicon.ico",
     "/vite.svg",
     "/socialupload-app-icon.png",

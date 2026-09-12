@@ -4,13 +4,171 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/socialupload-app-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Socialupload</title>
+    <title>Socialupload — Schedule and publish content to every social platform</title>
+    <meta
+      name="description"
+      content="Socialupload is a social media publishing platform. Create, schedule, and publish content to TikTok, YouTube, Instagram, Facebook, Threads, Reddit, X, Bilibili, Douyin, Xiaohongshu, Telegram, Discord, and Bluesky from one dashboard, and review performance analytics afterwards."
+    />
+    <link rel="canonical" href="https://socialupload.iamwillywang.com/" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+    <style>
+      /* Fallback styles for the pre-rendered content inside #app. Vue replaces
+         that markup on mount, so these rules only ever apply to the static
+         view shown to visitors without JavaScript and to crawlers that do not
+         execute scripts. */
+      .sau-static {
+        font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+        color: #14161c;
+        background: #ffffff;
+        line-height: 1.65;
+      }
+      .sau-static .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+      .sau-static header { border-bottom: 1px solid #e6e8ee; padding: 20px 0; }
+      .sau-static header .wrap { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+      .sau-static .brand { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; }
+      .sau-static nav { margin-left: auto; display: flex; gap: 18px; flex-wrap: wrap; font-size: 14px; }
+      .sau-static main { padding: 48px 0 8px; }
+      .sau-static h1 { font-family: 'Space Grotesk', sans-serif; font-size: 34px; line-height: 1.25; margin: 0 0 16px; }
+      .sau-static h2 { font-family: 'Space Grotesk', sans-serif; font-size: 22px; margin: 36px 0 12px; }
+      .sau-static h3 { font-size: 16px; margin: 22px 0 6px; }
+      .sau-static p, .sau-static li { font-size: 15px; color: #333844; }
+      .sau-static .lead { font-size: 17px; color: #333844; }
+      .sau-static ul { padding-left: 20px; }
+      .sau-static a { color: #0b57d0; }
+      .sau-static .cta { display: inline-block; margin-top: 20px; padding: 11px 22px; border-radius: 8px; background: #14161c; color: #fff; text-decoration: none; font-weight: 600; font-size: 15px; }
+      .sau-static footer { border-top: 1px solid #e6e8ee; margin-top: 48px; padding: 24px 0 40px; font-size: 14px; color: #5b6070; }
+      .sau-static footer .wrap { display: flex; gap: 18px; flex-wrap: wrap; }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <!--
+      Pre-rendered home page.
+
+      The Vue app mounts into #app and replaces everything below on load, so
+      signed-in features are unaffected. Keeping real copy in the served HTML
+      means the home page still explains what Socialupload is — and still links
+      to the Privacy Policy, Terms of Service, and Data Deletion pages — for
+      anyone (or anything) reading the page without executing JavaScript.
+    -->
+    <div id="app">
+      <div class="sau-static">
+        <header>
+          <div class="wrap">
+            <img src="/socialupload-app-icon.png" alt="Socialupload" width="28" height="28" />
+            <span class="brand">Socialupload</span>
+            <nav>
+              <a href="#features">Features</a>
+              <a href="/privacy">Privacy Policy</a>
+              <a href="/terms">Terms of Service</a>
+              <a href="/data-deletion">Data Deletion</a>
+              <a href="/#/login">Sign in</a>
+            </nav>
+          </div>
+        </header>
+
+        <main class="wrap">
+          <h1>Schedule and publish content to every social platform from one dashboard</h1>
+          <p class="lead">
+            Socialupload is a web application for creators, agencies, and social media
+            operators. It connects the social accounts you already own and gives you one
+            place to prepare content, queue it for a chosen time, publish it to each
+            platform, and review how it performed. You keep using your own accounts —
+            Socialupload publishes to them on your behalf through each platform's
+            official API or an authenticated browser session.
+          </p>
+          <a class="cta" href="/#/login">Sign in to Socialupload</a>
+
+          <h2>What you can do with Socialupload</h2>
+
+          <h3>Multi-platform publishing</h3>
+          <p>
+            Upload a video, image, or text post once, then fan it out to the accounts and
+            pages you select. Each platform keeps its own caption, title, hashtags, and
+            visibility settings, so a single piece of content can be tailored per channel
+            instead of copy-pasted.
+          </p>
+
+          <h3>Scheduling and a publishing queue</h3>
+          <p>
+            Set a publish date and time for each target and let the scheduler release the
+            post automatically. The queue shows what is pending, what has gone out, and
+            what failed, with retries and per-job logs so a failed upload can be diagnosed
+            instead of silently disappearing.
+          </p>
+
+          <h3>Media and template library</h3>
+          <p>
+            Keep uploaded videos, images, captions, and reusable publishing templates in a
+            library so recurring posts and multi-brand workflows do not require rebuilding
+            the same configuration every time.
+          </p>
+
+          <h3>Account connections</h3>
+          <p>
+            Connect accounts through each platform's official authorization flow. Stored
+            credentials — OAuth tokens, refresh tokens, and session cookies — live on the
+            server so that scheduled posts can be published while you are offline. You can
+            disconnect an account at any time from the Accounts page, which removes the
+            stored credentials for that account.
+          </p>
+
+          <h3>Analytics and engagement</h3>
+          <p>
+            Review views, reach, impressions, watch time, and engagement per post and per
+            platform, and manage comments and direct messages for the platforms that
+            support it, so you can see which content is working and respond to your
+            audience.
+          </p>
+
+          <h2>Supported platforms</h2>
+          <p>
+            TikTok, YouTube, Instagram, Facebook, Threads, Reddit, X (Twitter), Bilibili,
+            Douyin, Xiaohongshu, Kuaishou, WeChat Channel, Baijiahao, Telegram, Discord,
+            Bluesky, and Patreon. Available integrations depend on the platforms you
+            connect and the permissions you grant.
+          </p>
+
+          <h2>Who it is for</h2>
+          <p>
+            Socialupload is built for adults and authorized business users who manage one
+            or more social accounts — individual creators publishing on a schedule,
+            agencies running several client brands, and teams coordinating a shared
+            content calendar. It is not directed to children.
+          </p>
+
+          <h2 id="features">Your data and privacy</h2>
+          <p>
+            Socialupload collects the account information, content, and publishing records
+            needed to run the workflows you ask for. We do not sell your personal
+            information. The full details — what is collected, why, how long it is kept,
+            who it is shared with, and how to delete it — are in the Privacy Policy.
+          </p>
+          <ul>
+            <li><a href="/privacy">Privacy Policy</a> — what we collect, how we use it, and how to delete it.</li>
+            <li><a href="/terms">Terms of Service</a> — the rules for using Socialupload.</li>
+            <li><a href="/data-deletion">Data Deletion Instructions</a> — how to remove your data and revoke platform access.</li>
+          </ul>
+
+          <h2>Contact</h2>
+          <p>
+            Questions about the service, your data, or a deletion request can be sent to
+            <a href="mailto:willywang8216@gmail.com">willywang8216@gmail.com</a>.
+          </p>
+        </main>
+
+        <footer>
+          <div class="wrap">
+            <span>&copy; Socialupload</span>
+            <a href="/privacy">Privacy Policy</a>
+            <a href="/terms">Terms of Service</a>
+            <a href="/data-deletion">Data Deletion</a>
+            <a href="mailto:willywang8216@gmail.com">willywang8216@gmail.com</a>
+          </div>
+        </footer>
+      </div>
+    </div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

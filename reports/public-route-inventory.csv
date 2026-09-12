@@ -13,6 +13,10 @@ path_or_prefix,match_type,handler_endpoint,reason_public,data_exposed,abuse_risk
 /terms,exact,terms_page,legal page,none,low,y,none,
 /terms/,exact,terms_page,legal page,none,low,y,none,
 /terms-of-service.html,exact,terms_page,legal page (Meta app-review URL),none,low,y,none,
+/data-deletion,exact,data_deletion_page,legal page (deletion instructions must be readable while signed out),none,low,y,none,also has trailing-slash variant in PUBLIC_PATHS
+/data-deletion.html,exact,data_deletion_page,legal page (static alias),none,low,y,none,
+/robots.txt,exact,robots_txt,crawler discovery file,none,low,y,none,
+/sitemap.xml,exact,sitemap_xml,crawler discovery file,none,low,y,none,
 /favicon.ico,exact,favicon,browser icon,none,low,y,none,
 /vite.svg,exact,vite_svg,static asset,none,low,y,none,
 /socialupload-app-icon.png,exact,app_icon,static asset,none,low,y,none,

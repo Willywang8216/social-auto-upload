@@ -88,6 +88,11 @@ class AuthGateTests(unittest.TestCase):
             "/vite.svg",
             "/privacy",
             "/terms",
+            # Platform review teams fetch these while signed out; a 401 here
+            # reads as "no reachable policy" and fails app verification.
+            "/data-deletion",
+            "/robots.txt",
+            "/sitemap.xml",
             "/oauth/tiktok/callback",
             "/oauth/reddit/callback",
             "/oauth/youtube/callback",

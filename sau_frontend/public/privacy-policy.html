@@ -7,13 +7,18 @@
     <style>
       body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #222; }
       h1, h2 { color: #111; }
+      h3 { color: #111; margin: 22px 0 6px; font-size: 1.05rem; }
       a { color: #0b57d0; }
       .muted { color: #666; }
     </style>
   </head>
   <body>
     <h1>Socialupload Privacy Policy</h1>
-    <p class="muted">Last updated: 2026-05-10</p>
+    <p class="muted">Last updated: 2026-09-12</p>
+    <p class="muted">
+      Operator: Socialupload (socialupload.iamwillywang.com). Contact:
+      <a href="mailto:willywang8216@gmail.com">willywang8216@gmail.com</a>.
+    </p>
 
     <p>This Privacy Policy explains what information Socialupload collects, why it is collected, how it is used and shared, and the choices you have to manage, export, or delete information associated with your use of Socialupload.</p>
 
@@ -66,6 +71,17 @@
     <p>When you connect TikTok, the service may process TikTok data returned through Login Kit and the Content Posting API, including your TikTok open ID, display name, avatar URL, authorized scopes, access tokens, refresh tokens, token expiry, upload or publish status, webhook events, selected privacy settings, captions, hashtags, video URLs, and related publishing metadata. This information is used only to show the connected TikTok account, refresh the connection, upload creator-selected content as a draft when requested, directly publish content when explicitly confirmed by the user, diagnose failures, and maintain an auditable publishing history.</p>
     <p>TikTok access can be disconnected from the service account-management controls where available. You should also revoke the app directly from your TikTok account settings if you want TikTok to stop honoring previously granted permissions. You may request deletion of TikTok-related profile data, tokens, upload records, and logs through the contact method on the Socialupload website, subject to legal, security, backup, and operational retention needs.</p>
 
+    <h3>Google user data</h3>
+    <p>Socialupload offers optional integrations with Google services. When you choose to connect a Google account, the service requests only the scopes needed for the feature you are enabling, and it processes the resulting Google user data as described below.</p>
+    <ul>
+      <li><strong>YouTube publishing.</strong> If you connect a YouTube channel, the service requests the YouTube upload, read-only, and force-SSL scopes. It uses the returned channel identifier, channel title, access token, refresh token, and token expiry to display the connected channel, upload the video and metadata you select (title, description, tags, privacy status, thumbnail, and scheduled publish time), read back the uploaded video's status and URL, and confirm whether the upload succeeded. The service does not read, collect, or store your YouTube watch history, subscriptions, or private messages, and it does not modify videos you did not ask it to publish.</li>
+      <li><strong>Google Sheets export.</strong> If you connect a Google account for sheet exports, the service requests the spreadsheets scope. It uses it to create and write to a spreadsheet you designate, containing the publishing, campaign, or analytics records you asked to export. It does not read spreadsheets you did not ask it to export to.</li>
+      <li><strong>Google Sign-In.</strong> If you sign in with Google, the service requests the openid, email, and profile scopes and receives your Google account identifier, email address, name, and profile image URL. It uses these only to create and authenticate your Socialupload session and to show which account you are signed in as.</li>
+    </ul>
+    <p>Google user data is stored on the service infrastructure described in section 10, is used only to provide the features listed above, is never sold, and is not used for advertising, profiling, or training machine-learning models. It is not transferred to third parties except to the service providers that host and operate the service on our behalf, or where required by law.</p>
+    <p>Socialupload's use and transfer to any other app of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
+    <p>You can disconnect a Google account at any time from the Accounts page in Socialupload, which deletes the stored access token, refresh token, and channel metadata for that account. You can also revoke Socialupload's access directly at <a href="https://myaccount.google.com/permissions" rel="noopener">Google Account Permissions</a>. To request deletion of Google user data held by the service, use the instructions in section 8 or the <a href="/data-deletion">Data Deletion page</a>.</p>
+
     <h2>7. Your privacy controls and choices</h2>
     <ul>
       <li>You can review and update account labels, connected-account configuration, campaign profiles, uploaded assets, drafts, and publishing schedules using available service controls.</li>
@@ -79,15 +95,26 @@
     <h2>8. Exporting and deleting information</h2>
     <p>You may request a copy of certain account, workflow, content, and publishing records associated with your use of the service. You may also request deletion of information where deletion is technically feasible and not restricted by legal, security, fraud-prevention, backup, accounting, dispute-resolution, or operational requirements.</p>
     <p>Published content often must be edited or deleted directly on the target platform. Deleting information from Socialupload may not remove copies already published, processed, cached, backed up, or retained by third-party platforms or other users.</p>
+    <p>To request a copy of your data, or deletion of your data:</p>
+    <ul>
+      <li>Delete individual items yourself at any time — remove a connected account on the Accounts page to delete its stored tokens and metadata, or delete media, drafts, and scheduled jobs from the library and publishing queue.</li>
+      <li>Submit a deletion request through the form on the <a href="/data-deletion">Data Deletion page</a>, which also lists how to revoke Socialupload's access on each connected platform.</li>
+      <li>Email <a href="mailto:willywang8216@gmail.com">willywang8216@gmail.com</a> with the subject line "Data deletion request", stating the account or email address concerned.</li>
+    </ul>
+    <p>We respond to deletion and access requests within 30 days.</p>
 
     <h2>9. Retaining your information</h2>
-    <p>We retain information for as long as reasonably needed to provide requested workflows, maintain operational records, comply with law, resolve disputes, prevent abuse, protect security, and improve reliability.</p>
+    <p>We retain information for as long as reasonably needed to provide requested workflows, maintain operational records, comply with law, resolve disputes, prevent abuse, protect security, and improve reliability. The periods below describe how long each category is normally kept.</p>
     <ul>
-      <li>Uploaded content, generated drafts, campaign records, scheduled jobs, logs, and connected-account materials may be retained until deleted by you or an administrator, or until no longer needed for the service.</li>
-      <li>Connected account cookies, tokens, or browser storage-state files may be stored locally or on service infrastructure and may be encrypted at rest where supported by deployment configuration.</li>
-      <li>Logs, queue records, backups, and security records may remain for reasonable operational periods after deletion from the main application view.</li>
-      <li>Some information may be retained longer when necessary for legitimate business, legal, security, fraud-prevention, or financial record-keeping purposes.</li>
+      <li><strong>Uploaded content and generated drafts.</strong> Kept until you delete them or remove the associated campaign. Deleting them from the library removes them from active storage; copies may persist in backups for up to 30 days.</li>
+      <li><strong>Connected account credentials.</strong> OAuth access tokens, refresh tokens, and stored session cookies are kept for as long as the account stays connected in Socialupload. Disconnecting the account deletes them immediately.</li>
+      <li><strong>Google user data.</strong> Google account identifiers, channel metadata, and Google OAuth tokens are kept only while the Google integration remains connected, and are deleted when you disconnect it. Exported spreadsheets are stored in your own Google Drive and are governed by your Google account settings.</li>
+      <li><strong>Publishing and workflow records.</strong> Job records, queue history, and post status are kept for 180 days so that failures can be diagnosed and re-published, then deleted or aggregated.</li>
+      <li><strong>Logs and security records.</strong> Application logs and security events are kept for up to 30 days, except where a record is needed to investigate an ongoing incident or abuse report.</li>
+      <li><strong>Backups.</strong> Database backups are kept for up to 30 days on a rolling schedule, after which deleted records are no longer recoverable from them.</li>
+      <li><strong>Legal and financial records.</strong> Some information may be retained longer when necessary to comply with a legal obligation, enforce the Terms of Service, resolve a dispute, or prevent fraud.</li>
     </ul>
+    <p>When information is no longer needed under these periods, it is deleted or irreversibly anonymised.</p>
 
     <h2>10. Security</h2>
     <p>The service may use access controls, transport security where configured, credential-protection measures, optional encryption for stored account session files, least-privilege operational access, logging, monitoring, and incident-response practices to help protect information.</p>
@@ -106,8 +133,9 @@
     <p>This Privacy Policy may be updated from time to time. The latest version will be posted on the service with the updated date. If changes are material, notice may be provided through the service or through contact information available to the operator. Continued use of the service after an update means you accept the revised policy.</p>
 
     <h2>15. Contact</h2>
-    <p>For privacy-related questions, access requests, deletion requests, or legal notices, please use the support or contact method provided on the Socialupload website.</p>
+    <p>Socialupload is operated by the Socialupload team, reachable at <a href="mailto:willywang8216@gmail.com">willywang8216@gmail.com</a>.</p>
+    <p>For privacy-related questions, access requests, deletion requests, or legal notices, email that address, or use the form on the <a href="/data-deletion">Data Deletion page</a>. We aim to respond within 30 days.</p>
 
-    <p><a href="/terms-of-service.html">View Terms of Service</a></p>
+    <p><a href="/terms-of-service.html">View Terms of Service</a> &middot; <a href="/data-deletion">Data Deletion Instructions</a> &middot; <a href="/">Home</a></p>
   </body>
 </html>

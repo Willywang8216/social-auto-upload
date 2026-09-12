@@ -541,9 +541,38 @@ def terms_page():
 
 @app.route('/data-deletion')
 @app.route('/data-deletion/')
+@app.route('/data-deletion.html')
 def data_deletion_page():
-    """Serve the data deletion instructions page (SPA route)."""
-    return _no_cache_html_response(_frontend_index_dir(), Path(current_dir), 'index.html')
+    """Serve the data deletion instructions page.
+
+    This is a real static document rather than the SPA shell: the deletion
+    instructions have to be readable by anyone who cannot sign in — that is the
+    whole point of the page — and by the crawlers that platform review teams use
+    to check the URL. The in-app ``/#/data-deletion`` route still exists for
+    signed-in users.
+    """
+    directory, filename = _frontend_public_asset('data-deletion.html')
+    response = send_from_directory(str(directory), filename)
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
+
+
+@app.route('/robots.txt')
+def robots_txt():
+    directory, filename = _frontend_public_asset('robots.txt')
+    response = send_from_directory(str(directory), filename)
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return response
+
+
+@app.route('/sitemap.xml')
+def sitemap_xml():
+    directory, filename = _frontend_public_asset('sitemap.xml')
+    response = send_from_directory(str(directory), filename)
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return response
 
 
 @app.route('/api/data-deletion-request', methods=['POST'])
