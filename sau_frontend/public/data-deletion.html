@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Data Deletion Instructions — Socialupload</title>
+    <meta
+      name="description"
+      content="How to delete your data from Socialupload, including connected account credentials, and how to revoke Socialupload's access to your social platform accounts."
+    />
+    <style>
+      body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #222; }
+      h1, h2 { color: #111; }
+      h2 { margin-top: 32px; }
+      a { color: #0b57d0; }
+      .muted { color: #666; }
+      code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>Data Deletion Instructions</h1>
+    <p class="muted">Socialupload — Last updated: 2026-09-12</p>
+    <p>
+      This page explains how to delete the data that Socialupload holds about you, and how to
+      revoke Socialupload's access to the social media accounts you connected. If you would
+      rather have us do it for you, use the request method in the last section.
+    </p>
+
+    <h2>1. Delete data yourself, in the app</h2>
+    <ol>
+      <li>Sign in to your Socialupload dashboard at <strong>https://socialupload.iamwillywang.com</strong>.</li>
+      <li>Open <strong>Accounts</strong> and, for each connected account you want to remove, click the <strong>&#10005;</strong> (Remove) button on the account card. This permanently deletes the stored OAuth tokens, refresh tokens, session cookies, profile data, platform user identifiers, and account configuration for that account.</li>
+      <li>Open <strong>Library</strong> and <strong>Publish Center</strong> and delete any uploaded media, drafts, templates, campaigns, or scheduled jobs you want removed.</li>
+      <li>Open <strong>Settings</strong> and delete your profile or workspace if that option is available for your account type.</li>
+    </ol>
+    <p>
+      Removing a connected account deletes its credentials from the active database
+      immediately. Records that remain in rolling backups are purged within 30 days.
+    </p>
+
+    <h2>2. Revoke Socialupload's access on each platform</h2>
+    <p>
+      Removing an account inside Socialupload stops us using its credentials, but the
+      platform itself may still list Socialupload as an authorized app. Revoke it directly
+      there as well:
+    </p>
+    <ul>
+      <li><strong>Google / YouTube:</strong> <a href="https://myaccount.google.com/permissions" rel="noopener">Google Account Permissions</a> — select Socialupload and remove access.</li>
+      <li><strong>Facebook / Instagram:</strong> <a href="https://www.facebook.com/settings/?tab=applications" rel="noopener">Facebook Apps and Websites</a> — remove Socialupload.</li>
+      <li><strong>TikTok:</strong> TikTok app &rarr; Profile &rarr; Settings and privacy &rarr; Security &rarr; Manage app permissions — revoke Socialupload.</li>
+      <li><strong>X (Twitter):</strong> Settings &rarr; Security and account access &rarr; Apps and sessions &rarr; Connected apps — revoke Socialupload.</li>
+      <li><strong>Threads:</strong> Threads Settings &rarr; connected apps — revoke Socialupload.</li>
+      <li><strong>Reddit:</strong> <a href="https://www.reddit.com/settings/apps" rel="noopener">Reddit app preferences</a> — revoke access for Socialupload.</li>
+      <li><strong>Discord / Telegram / Bluesky / Patreon:</strong> remove Socialupload from the authorized or connected apps list in that platform's account settings.</li>
+    </ul>
+
+    <h2>3. Request deletion by email</h2>
+    <p>
+      If you cannot sign in, or you want all data associated with a social account deleted,
+      email us and we will process the request within 30 days:
+    </p>
+    <ul>
+      <li>Email: <a href="mailto:willywang8216@gmail.com?subject=Data%20deletion%20request">willywang8216@gmail.com</a></li>
+      <li>Subject: <code>Data deletion request</code></li>
+      <li>Include: the email address or platform username you used with Socialupload, so we can locate the right records.</li>
+    </ul>
+    <p>
+      We will confirm once the data has been deleted. Some records may be retained where the
+      law requires it, or for as long as needed to resolve a dispute or prevent fraud; the
+      Privacy Policy sets out those retention periods.
+    </p>
+
+    <h2>4. What gets deleted</h2>
+    <ul>
+      <li>Connected account credentials: OAuth access tokens, refresh tokens, session cookies and browser storage-state files.</li>
+      <li>Account metadata: platform user identifiers, channel or page names, avatar URLs, and granted scopes.</li>
+      <li>Content you uploaded or generated: videos, images, captions, and drafts held in your library.</li>
+      <li>Workflow records: scheduled jobs, queue history, publishing logs, and error records.</li>
+    </ul>
+    <p>
+      Content you already published to a social platform is stored by that platform, and must
+      be deleted there directly — deleting it from Socialupload does not remove the published
+      copy.
+    </p>
+
+    <p>
+      <a href="/privacy">Privacy Policy</a> &middot;
+      <a href="/terms">Terms of Service</a> &middot;
+      <a href="/">Home</a>
+    </p>
+  </body>
+</html>
