@@ -360,12 +360,29 @@ class TargetMutationTests(unittest.TestCase):
         target must not be found (IDOR guard)."""
         import sqlite3
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("ALTER TABLE publish_jobs ADD COLUMN workspace_id TEXT")
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(publish_jobs)").fetchall()}
+            if "workspace_id" not in cols:
+                conn.execute("ALTER TABLE publish_jobs ADD COLUMN workspace_id TEXT")
         job = jobs.enqueue_job(
             _spec(targets=[("acct-1", "f1", None)]), workspace_id="ws-A",
             db_path=self.db_path,
         )
         target = jobs.list_targets(job.id, db_path=self.db_path)[0]
+
+        # CI's bootstrap runs the 0015-0018 migrations, so publish_jobs
+        # already carries workspace_id; on pre-migration scratch DBs the
+        # column is added here. Without the column the legacy path still
+        # works (the mutation would not 404 cross-scope).
+        with sqlite3.connect(self.db_path) as conn:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(publish_jobs)").fetchall()}
+        if "workspace_id" not in cols:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("ALTER TABLE publish_jobs ADD COLUMN workspace_id TEXT")
+                conn.execute("UPDATE publish_jobs SET workspace_id = 'ws-A' WHERE id = ?",
+                             (job.id,))
+
         with self.assertRaises(LookupError):
             jobs.cancel_target(target.id, workspace_id="ws-B",
                                db_path=self.db_path)
