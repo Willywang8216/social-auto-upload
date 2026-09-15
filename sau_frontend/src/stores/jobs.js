@@ -91,6 +91,39 @@ export const useJobsStore = defineStore('jobs', () => {
     return _store(response?.data)
   }
 
+  // --- Calendar / schedule management (2026-09-15) ---
+
+  // Returns the raw list of scheduled targets for the calendar view.
+  async function refreshCalendar({ month, platform, status } = {}) {
+    const response = await jobsApi.calendar({ month, platform, status })
+    const data = response?.data || {}
+    return data.items || []
+  }
+
+  async function rescheduleTarget(targetId, scheduleAt, parentJobId) {
+    const response = await jobsApi.rescheduleTarget(targetId, scheduleAt)
+    if (parentJobId != null) {
+      await fetchJob(parentJobId)  // refresh job counters/counts
+    }
+    return response?.data
+  }
+
+  async function cancelTarget(targetId, parentJobId) {
+    const response = await jobsApi.cancelTarget(targetId)
+    if (parentJobId != null) {
+      await fetchJob(parentJobId)
+    }
+    return response?.data
+  }
+
+  async function resubmitTarget(targetId, parentJobId) {
+    const response = await jobsApi.resubmitTarget(targetId)
+    if (parentJobId != null) {
+      await fetchJob(parentJobId)
+    }
+    return response?.data
+  }
+
   // Drives a single job to completion via repeated /jobs/<id> calls.
   // The poller stops itself once the job reaches a terminal status, or
   // when the caller explicitly cancels via stopPolling.
@@ -136,6 +169,10 @@ export const useJobsStore = defineStore('jobs', () => {
     cancelJob,
     fetchJob,
     refreshList,
+    refreshCalendar,
+    rescheduleTarget,
+    cancelTarget,
+    resubmitTarget,
     startPolling,
     stopPolling,
     stopAllPolling

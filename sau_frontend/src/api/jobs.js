@@ -38,5 +38,24 @@ export const jobsApi = {
   // single-process dev mode where there is no separate worker.
   runDrain() {
     return http.post('/jobs/run')
+  },
+
+  // --- Calendar / schedule management (2026-09-15) ---
+
+  // List scheduled targets for the calendar grid, optionally filtered by
+  // month (YYYY-MM), platform slug, or comma-separated status list.
+  calendar(params = {}) {
+    return http.get('/jobs/calendar', { params })
+  },
+
+  // Per-target operations. All return the updated target payload.
+  rescheduleTarget(targetId, scheduleAt) {
+    return http.post(`/jobs/targets/${targetId}/reschedule`, { scheduleAt })
+  },
+  cancelTarget(targetId) {
+    return http.post(`/jobs/targets/${targetId}/cancel`)
+  },
+  resubmitTarget(targetId) {
+    return http.post(`/jobs/targets/${targetId}/resubmit`)
   }
 }

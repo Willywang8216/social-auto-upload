@@ -311,6 +311,10 @@ const sections = ref([
       { method: 'POST', path: '/jobs/:id/cancel', description: 'Cancel a running job' },
       { method: 'POST', path: '/jobs/:id/retry', description: 'Retry failed targets' },
       { method: 'POST', path: '/jobs/run', description: 'Run pending jobs immediately' },
+      { method: 'GET', path: '/jobs/calendar', description: 'List scheduled targets for the calendar (pending/retrying/failed); query: month (YYYY-MM), platform, status (comma-separated), limit' },
+      { method: 'POST', path: '/jobs/targets/:targetId/reschedule', description: 'Move a non-running target to a new time (body: scheduleAt)' },
+      { method: 'POST', path: '/jobs/targets/:targetId/cancel', description: 'Cancel a pending/retrying target' },
+      { method: 'POST', path: '/jobs/targets/:targetId/resubmit', description: 'Re-queue a failed/cancelled target' },
     ]
   },
   {

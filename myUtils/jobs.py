@@ -706,6 +706,279 @@ def get_tiktok_publish_status(
         return dict(row) if row else None
 
 
+# ---------------------------------------------------------------------------
+# Calendar / schedule management (API-driven target operations)
+# ---------------------------------------------------------------------------
+
+def list_scheduled_targets(
+    *,
+    month: str | None = None,
+    platform: str | None = None,
+    status: str | None = None,
+    limit: int = 500,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> list[tuple[dict, dict]]:
+    """JOIN publish_job_targets x publish_jobs, return (target, job) tuples.
+
+    This is the data source for the calendar view. Only targets with a
+    non-empty ``schedule_at`` are returned (transient jobs have NULL there
+    and are the job dashboard's concern). ``status`` may be a comma-separated
+    list; ``month`` narrows to ``schedule_at LIKE 'YYYY-MM%'``.
+    """
+
+    try:
+        limit_int = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"limit must be an integer, got {limit!r}") from exc
+    if limit_int < 1:
+        raise ValueError(f"limit must be >= 1, got {limit_int}")
+    if limit_int > 2000:
+        raise ValueError(f"limit must be <= 2000, got {limit_int}")
+
+    statuses = [s.strip() for s in status.split(",") if s.strip()] if status \
+        else [TARGET_PENDING, TARGET_RETRYING, TARGET_FAILED]
+
+    clauses = ["t.schedule_at IS NOT NULL", "t.schedule_at != ''"]
+    params: list = []
+    placeholders = ",".join("?" * len(statuses))
+    clauses.append(f"t.status IN ({placeholders})")
+    params.extend(statuses)
+    if month:
+        clauses.append("t.schedule_at LIKE ?")
+        params.append(month + "%")
+    if platform:
+        clauses.append("j.platform = ?")
+        params.append(platform)
+    if workspace_id is not None:
+        clauses.append("j.workspace_id = ?")
+        params.append(workspace_id)
+
+    sql = f"""
+        SELECT t.*, j.platform, j.profile_id, j.status AS job_status,
+               j.payload_json
+        FROM publish_job_targets t
+        JOIN publish_jobs j ON j.id = t.job_id
+        WHERE {" AND ".join(clauses)}
+        ORDER BY t.schedule_at ASC
+        LIMIT ?
+    """
+    params.append(limit_int)
+
+    results: list[tuple[dict, dict]] = []
+    with _connect(db_path) as conn:
+        for row in conn.execute(sql, params).fetchall():
+            target = dict(row)
+            payload_text = target.pop("payload_json") or "{}"
+            try:
+                payload = json.loads(payload_text) if payload_text else {}
+            except (json.JSONDecodeError, AttributeError):
+                payload = {}
+
+            # Title resolution: explicit title → draft.message (truncated) →
+            # artifact basename → fallback. The publish-center path stores the
+            # caption in draft.message and media in artifacts[], so this covers
+            # every job shape currently produced.
+            title = str(payload.get("title") or "").strip()
+            if not title:
+                try:
+                    draft = payload.get("draft") or {}
+                    title = str(draft.get("message") or "").strip()
+                    if len(title) > 80:
+                        title = title[:80] + "…"
+                except AttributeError:
+                    title = ""
+            if not title:
+                artifacts = payload.get("artifacts") or []
+                if artifacts:
+                    local = str((artifacts[0].get("local_path") or "") or "")
+                    title = local.rsplit("/", 1)[-1] or "Untitled"
+            if not title:
+                title = "Untitled"
+
+            job_meta = {
+                "platform": target.pop("platform"),
+                "profile_id": target.pop("profile_id"),
+                "job_status": target.pop("job_status"),
+                "title": title,
+            }
+            results.append((target, job_meta))
+    return results
+
+
+def reschedule_target(target_id: int, schedule_at: str, *, db_path: Path | None = None) -> Target:
+    """Move a non-running target to a new time.
+
+    Guarded on status NOT IN (running, succeeded) — a browser upload that is
+    already in flight cannot be relocated, and a finished post should not be
+    rewound.
+    """
+
+    candidate = schedule_at.strip()
+    if not candidate:
+        raise ValueError("scheduleAt must be a non-empty ISO datetime")
+
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT job_id, status FROM publish_job_targets WHERE id = ?",
+            (target_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"Target not found: id={target_id}")
+
+        cursor = conn.execute(
+            """
+            UPDATE publish_job_targets
+            SET schedule_at = ?, status = ?, last_error = NULL,
+                attempts = 0, finished_at = NULL
+            WHERE id = ? AND status NOT IN (?, ?)
+            """,
+            (candidate, TARGET_PENDING, target_id,
+             TARGET_RUNNING, TARGET_SUCCEEDED),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise ValueError(
+                f"Cannot reschedule target {target_id} in status {row['status']}")
+        refreshed = conn.execute(
+            "SELECT * FROM publish_job_targets WHERE id = ?", (target_id,)
+        ).fetchone()
+        return _row_to_target(refreshed)
+
+
+def cancel_target(target_id: int, *, db_path: Path | None = None) -> Target:
+    """Cancel one pending/retrying target.
+
+    A ``running`` target is untouched here — the running executor can't be
+    aborted mid-upload (see the worker notes above) and the whole job gives
+    the same guarantee via ``cancel_job``.
+    """
+
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT job_id, status FROM publish_job_targets WHERE id = ?",
+            (target_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"Target not found: id={target_id}")
+
+        cursor = conn.execute(
+            """
+            UPDATE publish_job_targets
+            SET status = ?, finished_at = ?
+            WHERE id = ? AND status IN (?, ?)
+            """,
+            (TARGET_CANCELLED, _now_iso(), target_id,
+             TARGET_PENDING, TARGET_RETRYING),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise ValueError(
+                f"Cannot cancel target {target_id} in status {row['status']}")
+        _recount_job(conn, row["job_id"])
+        conn.commit()
+        refreshed = conn.execute(
+            "SELECT * FROM publish_job_targets WHERE id = ?", (target_id,)
+        ).fetchone()
+        return _row_to_target(refreshed)
+
+
+def resubmit_target(target_id: int, *, db_path: Path | None = None) -> Target:
+    """Re-queue a failed (or cancelled) target.
+
+    Preserves a still-future ``schedule_at``; clears it when the time has
+    passed so the worker claims the target immediately.
+    """
+
+    now = _now_iso()
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT job_id, status, schedule_at FROM publish_job_targets "
+            "WHERE id = ?", (target_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"Target not found: id={target_id}")
+
+        schedule = row["schedule_at"]
+        if schedule and schedule > now:
+            new_schedule = schedule
+        else:
+            new_schedule = None
+
+        cursor = conn.execute(
+            """
+            UPDATE publish_job_targets
+            SET status = ?, attempts = 0, last_error = NULL,
+                started_at = NULL, finished_at = NULL, schedule_at = ?
+            WHERE id = ? AND status IN (?, ?)
+            """,
+            (TARGET_PENDING, new_schedule, target_id,
+             TARGET_FAILED, TARGET_CANCELLED),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise ValueError(
+                f"Cannot resubmit target {target_id} in status {row['status']}")
+        _recount_job(conn, row["job_id"])
+        conn.commit()
+        refreshed = conn.execute(
+            "SELECT * FROM publish_job_targets WHERE id = ?", (target_id,)
+        ).fetchone()
+        return _row_to_target(refreshed)
+
+
+def _recount_job(conn: sqlite3.Connection, job_id: int) -> None:
+    """Recompute job counters/status after a target-level mutation.
+
+    ``mark_target_*`` increments counters on the running->terminal transition,
+    but reschedule/cancel/resubmit move targets between non-running states and
+    bypass those counters entirely. Recompute from the source of truth.
+    """
+
+    row = conn.execute(
+        """
+        SELECT
+            SUM(status = ?) AS completed,
+            SUM(status = ?) AS failed,
+            SUM(status = ?) AS cancelled,
+            SUM(status = ?) AS pending
+        FROM publish_job_targets WHERE job_id = ?
+        """,
+        (TARGET_SUCCEEDED, TARGET_FAILED, TARGET_CANCELLED, TARGET_PENDING,
+         job_id),
+    ).fetchone()
+    if row is None:
+        return
+    completed = row["completed"] or 0
+    failed = row["failed"] or 0
+    cancelled = row["cancelled"] or 0
+    pending = row["pending"] or 0
+
+    if completed + failed + cancelled == 0 and pending == 0:
+        return  # defensive: target rows missing
+
+    if pending > 0:
+        job_status = JOB_PENDING
+    elif failed > 0:
+        job_status = JOB_FAILED
+    elif not row["cancelled"]:
+        job_status = JOB_SUCCEEDED
+    else:
+        job_status = JOB_CANCELLED
+
+    conn.execute(
+        """
+        UPDATE publish_jobs
+        SET completed_targets = ?, failed_targets = ?,
+            status = ?, finished_at = COALESCE(finished_at, ?)
+        WHERE id = ?
+        """,
+        (completed, failed, job_status,
+         _now_iso() if job_status != JOB_PENDING else None,
+         job_id),
+    )
+
+
 def list_tiktok_publish_statuses(
     job_id: str, *, db_path: Path | None = None
 ) -> list[dict]:
