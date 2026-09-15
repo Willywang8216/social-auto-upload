@@ -6629,9 +6629,8 @@ def jobs_target_reschedule(target_id):
                         "data": None}), 400
     try:
         target = job_runtime.reschedule_target(
-            target_id, schedule_at, db_path=_current_db_path())
-        job_runtime.get_job(target.job_id, workspace_id=_workspace_scope(),
-                            db_path=_current_db_path())
+            target_id, schedule_at,
+            workspace_id=_workspace_scope(), db_path=_current_db_path())
     except LookupError:
         return jsonify({"code": 404, "msg": "Target not found", "data": None}), 404
     except ValueError as exc:
@@ -6644,9 +6643,8 @@ def jobs_target_reschedule(target_id):
 def jobs_target_cancel(target_id):
     try:
         target = job_runtime.cancel_target(
-            target_id, db_path=_current_db_path())
-        job_runtime.get_job(target.job_id, workspace_id=_workspace_scope(),
-                            db_path=_current_db_path())
+            target_id,
+            workspace_id=_workspace_scope(), db_path=_current_db_path())
     except LookupError:
         return jsonify({"code": 404, "msg": "Target not found", "data": None}), 404
     except ValueError as exc:
@@ -6659,9 +6657,8 @@ def jobs_target_cancel(target_id):
 def jobs_target_resubmit(target_id):
     try:
         target = job_runtime.resubmit_target(
-            target_id, db_path=_current_db_path())
-        job_runtime.get_job(target.job_id, workspace_id=_workspace_scope(),
-                            db_path=_current_db_path())
+            target_id,
+            workspace_id=_workspace_scope(), db_path=_current_db_path())
     except LookupError:
         return jsonify({"code": 404, "msg": "Target not found", "data": None}), 404
     except ValueError as exc:

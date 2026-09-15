@@ -36,9 +36,9 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 from utils.conf_defaults import BASE_DIR
 
@@ -146,8 +146,6 @@ def _connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 def _now_iso() -> str:
     # Use timezone-aware UTC and strip the offset so the isoformat string
     # remains compatible with the existing ``DATETIME`` SQLite columns.
-    from datetime import timezone
-
     return datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
@@ -790,9 +788,11 @@ def list_scheduled_targets(
                     title = ""
             if not title:
                 artifacts = payload.get("artifacts") or []
-                if artifacts:
-                    local = str((artifacts[0].get("local_path") or "") or "")
-                    title = local.rsplit("/", 1)[-1] or "Untitled"
+                if artifacts and isinstance(artifacts, list):
+                    first = artifacts[0] if artifacts else None
+                    local = str(((first or {}).get("local_path") or "") or "")
+                    if local:
+                        title = local.rsplit("/", 1)[-1] or "Untitled"
             if not title:
                 title = "Untitled"
 
@@ -806,25 +806,80 @@ def list_scheduled_targets(
     return results
 
 
-def reschedule_target(target_id: int, schedule_at: str, *, db_path: Path | None = None) -> Target:
+def _target_context(
+    conn: sqlite3.Connection,
+    target_id: int,
+    *,
+    workspace_id: str | None,
+) -> sqlite3.Row:
+    """Load a target row joined with its job, enforcing tenant isolation.
+
+    Uses the legacy plain SELECT when ``workspace_id`` is ``None`` (works on
+    pre-migration DBs that lack the column); scopes to the workspace when one
+    is passed (requires the 0017 ``workspace_id`` migration, present in
+    multi-tenant production). Mismatched ownership surfaces as not-found.
+    """
+    if workspace_id is None:
+        row = conn.execute(
+            "SELECT job_id, status, schedule_at FROM publish_job_targets WHERE id = ?",
+            (target_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"Target not found: id={target_id}")
+        return row
+    try:
+        row = conn.execute(
+            """
+            SELECT j.id AS job_id, j.workspace_id AS job_workspace,
+                   t.status, t.schedule_at
+            FROM publish_job_targets t
+            JOIN publish_jobs j ON j.id = t.job_id
+            WHERE t.id = ?
+            """,
+            (target_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # Pre-migration DB without the workspace_id column: fall back to the
+        # legacy scoping (no column) and treat the target as reachable, which
+        # is the correct behaviour for single-tenant databases.
+        row = conn.execute(
+            "SELECT job_id, status, schedule_at FROM publish_job_targets WHERE id = ?",
+            (target_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"Target not found: id={target_id}")
+        return row
+    if row is None:
+        raise LookupError(f"Target not found: id={target_id}")
+    if row["job_workspace"] != workspace_id:
+        raise LookupError(f"Target not found: id={target_id}")
+    return row
+
+
+def reschedule_target(
+    target_id: int,
+    schedule_at: str,
+    *,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> Target:
     """Move a non-running target to a new time.
 
     Guarded on status NOT IN (running, succeeded) — a browser upload that is
     already in flight cannot be relocated, and a finished post should not be
-    rewound.
+    rewound. When ``workspace_id`` is given, a target owned by another
+    workspace is treated as not found (tenant isolation).
     """
 
     candidate = schedule_at.strip()
     if not candidate:
         raise ValueError("scheduleAt must be a non-empty ISO datetime")
+    candidate, _ = _normalise_due(candidate)
+    if not candidate:
+        raise ValueError("scheduleAt must be a non-empty ISO datetime")
 
     with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT job_id, status FROM publish_job_targets WHERE id = ?",
-            (target_id,),
-        ).fetchone()
-        if row is None:
-            raise LookupError(f"Target not found: id={target_id}")
+        row = _target_context(conn, target_id, workspace_id=workspace_id)
 
         cursor = conn.execute(
             """
@@ -840,27 +895,30 @@ def reschedule_target(target_id: int, schedule_at: str, *, db_path: Path | None 
         if cursor.rowcount == 0:
             raise ValueError(
                 f"Cannot reschedule target {target_id} in status {row['status']}")
+        _recount_job(conn, row["job_id"])
+        conn.commit()
         refreshed = conn.execute(
             "SELECT * FROM publish_job_targets WHERE id = ?", (target_id,)
         ).fetchone()
         return _row_to_target(refreshed)
 
 
-def cancel_target(target_id: int, *, db_path: Path | None = None) -> Target:
+def cancel_target(
+    target_id: int,
+    *,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> Target:
     """Cancel one pending/retrying target.
 
     A ``running`` target is untouched here — the running executor can't be
     aborted mid-upload (see the worker notes above) and the whole job gives
-    the same guarantee via ``cancel_job``.
+    the same guarantee via ``cancel_job``. When ``workspace_id`` is given, a
+    target owned by another workspace is treated as not found.
     """
 
     with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT job_id, status FROM publish_job_targets WHERE id = ?",
-            (target_id,),
-        ).fetchone()
-        if row is None:
-            raise LookupError(f"Target not found: id={target_id}")
+        row = _target_context(conn, target_id, workspace_id=workspace_id)
 
         cursor = conn.execute(
             """
@@ -883,27 +941,24 @@ def cancel_target(target_id: int, *, db_path: Path | None = None) -> Target:
         return _row_to_target(refreshed)
 
 
-def resubmit_target(target_id: int, *, db_path: Path | None = None) -> Target:
+def resubmit_target(
+    target_id: int,
+    *,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> Target:
     """Re-queue a failed (or cancelled) target.
 
     Preserves a still-future ``schedule_at``; clears it when the time has
-    passed so the worker claims the target immediately.
+    passed so the worker claims the target immediately. When ``workspace_id``
+    is given, a target owned by another workspace is treated as not found.
     """
 
     now = _now_iso()
     with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT job_id, status, schedule_at FROM publish_job_targets "
-            "WHERE id = ?", (target_id,),
-        ).fetchone()
-        if row is None:
-            raise LookupError(f"Target not found: id={target_id}")
+        row = _target_context(conn, target_id, workspace_id=workspace_id)
 
-        schedule = row["schedule_at"]
-        if schedule and schedule > now:
-            new_schedule = schedule
-        else:
-            new_schedule = None
+        new_schedule, _ = _normalise_due(row["schedule_at"], now)
 
         cursor = conn.execute(
             """
@@ -927,12 +982,43 @@ def resubmit_target(target_id: int, *, db_path: Path | None = None) -> Target:
         return _row_to_target(refreshed)
 
 
+def _normalise_due(schedule: str | None, now: str | None = None) -> tuple[str | None, bool]:
+    """Normalise an ``schedule_at`` value into a tz-naive UTC string if it is
+    still in the future, else ``None`` (worker picks it up immediately).
+
+    Accepts the canonical ``YYYY-MM-DDTHH:MM:SS`` naive-UTC shape the
+    orchestrator writes, plus simple offsets (``+08:00`` / ``Z``) that the
+    legacy file-scheduling path produced. Returns ``(kept_schedule, is_due)``.
+    """
+    if not schedule:
+        return None, True
+    text = str(schedule).strip()
+    if not text:
+        return None, True
+    base = now or _now_iso()
+    try:
+        parsed = datetime.fromisoformat(text)
+        due = datetime.fromisoformat(base)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return (parsed.isoformat(timespec="seconds") if parsed > due else None,
+                parsed <= due)
+    except ValueError:
+        # Non-parseable legacy value: keep it, the worker's own claim clause
+        # (string comparison) still decides. Do not silently drop data.
+        return text, False
+
+
 def _recount_job(conn: sqlite3.Connection, job_id: int) -> None:
     """Recompute job counters/status after a target-level mutation.
 
     ``mark_target_*`` increments counters on the running->terminal transition,
     but reschedule/cancel/resubmit move targets between non-running states and
     bypass those counters entirely. Recompute from the source of truth.
+
+    Unlike ``_maybe_finalise_job`` this recomputes *counts* too, and it treats
+    ``running``/``retrying`` targets as in-flight (never finalises a job while
+    a target is mid-flight, and never drops a job's finished_at once set).
     """
 
     row = conn.execute(
@@ -941,11 +1027,12 @@ def _recount_job(conn: sqlite3.Connection, job_id: int) -> None:
             SUM(status = ?) AS completed,
             SUM(status = ?) AS failed,
             SUM(status = ?) AS cancelled,
-            SUM(status = ?) AS pending
+            SUM(status = ?) AS pending,
+            SUM(status IN (?, ?)) AS in_flight
         FROM publish_job_targets WHERE job_id = ?
         """,
         (TARGET_SUCCEEDED, TARGET_FAILED, TARGET_CANCELLED, TARGET_PENDING,
-         job_id),
+         TARGET_RUNNING, TARGET_RETRYING, job_id),
     ).fetchone()
     if row is None:
         return
@@ -953,16 +1040,22 @@ def _recount_job(conn: sqlite3.Connection, job_id: int) -> None:
     failed = row["failed"] or 0
     cancelled = row["cancelled"] or 0
     pending = row["pending"] or 0
+    in_flight = row["in_flight"] or 0
 
-    if completed + failed + cancelled == 0 and pending == 0:
-        return  # defensive: target rows missing
+    if completed + failed + cancelled + pending + in_flight == 0:
+        return  # no targets at all — leave the job row alone
 
-    if pending > 0:
+    if in_flight > 0:
+        # A target is mid-upload: the job is running, matching what
+        # claim_next_targets wrote when the first target was claimed.
+        job_status = JOB_RUNNING
+    elif pending > 0:
         job_status = JOB_PENDING
-    elif failed > 0:
-        job_status = JOB_FAILED
-    elif not row["cancelled"]:
-        job_status = JOB_SUCCEEDED
+    elif failed > 0 or completed > 0:
+        # Any terminal target: partial success reads as failed (same rule as
+        # _maybe_finalise_job) unless everything succeeded or cancelled.
+        job_status = JOB_FAILED if failed > 0 else (
+            JOB_SUCCEEDED if completed > 0 else JOB_CANCELLED)
     else:
         job_status = JOB_CANCELLED
 
@@ -970,12 +1063,15 @@ def _recount_job(conn: sqlite3.Connection, job_id: int) -> None:
         """
         UPDATE publish_jobs
         SET completed_targets = ?, failed_targets = ?,
-            status = ?, finished_at = COALESCE(finished_at, ?)
+            status = ?,
+            finished_at = CASE
+                WHEN ? = ? THEN NULL
+                ELSE COALESCE(finished_at, ?)
+            END
         WHERE id = ?
         """,
-        (completed, failed, job_status,
-         _now_iso() if job_status != JOB_PENDING else None,
-         job_id),
+        (completed, failed, job_status, job_status, JOB_PENDING,
+         _now_iso(), job_id),
     )
 
 

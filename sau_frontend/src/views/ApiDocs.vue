@@ -308,8 +308,7 @@ const sections = ref([
     endpoints: [
       { method: 'GET', path: '/jobs', description: 'List all jobs' },
       { method: 'GET', path: '/jobs/:id', description: 'Get job details with targets' },
-      { method: 'POST', path: '/jobs/:id/cancel', description: 'Cancel a running job' },
-      { method: 'POST', path: '/jobs/:id/retry', description: 'Retry failed targets' },
+      { method: 'POST', path: '/jobs/:id/cancel', description: 'Cancel a non-terminal job (running targets finish; pending/retrying are cancelled)' },
       { method: 'POST', path: '/jobs/run', description: 'Run pending jobs immediately' },
       { method: 'GET', path: '/jobs/calendar', description: 'List scheduled targets for the calendar (pending/retrying/failed); query: month (YYYY-MM), platform, status (comma-separated), limit' },
       { method: 'POST', path: '/jobs/targets/:targetId/reschedule', description: 'Move a non-running target to a new time (body: scheduleAt)' },
