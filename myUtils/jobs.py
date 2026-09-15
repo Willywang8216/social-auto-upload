@@ -36,9 +36,9 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 from utils.conf_defaults import BASE_DIR
 
@@ -146,8 +146,6 @@ def _connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 def _now_iso() -> str:
     # Use timezone-aware UTC and strip the offset so the isoformat string
     # remains compatible with the existing ``DATETIME`` SQLite columns.
-    from datetime import timezone
-
     return datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
@@ -704,6 +702,377 @@ def get_tiktok_publish_status(
             (publish_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Calendar / schedule management (API-driven target operations)
+# ---------------------------------------------------------------------------
+
+def list_scheduled_targets(
+    *,
+    month: str | None = None,
+    platform: str | None = None,
+    status: str | None = None,
+    limit: int = 500,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> list[tuple[dict, dict]]:
+    """JOIN publish_job_targets x publish_jobs, return (target, job) tuples.
+
+    This is the data source for the calendar view. Only targets with a
+    non-empty ``schedule_at`` are returned (transient jobs have NULL there
+    and are the job dashboard's concern). ``status`` may be a comma-separated
+    list; ``month`` narrows to ``schedule_at LIKE 'YYYY-MM%'``.
+    """
+
+    try:
+        limit_int = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"limit must be an integer, got {limit!r}") from exc
+    if limit_int < 1:
+        raise ValueError(f"limit must be >= 1, got {limit_int}")
+    if limit_int > 2000:
+        raise ValueError(f"limit must be <= 2000, got {limit_int}")
+
+    statuses = [s.strip() for s in status.split(",") if s.strip()] if status \
+        else [TARGET_PENDING, TARGET_RETRYING, TARGET_FAILED]
+
+    clauses = ["t.schedule_at IS NOT NULL", "t.schedule_at != ''"]
+    params: list = []
+    placeholders = ",".join("?" * len(statuses))
+    clauses.append(f"t.status IN ({placeholders})")
+    params.extend(statuses)
+    if month:
+        clauses.append("t.schedule_at LIKE ?")
+        params.append(month + "%")
+    if platform:
+        clauses.append("j.platform = ?")
+        params.append(platform)
+    if workspace_id is not None:
+        clauses.append("j.workspace_id = ?")
+        params.append(workspace_id)
+
+    sql = f"""
+        SELECT t.*, j.platform, j.profile_id, j.status AS job_status,
+               j.payload_json
+        FROM publish_job_targets t
+        JOIN publish_jobs j ON j.id = t.job_id
+        WHERE {" AND ".join(clauses)}
+        ORDER BY t.schedule_at ASC
+        LIMIT ?
+    """
+    params.append(limit_int)
+
+    results: list[tuple[dict, dict]] = []
+    with _connect(db_path) as conn:
+        for row in conn.execute(sql, params).fetchall():
+            target = dict(row)
+            payload_text = target.pop("payload_json") or "{}"
+            try:
+                payload = json.loads(payload_text) if payload_text else {}
+            except (json.JSONDecodeError, AttributeError):
+                payload = {}
+
+            # Title resolution: explicit title → draft.message (truncated) →
+            # artifact basename → fallback. The publish-center path stores the
+            # caption in draft.message and media in artifacts[], so this covers
+            # every job shape currently produced.
+            title = str(payload.get("title") or "").strip()
+            if not title:
+                try:
+                    draft = payload.get("draft") or {}
+                    title = str(draft.get("message") or "").strip()
+                    if len(title) > 80:
+                        title = title[:80] + "…"
+                except AttributeError:
+                    title = ""
+            if not title:
+                artifacts = payload.get("artifacts") or []
+                if artifacts and isinstance(artifacts, list):
+                    first = artifacts[0] if artifacts else None
+                    local = str(((first or {}).get("local_path") or "") or "")
+                    if local:
+                        title = local.rsplit("/", 1)[-1] or "Untitled"
+            if not title:
+                title = "Untitled"
+
+            job_meta = {
+                "platform": target.pop("platform"),
+                "profile_id": target.pop("profile_id"),
+                "job_status": target.pop("job_status"),
+                "title": title,
+            }
+            results.append((target, job_meta))
+    return results
+
+
+def _target_context(
+    conn: sqlite3.Connection,
+    target_id: int,
+    *,
+    workspace_id: str | None,
+) -> sqlite3.Row:
+    """Load a target row joined with its job, enforcing tenant isolation.
+
+    Uses the legacy plain SELECT when ``workspace_id`` is ``None`` (works on
+    pre-migration DBs that lack the column); scopes to the workspace when one
+    is passed (requires the 0017 ``workspace_id`` migration, present in
+    multi-tenant production). Mismatched ownership surfaces as not-found.
+    """
+    if workspace_id is None:
+        row = conn.execute(
+            "SELECT job_id, status, schedule_at FROM publish_job_targets WHERE id = ?",
+            (target_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"Target not found: id={target_id}")
+        return row
+    try:
+        row = conn.execute(
+            """
+            SELECT j.id AS job_id, j.workspace_id AS job_workspace,
+                   t.status, t.schedule_at
+            FROM publish_job_targets t
+            JOIN publish_jobs j ON j.id = t.job_id
+            WHERE t.id = ?
+            """,
+            (target_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # Pre-migration DB without the workspace_id column: fall back to the
+        # legacy scoping (no column) and treat the target as reachable, which
+        # is the correct behaviour for single-tenant databases.
+        row = conn.execute(
+            "SELECT job_id, status, schedule_at FROM publish_job_targets WHERE id = ?",
+            (target_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"Target not found: id={target_id}")
+        return row
+    if row is None:
+        raise LookupError(f"Target not found: id={target_id}")
+    if row["job_workspace"] != workspace_id:
+        raise LookupError(f"Target not found: id={target_id}")
+    return row
+
+
+def reschedule_target(
+    target_id: int,
+    schedule_at: str,
+    *,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> Target:
+    """Move a non-running target to a new time.
+
+    Guarded on status NOT IN (running, succeeded) — a browser upload that is
+    already in flight cannot be relocated, and a finished post should not be
+    rewound. When ``workspace_id`` is given, a target owned by another
+    workspace is treated as not found (tenant isolation).
+    """
+
+    candidate = schedule_at.strip()
+    if not candidate:
+        raise ValueError("scheduleAt must be a non-empty ISO datetime")
+    candidate, _ = _normalise_due(candidate)
+    if not candidate:
+        raise ValueError("scheduleAt must be a non-empty ISO datetime")
+
+    with _connect(db_path) as conn:
+        row = _target_context(conn, target_id, workspace_id=workspace_id)
+
+        cursor = conn.execute(
+            """
+            UPDATE publish_job_targets
+            SET schedule_at = ?, status = ?, last_error = NULL,
+                attempts = 0, finished_at = NULL
+            WHERE id = ? AND status NOT IN (?, ?)
+            """,
+            (candidate, TARGET_PENDING, target_id,
+             TARGET_RUNNING, TARGET_SUCCEEDED),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise ValueError(
+                f"Cannot reschedule target {target_id} in status {row['status']}")
+        _recount_job(conn, row["job_id"])
+        conn.commit()
+        refreshed = conn.execute(
+            "SELECT * FROM publish_job_targets WHERE id = ?", (target_id,)
+        ).fetchone()
+        return _row_to_target(refreshed)
+
+
+def cancel_target(
+    target_id: int,
+    *,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> Target:
+    """Cancel one pending/retrying target.
+
+    A ``running`` target is untouched here — the running executor can't be
+    aborted mid-upload (see the worker notes above) and the whole job gives
+    the same guarantee via ``cancel_job``. When ``workspace_id`` is given, a
+    target owned by another workspace is treated as not found.
+    """
+
+    with _connect(db_path) as conn:
+        row = _target_context(conn, target_id, workspace_id=workspace_id)
+
+        cursor = conn.execute(
+            """
+            UPDATE publish_job_targets
+            SET status = ?, finished_at = ?
+            WHERE id = ? AND status IN (?, ?)
+            """,
+            (TARGET_CANCELLED, _now_iso(), target_id,
+             TARGET_PENDING, TARGET_RETRYING),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise ValueError(
+                f"Cannot cancel target {target_id} in status {row['status']}")
+        _recount_job(conn, row["job_id"])
+        conn.commit()
+        refreshed = conn.execute(
+            "SELECT * FROM publish_job_targets WHERE id = ?", (target_id,)
+        ).fetchone()
+        return _row_to_target(refreshed)
+
+
+def resubmit_target(
+    target_id: int,
+    *,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> Target:
+    """Re-queue a failed (or cancelled) target.
+
+    Preserves a still-future ``schedule_at``; clears it when the time has
+    passed so the worker claims the target immediately. When ``workspace_id``
+    is given, a target owned by another workspace is treated as not found.
+    """
+
+    now = _now_iso()
+    with _connect(db_path) as conn:
+        row = _target_context(conn, target_id, workspace_id=workspace_id)
+
+        new_schedule, _ = _normalise_due(row["schedule_at"], now)
+
+        cursor = conn.execute(
+            """
+            UPDATE publish_job_targets
+            SET status = ?, attempts = 0, last_error = NULL,
+                started_at = NULL, finished_at = NULL, schedule_at = ?
+            WHERE id = ? AND status IN (?, ?)
+            """,
+            (TARGET_PENDING, new_schedule, target_id,
+             TARGET_FAILED, TARGET_CANCELLED),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise ValueError(
+                f"Cannot resubmit target {target_id} in status {row['status']}")
+        _recount_job(conn, row["job_id"])
+        conn.commit()
+        refreshed = conn.execute(
+            "SELECT * FROM publish_job_targets WHERE id = ?", (target_id,)
+        ).fetchone()
+        return _row_to_target(refreshed)
+
+
+def _normalise_due(schedule: str | None, now: str | None = None) -> tuple[str | None, bool]:
+    """Normalise an ``schedule_at`` value into a tz-naive UTC string if it is
+    still in the future, else ``None`` (worker picks it up immediately).
+
+    Accepts the canonical ``YYYY-MM-DDTHH:MM:SS`` naive-UTC shape the
+    orchestrator writes, plus simple offsets (``+08:00`` / ``Z``) that the
+    legacy file-scheduling path produced. Returns ``(kept_schedule, is_due)``.
+    """
+    if not schedule:
+        return None, True
+    text = str(schedule).strip()
+    if not text:
+        return None, True
+    base = now or _now_iso()
+    try:
+        parsed = datetime.fromisoformat(text)
+        due = datetime.fromisoformat(base)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return (parsed.isoformat(timespec="seconds") if parsed > due else None,
+                parsed <= due)
+    except ValueError:
+        # Non-parseable legacy value: keep it, the worker's own claim clause
+        # (string comparison) still decides. Do not silently drop data.
+        return text, False
+
+
+def _recount_job(conn: sqlite3.Connection, job_id: int) -> None:
+    """Recompute job counters/status after a target-level mutation.
+
+    ``mark_target_*`` increments counters on the running->terminal transition,
+    but reschedule/cancel/resubmit move targets between non-running states and
+    bypass those counters entirely. Recompute from the source of truth.
+
+    Unlike ``_maybe_finalise_job`` this recomputes *counts* too, and it treats
+    ``running``/``retrying`` targets as in-flight (never finalises a job while
+    a target is mid-flight, and never drops a job's finished_at once set).
+    """
+
+    row = conn.execute(
+        """
+        SELECT
+            SUM(status = ?) AS completed,
+            SUM(status = ?) AS failed,
+            SUM(status = ?) AS cancelled,
+            SUM(status = ?) AS pending,
+            SUM(status IN (?, ?)) AS in_flight
+        FROM publish_job_targets WHERE job_id = ?
+        """,
+        (TARGET_SUCCEEDED, TARGET_FAILED, TARGET_CANCELLED, TARGET_PENDING,
+         TARGET_RUNNING, TARGET_RETRYING, job_id),
+    ).fetchone()
+    if row is None:
+        return
+    completed = row["completed"] or 0
+    failed = row["failed"] or 0
+    cancelled = row["cancelled"] or 0
+    pending = row["pending"] or 0
+    in_flight = row["in_flight"] or 0
+
+    if completed + failed + cancelled + pending + in_flight == 0:
+        return  # no targets at all — leave the job row alone
+
+    if in_flight > 0:
+        # A target is mid-upload: the job is running, matching what
+        # claim_next_targets wrote when the first target was claimed.
+        job_status = JOB_RUNNING
+    elif pending > 0:
+        job_status = JOB_PENDING
+    elif failed > 0 or completed > 0:
+        # Any terminal target: partial success reads as failed (same rule as
+        # _maybe_finalise_job) unless everything succeeded or cancelled.
+        job_status = JOB_FAILED if failed > 0 else (
+            JOB_SUCCEEDED if completed > 0 else JOB_CANCELLED)
+    else:
+        job_status = JOB_CANCELLED
+
+    conn.execute(
+        """
+        UPDATE publish_jobs
+        SET completed_targets = ?, failed_targets = ?,
+            status = ?,
+            finished_at = CASE
+                WHEN ? = ? THEN NULL
+                ELSE COALESCE(finished_at, ?)
+            END
+        WHERE id = ?
+        """,
+        (completed, failed, job_status, job_status, JOB_PENDING,
+         _now_iso(), job_id),
+    )
 
 
 def list_tiktok_publish_statuses(

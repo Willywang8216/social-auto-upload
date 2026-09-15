@@ -302,3 +302,134 @@ class ScheduleGateTests(unittest.TestCase):
         self.assertTrue(jobs.has_claimable_targets(db_path=self.db_path))
         claimed = jobs.claim_next_targets(limit=5, db_path=self.db_path)
         self.assertEqual({t.account_ref for t in claimed}, {"acct-1", "acct-2"})
+
+
+class TargetMutationTests(unittest.TestCase):
+    """Target-level CRUD: reschedule/cancel/resubmit and their job-level
+    recounting. These guard the fixes for the calendar CRUD review."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "jobs.db"
+        create_table.bootstrap(self.db_path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _enq(self, targets, *, key="k1") -> jobs.Job:
+        return jobs.enqueue_job(
+            _spec(targets=targets, key=key), db_path=self.db_path)
+
+    def test_reschedule_resets_job_failed_counters(self) -> None:
+        """A failed single-target job rescheduled to pending must read pending
+        with failed_targets=0 (was: stuck-failed forever)."""
+        job = self._enq([("acct-1", "file-a", None)])
+        target = jobs.claim_next_targets(limit=1, db_path=self.db_path)[0]
+        jobs.mark_target_failed(target.id, "boom", db_path=self.db_path)
+        self.assertEqual(jobs.get_job(job.id, db_path=self.db_path).status,
+                         jobs.JOB_FAILED)
+
+        future = _utc_iso(timedelta(hours=1))
+        rescheduled = jobs.reschedule_target(target.id, future, db_path=self.db_path)
+        self.assertEqual(rescheduled.status, jobs.TARGET_PENDING)
+        refreshed = jobs.get_job(job.id, db_path=self.db_path)
+        self.assertEqual(refreshed.status, jobs.JOB_PENDING)
+        self.assertEqual(refreshed.failed_targets, 0)
+        self.assertIsNone(refreshed.finished_at)
+
+    def test_cancel_while_another_target_running_keeps_job_running(self) -> None:
+        """Cancelling a pending target must not flip a job to cancelled while
+        another target is still running (was: misclassified terminal)."""
+        job = self._enq([("acct-1", "f1", None), ("acct-2", "f1", None)])
+        jobs.claim_next_targets(limit=1, db_path=self.db_path)
+        pending = next(t for t in jobs.list_targets(job.id, db_path=self.db_path)
+                       if t.status == jobs.TARGET_PENDING)
+        jobs.cancel_target(pending.id, db_path=self.db_path)
+        self.assertEqual(jobs.get_job(job.id, db_path=self.db_path).status,
+                         jobs.JOB_RUNNING)
+
+        # The running target finishing late gives 1 succeeded + 1 cancelled.
+        running = next(t for t in jobs.list_targets(job.id, db_path=self.db_path)
+                       if t.status == jobs.TARGET_RUNNING)
+        jobs.mark_target_success(running.id, db_path=self.db_path)
+        self.assertEqual(jobs.get_job(job.id, db_path=self.db_path).status,
+                         jobs.JOB_CANCELLED)
+
+    def test_cross_workspace_target_mutation_is_forbidden(self) -> None:
+        """With the workspace_id column present, mutating another workspace's
+        target must not be found (IDOR guard)."""
+        import sqlite3
+        with sqlite3.connect(self.db_path) as conn:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(publish_jobs)").fetchall()}
+            if "workspace_id" not in cols:
+                conn.execute("ALTER TABLE publish_jobs ADD COLUMN workspace_id TEXT")
+        job = jobs.enqueue_job(
+            _spec(targets=[("acct-1", "f1", None)]), workspace_id="ws-A",
+            db_path=self.db_path,
+        )
+        target = jobs.list_targets(job.id, db_path=self.db_path)[0]
+
+        # CI's bootstrap runs the 0015-0018 migrations, so publish_jobs
+        # already carries workspace_id; on pre-migration scratch DBs the
+        # column is added here. Without the column the legacy path still
+        # works (the mutation would not 404 cross-scope).
+        with sqlite3.connect(self.db_path) as conn:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(publish_jobs)").fetchall()}
+        if "workspace_id" not in cols:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("ALTER TABLE publish_jobs ADD COLUMN workspace_id TEXT")
+                conn.execute("UPDATE publish_jobs SET workspace_id = 'ws-A' WHERE id = ?",
+                             (job.id,))
+
+        with self.assertRaises(LookupError):
+            jobs.cancel_target(target.id, workspace_id="ws-B",
+                               db_path=self.db_path)
+        with self.assertRaises(LookupError):
+            jobs.resubmit_target(target.id, workspace_id="ws-B",
+                                 db_path=self.db_path)
+        ok = jobs.cancel_target(target.id, workspace_id="ws-A",
+                                db_path=self.db_path)
+        self.assertEqual(ok.status, jobs.TARGET_CANCELLED)
+
+    def test_resubmit_normalises_offset_schedule(self) -> None:
+        """Offset-suffixed future schedule_at is normalised to naive UTC and
+        preserved; a past one is cleared so the worker claims immediately."""
+        import sqlite3
+        job = self._enq([("acct-1", "f1", None)], key="k-offset")
+        target = jobs.list_targets(job.id, db_path=self.db_path)[0]
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE publish_job_targets SET status = ?, schedule_at = ?"
+                " WHERE id = ?",
+                (jobs.TARGET_FAILED, "2100-01-01T12:00:00+08:00", target.id),
+            )
+        kept = jobs.resubmit_target(target.id, db_path=self.db_path)
+        self.assertEqual(kept.schedule_at, "2100-01-01T04:00:00")
+
+        job2 = self._enq([("acct-2", "f2", None)], key="k-offset2")
+        target2 = jobs.list_targets(job2.id, db_path=self.db_path)[0]
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE publish_job_targets SET status = ?, schedule_at = ?"
+                " WHERE id = ?",
+                (jobs.TARGET_FAILED, "2020-01-01T12:00:00+08:00", target2.id),
+            )
+        cleared = jobs.resubmit_target(target2.id, db_path=self.db_path)
+        self.assertIsNone(cleared.schedule_at)
+
+    def test_list_scheduled_targets_tolerates_dict_artifacts(self) -> None:
+        """A truthy non-list artifacts payload must not crash title fallback."""
+        import sqlite3
+        job = self._enq([("acct-1", "f1", None)], key="k-artifacts-dict")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE publish_jobs SET payload_json = ? WHERE id = ?",
+                (jobs.json.dumps(
+                    {"title": "", "artifacts": {"local_path": "/x/y.mp4"}},
+                    ensure_ascii=False),
+                 job.id),
+            )
+        rows = jobs.list_scheduled_targets(db_path=self.db_path)
+        self.assertEqual(rows, [])  # no crash; no calendar rows to display

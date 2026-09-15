@@ -6573,6 +6573,100 @@ def _job_to_payload(job: job_runtime.Job) -> dict:
     }
 
 
+def _scheduled_target_payload(target: dict, job_meta: dict) -> dict:
+    """Map a list_scheduled_targets row (target + job_meta dicts) to an API item.
+
+    ``target`` here is the plain dict version of publish_job_targets columns,
+    not a job_runtime.Target, so routes use this instead of _target_to_payload.
+    """
+    return {
+        "targetId": target["id"],
+        "jobId": target["job_id"],
+        "platform": job_meta.get("platform"),
+        "profileId": job_meta.get("profile_id"),
+        "title": job_meta.get("title") or "Untitled",
+        "accountRef": target["account_ref"],
+        "fileRef": target["file_ref"],
+        "scheduleAt": target["schedule_at"],
+        "status": target["status"],
+        "attempts": target["attempts"],
+        "lastError": target["last_error"],
+    }
+
+
+@app.route("/jobs/calendar", methods=["GET"])
+def jobs_calendar():
+    """Scheduled (pending/retrying/failed) targets across jobs, for the calendar.
+
+    Query params: month (YYYY-MM), platform (slug), status (comma-separated,
+    default pending,retrying,failed), limit (default 500, max 2000).
+    """
+    month = request.args.get("month") or None
+    platform = request.args.get("platform") or None
+    status = request.args.get("status") or None
+    try:
+        rows = job_runtime.list_scheduled_targets(
+            month=month,
+            platform=platform,
+            status=status,
+            limit=int(request.args.get("limit", "500")),
+            workspace_id=_workspace_scope(),
+            db_path=_current_db_path(),
+        )
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    items = [_scheduled_target_payload(t, jm) for t, jm in rows]
+    return jsonify({"code": 200, "msg": "ok",
+                    "data": {"items": items, "total": len(items)}}), 200
+
+
+@app.route("/jobs/targets/<int:target_id>/reschedule", methods=["POST"])
+def jobs_target_reschedule(target_id):
+    data = request.get_json(silent=True) or {}
+    schedule_at = (data.get("scheduleAt") or "").strip()
+    if not schedule_at:
+        return jsonify({"code": 400, "msg": "scheduleAt is required",
+                        "data": None}), 400
+    try:
+        target = job_runtime.reschedule_target(
+            target_id, schedule_at,
+            workspace_id=_workspace_scope(), db_path=_current_db_path())
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Target not found", "data": None}), 404
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "rescheduled",
+                    "data": _target_to_payload(target)}), 200
+
+
+@app.route("/jobs/targets/<int:target_id>/cancel", methods=["POST"])
+def jobs_target_cancel(target_id):
+    try:
+        target = job_runtime.cancel_target(
+            target_id,
+            workspace_id=_workspace_scope(), db_path=_current_db_path())
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Target not found", "data": None}), 404
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "cancelled",
+                    "data": _target_to_payload(target)}), 200
+
+
+@app.route("/jobs/targets/<int:target_id>/resubmit", methods=["POST"])
+def jobs_target_resubmit(target_id):
+    try:
+        target = job_runtime.resubmit_target(
+            target_id,
+            workspace_id=_workspace_scope(), db_path=_current_db_path())
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Target not found", "data": None}), 404
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "resubmitted",
+                    "data": _target_to_payload(target)}), 200
+
+
 def _target_to_payload(target: job_runtime.Target) -> dict:
     return {
         "id": target.id,
