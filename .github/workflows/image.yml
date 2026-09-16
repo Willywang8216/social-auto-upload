@@ -22,6 +22,7 @@ on:
       - 'sau_app/**'
       - 'uploader/**'
       - 'myUtils/**'
+      - 'mcp_server/**'
       - 'migrations/**'
       - 'pyproject.toml'
       - 'requirements.txt'
