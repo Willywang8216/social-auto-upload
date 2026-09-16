@@ -227,3 +227,71 @@ def register(mcp: FastMCP) -> None:
             return {"drained": True}
         except Exception as exc:  # noqa: BLE001
             return error_payload(exc)
+
+    @mcp.tool(
+        name="jobs_system_health",
+        description=(
+            "SAU system health overview. Returns publish-jobs and target "
+            "counts by status plus inbox watcher status (ready/pending/"
+            "quarantined) and the last offload-to-Drive run (exit code, "
+            "files, time). All read-only."
+        ),
+    )
+    def jobs_system_health(db_path: str | None = None) -> dict[str, Any]:
+        try:
+            from myUtils import jobs as _j
+            import sqlite3, json, os
+            resolved = resolve_db_path(db_path)
+            counts = {}
+            if resolved.exists():
+                with sqlite3.connect(str(resolved)) as conn:
+                    counts = {
+                        "targets": dict(conn.execute(
+                            "SELECT status, COUNT(*) FROM publish_job_targets GROUP BY status"
+                        ).fetchall()),
+                        "jobs": dict(conn.execute(
+                            "SELECT status, COUNT(*) FROM publish_jobs GROUP BY status"
+                        ).fetchall()),
+                    }
+
+            inbox = {"ready": 0, "pending": 0, "quarantined": 0, "items": {}, "statePath": ""}
+            offload = {"lastRun": None, "exitCode": None, "localFiles": None, "healthy": None}
+            for p in ("/home/will/sau-inbox", "/app/sau-inbox"):
+                sp = os.path.join(p, "state.json")
+                if os.path.exists(sp):
+                    try:
+                        raw = json.loads(open(sp, encoding="utf-8").read())
+                        inbox = {
+                            "ready": len(raw.get("ready", [])),
+                            "pending": len(raw.get("pending", [])),
+                            "quarantined": len(raw.get("quarantined", [])),
+                            "items": {k: raw.get(k, []) for k in ("ready", "pending", "quarantined")},
+                            "statePath": sp,
+                        }
+                    except Exception:
+                        inbox = {"ready": 0, "pending": 0, "quarantined": 0,
+                                 "items": {}, "statePath": sp, "error": "unreadable"}
+                    break
+            for logp in ("/home/will/social-auto-upload/logs/offload.log",
+                         "/app/logs/offload.log"):
+                if os.path.exists(logp):
+                    for line in reversed(open(logp, encoding="utf-8", errors="replace").read().splitlines()):
+                        if "offload done" in line and "local videoFile=" in line:
+                            import re
+                            m = re.search(r"rc=(\d+)", line)
+                            m2 = re.search(r"local videoFile=(\d+)", line)
+                            offload = {
+                                "lastRun": line[:25],
+                                "exitCode": int(m.group(1)) if m else None,
+                                "localFiles": int(m2.group(1)) if m2 else None,
+                                "healthy": (int(m.group(1)) == 0) if m else None,
+                            }
+                            break
+                    break
+            return {
+                "publish": counts,
+                "inbox": inbox,
+                "offload": offload,
+            }
+        except Exception as exc:  # noqa: BLE001
+            return error_payload(exc)
