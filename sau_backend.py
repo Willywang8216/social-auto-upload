@@ -6556,7 +6556,43 @@ def jobs_run():
     return jsonify({"code": 200, "msg": "drained", "data": None}), 200
 
 
+# Publish target account resolution: publish_job_targets.account_ref stores
+# "account:<id>" while the UI should show the human-readable account name
+# (e.g. "NW_IG" instead of "account:72"). We resolve the name again after a
+# job list/detail/calendar response so the queue and calendar columns read
+# naturally without carrying account rows into unrelated paths.
+_account_name_cache: dict[str, str] = {}
+
+
+def _account_display_name(account_ref: str) -> str:
+    """Map ``account:N`` / ``account:<id>`` refs to a readable account name.
+
+    Falls back to the raw ref unchanged when the account row is missing or
+    the ref does not follow the ``account:`` structured form (e.g. a legacy
+    cookie-path ref). Nested dict payloads are handled by callers.
+    """
+    if not account_ref or not isinstance(account_ref, str):
+        return account_ref or ""
+    if not account_ref.startswith("account:"):
+        return account_ref
+    key = account_ref
+    cached = _account_name_cache.get(key)
+    if cached:
+        return cached
+    try:
+        account_id = int(account_ref.split(":", 1)[1])
+        account = profile_registry.get_account(account_id, db_path=_current_db_path())
+        label = (account.nickname or account.account_name or "").strip() or account_ref
+    except Exception:  # noqa: BLE001 — any miss falls back to the raw ref
+        label = account_ref
+    if len(_account_name_cache) < 4096:
+        _account_name_cache[key] = label
+    return label
+
+
 def _job_to_payload(job: job_runtime.Job) -> dict:
+    payload = job.payload
+    targets = None
     return {
         "id": job.id,
         "idempotencyKey": job.idempotency_key,
@@ -6569,8 +6605,8 @@ def _job_to_payload(job: job_runtime.Job) -> dict:
         "createdAt": job.created_at,
         "startedAt": job.started_at,
         "finishedAt": job.finished_at,
-        "payload": job.payload,
-        "title": job_runtime._action_title(job.payload),
+        "payload": payload,
+        "title": job_runtime._action_title(payload),
     }
 
 
@@ -6586,7 +6622,8 @@ def _scheduled_target_payload(target: dict, job_meta: dict) -> dict:
         "platform": job_meta.get("platform"),
         "profileId": job_meta.get("profile_id"),
         "title": job_meta.get("title") or "Untitled",
-        "accountRef": target["account_ref"],
+        "accountRef": _account_display_name(target["account_ref"]),
+        "accountName": _account_display_name(target["account_ref"]),
         "fileRef": target["file_ref"],
         "scheduleAt": target["schedule_at"],
         "status": target["status"],
@@ -6669,10 +6706,12 @@ def jobs_target_resubmit(target_id):
 
 
 def _target_to_payload(target: job_runtime.Target) -> dict:
+    display = _account_display_name(target.account_ref)
     return {
         "id": target.id,
         "jobId": target.job_id,
-        "accountRef": target.account_ref,
+        "accountRef": display,
+        "accountName": display,
         "fileRef": target.file_ref,
         "scheduleAt": target.schedule_at,
         "status": target.status,
