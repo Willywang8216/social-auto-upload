@@ -460,3 +460,77 @@ class CalendarMcpToolTests(_McpTestCase):
         out = self._call(tool="jobs_target_cancel", target_id=999,
                          db_path=str(self.db_path))
         self.assertEqual(out["error"], "not_found")
+
+
+class SystemHealthMcpToolTests(_McpTestCase):
+    def test_system_health_returns_counters(self) -> None:
+        from myUtils import jobs as job_runtime
+        spec = job_runtime.JobSpec(
+            platform="douyin", payload={"title": "t"},
+            targets=[("acct-1", "file-1", None)], idempotency_key="health-1",
+        )
+        job_runtime.enqueue_job(spec, db_path=self.db_path)
+        out = self._call(tool="jobs_system_health", db_path=str(self.db_path))
+        self.assertIn("publish", out)
+        self.assertIn("inbox", out)
+        self.assertIn("offload", out)
+        # publish counters read from the scratch DB:
+        targets = out["publish"]["targets"]
+        self.assertEqual(targets.get("pending"), 1)
+
+
+class InboxMcpToolTests(_McpTestCase):
+    """inbox_list / inbox_approve / inbox_reject against a scratch inbox state."""
+
+    def _seed_inbox(self):
+        import json, os, pathlib
+        import myUtils.inbox_ops as inbox
+        d = os.path.join(self._tmp.name, "inbox")
+        pathlib.Path(d).mkdir(parents=True, exist_ok=True)
+        os.environ["SAU_INBOX"] = d
+        os.environ["SAU_WATCH_STATE"] = os.path.join(d, "state.json")
+        state = {
+            "version": 1,
+            "processed": {},
+            "ready": [{
+                "id": "nw:pilot:2026-09-10T10:00:00",
+                "persona": "nw", "profileIds": [1], "topic": "pilot",
+                "sfwFlag": "sfw", "kind": "video",
+                "sourcePath": "/home/will/sau-inbox/nw/video/pilot_sfw.mp4",
+                "brief": "第一支全自動 pipeline 測試",
+                "status": "ready", "createdAt": "2026-09-10T10:00:00",
+                "needsTitleGeneration": True,
+            }],
+            "pending": [], "quarantined": [],
+        }
+        pathlib.Path(os.path.join(d, "state.json")).write_text(
+            json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        # reload the module paths so INBOX_DIR/STATE_PATH track the env
+        return inbox
+
+    def _reload(self):
+        import importlib
+        import myUtils.inbox_ops as inbox_mod
+        inbox_mod = importlib.reload(inbox_mod)
+        return inbox_mod
+
+    def test_inbox_list_retiles(self) -> None:
+        self._seed_inbox()
+        inbox_mod = self._reload()
+        lists = inbox_mod.list_items()
+        self.assertEqual(len(lists["ready"]), 1)
+        self.assertEqual(lists["ready"][0]["persona"], "nw")
+
+    def test_inbox_approve_reject_roundtrip(self) -> None:
+        inbox = self._seed_inbox()
+        inbox_mod = self._reload()
+        # reject first
+        entry = inbox_mod.reject("nw:pilot:2026-09-10T10:00:00", reason="test")
+        self.assertEqual(entry["status"], "quarantined")
+        # approve the quarantined item (reject moved it out of ready; the
+        # unit path used by publish is approve-from-ready; test ready path
+        # by re-seeding).
+        self._seed_inbox()
+        inbox_mod2 = self._reload()
+        ok = inbox_mod2.approve("nw:pilot:2026-09-10T10:00:00")
+        self.assertEqual(ok["status"], "processed")

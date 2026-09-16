@@ -18,6 +18,7 @@ from mcp_server.tools import (
     accounts,
     discovery,
     files,
+    inbox,
     jobs,
     profiles,
     publish,
@@ -29,9 +30,10 @@ SERVER_NAME = "sau-mcp"
 SERVER_VERSION = "0.1.0"
 SERVER_INSTRUCTIONS = (
     "social-auto-upload MCP server. Manage profiles, accounts, publish "
-    "templates, and publish jobs for a multi-platform social media uploader. "
-    "Use `whoami` first to confirm the workspace, then drive CRUD via "
-    "`accounts_*`, `profiles_*`, and `publish_*` tools."
+    "templates, publish jobs, and the SAU-Inbox phone-first queue for a "
+    "multi-platform social media uploader. Use `whoami` first to confirm the "
+    "workspace, then drive CRUD via `accounts_*`, `profiles_*`, `publish_*`, "
+    "`jobs_*`, and `inbox_*` tools."
 )
 
 
@@ -52,6 +54,7 @@ def build_server() -> FastMCP:
     files.register(mcp)
     jobs.register(mcp)
     publish.register(mcp)
+    inbox.register(mcp)
     discovery.register(mcp)
     return mcp
 
