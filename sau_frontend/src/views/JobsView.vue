@@ -42,7 +42,7 @@
         </el-table-column>
         <el-table-column label="標題">
           <template #default="scope">
-            {{ scope.row.payload?.title || '—' }}
+            {{ scope.row.title || scope.row.payload?.title || '—' }}
           </template>
         </el-table-column>
         <el-table-column label="進度" width="200">

@@ -6570,6 +6570,7 @@ def _job_to_payload(job: job_runtime.Job) -> dict:
         "startedAt": job.started_at,
         "finishedAt": job.finished_at,
         "payload": job.payload,
+        "title": job_runtime._action_title(job.payload),
     }
 
 

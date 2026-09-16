@@ -345,6 +345,50 @@ def get_job_by_idempotency_key(key: str, *, db_path: Path | None = None) -> Job 
 LIST_JOBS_MAX_LIMIT = 500
 
 
+def _action_title(payload: dict) -> str:
+    """Derive a human-readable job/target title from a publish payload.
+
+    Resolution order: ``payload.title`` → ``payload.message`` → a single
+    ``draft.message`` (the publish-center caption) → the first artifact's
+    basename → "Untitled". Handles two legacy shapes the pipeline produced:
+    ``draft.message`` being a stringified JSON object (old jobs stored the whole
+    generated draft as a JSON *string*) and ``payload.message`` holding the same
+    stringified object.
+    """
+    if not isinstance(payload, dict):
+        return "Untitled"
+
+    def _snip(value) -> str:
+        if isinstance(value, dict):
+            value = value.get("message") or ""
+        text = str(value or "").strip()
+        if not text or text.startswith("{") or text.startswith("["):
+            return ""
+        return text if len(text) <= 80 else text[:80] + "..."
+
+    for key in ("title", "message", "scheduledAt"):
+        text = _snip(payload.get(key))
+        if text:
+            return text
+    draft = payload.get("draft")
+    if isinstance(draft, dict):
+        text = _snip(draft.get("message"))
+        if text:
+            return text
+    artifacts = payload.get("artifacts") or []
+    if isinstance(artifacts, list) and artifacts:
+        first = artifacts[0]
+        if isinstance(first, dict):
+            local = str(first.get("local_path") or "").strip()
+            if local:
+                return local.rsplit("/", 1)[-1] or "Untitled"
+        else:
+            name = str(first or "").strip()
+            if name:
+                return name.rsplit("/", 1)[-1] or "Untitled"
+    return "Untitled"
+
+
 def list_jobs(
     *,
     status: str | None = None,
@@ -773,29 +817,11 @@ def list_scheduled_targets(
             except (json.JSONDecodeError, AttributeError):
                 payload = {}
 
-            # Title resolution: explicit title → draft.message (truncated) →
-            # artifact basename → fallback. The publish-center path stores the
-            # caption in draft.message and media in artifacts[], so this covers
-            # every job shape currently produced.
-            title = str(payload.get("title") or "").strip()
-            if not title:
-                try:
-                    draft = payload.get("draft") or {}
-                    title = str(draft.get("message") or "").strip()
-                    if len(title) > 80:
-                        title = title[:80] + "…"
-                except AttributeError:
-                    title = ""
-            if not title:
-                artifacts = payload.get("artifacts") or []
-                if artifacts and isinstance(artifacts, list):
-                    first = artifacts[0] if artifacts else None
-                    local = str(((first or {}).get("local_path") or "") or "")
-                    if local:
-                        title = local.rsplit("/", 1)[-1] or "Untitled"
-            if not title:
-                title = "Untitled"
-
+            # Title resolution: explicit title → top-level message → a single
+            # draft.message → artifact basename → fallback. Each source is
+            # snipped via _action_title, which also skips stringified-JSON
+            # legacy captions (see its docstring).
+            title = _action_title(payload)
             job_meta = {
                 "platform": target.pop("platform"),
                 "profile_id": target.pop("profile_id"),

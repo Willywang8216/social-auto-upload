@@ -433,3 +433,41 @@ class TargetMutationTests(unittest.TestCase):
             )
         rows = jobs.list_scheduled_targets(db_path=self.db_path)
         self.assertEqual(rows, [])  # no crash; no calendar rows to display
+
+
+class ActionTitleTests(unittest.TestCase):
+    """_action_title must turn every legacy payload shape into a readable
+    title, skipping stringified-JSON captions that old jobs stored."""
+
+    def test_explicit_title_wins(self) -> None:
+        self.assertEqual(jobs._action_title({"title": "Hello"}), "Hello")
+
+    def test_top_level_message_falls_back(self) -> None:
+        self.assertEqual(jobs._action_title({"title": None, "message": "Hi there"}),
+                         "Hi there")
+
+    def test_draft_message_used(self) -> None:
+        self.assertEqual(
+            jobs._action_title({"title": None, "draft": {"message": "Caption text"}}),
+            "Caption text")
+
+    def test_stringified_json_draft_is_skipped(self) -> None:
+        payload = {"draft": {"message": '{"message": "old json caption"}', "charCount": 7}}
+        self.assertEqual(jobs._action_title(payload), "Untitled")
+
+    def test_stringified_json_top_message_is_skipped(self) -> None:
+        payload = {"message": '{"message": "old json caption"}', "draft": {"message": "x"}}
+        # draft fallback is usable even when top-level message is junk.
+        self.assertEqual(jobs._action_title(payload), "x")
+
+    def test_long_message_truncated(self) -> None:
+        long = "x" * 120
+        self.assertEqual(jobs._action_title({"message": long}), "x" * 80 + "...")
+
+    def test_artifact_basename_fallback(self) -> None:
+        payload = {"artifacts": [{"local_path": "/app/videoFile/_batch/test.mp4"}]}
+        self.assertEqual(jobs._action_title(payload), "test.mp4")
+
+    def test_empty_payload_untitled(self) -> None:
+        self.assertEqual(jobs._action_title({}), "Untitled")
+        self.assertEqual(jobs._action_title(None), "Untitled")

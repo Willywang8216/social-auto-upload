@@ -388,3 +388,75 @@ class PublishToolTests(_McpTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CalendarMcpToolTests(_McpTestCase):
+    """Calendar + per-target mutation tools over the MCP transport."""
+
+    def _job(self, payload, targets=None, key="k"):
+        from myUtils import jobs as job_runtime
+        spec = job_runtime.JobSpec(
+            platform="douyin",
+            payload=payload,
+            targets=targets or [("acct-1", "file-1", None)],
+            idempotency_key=key,
+        )
+        return job_runtime.enqueue_job(spec, db_path=self.db_path)
+
+    def test_jobs_calendar_lists_only_scheduled(self) -> None:
+        from myUtils import jobs as job_runtime
+        from datetime import datetime, timedelta, timezone
+        future = (datetime.now(tz=timezone.utc).replace(tzinfo=None)
+                  + timedelta(hours=2)).isoformat(timespec="seconds")
+        job = self._job(
+            {"title": "Scheduled vid", "draft": {"message": "caption"}},
+            targets=[("acct-1", "file-1", future)],
+            key="cal-1",
+        )
+        items = self._call(tool="jobs_calendar", db_path=str(self.db_path))
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["targetId"], job.id)
+        self.assertEqual(items[0]["status"], job_runtime.TARGET_PENDING)
+        self.assertEqual(items[0]["title"], "Scheduled vid")
+
+    def test_jobs_calendar_excludes_transient(self) -> None:
+        # No schedule_at => not a calendar row.
+        self._job({"title": "immediate"}, key="cal-2")
+        items = self._call(tool="jobs_calendar", db_path=str(self.db_path))
+        self.assertEqual(len(items), 0)
+
+    def test_target_reschedule_cancel_resubmit_roundtrip(self) -> None:
+        from myUtils import jobs as job_runtime
+        from datetime import datetime, timedelta, timezone
+        future = (datetime.now(tz=timezone.utc).replace(tzinfo=None)
+                  + timedelta(hours=2)).isoformat(timespec="seconds")
+        job = self._job(
+            {"title": "X"},
+            targets=[("acct-1", "file-1", future)],
+            key="cal-3",
+        )
+        target_id = job.id  # single-target job: target id == job id
+
+        # Reschedule via MCP.
+        later = (datetime.now(tz=timezone.utc).replace(tzinfo=None)
+                 + timedelta(days=3)).isoformat(timespec="seconds")
+        res = self._call(tool="jobs_target_reschedule",
+                         target_id=target_id, schedule_at=later,
+                         db_path=str(self.db_path))
+        self.assertEqual(res["status"], job_runtime.TARGET_PENDING)
+        self.assertEqual(res["scheduleAt"], later)
+
+        # Cancel via MCP.
+        cancelled = self._call(tool="jobs_target_cancel",
+                               target_id=target_id, db_path=str(self.db_path))
+        self.assertEqual(cancelled["status"], job_runtime.TARGET_CANCELLED)
+
+        # Resubmit via MCP (cancelled -> pending).
+        resub = self._call(tool="jobs_target_resubmit",
+                           target_id=target_id, db_path=str(self.db_path))
+        self.assertEqual(resub["status"], job_runtime.TARGET_PENDING)
+
+    def test_target_mutation_missing_returns_not_found(self) -> None:
+        out = self._call(tool="jobs_target_cancel", target_id=999,
+                         db_path=str(self.db_path))
+        self.assertEqual(out["error"], "not_found")
