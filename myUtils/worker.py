@@ -802,6 +802,44 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             continue
 
 
+def _now_utc_naive() -> datetime:
+    """Current time as a tz-naive UTC datetime.
+
+    Matches the shape ``jobs._now_iso`` writes and ``publish_orchestrator``
+    stores in ``publish_job_targets.schedule_at``, so the two compare
+    chronologically without mixing offset-aware and offset-naive datetimes.
+    """
+    return datetime.now(tz=timezone.utc).replace(tzinfo=None)
+
+
+def _publish_date_for_target(target: jobs.Target) -> "datetime | int":
+    """The ``publish_date`` to hand an uploader for a claimed target.
+
+    A claimed target is, by construction, already due: ``jobs._claimable_clause``
+    only hands out targets whose ``schedule_at`` (tz-naive UTC, same shape as
+    ``jobs._now_iso``) has arrived. Forwarding that now-past datetime to an
+    uploader tells the platform to *schedule* a post in the past, which every
+    uploader's ``validate_publish_date`` refuses — X rejects it outright with
+    "定时发布时间必须晚于当前时间", which silently failed every staggered X target
+    from 2026-09-12 onwards.
+
+    The worker publishes when the time comes, so return the no-scheduling
+    sentinel (``0``) and let the post go out now. A target with no
+    ``schedule_at``, or one that somehow has not fallen due yet, is passed
+    through unchanged.
+    """
+    schedule_at = target.schedule_at or 0
+    if isinstance(schedule_at, str) and schedule_at:
+        try:
+            schedule_at = datetime.fromisoformat(schedule_at)
+        except ValueError:
+            schedule_at = 0
+
+    if isinstance(schedule_at, datetime) and schedule_at <= _now_utc_naive():
+        return 0
+    return schedule_at
+
+
 async def _run_platform_upload(
     platform: str,
     payload: dict,
@@ -818,10 +856,7 @@ async def _run_platform_upload(
     shaping.
     """
 
-    schedule_at = target.schedule_at or 0
-    if isinstance(schedule_at, str) and schedule_at:
-        from datetime import datetime
-        schedule_at = datetime.fromisoformat(schedule_at)
+    schedule_at = _publish_date_for_target(target)
 
     title = payload.get("title", "")
     tags = payload.get("tags", []) or []
