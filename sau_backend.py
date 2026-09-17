@@ -3248,6 +3248,36 @@ def _is_video_file(path: str | Path) -> bool:
     return Path(path).suffix.lower() in VIDEO_SUFFIXES
 
 
+def _shrink_for_publish(source_path: Path, campaign_id: int | None = None) -> Path:
+    """Compress an oversized source video before upload (Google Drive originals).
+
+    Re-encodes with the project's publishing profile (1080x1920, CRF ~22,
+    <=30fps, AAC 128k) when the file is over ~150MB or exceeds the profile
+    dimensions/fps; small or already-conforming files are copied unchanged.
+    Output lands in the campaign workspace so the original is never touched.
+    Best-effort: any ffmpeg failure falls back to the source path rather than
+    blocking the publish.
+    """
+    try:
+        import myUtils.media_prep as media_prep
+
+        if not media_prep._ensure_available():
+            return source_path
+        out_dir = media_pipeline.build_campaign_workspace(campaign_id) if campaign_id else source_path.parent
+        out = media_prep.shrink(source_path, out_dir, threshold_mb=150)
+        if out and Path(out).exists() and Path(out).stat().st_size > 0:
+            logging.getLogger(__name__).info(
+                "Pre-publish media prep: %s -> %s (%.1fMB)",
+                source_path, out, Path(out).stat().st_size / (1024 * 1024),
+            )
+            return Path(out)
+    except Exception as exc:  # noqa: BLE001 — never block publish on prep
+        logging.getLogger(__name__).warning(
+            "Pre-publish media prep failed for %s: %s", source_path, exc,
+        )
+    return source_path
+
+
 def _derive_watermark_spec(profile: profile_registry.Profile, data: dict) -> dict:
     watermark = data.get("watermark")
     if watermark is None:
@@ -3394,6 +3424,12 @@ def _prepare_campaign_media_artifacts(
                     "Intro/outro concat failed for campaign %d, file %s: %s",
                     campaign_id, source_path, exc,
                 )
+
+        # Pre-publish compression: shrink oversized source videos before
+        # watermarking/upload. This is where large GDrive originals get
+        # re-encoded to the publishing profile (1080x1920, CRF~22, <=30fps).
+        if _is_video_file(publish_path):
+            publish_path = _shrink_for_publish(publish_path, campaign_id)
 
         if watermark_spec and not tiktok_only and _is_image_file(source_path):
             artifact_kind = "watermarked_image"

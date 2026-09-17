@@ -44,6 +44,11 @@ FFPROBE = "ffprobe"
 _TARGET_ASPECT = TARGET_W / TARGET_H  # 0.5625 (9:16 vertical)
 
 
+def _ensure_available() -> bool:
+    """Cheap probe: both ffmpeg and ffprobe resolve on PATH (no subprocess)."""
+    return bool(shutil.which(FFMPEG) and shutil.which(FFPROBE))
+
+
 def _ensure_tool(tool: str) -> str:
     """Resolve an ffmpeg-family binary lazily, or raise when unavailable."""
     exe = shutil.which(tool)
