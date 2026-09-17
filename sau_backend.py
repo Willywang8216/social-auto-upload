@@ -8834,6 +8834,125 @@ def inbox_item_reject(item_id):
                     "data": inbox_ops.item_payload(entry)}), 200
 
 
+def _inbox_publish_payload(item, body=None, *, db_path=None, resolve_video_file_path=None):
+    """Build the ``submit_publish`` inputs for a ready inbox item.
+
+    Pure mapping helper (no Flask, no I/O beyond an existence check when a
+    path resolver is supplied): given a ready inbox item entry and an
+    optional request body, return ``(profile_ids, media_paths, brief,
+    schedule)``.
+
+    * ``profile_ids`` comes from the item's ``profileIds`` list — for a
+      "both" item that is ``[1, 3]`` (nw + sw). A body ``{"profileIds": [...]}``
+      may override.
+    * ``media_paths`` maps the item's ``sourcePath`` through
+      ``resolve_video_file_path_safely`` when that succeeds; an absolute
+      ``/app/sau-inbox``-mounted path that exists is passed through as-is.
+    * ``brief`` is the item ``brief`` unless the body carries an override;
+      ``schedule`` is the body's ``schedule`` dict or ``None`` (immediate).
+    """
+    data = body if isinstance(body, dict) else {}
+
+    profile_ids = [int(v) for v in (data.get("profileIds") or item.get("profileIds") or []) if v]
+    if not profile_ids:
+        raise ValueError("Inbox item has no profileIds — cannot publish")
+
+    source_path = str(item.get("sourcePath") or "").strip()
+    if not source_path:
+        raise ValueError("Inbox item has no sourcePath — cannot publish")
+
+    resolved = None
+    if resolve_video_file_path is not None:
+        resolved = resolve_video_file_path(source_path)
+    elif db_path is not None:
+        try:
+            from sau_backend import _resolve_video_file_path_safely
+            resolved = _resolve_video_file_path_safely(source_path)
+        except Exception:  # noqa: BLE001
+            resolved = None
+    if resolved is not None and str(resolved):
+        media_path = str(resolved)
+    elif Path(source_path).is_absolute():
+        # Fall back to the raw path when it is absolute (host path mounted
+        # at /app/sau-inbox in the container — the file may not exist locally
+        # on this machine, let _ensure_file_record_for_path record it anyway).
+        media_path = source_path
+    else:
+        media_path = source_path
+
+    brief = str(data.get("brief") or item.get("brief") or "").strip()
+    schedule = data.get("schedule")
+    return profile_ids, [media_path], brief, schedule
+
+
+@app.route("/api/inbox/items/<string:item_id>/publish", methods=["POST"])
+def inbox_item_publish(item_id):
+    """Publish a ready inbox item through the publish-center path.
+
+    Convenience for the one-click inbox flow: takes the ready item (which
+    carries ``profileIds`` — ``[1, 3]`` for a "both" persona item) and pushes
+    it through the same ``publish_orchestrator.submit_publish`` path the
+    publish center uses, with ``schedule`` ``None`` (immediate) unless the
+    body overrides it.
+
+    Body: optional ``{"profileIds": [...], "brief": "...", "schedule": {...}}``.
+    Returns ``{code:200, data:{jobs:[...], campaignIds:[...]}}``. Missing item
+    -> 404, orchestration error -> 400. Does not move the item between inbox
+    lists — the caller (frontend) drives approve/reject separately.
+    """
+    from myUtils import inbox_ops
+    data = request.get_json(silent=True) or {}
+    item = None
+    try:
+        items = inbox_ops.list_items()
+        ready = items.get("ready", [])
+        item = next((e for e in ready if str(e.get("id")) == str(item_id)), None)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("inbox publish: read state failed")
+        return jsonify({"code": 404, "msg": "Inbox item not found",
+                        "data": None}), 404
+    if item is None:
+        return jsonify({"code": 404, "msg": "Inbox item not found",
+                        "data": None}), 404
+
+    db_path = _current_db_path()
+    try:
+        profile_ids, media_file_paths, brief, schedule = _inbox_publish_payload(
+            item, data, db_path=db_path,
+        )
+        result = publish_orchestrator.submit_publish(
+            profile_ids=profile_ids,
+            selected_account_ids=None,
+            media_file_paths=media_file_paths,
+            brief=brief,
+            options={},
+            schedule=schedule,
+            account_drafts=None,
+            tiktok_post_settings=None,
+            db_path=db_path,
+            prepare_artifacts=_prepare_campaign_media_artifacts,
+            generate_account_draft=_generate_account_draft,
+            ensure_file_record_for_path=_ensure_file_record_for_path,
+            artifact_payloads_for_platform=_artifact_payloads_for_platform,
+            job_to_payload=_job_to_payload,
+        )
+    except LookupError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).exception("inbox publish failed")
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    if result.jobs:
+        _start_worker_drain_thread()
+    return jsonify({
+        "code": 200,
+        "msg": "queued",
+        "data": {
+            "campaignIds": result.campaign_ids,
+            "jobs": result.jobs,
+        },
+    }), 200
+
+
 @app.route("/api/system/health", methods=["GET"])
 def system_health():
     """System health summary for the publish pipeline.
