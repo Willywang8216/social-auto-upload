@@ -18,6 +18,7 @@ const tabs = [
   { id: 'compose',  label: 'Compose',  path: '/publish/compose' },
   { id: 'calendar', label: 'Calendar', path: '/publish/calendar' },
   { id: 'queue',   label: 'Queue',   path: '/publish/queue', badge: '12' },
+  { id: 'inbox',   label: '傳入佇列',  path: '/publish/inbox' },
 ]
 </script>
 

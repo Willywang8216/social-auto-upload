@@ -8746,5 +8746,137 @@ def telegram_available_targets():
     return jsonify({"code": 200, "data": items, "msg": "ok"}), 200
 
 
+# ---------------------------------------------------------------------------
+# Inbox + system health routes
+# ---------------------------------------------------------------------------
+
+@app.route("/api/inbox", methods=["GET"])
+def inbox_list():
+    """List SAU-inbox items grouped by status (ready / pending / quarantined).
+
+    Missing or corrupt state files resolve to empty lists (inbox_ops.load_state
+    is tolerant), never an error.
+    """
+    from myUtils import inbox_ops
+    items = inbox_ops.list_items()
+    data = {
+        "ready": [inbox_ops.item_payload(e) for e in items.get("ready", [])],
+        "pending": [inbox_ops.item_payload(e) for e in items.get("pending", [])],
+        "quarantined": [inbox_ops.item_payload(e) for e in items.get("quarantined", [])],
+    }
+    return jsonify({"code": 200, "msg": "ok", "data": data}), 200
+
+
+@app.route("/api/inbox/items/<string:item_id>/approve", methods=["POST"])
+def inbox_item_approve(item_id):
+    """Approve a ready inbox item (moves it to processed)."""
+    from myUtils import inbox_ops
+    try:
+        entry = inbox_ops.approve(item_id)
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Inbox item not found",
+                        "data": None}), 404
+    return jsonify({"code": 200, "msg": "approved",
+                    "data": inbox_ops.item_payload(entry)}), 200
+
+
+@app.route("/api/inbox/items/<string:item_id>/reject", methods=["POST"])
+def inbox_item_reject(item_id):
+    """Reject a ready inbox item (moves it to the quarantined list).
+
+    Optional JSON body: {"reason": "..."}.
+    """
+    from myUtils import inbox_ops
+    data = request.get_json(silent=True) or {}
+    reason = data.get("reason") if isinstance(data, dict) else None
+    try:
+        entry = inbox_ops.reject(item_id, reason=reason)
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Inbox item not found",
+                        "data": None}), 404
+    return jsonify({"code": 200, "msg": "rejected",
+                    "data": inbox_ops.item_payload(entry)}), 200
+
+
+@app.route("/api/system/health", methods=["GET"])
+def system_health():
+    """System health summary for the publish pipeline.
+
+    Publishes: per-status counts of publish_job_targets / publish_jobs read
+    from the current SQLite DB. Offload/digest come from the latest matching
+    line in /app/logs (then /home/will/social-auto-upload/logs). Every read is
+    wrapped so a missing file yields None/0 instead of a 500.
+    """
+    import re as _re
+    import sqlite3 as _sqlite
+    from myUtils import inbox_ops
+
+    def _publish_counts() -> dict:
+        out = {"targetsByStatus": {}, "jobsByStatus": {}}
+        try:
+            db_path = _current_db_path()
+            with _sqlite.connect(str(db_path)) as conn:
+                out["targetsByStatus"] = dict(conn.execute(
+                    "SELECT status, COUNT(*) FROM publish_job_targets GROUP BY status"
+                ).fetchall())
+                out["jobsByStatus"] = dict(conn.execute(
+                    "SELECT status, COUNT(*) FROM publish_jobs GROUP BY status"
+                ).fetchall())
+        except Exception:  # noqa: BLE001 — missing/unreadable DB -> empty counts
+            pass
+        return out
+
+    def _inbox_counts() -> dict:
+        try:
+            items = inbox_ops.list_items()
+            return {
+                "ready": len(items.get("ready", [])),
+                "pending": len(items.get("pending", [])),
+                "quarantined": len(items.get("quarantined", [])),
+            }
+        except Exception:  # noqa: BLE001
+            return {"ready": 0, "pending": 0, "quarantined": 0}
+
+    _LOG_DIRS = ("/app/logs", "/home/will/social-auto-upload/logs")
+
+    def _last_matching(filename: str, needles: tuple[str, ...], prefix_len: int) -> str | None:
+        for base in _LOG_DIRS:
+            logp = Path(base) / filename
+            try:
+                with open(logp, encoding="utf-8", errors="replace") as fh:
+                    for line in reversed(fh.read().splitlines()):
+                        if all(n in line for n in needles):
+                            return line[:prefix_len]
+            except OSError:
+                continue
+            # First existing log dir wins: if the file exists but has no
+            # matching line (or is empty), don't fall through to the other dir.
+            return None
+        return None
+
+    offload = {"lastRun": None, "exitCode": None, "localFiles": None, "healthy": None}
+    offload_run_line = _last_matching("offload.log", ("offload done", "local videoFile="), 1000)
+    if offload_run_line:
+        offload["lastRun"] = offload_run_line[:25]
+        mrc = _re.search(r"rc=(\d+)", offload_run_line)
+        mlocal = _re.search(r"local videoFile=(\d+)", offload_run_line)
+        offload["exitCode"] = int(mrc.group(1)) if mrc else None
+        offload["localFiles"] = int(mlocal.group(1)) if mlocal else None
+        offload["healthy"] = (offload["exitCode"] == 0) if offload["exitCode"] is not None else None
+
+    digest = {"lastSent": None}
+    digest_line = _last_matching("digest.log", ("digest sent=",), 1000)
+    if digest_line:
+        digest["lastSent"] = digest_line[:26]
+
+    data = {
+        "publish": _publish_counts(),
+        "inbox": _inbox_counts(),
+        "offload": offload,
+        "digest": digest,
+    }
+    return jsonify({"code": 200, "msg": "ok", "data": data}), 200
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5409, threaded=True)

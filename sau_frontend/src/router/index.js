@@ -23,6 +23,7 @@ const TikTokReviewStatus = () => import('../views/TikTokReviewStatus.vue')
 const OAuthReviewStatus  = () => import('../views/OAuthReviewStatus.vue')
 const Calendar           = () => import('../views/CalendarView.vue')
 const Queue              = () => import('../views/QueueView.vue')
+const Inbox              = () => import('../views/InboxView.vue')
 const Settings           = () => import('../views/SettingsView.vue')
 const Help               = () => import('../views/HelpView.vue')
 const PrivacyPolicy      = () => import('../views/PrivacyPolicy.vue')
@@ -88,6 +89,7 @@ const routes = [
       { path: 'compose',    component: PublishCenter, meta: { title: 'Publish Center — Socialupload' } },
       { path: 'calendar',   component: Calendar,       meta: { title: 'Calendar — Socialupload' } },
       { path: 'queue',      component: Queue,           meta: { title: 'Queue — Socialupload' } },
+      { path: 'inbox',      component: Inbox,           meta: { title: '傳入佇列 — Socialupload' } },
     ]
   },
 
