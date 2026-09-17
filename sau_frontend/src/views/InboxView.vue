@@ -1,5 +1,6 @@
 <template>
   <div class="inbox-view">
+    <SystemHealthCard />
     <div class="page-header">
       <h1>傳入佇列</h1>
       <div class="page-actions">
@@ -58,6 +59,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 
 import { inboxApi } from '@/api/inbox'
+import SystemHealthCard from '@/components/SystemHealthCard.vue'
 import InboxCard from '@/components/inbox/InboxCard.vue'
 
 const router = useRouter()
