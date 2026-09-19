@@ -72,7 +72,9 @@ class RedditAuthTests(unittest.TestCase):
             redirect_uri='https://example.com/cb',
             state='st',
         )
-        self.assertIn('scope=identity+submit+read', url)
+        self.assertIn(
+            'scope=identity+submit+read+edit+history+modconfig+account', url
+        )
 
     def test_build_state_token_is_url_safe(self):
         token = reddit_auth.build_state_token()
