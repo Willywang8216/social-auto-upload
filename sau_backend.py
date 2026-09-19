@@ -8885,6 +8885,53 @@ def _inbox_publish_payload(item, body=None, *, db_path=None, resolve_video_file_
     return profile_ids, [media_path], brief, schedule
 
 
+# Platforms that forbid full nudity / adult content. An NSFW inbox item must
+# never be published to these, and the inbox one-click path used to pass
+# ``selected_account_ids=None`` — which the orchestrator expands to *every*
+# enabled account of the profile. That silently sent nudity to IG/FB/Threads/
+# YouTube/TikTok. This allowlist keeps NSFW on the platforms that permit it
+# (bluesky / telegram / twitter / reddit).
+NSFW_RESTRICTED_PLATFORMS = frozenset(
+    {"instagram", "facebook", "threads", "youtube", "tiktok"}
+)
+
+
+def _inbox_selected_account_ids(
+    profile_ids: list[int],
+    sfw_flag: object,
+    *,
+    db_path=None,
+) -> list[int] | None:
+    """Account allowlist for an inbox publish, derived from the item's sfwFlag.
+
+    Returns ``None`` for an SFW (or unlabelled) item so the orchestrator keeps
+    its default of every enabled account on the profile. For an NSFW item it
+    returns the explicit ids of the enabled accounts whose platform allows
+    adult content — an empty result is an error rather than a silent fallback
+    to "all", because the orchestrator treats an empty list as "all".
+    """
+    if str(sfw_flag or "").strip().lower() != "nsfw":
+        return None
+    allowed: list[int] = []
+    for profile_id in profile_ids:
+        try:
+            accounts = profile_registry.list_accounts(
+                profile_id=profile_id, enabled=True, db_path=db_path,
+            )
+        except TypeError:
+            accounts = profile_registry.list_accounts(profile_id=profile_id, enabled=True)
+        for account in accounts:
+            if str(getattr(account, "platform", "")).strip().lower() in NSFW_RESTRICTED_PLATFORMS:
+                continue
+            allowed.append(int(account.id))
+    if not allowed:
+        raise ValueError(
+            "NSFW item has no adult-safe account on this profile — refusing to "
+            "fall back to publishing to every enabled account"
+        )
+    return allowed
+
+
 @app.route("/api/inbox/items/<string:item_id>/publish", methods=["POST"])
 def inbox_item_publish(item_id):
     """Publish a ready inbox item through the publish-center path.
@@ -8920,9 +8967,12 @@ def inbox_item_publish(item_id):
         profile_ids, media_file_paths, brief, schedule = _inbox_publish_payload(
             item, data, db_path=db_path,
         )
+        selected_account_ids = _inbox_selected_account_ids(
+            profile_ids, item.get("sfwFlag"), db_path=db_path,
+        )
         result = publish_orchestrator.submit_publish(
             profile_ids=profile_ids,
-            selected_account_ids=None,
+            selected_account_ids=selected_account_ids,
             media_file_paths=media_file_paths,
             brief=brief,
             options={},
