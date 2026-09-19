@@ -51,7 +51,10 @@ class _FakeContext:
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # Python 3.12 no longer creates an implicit current event loop, so the old
+    # asyncio.get_event_loop().run_until_complete() raises in CI. Drive each
+    # coroutine with asyncio.run() instead.
+    return asyncio.run(coro)
 
 
 class BlockHeavyMediaTests(unittest.TestCase):
