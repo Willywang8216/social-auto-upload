@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Iterator, Sequence
 
+from patchright.async_api import BrowserContext
 from patchright.async_api import Page
+from patchright.async_api import Route
 from patchright.async_api import async_playwright
 
 from utils.conf_defaults import DEBUG_MODE, LOCAL_CHROME_HEADLESS
@@ -470,6 +472,50 @@ async def is_topmost_at_center(locator) -> bool:
         )
     except Exception:  # noqa: BLE001
         return False
+# Media the compose page never needs. x.com serves its home timeline alongside
+# the composer, and that timeline autoplays multi-megabyte 4K clips from
+# video.twimg.com. Those downloads saturate the session so the composer never
+# becomes interactive in time; the observed failures were
+# "Page.goto: Timeout 30000ms exceeded" and "TargetClosedError" mid-typing, on
+# every X account. Aborting the heavy media leaves the page's own markup and
+# API calls intact while removing the bandwidth and decoder pressure.
+BLOCKED_MEDIA_RESOURCE_TYPES = frozenset({"media", "font"})
+BLOCKED_MEDIA_URL_PATTERNS = (
+    "video.twimg.com",
+    "pbs.twimg.com/amplify_video_thumb",
+)
+
+
+async def _block_heavy_media(context: BrowserContext) -> BrowserContext:
+    """Abort bulky video/font responses for the publish session.
+
+    Best effort: a routing failure must never fail the publish, so it is
+    swallowed and the unmodified context is returned.
+    """
+    async def _route(route: Route) -> None:
+        try:
+            request = route.request
+            if request.resource_type in BLOCKED_MEDIA_RESOURCE_TYPES:
+                await route.abort()
+                return
+            url = request.url
+            if any(pattern in url for pattern in BLOCKED_MEDIA_URL_PATTERNS):
+                await route.abort()
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await route.continue_()
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        await context.route("**/*", _route)
+    except Exception as exc:  # noqa: BLE001
+        twitter_logger.warning(f"X 影音資源封鎖失敗，改用原設定: {exc}")
+    return context
+
+
 
 
 async def wait_for_ready_post_button(
@@ -705,6 +751,7 @@ class TwitterThreadVideo(BaseVideoUploader):
             try:
                 context = await browser.new_context(storage_state=self.account_file)
                 context = await set_init_script(context)
+                context = await _block_heavy_media(context)
                 page = await context.new_page()
 
                 async def publish_step(
