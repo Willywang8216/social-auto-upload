@@ -15,7 +15,26 @@ except ModuleNotFoundError:  # pragma: no cover - environment-specific
 REDDIT_AUTHORIZE_URL = "https://www.reddit.com/api/v1/authorize"
 REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 REDDIT_ME_URL = "https://oauth.reddit.com/api/v1/me"
-DEFAULT_SCOPES = ("identity", "submit", "read")
+# Scopes the connect flow asks for. Beyond the read/submit minimum the
+# publisher needs, these three unlock operations that were previously
+# impossible from SAU once an account was connected:
+#   edit        delete or edit the account's own posts/comments, so a test
+#               post or a bad publish can be cleaned up programmatically
+#   history     read the account's own submitted/commented listings
+#   modconfig   set the u_<user> profile text (the profile is a subreddit the
+#               account moderates), i.e. the brand bio
+#   account     write account preferences, notably the over_18 NSFW flag
+# Reddit shows every scope on the consent screen, so this stays a deliberate
+# list rather than "everything".
+DEFAULT_SCOPES = (
+    "identity",
+    "submit",
+    "read",
+    "edit",
+    "history",
+    "modconfig",
+    "account",
+)
 CLIENT_ID_ENV = "REDDIT_CLIENT_ID"
 CLIENT_SECRET_ENV = "REDDIT_CLIENT_SECRET"
 REDIRECT_URI_ENV = "REDDIT_REDIRECT_URI"
