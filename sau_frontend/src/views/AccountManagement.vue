@@ -535,6 +535,7 @@ import { metaApi } from '@/api/meta'
 import { threadsApi } from '@/api/threads'
 import { youtubeApi } from '@/api/youtube'
 import { twitterApi } from '@/api/twitter'
+import { redditApi } from '@/api/reddit'
 import { icons } from '@/utils/icons'
 import {
   telegramFieldDefs,
@@ -576,7 +577,7 @@ const PLATFORM_META = {
 }
 
 /* Platforms that support OAuth (default auth method) */
-const OAUTH_PLATFORMS = ['tiktok', 'facebook', 'instagram', 'threads', 'youtube', 'twitter']
+const OAUTH_PLATFORMS = ['tiktok', 'facebook', 'instagram', 'threads', 'youtube', 'twitter', 'reddit']
 
 /* Platform-specific manual config field definitions, sourced from
    account-form-defs.js. Drives the "Configure manually" connect tab so
@@ -1032,9 +1033,9 @@ const openConnect = (initial = {}) => {
     paste: '',
     config: {},
   }
-  // Default to OAuth for platforms that support it; manual-capable platforms
-  // (bluesky, telegram, discord, reddit…) default to the "Configure manually"
-  // tab; only cookie-first platforms fall back to QR/browser login.
+  // Default to OAuth for platforms that support it; remaining manual-capable
+  // platforms (bluesky, telegram, discord…) default to the "Configure
+  // manually" tab; only cookie-first platforms fall back to QR/browser login.
   const platformKey = initial.platform || ''
   const hasManualFields = (platformManualFieldDefs[platformKey] || []).length > 0
   if (OAUTH_PLATFORMS.includes(platformKey)) {
@@ -1113,6 +1114,8 @@ const doOAuthConnect = async () => {
       oauthRes = await youtubeApi.startOAuth(payload)
     } else if (platform === 'twitter') {
       oauthRes = await twitterApi.startOAuth(payload)
+    } else if (platform === 'reddit') {
+      oauthRes = await redditApi.startOAuth(payload)
     }
 
     const authorizeUrl = oauthRes?.data?.authorizeUrl
