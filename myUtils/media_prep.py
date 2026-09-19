@@ -43,6 +43,69 @@ FFPROBE = "ffprobe"
 
 _TARGET_ASPECT = TARGET_W / TARGET_H  # 0.5625 (9:16 vertical)
 
+# Hard single-file media ceilings per platform, in decimal megabytes (10^6
+# bytes) — the unit platforms publish their caps in. See ``size_mb_decimal``
+# for why this must not be MiB.
+#
+#   bluesky     300 MB  app.bsky.embed.video lexicon, maxSize = 300000000
+#   instagram   250 MB  docs/api-rate-limits.md (feed and reels)
+#   twitter     512 MB  docs/api-rate-limits.md; the 140 s duration cap is
+#                       handled by the uploader's auto-split, not here
+#   threads    1024 MB  Meta threads docs (duration capped at 300 s)
+#   tiktok     4096 MB  uploader constant (duration capped at 60 min)
+#   telegram   2000 MB  MTProto user account (SAU sends as the user, not the
+#                       50 MB bot API)
+#   youtube  262144 MB  256 GB, effectively unbounded
+#   facebook   4096 MB  no published figure lives in this repo; generous
+PLATFORM_MAX_MB = {
+    "bluesky": 300,
+    "instagram": 250,
+    "twitter": 512,
+    "threads": 1024,
+    "tiktok": 4096,
+    "telegram": 2000,
+    "youtube": 262144,
+    "facebook": 4096,
+}
+
+# Used when a target platform is absent from the table (or the caller passed no
+# platforms at all). Deliberately the most conservative real cap we know.
+DEFAULT_MAX_MB = 300
+
+# Shrink when the file exceeds this fraction of the platform's cap. Re-encodes
+# land far below the estimate, so the headroom only has to absorb the gap
+# between a probed size and the bytes the platform actually counts.
+SIZE_HEADROOM = 0.98
+
+
+def size_mb_decimal(meta: dict) -> float:
+    """Size of ``meta`` in decimal megabytes.
+
+    Platforms publish caps in decimal MB (Bluesky's is exactly 300,000,000
+    bytes), so the comparison has to be decimal too: 300 MB is 286.1 MiB, and a
+    MiB-based check would wave through a 295 MiB file that the platform then
+    rejects. Accepts either the ``size_mb`` key or a raw ``size`` byte count.
+    """
+    if "size" in meta:
+        return float(meta.get("size") or 0) / 1_000_000
+    return float(meta.get("size_mb") or 0)
+
+
+def resolve_size_limit_mb(platforms=None) -> float:
+    """File-size trigger, in decimal MB, for a set of target platforms.
+
+    The strictest cap among ``platforms`` wins, so a campaign fanning out to
+    Bluesky and Threads shrinks to the Bluesky ceiling while a YouTube-only
+    campaign is left alone on size (its dimensions and fps are still checked).
+    """
+    if not platforms:
+        return DEFAULT_MAX_MB * SIZE_HEADROOM
+    caps = [
+        PLATFORM_MAX_MB.get(str(platform).strip().lower(), DEFAULT_MAX_MB)
+        for platform in platforms
+    ]
+    return min(caps) * SIZE_HEADROOM
+
 
 def _ensure_available() -> bool:
     """Cheap probe: both ffmpeg and ffprobe resolve on PATH (no subprocess)."""
@@ -165,22 +228,27 @@ def build_filters(meta: dict) -> str:
     return ",".join(parts)
 
 
-def should_shrink(meta: dict, threshold_mb: float = 150) -> bool:
+def should_shrink(
+    meta: dict,
+    threshold_mb: float | None = None,
+    *,
+    platforms=None,
+) -> bool:
     """Decide whether ``meta`` needs an ffmpeg pass before upload.
 
-    True when the file exceeds ``threshold_mb``, or when any dimension or the
-    frame rate exceed the publishing profile (``meta`` accepts either the
-    ``size_mb`` key or the raw ``size`` byte count).
+    True when the file exceeds the size trigger, or when any dimension or the
+    frame rate exceed the publishing profile. The size trigger is the strictest
+    cap among ``platforms`` — see ``resolve_size_limit_mb`` — so a Bluesky-bound
+    file is held to 300 MB while a YouTube-only one is not size-checked at all.
+    Pass ``threshold_mb`` to override the trigger outright.
     """
-    if "size_mb" in meta:
-        size_mb = float(meta.get("size_mb") or 0)
-    else:
-        size_mb = float(meta.get("size") or 0) / (1024 * 1024)
+    if threshold_mb is None:
+        threshold_mb = resolve_size_limit_mb(platforms)
     width = int(meta.get("width") or 0)
     height = int(meta.get("height") or 0)
     fps = float(meta.get("fps") or 0)
     return (
-        size_mb > float(threshold_mb)
+        size_mb_decimal(meta) > float(threshold_mb)
         or width > TARGET_W
         or height > TARGET_H
         or fps > MAX_FPS
@@ -201,13 +269,17 @@ def shrink(
     out_dir: str | Path,
     *,
     crf: int = CRF_DEFAULT,
-    threshold_mb: float = 150,
+    threshold_mb: float | None = None,
+    platforms=None,
 ) -> Path:
     """Compress ``src`` into ``out_dir/<stem>_pub.mp4`` when needed.
 
     Probes the source; when ``should_shrink`` is true a single-pass ffmpeg
     encode (the publishing profile above) writes the output MP4, otherwise the
     source is copied unchanged. Either way the returned Path exists.
+
+    ``platforms`` (or an explicit ``threshold_mb``) picks the size trigger; see
+    ``resolve_size_limit_mb``.
     """
     src_path = Path(src).expanduser().resolve()
     out_dir_path = Path(out_dir).expanduser().resolve()
@@ -215,7 +287,7 @@ def shrink(
     out_path = out_dir_path / f"{src_path.stem}_pub.mp4"
 
     meta = probe(src_path)
-    if not should_shrink(meta, threshold_mb=threshold_mb):
+    if not should_shrink(meta, threshold_mb=threshold_mb, platforms=platforms):
         shutil.copy2(src_path, out_path)
         return out_path
 

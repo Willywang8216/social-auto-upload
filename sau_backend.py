@@ -3248,12 +3248,19 @@ def _is_video_file(path: str | Path) -> bool:
     return Path(path).suffix.lower() in VIDEO_SUFFIXES
 
 
-def _shrink_for_publish(source_path: Path, campaign_id: int | None = None) -> Path:
+def _shrink_for_publish(
+    source_path: Path,
+    campaign_id: int | None = None,
+    selected_platforms: set[str] | None = None,
+) -> Path:
     """Compress an oversized source video before upload (Google Drive originals).
 
     Re-encodes with the project's publishing profile (1080x1920, CRF ~22,
-    <=30fps, AAC 128k) when the file is over ~150MB or exceeds the profile
-    dimensions/fps; small or already-conforming files are copied unchanged.
+    <=30fps, AAC 128k) when the file exceeds the size ceiling of the campaign's
+    target platforms or overruns the profile dimensions/fps; small or
+    already-conforming files are copied unchanged. The ceiling is the strictest
+    cap among ``selected_platforms`` (Bluesky 300 MB, Instagram 250 MB, …), so a
+    Bluesky-bound clip is shrunk while a YouTube-only one is not size-checked.
     Output lands in the campaign workspace so the original is never touched.
     Best-effort: any ffmpeg failure falls back to the source path rather than
     blocking the publish.
@@ -3264,7 +3271,7 @@ def _shrink_for_publish(source_path: Path, campaign_id: int | None = None) -> Pa
         if not media_prep._ensure_available():
             return source_path
         out_dir = media_pipeline.build_campaign_workspace(campaign_id) if campaign_id else source_path.parent
-        out = media_prep.shrink(source_path, out_dir, threshold_mb=150)
+        out = media_prep.shrink(source_path, out_dir, platforms=selected_platforms)
         if out and Path(out).exists() and Path(out).stat().st_size > 0:
             logging.getLogger(__name__).info(
                 "Pre-publish media prep: %s -> %s (%.1fMB)",
@@ -3427,9 +3434,13 @@ def _prepare_campaign_media_artifacts(
 
         # Pre-publish compression: shrink oversized source videos before
         # watermarking/upload. This is where large GDrive originals get
-        # re-encoded to the publishing profile (1080x1920, CRF~22, <=30fps).
+        # re-encoded to the publishing profile (1080x1920, CRF~22, <=30fps),
+        # with the size ceiling taken from whichever target platform has the
+        # strictest cap.
         if _is_video_file(publish_path):
-            publish_path = _shrink_for_publish(publish_path, campaign_id)
+            publish_path = _shrink_for_publish(
+                publish_path, campaign_id, selected_platforms
+            )
 
         if watermark_spec and not tiktok_only and _is_image_file(source_path):
             artifact_kind = "watermarked_image"

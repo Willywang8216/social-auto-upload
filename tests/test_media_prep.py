@@ -97,13 +97,76 @@ class ShouldShrinkTests(unittest.TestCase):
 
     def test_threshold_boundary_is_exclusive(self) -> None:
         meta = {"size_mb": 150, "width": 1080, "height": 1920, "fps": 24}
-        self.assertFalse(media_prep.should_shrink(meta))
+        self.assertFalse(media_prep.should_shrink(meta, threshold_mb=150))
         meta = {"size_mb": 150.01, "width": 1080, "height": 1920, "fps": 24}
-        self.assertTrue(media_prep.should_shrink(meta))
+        self.assertTrue(media_prep.should_shrink(meta, threshold_mb=150))
 
     def test_custom_threshold(self) -> None:
         meta = {"size_mb": 100, "width": 1080, "height": 1920, "fps": 24}
         self.assertTrue(media_prep.should_shrink(meta, threshold_mb=50))
+
+
+class PlatformSizeLimitTests(unittest.TestCase):
+    """Per-platform size ceilings; pure logic, runs without ffmpeg."""
+
+    def test_bluesky_limit_is_300mb_decimal(self) -> None:
+        self.assertEqual(media_prep.PLATFORM_MAX_MB["bluesky"], 300)
+
+    def test_resolve_picks_strictest_cap(self) -> None:
+        # Bluesky 300 vs Instagram 250 -> Instagram wins.
+        limit = media_prep.resolve_size_limit_mb(["bluesky", "instagram"])
+        self.assertAlmostEqual(limit, 250 * media_prep.SIZE_HEADROOM)
+
+    def test_resolve_single_platform(self) -> None:
+        limit = media_prep.resolve_size_limit_mb(["bluesky"])
+        self.assertAlmostEqual(limit, 300 * media_prep.SIZE_HEADROOM)
+
+    def test_resolve_unknown_platform_falls_back_to_default(self) -> None:
+        limit = media_prep.resolve_size_limit_mb(["myspace"])
+        self.assertAlmostEqual(
+            limit, media_prep.DEFAULT_MAX_MB * media_prep.SIZE_HEADROOM
+        )
+
+    def test_resolve_no_platforms_falls_back_to_default(self) -> None:
+        limit = media_prep.resolve_size_limit_mb(None)
+        self.assertAlmostEqual(
+            limit, media_prep.DEFAULT_MAX_MB * media_prep.SIZE_HEADROOM
+        )
+
+    def test_youtube_only_is_not_size_checked(self) -> None:
+        # 800 MB passes for YouTube but not for Bluesky.
+        meta = {"size_mb": 800, "width": 1080, "height": 1920, "fps": 24}
+        self.assertFalse(media_prep.should_shrink(meta, platforms=["youtube"]))
+        self.assertTrue(media_prep.should_shrink(meta, platforms=["bluesky"]))
+
+    def test_just_over_bluesky_cap_shrinks(self) -> None:
+        meta = {"size_mb": 295, "width": 1080, "height": 1920, "fps": 24}
+        self.assertTrue(media_prep.should_shrink(meta, platforms=["bluesky"]))
+
+    def test_well_under_bluesky_cap_does_not_shrink(self) -> None:
+        meta = {"size_mb": 290, "width": 1080, "height": 1920, "fps": 24}
+        self.assertFalse(media_prep.should_shrink(meta, platforms=["bluesky"]))
+
+    def test_decimal_mb_not_mib(self) -> None:
+        # Bluesky's cap is 300,000,000 bytes. That is 286.1 MiB, so a file of
+        # 290 MiB is OVER the cap and must shrink — a MiB-based check would
+        # wave it through and the platform would reject it.
+        meta = {
+            "size": 290 * 1024 * 1024,
+            "width": 1080,
+            "height": 1920,
+            "fps": 24,
+        }
+        self.assertGreater(media_prep.size_mb_decimal(meta), 300)
+        self.assertTrue(media_prep.should_shrink(meta, platforms=["bluesky"]))
+
+    def test_size_mb_key_is_already_megabytes(self) -> None:
+        self.assertAlmostEqual(media_prep.size_mb_decimal({"size_mb": 42}), 42.0)
+
+    def test_size_key_is_bytes(self) -> None:
+        self.assertAlmostEqual(
+            media_prep.size_mb_decimal({"size": 2_000_000}), 2.0
+        )
 
 
 class ToolAvailabilityTests(unittest.TestCase):
