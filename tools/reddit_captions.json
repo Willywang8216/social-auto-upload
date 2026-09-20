@@ -1,0 +1,52 @@
+{
+  "_readme": [
+    "Reddit 專用文案。每一則都必須是『本人分享』的語氣,不能有任何導流。",
+    "",
+    "為什麼不能沿用 captions-*.md 的素材:",
+    "  * 那些檔的 OnlyFans(EN) 段是促銷文,直接貼上 = 違反多數版的付費推廣禁令",
+    "  * X 段大量 hashtag,Reddit 不用 hashtag,看起來就是廣告",
+    "  * Description 段是視覺模型產生的,照抄會有明顯 AI 味,而且不是貼文語氣",
+    "",
+    "實測到的硬規則(2026-09-20,逐版讀 rules API):",
+    "  * r/AsianLadyboners 明文禁止「see more in my profile」「link in bio」這類繞道",
+    "  * r/twinks / r/TwinksAndTwunks 禁止標題、留言、浮水印出現付費或社群資訊",
+    "  * 幾乎所有成人版禁止推廣 OnlyFans 等付費內容",
+    "",
+    "所以這裡的每一則:沒有 CTA、沒有連結、沒有品牌標語、沒有 hashtag、不提任何付費平台。",
+    "只描述那張照片本身,用第一人稱像個真人在分享。八則各不相同,不是同一個模板換字。"
+  ],
+
+  "Bare Against the Bridge 102.jpg": {
+    "title": "Took the long way home past the bridge",
+    "body": "City was still lit at 1am so I stopped. Cold metal, warm air, nobody around."
+  },
+  "Bare Back to Nature 103.jpg": {
+    "title": "Railing at the lake, early",
+    "body": "Water was flat as glass. Sat there long enough that the clouds moved."
+  },
+  "Bare Light in Contemplation 72.jpg": {
+    "title": "Afternoon light in this room is unreal",
+    "body": "Sat down for five minutes and stayed an hour."
+  },
+  "Bare Nocturnal Digital Reverie 114.jpg": {
+    "title": "Scrolling outside instead of inside",
+    "body": "River's lit up behind me. Perfect temperature for sitting out here."
+  },
+
+  "20260206033405887(6).jpg": {
+    "title": "glasses stay on",
+    "body": "was going for a serious face and lasted about two seconds."
+  },
+  "20260206033405887(7).jpg": {
+    "title": "slept in, then stayed in",
+    "body": "zero plans today and I'm sticking to them."
+  },
+  "20260206033405887(8).jpg": {
+    "title": "stretching before I actually get up",
+    "body": "this is as far as the productivity goes today."
+  },
+  "20260206033405887.jpg": {
+    "title": "blanket on the floor kind of day",
+    "body": "stayed exactly where I landed."
+  }
+}
