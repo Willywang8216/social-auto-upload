@@ -23,6 +23,7 @@ from myUtils import account_validation
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory, current_app, url_for, redirect, g
 from utils.conf_defaults import BASE_DIR
 from myUtils import campaigns as campaign_store
+from myUtils import content_rating
 from myUtils import content_rules
 from myUtils import google_sheets
 from myUtils import jobs as job_runtime
@@ -8900,11 +8901,15 @@ def _inbox_publish_payload(item, body=None, *, db_path=None, resolve_video_file_
 # never be published to these, and the inbox one-click path used to pass
 # ``selected_account_ids=None`` — which the orchestrator expands to *every*
 # enabled account of the profile. That silently sent nudity to IG/FB/Threads/
-# YouTube/TikTok. This allowlist keeps NSFW on the platforms that permit it
-# (bluesky / telegram / twitter / reddit).
-NSFW_RESTRICTED_PLATFORMS = frozenset(
-    {"instagram", "facebook", "threads", "youtube", "tiktok"}
-)
+# YouTube/TikTok.
+#
+# The authoritative gate now lives in ``myUtils.content_rating`` and is applied
+# inside ``publish_orchestrator.submit_publish``, so every entry point (this
+# inbox route, /publish-center/submit, the MCP publish tool) is covered by the
+# same rule. This helper is kept for the inbox route's explicit allowlist and
+# delegates to that module; the constant is re-exported for callers that
+# imported it from here.
+NSFW_RESTRICTED_PLATFORMS = content_rating.NSFW_RESTRICTED_PLATFORMS
 
 
 def _inbox_selected_account_ids(
@@ -8912,16 +8917,19 @@ def _inbox_selected_account_ids(
     sfw_flag: object,
     *,
     db_path=None,
+    media_file_paths: list[str] | None = None,
 ) -> list[int] | None:
-    """Account allowlist for an inbox publish, derived from the item's sfwFlag.
+    """Account allowlist for an inbox publish.
 
-    Returns ``None`` for an SFW (or unlabelled) item so the orchestrator keeps
-    its default of every enabled account on the profile. For an NSFW item it
-    returns the explicit ids of the enabled accounts whose platform allows
-    adult content — an empty result is an error rather than a silent fallback
-    to "all", because the orchestrator treats an empty list as "all".
+    The rating comes from the media filenames (the operator's rule: only a name
+    that starts or ends with ``sfw`` is SFW) with the item's ``sfwFlag`` able
+    to tighten but never loosen it. Returns ``None`` for SFW so the orchestrator
+    keeps every enabled account; for NSFW returns the explicit ids of the
+    adult-safe accounts. An empty result raises rather than falling back to
+    "all", because the orchestrator treats an empty list as "all".
     """
-    if str(sfw_flag or "").strip().lower() != "nsfw":
+    rating = content_rating.rating_for_media(media_file_paths or [], explicit=sfw_flag)
+    if rating != content_rating.RATING_NSFW:
         return None
     allowed: list[int] = []
     for profile_id in profile_ids:
@@ -8931,10 +8939,9 @@ def _inbox_selected_account_ids(
             )
         except TypeError:
             accounts = profile_registry.list_accounts(profile_id=profile_id, enabled=True)
-        for account in accounts:
-            if str(getattr(account, "platform", "")).strip().lower() in NSFW_RESTRICTED_PLATFORMS:
-                continue
-            allowed.append(int(account.id))
+        allowed.extend(
+            int(a.id) for a in content_rating.restrict_accounts(accounts, rating)
+        )
     if not allowed:
         raise ValueError(
             "NSFW item has no adult-safe account on this profile — refusing to "
@@ -8980,6 +8987,7 @@ def inbox_item_publish(item_id):
         )
         selected_account_ids = _inbox_selected_account_ids(
             profile_ids, item.get("sfwFlag"), db_path=db_path,
+            media_file_paths=media_file_paths,
         )
         result = publish_orchestrator.submit_publish(
             profile_ids=profile_ids,

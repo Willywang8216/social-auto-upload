@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Callable
 
 from myUtils import campaigns as campaign_store
+from myUtils import content_rating
 from myUtils import jobs as job_runtime
 from myUtils import media_groups as media_group_store
 from myUtils import platform_capabilities
@@ -256,11 +257,30 @@ def submit_publish(
     skipped: list[dict] = []
     stagger_offset = 0  # global ordering of targets across profiles
 
+    # Content rating is derived from the filenames — the operator's rule is
+    # that only a name starting or ending with "sfw" is SFW, everything else is
+    # NSFW. It is applied *here*, after account resolution, because this is the
+    # one function every publish entry point (web UI, inbox one-click, MCP)
+    # funnels through. A request cannot loosen it: options.sfwFlag may only
+    # tighten the result.
+    rating = content_rating.rating_for_media(
+        media_file_paths, explicit=(options or {}).get("sfwFlag")
+    )
+
     for profile_id in profile_ids:
         profile = profile_registry.get_profile(int(profile_id), db_path=db_path)
         accounts = _resolve_accounts(profile.id, selected_account_ids, db_path=db_path)
         if not accounts:
             skipped.append({"profileId": profile.id, "reason": "no_enabled_accounts"})
+            continue
+        try:
+            accounts = content_rating.restrict_accounts(accounts, rating)
+        except ValueError:
+            # Every selected account is on a platform that bans nudity. Skip
+            # the profile rather than raise: another profile in the same
+            # request may still be publishable, and the skipped list tells the
+            # caller exactly what happened.
+            skipped.append({"profileId": profile.id, "reason": "nsfw_no_adult_safe_account"})
             continue
 
         request_data = _request_data_for_options(

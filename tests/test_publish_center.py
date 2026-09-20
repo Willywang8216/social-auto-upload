@@ -302,13 +302,18 @@ class PublishCenterSubmitTests(unittest.TestCase):
         self.assertGreaterEqual(len(data["jobs"]), 1)
 
     def test_single_media_platform_splits_into_multiple_jobs(self):
-        """When a single-media platform gets multiple files, it should split into staggered jobs."""
+        """When a single-media platform gets multiple files, it should split into staggered jobs.
+
+        TikTok bans nudity, so the fixtures carry the ``SFW`` marker: an
+        unlabelled filename is rated NSFW and would (correctly) be dropped by
+        the content gate before it ever reaches the split logic under test.
+        """
         profile, account = self._create_profile_and_account(platform="tiktok")
         # TikTok is single-media
         self.assertFalse(platform_capabilities.platform_supports_multi_media("tiktok"))
 
         file_record_ids = []
-        for fname in ["video1.mp4", "video2.mp4", "video3.mp4"]:
+        for fname in ["SFW video1.mp4", "SFW video2.mp4", "SFW video3.mp4"]:
             file_record_ids.append(self._insert_file_record(fname))
         call_count = {"n": 0}
         def mock_ensure(path, db_path):
@@ -326,7 +331,7 @@ class PublishCenterSubmitTests(unittest.TestCase):
             resp = self.client.post("/publish-center/submit", json={
                 "profileIds": [profile.id],
                 "selectedAccountIds": [account.id],
-                "mediaFilePaths": ["video1.mp4", "video2.mp4", "video3.mp4"],
+                "mediaFilePaths": ["SFW video1.mp4", "SFW video2.mp4", "SFW video3.mp4"],
                 "brief": "TikTok batch",
                 "options": {"watermark": False, "intro": False, "outro": False},
                 "schedule": {"publishNow": True},
@@ -336,6 +341,77 @@ class PublishCenterSubmitTests(unittest.TestCase):
         data = resp.get_json()["data"]
         # Should create 3 jobs (one per video), not 1
         self.assertEqual(len(data["jobs"]), 3)
+
+    # --- NSFW containment on the publish-center path (the one the UI uses) ---
+
+    def _submit(self, profile, account, media, **extra):
+        file_record_id = self._insert_file_record(media[0])
+        with patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={}), \
+             patch.object(self.sau_backend, "_generate_account_draft", return_value={
+                 "message": "post", "hashtags": [], "firstComment": "",
+             }), \
+             patch.object(self.sau_backend, "_ensure_file_record_for_path", return_value=file_record_id), \
+             patch.object(self.sau_backend, "_artifact_payloads_for_platform", return_value=[]), \
+             patch.object(self.sau_backend, "_job_to_payload", side_effect=lambda j: {"id": j.id, "platform": j.platform, "totalTargets": 1}):
+            body = {
+                "profileIds": [profile.id],
+                "selectedAccountIds": [account.id],
+                "mediaFilePaths": media,
+                "brief": "post",
+                "options": {"watermark": False, "intro": False, "outro": False},
+                "schedule": {"publishNow": True},
+                "accountDrafts": {},
+            }
+            body.update(extra)
+            return self.client.post("/publish-center/submit", json=body)
+
+    def test_unlabelled_media_is_never_sent_to_instagram_even_when_selected(self):
+        # Explicitly selecting the Instagram account must not be enough: the
+        # filename carries no "sfw" marker, so the file is NSFW and Instagram
+        # is dropped. This is the publish-center route the web UI calls.
+        profile, ig = self._create_profile_and_account(platform="instagram")
+        resp = self._submit(profile, ig, ["20260722155038425.mp4"])
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()["data"]
+        self.assertEqual(data["jobs"], [])
+        self.assertEqual(
+            [s["reason"] for s in data["skipped"]], ["nsfw_no_adult_safe_account"],
+        )
+
+    def test_sfw_labelled_media_reaches_instagram(self):
+        profile, ig = self._create_profile_and_account(platform="instagram")
+        resp = self._submit(profile, ig, ["SFW 20260813074703243.mp4"])
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.get_json()["data"]["jobs"]), 1)
+
+    def test_unlabelled_media_still_reaches_adult_safe_platforms(self):
+        profile, tg = self._create_profile_and_account(platform="telegram")
+        resp = self._submit(profile, tg, ["20260722155038425.mp4"])
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.get_json()["data"]["jobs"]), 1)
+
+    def test_nsfw_batch_to_mixed_profile_keeps_only_safe_accounts(self):
+        profile, tg = self._create_profile_and_account(platform="telegram")
+        ig = profile_registry.add_account(
+            profile_id=profile.id, platform="instagram", account_name="ig",
+            auth_type="manual", config={}, db_path=self.db_path,
+        )
+        resp = self._submit(
+            profile, tg, ["20260722155038425.mp4"],
+            selectedAccountIds=[tg.id, ig.id],
+        )
+        self.assertEqual(resp.status_code, 200)
+        jobs = resp.get_json()["data"]["jobs"]
+        self.assertEqual([j["platform"] for j in jobs], ["telegram"])
+
+    def test_sfw_flag_in_options_cannot_launder_unlabelled_media(self):
+        # A request body saying "this is SFW" is not trusted over the filename.
+        profile, ig = self._create_profile_and_account(platform="instagram")
+        resp = self._submit(
+            profile, ig, ["20260722155038425.mp4"],
+            options={"watermark": False, "intro": False, "outro": False, "sfwFlag": "sfw"},
+        )
+        self.assertEqual(resp.get_json()["data"]["jobs"], [])
 
 
 if __name__ == "__main__":
