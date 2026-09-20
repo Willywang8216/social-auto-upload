@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ BLUESKY_API_ROOT = "https://bsky.social/xrpc"
 REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 REDDIT_SUBMIT_URL = "https://oauth.reddit.com/api/submit"
 REDDIT_ME_URL = "https://oauth.reddit.com/api/v1/me"
+REDDIT_MEDIA_LEASE_URL = "https://oauth.reddit.com/api/media/asset.json"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 YOUTUBE_RESUMABLE_UPLOAD_URL = (
     "https://www.googleapis.com/upload/youtube/v3/videos"
@@ -2344,6 +2345,104 @@ def refresh_twitter_access_token(config: dict[str, Any], *, session=None) -> dic
     }
 
 
+def _reddit_upload_image(http, headers: dict[str, str], image: dict[str, str]) -> str:
+    """Upload one image to Reddit's own media host; return the URL to submit with.
+
+    Reddit image posts have to point at an asset Reddit has ingested, not at an
+    external host. Posting our own storage URL instead would make this the only
+    self-hosted link in a feed of i.redd.it images — which is exactly the shape
+    the target subs' promotion rules go after, and it survives even when the
+    title and body are clean.
+
+    Three steps: request a lease, POST the bytes to the S3 endpoint it hands
+    back, then give the resulting S3 object URL to /api/submit with kind=image.
+    Reddit fetches that URL, processes the image and serves it from i.redd.it.
+
+    The URL returned here must be the raw S3 one. Submitting the eventual
+    i.redd.it/<id> URL fails: Reddit fetches it while validating the post, the
+    CDN does not have the object yet, and the submit is rejected as an invalid
+    image URL.
+    """
+    local_path = str(image.get("local_path") or "")
+    if not local_path:
+        raise PreparedPublishError("Reddit image upload requires a local_path")
+    path = Path(local_path)
+    if not path.is_file():
+        raise PreparedPublishError(f"Reddit image upload: missing file {local_path}")
+    mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+
+    lease = http.post(
+        REDDIT_MEDIA_LEASE_URL,
+        headers=headers,
+        data={"filepath": path.name, "mimetype": mime},
+        timeout=120,
+    )
+    _raise_for_status(lease)
+    payload = lease.json() or {}
+    args = payload.get("args") or {}
+    action = str(args.get("action") or "")
+    if not action:
+        raise PreparedPublishError("Reddit media lease returned no upload action")
+    # Reddit hands back a protocol-relative URL ("//host/path").
+    if action.startswith("//"):
+        action = f"https:{action}"
+    fields = {
+        str(field.get("name")): str(field.get("value"))
+        for field in (args.get("fields") or [])
+        if field.get("name")
+    }
+
+    with open(path, "rb") as handle:
+        upload = http.post(
+            action,
+            data=fields,
+            files={"file": (path.name, handle, mime)},
+            timeout=600,
+        )
+    _raise_for_status(upload)
+
+    match = re.search(r"<Location>(.*?)</Location>", upload.text or "")
+    if not match:
+        raise PreparedPublishError("Reddit media upload returned no Location")
+    return unquote(match.group(1).strip())
+
+
+def _reddit_image_post_url(websocket_url: str, timeout: float = 20.0) -> str:
+    """Best-effort read of the permalink Reddit pushes after an image submit.
+
+    An image submission answers with a websocket_url and a user_submitted_page
+    URL rather than the post's fullname, so this socket is the only way to learn
+    the permalink. The post is created whether or not this succeeds, so every
+    failure path here returns "" instead of raising.
+    """
+    if not websocket_url:
+        return ""
+    try:  # pragma: no cover - depends on websocket-client being installed
+        import websocket
+    except ImportError:
+        return ""
+    socket = None
+    try:  # pragma: no cover - network dependent
+        socket = websocket.create_connection(websocket_url, timeout=timeout)
+        socket.settimeout(timeout)
+        while True:
+            message = json.loads(socket.recv())
+            payload = message.get("payload") or {}
+            redirect = payload.get("redirect") or payload.get("url")
+            if redirect:
+                return str(redirect)
+            if message.get("type") in {"error", "upload_error", "failed"}:
+                return ""
+    except Exception:  # noqa: BLE001 - the post already exists; this is only the permalink
+        return ""
+    finally:
+        if socket is not None:
+            try:
+                socket.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
     config = dict(account.config or {})
     config.setdefault("accountName", getattr(account, "account_name", "sau"))
@@ -2367,25 +2466,47 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
     }
     message = _payload_message(payload)
     media = _extract_media(payload)
+    # Reddit cannot host video itself, so a video payload keeps the link-post
+    # contract it always had (and video wins when both are present). An image
+    # payload, by contrast, must become a native image post: submitting the
+    # storage URL as a link made every Reddit submission the one self-hosted
+    # link in a feed of i.redd.it images — a promotion signal that survives even
+    # a clean title and body, and what the target subs' rules target.
     public_url = ""
+    image = None
     if media["videos"]:
         public_url = media["videos"][0].get("public_url") or ""
-    if not public_url and media["images"]:
-        public_url = media["images"][0].get("public_url") or ""
+    elif media["images"]:
+        image = media["images"][0]
     title = _message_title(payload)
     results = []
     for subreddit in subreddits:
+        native_url = ""
+        if image is not None:
+            if not (image.get("local_path") or ""):
+                raise PreparedPublishError(
+                    "Reddit image posts need the file on local disk so it can be "
+                    "uploaded to Reddit; refusing to fall back to a link post "
+                    "pointing at our own storage"
+                )
+            # One lease per subreddit: the asset is consumed by the submit that
+            # references it. Raises rather than degrading to a link post.
+            native_url = _reddit_upload_image(http, headers, image)
         data = {
             "api_type": "json",
             "sr": subreddit,
             "title": title[:300],
             "resubmit": "false",
             "sendreplies": "true",
-            "kind": "link" if public_url else "self",
         }
-        if public_url:
+        if native_url:
+            data["kind"] = "image"
+            data["url"] = native_url
+        elif public_url:
+            data["kind"] = "link"
             data["url"] = public_url
         else:
+            data["kind"] = "self"
             data["text"] = message
         response = http.post(REDDIT_SUBMIT_URL, headers=headers, data=data, timeout=120)
         _raise_for_status(response)
@@ -2393,6 +2514,13 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
         errors = body.get("json", {}).get("errors", [])
         if errors:
             raise PreparedPublishError(f"Reddit submit failed for r/{subreddit}: {errors}")
+        # An image submit answers with a websocket_url instead of the post's
+        # fullname; read the permalink off it, best effort.
+        ws_url = str((body.get("json", {}).get("data") or {}).get("websocket_url") or "")
+        if ws_url:
+            post_url = _reddit_image_post_url(ws_url)
+            if post_url:
+                body.setdefault("json", {}).setdefault("data", {})["post_url"] = post_url
         results.append(body)
     return results
 

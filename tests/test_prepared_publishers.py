@@ -25,10 +25,11 @@ from myUtils import prepared_publishers
 
 
 class _FakeResponse:
-    def __init__(self, payload=None, *, headers=None, status_code=200):
+    def __init__(self, payload=None, *, headers=None, status_code=200, text=""):
         self._payload = payload or {}
         self.headers = headers or {}
         self.status_code = status_code
+        self.text = text
 
     def raise_for_status(self):
         return None
@@ -993,6 +994,170 @@ class RedditPublisherTests(unittest.TestCase):
         data = session.calls[1][2]["data"]
         self.assertEqual(data["kind"], "link")
         self.assertEqual(data["url"], "https://cdn.example/video.mp4")
+
+
+class RedditNativeImageTests(unittest.TestCase):
+    """An image payload must become a native image post, not a self-hosted link.
+
+    Submitting the storage URL as a link post made every Reddit submission the
+    one self-hosted link in a feed of i.redd.it images, which is the promotion
+    signal the target subs' rules go after.
+    """
+
+    def _account(self):
+        return SimpleNamespace(
+            account_name="test",
+            config={
+                "clientId": "cid",
+                "clientSecret": "secret",
+                "refreshToken": "refresh",
+                "subreddits": ["test"],
+            },
+        )
+
+    def _image(self, directory: str) -> str:
+        path = Path(directory) / "shot.jpg"
+        path.write_bytes(b"\xff\xd8\xff\xe0fake-jpeg-bytes")
+        return str(path)
+
+    def _lease(self):
+        return _FakeResponse(
+            {
+                "args": {
+                    # Reddit hands this back protocol-relative.
+                    "action": "//reddit-uploaded-media.s3-accelerate.amazonaws.com",
+                    "fields": [
+                        {"name": "key", "value": "abc123"},
+                        {"name": "policy", "value": "p"},
+                    ],
+                },
+                "asset": {"asset_id": "a1", "websocket_url": "wss://ws.example/x"},
+            }
+        )
+
+    def test_image_is_uploaded_then_submitted_as_image_kind(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = self._image(directory)
+            session = _RecordingSession(
+                [
+                    _FakeResponse({"access_token": "token"}),
+                    self._lease(),
+                    _FakeResponse(
+                        text=(
+                            "<PostResponse><Location>"
+                            "https://reddit-uploaded-media.s3-accelerate.amazonaws.com/bucket/abc123"
+                            "</Location></PostResponse>"
+                        )
+                    ),
+                    _FakeResponse({"json": {"errors": [], "data": {}}}),
+                ]
+            )
+            prepared_publishers.publish_reddit_sync(
+                self._account(),
+                {
+                    "message": "hello",
+                    "artifacts": [
+                        {"local_path": image_path, "artifact_kind": "watermarked_image"}
+                    ],
+                },
+                session=session,
+            )
+
+        lease = session.calls[1]
+        self.assertEqual(lease[1], prepared_publishers.REDDIT_MEDIA_LEASE_URL)
+        self.assertEqual(lease[2]["data"]["filepath"], "shot.jpg")
+        self.assertEqual(lease[2]["data"]["mimetype"], "image/jpeg")
+
+        upload = session.calls[2]
+        # The lease action arrives protocol-relative; it must gain a scheme.
+        self.assertEqual(
+            upload[1], "https://reddit-uploaded-media.s3-accelerate.amazonaws.com"
+        )
+        self.assertEqual(upload[2]["data"]["key"], "abc123")
+
+        submit = session.calls[3][2]["data"]
+        self.assertEqual(submit["kind"], "image")
+        self.assertEqual(
+            submit["url"],
+            "https://reddit-uploaded-media.s3-accelerate.amazonaws.com/bucket/abc123",
+        )
+        self.assertNotIn("text", submit)
+
+    def test_url_encoded_location_is_decoded_before_submit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = _RecordingSession(
+                [
+                    _FakeResponse({"access_token": "token"}),
+                    self._lease(),
+                    _FakeResponse(
+                        text=(
+                            "<PostResponse><Location>"
+                            "https://s3.example/rte_images/a%2Bb%20c"
+                            "</Location></PostResponse>"
+                        )
+                    ),
+                    _FakeResponse({"json": {"errors": [], "data": {}}}),
+                ]
+            )
+            prepared_publishers.publish_reddit_sync(
+                self._account(),
+                {
+                    "message": "hello",
+                    "artifacts": [
+                        {
+                            "local_path": self._image(directory),
+                            "artifact_kind": "watermarked_image",
+                        }
+                    ],
+                },
+                session=session,
+            )
+        self.assertEqual(session.calls[3][2]["data"]["url"], "https://s3.example/rte_images/a+b c")
+
+    def test_image_without_a_local_file_is_refused_not_link_posted(self):
+        session = _RecordingSession([_FakeResponse({"access_token": "token"})])
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers.publish_reddit_sync(
+                self._account(),
+                {
+                    "message": "hello",
+                    "artifacts": [
+                        {
+                            "public_url": "https://cdn.example/x.jpg",
+                            "artifact_kind": "watermarked_image",
+                        }
+                    ],
+                },
+                session=session,
+            )
+        self.assertIn("local disk", str(ctx.exception))
+        # Only the token call happened; nothing was submitted.
+        self.assertEqual(len(session.calls), 1)
+
+    def test_missing_upload_location_raises(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = _RecordingSession(
+                [
+                    _FakeResponse({"access_token": "token"}),
+                    self._lease(),
+                    _FakeResponse(text="<PostResponse></PostResponse>"),
+                ]
+            )
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.publish_reddit_sync(
+                    self._account(),
+                    {
+                        "message": "hello",
+                        "artifacts": [
+                            {
+                                "local_path": self._image(directory),
+                                "artifact_kind": "watermarked_image",
+                            }
+                        ],
+                    },
+                    session=session,
+                )
+        self.assertIn("Location", str(ctx.exception))
 
 
 class NwSwBlogGitPushTests(unittest.TestCase):
