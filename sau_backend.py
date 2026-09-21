@@ -7098,6 +7098,35 @@ def publish_center_submit():
     if result.jobs:
         _start_worker_drain_thread()
 
+    # --- Pre-publish TG notification (best-effort) ---
+    try:
+        from myUtils import ops_alerts
+        lines = []
+        for job in (result.jobs or []):
+            jid = job.get("id") or job.get("jobId") or "?"
+            plat = job.get("platform") or "?"
+            acct = job.get("accountRef") or job.get("account_ref") or "?"
+            sched = job.get("scheduleAt") or job.get("schedule_at") or "immediate"
+            lines.append(f"• job#{jid} | {plat} | {acct} | {sched}")
+        if lines:
+            body_lines = [
+                f"Profiles: {profile_ids}",
+                f"Media: {len(media_file_paths)} file(s)",
+                f"Brief: {(brief or '')[:120]}",
+                f"Schedule: {schedule or 'immediate'}",
+                "",
+                "Targets:",
+            ] + lines[:30]
+            if len(lines) > 30:
+                body_lines.append(f"… and {len(lines)-30} more")
+            body_lines += ["", "Reply PAUSE <job_id> to cancel, RESCHEDULE <job_id> <ISO_TIME> to move."]
+            ops_alerts.send_ops_alert(
+                subject=f"[SAU] {len(result.jobs)} target(s) queued",
+                body="\n".join(body_lines),
+            )
+    except Exception:  # noqa: BLE001 — notification must never break submit
+        logging.getLogger(__name__).debug("pre-publish TG notify skipped", exc_info=True)
+
     return jsonify({
         "code": 200,
         "msg": "queued",
@@ -9012,6 +9041,35 @@ def inbox_item_publish(item_id):
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     if result.jobs:
         _start_worker_drain_thread()
+
+    # --- Pre-publish TG notification (best-effort) ---
+    try:
+        from myUtils import ops_alerts
+        lines = []
+        for job in (result.jobs or []):
+            jid = job.get("id") or job.get("jobId") or "?"
+            plat = job.get("platform") or "?"
+            acct = job.get("accountRef") or job.get("account_ref") or "?"
+            sched = job.get("scheduleAt") or job.get("schedule_at") or "immediate"
+            lines.append(f"• job#{jid} | {plat} | {acct} | {sched}")
+        if lines:
+            body_lines = [
+                f"Profiles: {profile_ids}",
+                f"Media: {len(media_file_paths)} file(s)",
+                f"Brief: {(brief or '')[:120]}",
+                f"Schedule: {schedule or 'immediate'}",
+                "",
+                "Targets:",
+            ] + lines[:30]
+            if len(lines) > 30:
+                body_lines.append(f"… and {len(lines)-30} more")
+            body_lines += ["", "Reply PAUSE <job_id> to cancel, RESCHEDULE <job_id> <ISO_TIME> to move."]
+            ops_alerts.send_ops_alert(
+                subject=f"[SAU] {len(result.jobs)} target(s) queued",
+                body="\n".join(body_lines),
+            )
+    except Exception:  # noqa: BLE001 — notification must never break submit
+        logging.getLogger(__name__).debug("pre-publish TG notify skipped", exc_info=True)
     return jsonify({
         "code": 200,
         "msg": "queued",
