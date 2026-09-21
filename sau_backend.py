@@ -3087,9 +3087,9 @@ def _upload_file_to_storage(file_path: Path, final_filename: str, file_record_id
                 (backend_row["id"], storage_key, cdn, file_record_id),
             )
             conn.commit()
-        logger.info("Uploaded %s to storage: %s", final_filename, storage_key)
+        logging.getLogger(__name__).info("Uploaded %s to storage: %s", final_filename, storage_key)
     except Exception:
-        logger.exception("Failed to upload %s to storage", final_filename)
+        logging.getLogger(__name__).exception("Failed to upload %s to storage", final_filename)
 
 
 def _download_file_from_storage(file_path: str, *, db_path: Path) -> Path | None:
@@ -3114,7 +3114,7 @@ def _download_file_from_storage(file_path: str, *, db_path: Path) -> Path | None
         except (ValueError, OSError):
             pass
     if not local_path:
-        logger.warning("Refusing to download to unsafe path: %s", file_path)
+        logging.getLogger(__name__).warning("Refusing to download to unsafe path: %s", file_path)
         return None
     if local_path.exists():
         return local_path
@@ -3131,7 +3131,7 @@ def _download_file_from_storage(file_path: str, *, db_path: Path) -> Path | None
                 client.download_file(row["storage_key"], local_path)
                 return local_path
         except Exception:
-            logger.exception("Failed to download %s from storage backend", file_path)
+            logging.getLogger(__name__).exception("Failed to download %s from storage backend", file_path)
 
     # Try 2: Download via public CDN URL
     if row["storage_cdn_url"]:
@@ -3142,7 +3142,7 @@ def _download_file_from_storage(file_path: str, *, db_path: Path) -> Path | None
             local_path.write_bytes(resp.content)
             return local_path
         except Exception:
-            logger.exception("Failed to download %s from CDN", file_path)
+            logging.getLogger(__name__).exception("Failed to download %s from CDN", file_path)
 
     return None
 
@@ -3157,7 +3157,7 @@ def _delete_file_from_storage(storage_key: str, backend_id: int, *, db_path: Pat
         client = client_from_row(backend_row)
         client.delete_object(storage_key)
     except Exception:
-        logger.warning("Failed to delete %s from storage", storage_key)
+        logging.getLogger(__name__).warning("Failed to delete %s from storage", storage_key)
 
 
 def _cleanup_local_files(*, db_path: Path, max_age_hours: int = 24) -> int:
@@ -3186,9 +3186,9 @@ def _cleanup_local_files(*, db_path: Path, max_age_hours: int = 24) -> int:
                 )
             conn.commit()
     except Exception:
-        logger.exception("Local file cleanup failed")
+        logging.getLogger(__name__).exception("Local file cleanup failed")
     if removed:
-        logger.info("Cleaned up %d local files already in storage", removed)
+        logging.getLogger(__name__).info("Cleaned up %d local files already in storage", removed)
     return removed
 
 
@@ -7737,7 +7737,7 @@ def api_create_watermark_config():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        logger.exception("Error creating watermark config")
+        logging.getLogger(__name__).exception("Error creating watermark config")
         return jsonify({"error": "Internal server error"}), 500
 
 
