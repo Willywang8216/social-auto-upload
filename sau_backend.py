@@ -342,8 +342,21 @@ def _resolve_video_file_path_safely(file_path: str) -> Path | None:
     if not file_path or not isinstance(file_path, str):
         return None
     base = (Path(BASE_DIR) / "videoFile").resolve()
+    # file_records hold two shapes: a bare name relative to videoFile/ (what
+    # /upload writes) and an explicit "videoFile/..." (what the reddit and
+    # batch schedulers emit, matching the payload convention). Joining the
+    # prefixed shape straight onto ``base`` produced
+    # ".../videoFile/videoFile/name", so the media looked absent and the
+    # offload fetch-back wrote a nested duplicate instead of the real file.
+    # Normalise the known prefixes away first; a genuinely absolute path
+    # still falls through to the containment check below and is rejected.
+    relative = str(file_path).strip()
+    for prefix in ("/app/videoFile/", "videoFile/"):
+        if relative.startswith(prefix):
+            relative = relative[len(prefix):]
+            break
     try:
-        resolved = (base / file_path).resolve()
+        resolved = (base / relative).resolve()
     except (ValueError, OSError):
         return None
     # Check that the resolved path is inside the base directory
@@ -3121,15 +3134,22 @@ def _download_file_from_storage(file_path: str, *, db_path: Path) -> Path | None
 
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Try 1: Download via storage backend client
+    # Try 1: download through the backend that actually holds the object.
+    # Backends register differently — an S3/Spaces row carries access keys and
+    # a bucket, an rclone row carries the remote name in ``bucket`` and its
+    # root in ``endpoint`` — so the dispatch lives in media_remote_storage.
+    # Calling the Spaces client directly here used to fail for every
+    # rclone-backed file, i.e. exactly the media the offload cron parks in
+    # Google Drive, and the caller only saw the media path missing later.
     if row["storage_key"] and row["storage_backend_id"]:
         try:
             backend_row = _load_storage_backend_by_id(row["storage_backend_id"], db_path=db_path)
             if backend_row:
-                from myUtils.do_spaces import client_from_row
-                client = client_from_row(backend_row)
-                client.download_file(row["storage_key"], local_path)
-                return local_path
+                media_remote_storage.download_from_backend(
+                    backend_row, row["storage_key"], local_path
+                )
+                if local_path.exists() and local_path.stat().st_size > 0:
+                    return local_path
         except Exception:
             logging.getLogger(__name__).exception("Failed to download %s from storage backend", file_path)
 
@@ -3152,6 +3172,18 @@ def _delete_file_from_storage(storage_key: str, backend_id: int, *, db_path: Pat
     try:
         backend_row = _load_storage_backend_by_id(backend_id, db_path=db_path)
         if not backend_row:
+            return
+        # Same provider split as the download path: an rclone row needs
+        # ``rclone deletefile``, not the Spaces client (which has no usable
+        # credentials on such a row and would raise on every call).
+        provider = str(backend_row.get("provider") or "").strip().lower()
+        if provider == "rclone":
+            from myUtils import rclone_storage as _rclone
+            _rclone.delete_artifact(
+                storage_key,
+                remote_name=str(backend_row.get("bucket") or "").strip() or None,
+                remote_root=str(backend_row.get("endpoint") or "").strip() or None,
+            )
             return
         from myUtils.do_spaces import client_from_row
         client = client_from_row(backend_row)
@@ -7055,6 +7087,119 @@ def _maybe_start_publish_scheduler() -> None:
     _PUBLISH_SCHEDULER_THREAD.start()
 
 
+def _tg_review_cards(*, jobs: list[dict], db_path: Path) -> list[dict]:
+    """Build one Telegram review card per queued campaign post.
+
+    Read back from the DB rather than from the submit result: the job row
+    carries the draft that will actually be sent plus the artifacts that were
+    prepared, and its targets carry the schedule the worker will honour.
+    """
+    cards: list[dict] = []
+    for job in jobs or []:
+        job_id = job.get("id")
+        if job_id is None:
+            continue
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT id, profile_id, platform, payload_json FROM publish_jobs WHERE id = ?",
+                    (int(job_id),),
+                ).fetchone()
+                if row is None:
+                    continue
+                targets = conn.execute(
+                    "SELECT account_ref, schedule_at FROM publish_job_targets "
+                    "WHERE job_id = ? ORDER BY id",
+                    (int(job_id),),
+                ).fetchall()
+        except Exception:  # noqa: BLE001 — a missing card must not break submit
+            logging.getLogger(__name__).debug("tg review: job read failed", exc_info=True)
+            continue
+
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except ValueError:
+            payload = {}
+        draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else {}
+        copy_text = str(draft.get("message") or payload.get("message") or "").strip()
+        artifacts = payload.get("artifacts") or []
+        first = artifacts[0] if artifacts else {}
+        media_path = str(first.get("local_path") or "")
+        public_url = str(first.get("public_url") or "")
+
+        labels: list[str] = []
+        schedules: list[str] = []
+        for target in targets:
+            ref = str(target["account_ref"] or "")
+            name = _account_display_name(ref)
+            labels.append(f"{row['platform']} — {name}" if name and name != ref else str(row["platform"]))
+            if target["schedule_at"]:
+                schedules.append(str(target["schedule_at"]))
+        try:
+            profile = profile_registry.get_profile(int(row["profile_id"]), db_path=db_path)
+            profile_label = f"{profile.name} (#{profile.id})"
+        except Exception:  # noqa: BLE001
+            profile_label = f"profile {row['profile_id']}"
+
+        cards.append({
+            "job_id": int(row["id"]),
+            "campaign_id": payload.get("campaignId"),
+            "post_id": payload.get("campaignPostId"),
+            "profile_id": int(row["profile_id"]),
+            "profile_label": profile_label,
+            "schedule_label": (min(schedules) + " UTC") if schedules else "immediate",
+            "account_labels": sorted(set(labels)),
+            "copy_text": copy_text,
+            "media_path": media_path or None,
+            "media_label": Path(media_path).name if media_path else "",
+            "public_url": public_url,
+        })
+    return cards
+
+
+def _notify_tg_review(*, jobs: list[dict], db_path: Path) -> None:
+    """Queue the review cards off the request path (Telegram must not block)."""
+    try:
+        from myUtils import tg_review
+        cards = _tg_review_cards(jobs=jobs, db_path=db_path)
+        if cards:
+            tg_review.notify_async(cards=cards, db_path=db_path)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).debug("tg review: notify skipped", exc_info=True)
+
+
+def _maybe_start_tg_review_poller() -> None:
+    """Start the reply reader when Telegram review is configured.
+
+    Guarded by ``SAU_TG_REVIEW_POLL_SECONDS`` (default 15s); set it to 0 to
+    disable. Needs no webhook — the poller uses ``getUpdates``.
+    """
+    try:
+        from myUtils import tg_review
+        interval = int(os.environ.get("SAU_TG_REVIEW_POLL_SECONDS", "15") or "0")
+    except Exception:  # noqa: BLE001
+        return
+    if interval <= 0 or not tg_review.is_configured():
+        return
+
+    def _cancel(target_id: int) -> None:
+        job_runtime.cancel_target(target_id, db_path=_current_db_path())
+
+    def _reschedule(target_id: int, when: str) -> None:
+        job_runtime.reschedule_target(target_id, when, db_path=_current_db_path())
+
+    try:
+        tg_review.start_poller(
+            interval_seconds=interval,
+            db_path=_current_db_path(),
+            cancel_target=_cancel,
+            reschedule_target=_reschedule,
+        )
+        logging.getLogger(__name__).info("tg review poller started (every %ss)", interval)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("tg review poller failed to start")
+
 @app.route("/publish-center/submit", methods=["POST"])
 def publish_center_submit():
     db_path = _current_db_path()
@@ -7098,34 +7243,11 @@ def publish_center_submit():
     if result.jobs:
         _start_worker_drain_thread()
 
-    # --- Pre-publish TG notification (best-effort) ---
-    try:
-        from myUtils import ops_alerts
-        lines = []
-        for job in (result.jobs or []):
-            jid = job.get("id") or job.get("jobId") or "?"
-            plat = job.get("platform") or "?"
-            acct = job.get("accountRef") or job.get("account_ref") or "?"
-            sched = job.get("scheduleAt") or job.get("schedule_at") or "immediate"
-            lines.append(f"• job#{jid} | {plat} | {acct} | {sched}")
-        if lines:
-            body_lines = [
-                f"Profiles: {profile_ids}",
-                f"Media: {len(media_file_paths)} file(s)",
-                f"Brief: {(brief or '')[:120]}",
-                f"Schedule: {schedule or 'immediate'}",
-                "",
-                "Targets:",
-            ] + lines[:30]
-            if len(lines) > 30:
-                body_lines.append(f"… and {len(lines)-30} more")
-            body_lines += ["", "Reply PAUSE <job_id> to cancel, RESCHEDULE <job_id> <ISO_TIME> to move."]
-            ops_alerts.send_ops_alert(
-                subject=f"[SAU] {len(result.jobs)} target(s) queued",
-                body="\n".join(body_lines),
-            )
-    except Exception:  # noqa: BLE001 — notification must never break submit
-        logging.getLogger(__name__).debug("pre-publish TG notify skipped", exc_info=True)
+    # Pre-publish review card in Telegram: the media itself, the exact copy and
+    # the destination, so the operator can approve or rewrite before the worker
+    # runs. Queued off the request path — Telegram latency must not hold up a
+    # submission.
+    _notify_tg_review(jobs=result.jobs or [], db_path=db_path)
 
     return jsonify({
         "code": 200,
@@ -8298,6 +8420,7 @@ def api_list_sheet_exports():
 
 _maybe_start_account_maintenance_scheduler()
 _maybe_start_publish_scheduler()
+_maybe_start_tg_review_poller()
 
 # Ensure DO Spaces bucket exists on startup
 try:
@@ -9042,34 +9165,9 @@ def inbox_item_publish(item_id):
     if result.jobs:
         _start_worker_drain_thread()
 
-    # --- Pre-publish TG notification (best-effort) ---
-    try:
-        from myUtils import ops_alerts
-        lines = []
-        for job in (result.jobs or []):
-            jid = job.get("id") or job.get("jobId") or "?"
-            plat = job.get("platform") or "?"
-            acct = job.get("accountRef") or job.get("account_ref") or "?"
-            sched = job.get("scheduleAt") or job.get("schedule_at") or "immediate"
-            lines.append(f"• job#{jid} | {plat} | {acct} | {sched}")
-        if lines:
-            body_lines = [
-                f"Profiles: {profile_ids}",
-                f"Media: {len(media_file_paths)} file(s)",
-                f"Brief: {(brief or '')[:120]}",
-                f"Schedule: {schedule or 'immediate'}",
-                "",
-                "Targets:",
-            ] + lines[:30]
-            if len(lines) > 30:
-                body_lines.append(f"… and {len(lines)-30} more")
-            body_lines += ["", "Reply PAUSE <job_id> to cancel, RESCHEDULE <job_id> <ISO_TIME> to move."]
-            ops_alerts.send_ops_alert(
-                subject=f"[SAU] {len(result.jobs)} target(s) queued",
-                body="\n".join(body_lines),
-            )
-    except Exception:  # noqa: BLE001 — notification must never break submit
-        logging.getLogger(__name__).debug("pre-publish TG notify skipped", exc_info=True)
+    # Same review card as the publish center: one message per queued post, with
+    # the media and the copy the worker is about to send.
+    _notify_tg_review(jobs=result.jobs or [], db_path=db_path)
     return jsonify({
         "code": 200,
         "msg": "queued",

@@ -173,6 +173,32 @@ def download_artifact(
     return destination
 
 
+def delete_artifact(
+    remote_path: str,
+    *,
+    remote_name: str | None = None,
+    remote_root: str | None = None,
+    runner=run_subprocess,
+) -> None:
+    """Remove one object from the rclone remote.
+
+    Counterpart to :func:`download_artifact`: the write side pairs
+    ``rclone copyto`` upload with read ``copyto`` download, and the purge half
+    of the media lifecycle (posted -> archived -> deleted) needs the matching
+    ``rclone deletefile``. Without it a caller that only knows the row's
+    provider has no way to drop a Drive object, which is why the S3-only
+    delete in ``sau_backend`` silently no-ops for rclone rows.
+    """
+    resolved_remote_name = _resolve_remote_name(remote_name)
+    root = _resolve_remote_root(remote_root)
+    spec_path = str(PurePosixPath(root, remote_path)) if root else remote_path
+    runner(
+        [RCLONE_COMMAND, "deletefile", f"{resolved_remote_name}:{spec_path}"],
+        capture_output=True,
+        text=True,
+    )
+
+
 def upload_artifact(
     local_path: str | Path,
     *,
