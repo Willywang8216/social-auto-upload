@@ -25,7 +25,7 @@ BOTH_ITEM = {
     "topic": "math from two angles",
     "sfwFlag": True,
     "kind": "video",
-    "sourcePath": "/app/sau-inbox/both/video/demo.mp4",
+    "sourcePath": "/app/sau-inbox/both/video/sfw-demo.mp4",
     "thumbPath": None,
     "brief": "Publish to both feed profiles.",
     "contentNote": None,
@@ -41,7 +41,7 @@ FULL_ITEM = {
     "sfwFlag": True,
     "kind": "video",
     "sourcePath": "/app/sau-inbox/sw/video/short.mp4",
-    "thumbPath": None,
+    "sourcePath": "/app/sau-inbox/sw/video/sfw-short.mp4",
     "brief": "",
     "contentNote": None,
     "status": "ready",
@@ -70,20 +70,20 @@ class InboxPublishPayloadTest(unittest.TestCase):
     def test_media_path_passthrough_and_resolver_precedence(self):
         # Absolute mounted inbox path passes straight through (no resolver).
         profile_ids, media_paths, brief, schedule = _inbox_publish_payload(BOTH_ITEM)
-        self.assertEqual(media_paths, ["/app/sau-inbox/both/video/demo.mp4"])
+        self.assertEqual(media_paths, ["/app/sau-inbox/both/video/sfw-demo.mp4"])
 
         # An explicit resolver that succeeds wins over the raw path.
         profile_ids, media_paths, brief, schedule = _inbox_publish_payload(
-            FULL_ITEM, resolve_video_file_path=lambda p: "/srv/media/short.mp4"
+            FULL_ITEM, resolve_video_file_path=lambda p: "/srv/media/sfw-short.mp4"
         )
         self.assertEqual(profile_ids, [3])
-        self.assertEqual(media_paths, ["/srv/media/short.mp4"])
+        self.assertEqual(media_paths, ["/srv/media/sfw-short.mp4"])
 
         # A resolver that fails (None) falls back to the raw absolute path.
         profile_ids, media_paths, brief, schedule = _inbox_publish_payload(
             FULL_ITEM, resolve_video_file_path=lambda p: None
         )
-        self.assertEqual(media_paths, ["/app/sau-inbox/sw/video/short.mp4"])
+        self.assertEqual(media_paths, ["/app/sau-inbox/sw/video/sfw-short.mp4"])
 
     def test_default_schedule_is_none_immediate(self):
         profile_ids, media_paths, brief, schedule = _inbox_publish_payload(BOTH_ITEM)
@@ -122,7 +122,7 @@ class InboxPublishRouteTest(unittest.TestCase):
         self.assertEqual(payload["data"]["campaignIds"], [10, 11])
         self.assertEqual(payload["data"]["jobs"], [{"id": 1}, {"id": 2}])
         self.assertEqual(captured["profile_ids"], [1, 3])
-        self.assertEqual(captured["media_file_paths"], ["/app/sau-inbox/both/video/demo.mp4"])
+        self.assertEqual(captured["media_file_paths"], ["/app/sau-inbox/both/video/sfw-demo.mp4"])
         self.assertIsNone(captured["schedule"])
         drained.assert_called_once()
 
