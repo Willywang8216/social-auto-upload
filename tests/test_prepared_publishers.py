@@ -235,22 +235,41 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[0][1], f"{prepared_publishers.FACEBOOK_GRAPH_ROOT}/123")
         self.assertEqual(result["id"], "123")
 
-    def test_discord_uses_webhook_with_local_files(self):
-        session = _RecordingSession([_FakeResponse({})])
+    def test_discord_media_rejection_contract(self):
+        session = _RecordingSession()
         account = SimpleNamespace(config={"webhookUrl": "https://discord.example/webhook"})
-        with tempfile.TemporaryDirectory() as tmp:
-            image = Path(tmp) / "cover.jpg"
-            image.write_bytes(b"image")
+        with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "cannot be silently omitted"):
             prepared_publishers.publish_discord_sync(
                 account,
-                {
-                    "message": "Discord launch",
-                    "artifacts": [{"local_path": str(image), "artifact_kind": "watermarked_image"}],
-                },
+                {"message": "Discord launch", "artifacts": [{"local_path": "/tmp/x.jpg", "artifact_kind": "image"}]},
                 session=session,
             )
-        self.assertEqual(session.calls[0][1], "https://discord.example/webhook")
-        self.assertIn("files", session.calls[0][2])
+        self.assertEqual(session.calls, [])
+
+    def test_discord_rejects_present_and_missing_media_artifacts(self):
+        account = SimpleNamespace(config={"webhookUrl": "https://discord.example/webhook"})
+        for artifact in (
+            {"local_path": "/tmp/missing-discord.jpg", "artifact_kind": "watermarked_image"},
+            {"local_path": "/tmp/present-discord.jpg", "artifact_kind": "watermarked_image"},
+        ):
+            session = _RecordingSession()
+            with self.subTest(artifact=artifact), self.assertRaisesRegex(
+                prepared_publishers.PreparedPublishError, "cannot be silently omitted"
+            ):
+                prepared_publishers.publish_discord_sync(
+                    account, {"message": "Discord attachment", "artifacts": [artifact]},
+                    session=session,
+                )
+            self.assertEqual(session.calls, [])
+
+    def test_discord_text_only_without_artifacts_remains_allowed(self):
+        session = _RecordingSession([_FakeResponse({})])
+        prepared_publishers.publish_discord_sync(
+            SimpleNamespace(config={"webhookUrl": "https://discord.example/webhook"}),
+            {"message": "intentional text-only"}, session=session,
+        )
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(session.calls[0][2]["json"]["content"], "intentional text-only")
 
     def test_facebook_multiple_images_create_unpublished_photos_then_feed_post(self):
         session = _RecordingSession([
@@ -391,6 +410,17 @@ class PreparedPublisherTests(unittest.TestCase):
                     ]},
                     session=_RecordingSession(),
                 )
+
+    def test_bluesky_media_artifact_without_source_fails_before_record_create(self):
+        account = SimpleNamespace(config={"handle": "h", "appPassword": "p"})
+        with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "no readable local file or public URL"):
+            prepared_publishers.publish_bluesky_sync(
+                account,
+                {"message": "post", "artifacts": [{
+                    "local_path": "/tmp/missing.jpg", "artifact_kind": "watermarked_image",
+                }]},
+                session=_RecordingSession(),
+            )
 
     def test_twitter_api_rejects_public_url_only_media(self):
         account = SimpleNamespace(config={"accessToken": "oauth2"})
@@ -1479,6 +1509,18 @@ class BlueskyPublisherTests(unittest.TestCase):
         self.assertEqual(record["labels"]["$type"], "com.atproto.label.defs#selfLabels")
         self.assertEqual(record["labels"]["values"][0]["val"], "sexual")
         self.assertEqual(results[0]["handle"], "sexualwill.bsky.social")
+
+    def test_publish_fails_closed_for_missing_declared_media(self):
+        account = SimpleNamespace(config={"handle": "h", "appPassword": "p"})
+        with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "no readable local file or public URL"):
+            prepared_publishers.publish_bluesky_sync(
+                account,
+                {"message": "text", "artifacts": [{
+                    "local_path": "/tmp/missing-bs.png",
+                    "artifact_kind": "watermarked_image",
+                }]},
+                session=_RecordingSession(),
+            )
 
     def test_publish_requires_message(self):
         account = SimpleNamespace(config={"handle": "h", "appPassword": "p"})

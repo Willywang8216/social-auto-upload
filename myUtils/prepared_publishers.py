@@ -854,42 +854,15 @@ def publish_discord_sync(account, payload: dict, *, session=None) -> list[Any]:
     if not webhook_url:
         raise PreparedPublishError("Discord publish requires webhookUrl or webhookUrlEnv")
 
+    declared_artifacts = payload.get("artifacts") or []
+    if declared_artifacts:
+        raise PreparedPublishError("Discord publisher only supports text/webhook here; media artifacts cannot be silently omitted")
+
     http = _get_session(session)
     message = _payload_message(payload) or _message_title(payload)
-    media = _extract_media(payload)
-    attachments = [*media["videos"], *media["images"]][:10]
-    files = {}
-    open_files = []
-    try:
-        content_lines = [message] if message else []
-        for index, item in enumerate(attachments):
-            local_path = item.get("local_path")
-            public_url = item.get("public_url")
-            if local_path and Path(local_path).exists():
-                handle = Path(local_path).open("rb")
-                open_files.append(handle)
-                files[f"files[{index}]"] = (Path(local_path).name, handle)
-            elif public_url:
-                content_lines.append(public_url)
-
-        if files:
-            response = http.post(
-                webhook_url,
-                data={"payload_json": json.dumps({"content": "\n".join(content_lines).strip()}, ensure_ascii=False)},
-                files=files,
-                timeout=600,
-            )
-        else:
-            response = http.post(
-                webhook_url,
-                json={"content": "\n".join(content_lines).strip()},
-                timeout=120,
-            )
-        _raise_for_status(response)
-        return [_response_payload(response)]
-    finally:
-        for handle in open_files:
-            handle.close()
+    response = http.post(webhook_url, json={"content": message}, timeout=120)
+    _raise_for_status(response)
+    return [_response_payload(response)]
 
 
 def validate_facebook_config_live(config: dict[str, Any], *, session=None) -> dict:
@@ -2090,7 +2063,7 @@ def _x_auth_header(
     return "OAuth " + ", ".join(header_parts)
 
 
-def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access_token: str, access_token_secret: str, session=None) -> str:
+def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access_token: str, access_token_secret: str, session=None, on_oauth2_refresh=None) -> str:
     """Upload image/video via X's chunked v1.1 media endpoint."""
     http = _get_session(session)
     source = Path(file_path)
@@ -2185,8 +2158,8 @@ def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access
     return media_id
 
 
-def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None) -> dict[str, Any]:
-    """Refresh Twitter OAuth 2.0 token if expired or about to expire. Returns possibly-updated config."""
+def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None, on_refresh=None) -> dict[str, Any]:
+    """Refresh OAuth 2.0 token and immediately persist a rotated refresh token."""
     refresh_token = str(config.get("refreshToken") or "").strip()
     if not refresh_token or config.get("twitterAuthType") != "api":
         return config
@@ -2213,6 +2186,8 @@ def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None) -> dic
         from datetime import datetime, timedelta
         updated["accessTokenExpiresAt"] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec="seconds")
     updated["accessTokenUpdatedAt"] = datetime.now().isoformat(timespec="seconds")
+    if on_refresh is not None:
+        on_refresh(updated)
     me = result.get("me") or {}
     user_data = me.get("data", me) if isinstance(me, dict) else {}
     if isinstance(user_data, dict):
@@ -2233,13 +2208,24 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
     """
     config = dict(account.config or {})
 
-    # Lazy-refresh expired OAuth 2.0 token before publishing.
-    config = _maybe_refresh_twitter_token(config, session=session)
+    # A rotated refresh token is single-use; persist it immediately so any later
+    # media/tweet failure does not strand the account on the already-dead token.
+    def _persist_refreshed(updated_config: dict[str, Any]) -> None:
+        from myUtils import profiles as profile_registry
+        account_id = getattr(account, "id", None)
+        if account_id is not None:
+            profile_registry.update_account(account_id, config=updated_config, auth_type="oauth")
+
+    config = _maybe_refresh_twitter_token(
+        config, session=session, on_refresh=_persist_refreshed,
+    )
 
     # Check if we have OAuth 2.0 token (from PKCE flow)
     oauth2_token = str(config.get("accessToken") or "").strip()
     has_oauth1 = all(_twitter_oauth1_credentials(config))
 
+    if payload.get("campaignId") and not (payload.get("artifacts") or []):
+        raise PreparedPublishError("Prepared X campaign has no media artifact; refusing text-only publication")
     if not oauth2_token and not has_oauth1:
         raise PreparedPublishError(
             "Twitter publish requires either OAuth 2.0 tokens (via Connect button) or OAuth 1.0a credentials"
@@ -2294,14 +2280,17 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
             )
         for item in upload_items:
             local_path = item.get("local_path")
-            if local_path:
-                mid = _x_media_upload(
-                    file_path=local_path,
-                    api_key=api_key, api_key_secret=api_key_secret,
-                    access_token=access_token, access_token_secret=access_token_secret,
-                    session=http,
-                )
-                media_ids.append(mid)
+            mid = _x_media_upload(
+                file_path=local_path,
+                api_key=api_key, api_key_secret=api_key_secret,
+                access_token=access_token, access_token_secret=access_token_secret,
+                session=http,
+            )
+            if not mid:
+                raise PreparedPublishError("X media upload returned no media ID")
+            media_ids.append(mid)
+        if len(media_ids) != len(upload_items):
+            raise PreparedPublishError("X media upload did not attach every requested media item")
 
     # Create tweet (v2 endpoint)
     tweet_data: dict[str, Any] = {"text": message}
@@ -3373,6 +3362,16 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
     http = _get_session(session)
 
     message, image_items, video_items = _bluesky_message_and_media(payload)
+    artifacts = payload.get("artifacts") or []
+    if artifacts and not (image_items or video_items):
+        raise PreparedPublishError("Bluesky media artifacts were supplied but none is a supported image/video")
+    if len(image_items) > 4 or len(video_items) > 1 or (image_items and video_items):
+        raise PreparedPublishError("Bluesky posts support up to four images or one video, not mixed media")
+    for item in [*video_items, *image_items]:
+        local = Path(str(item.get("local_path") or ""))
+        public_url = str(item.get("public_url") or "").strip()
+        if not (local.is_file() and local.stat().st_size > 0) and not public_url:
+            raise PreparedPublishError("Bluesky media artifact has no readable local file or public URL")
     auth = _bluesky_create_session(http, cfg)
 
     record: dict[str, Any] = {
@@ -3385,63 +3384,64 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
     def _resolve_local(item: dict) -> tuple[str | None, str | None]:
         local_path = item.get("local_path") or ""
         public_url = item.get("public_url") or ""
-        if local_path and Path(local_path).exists():
+        if local_path and Path(local_path).is_file() and Path(local_path).stat().st_size > 0:
             return local_path, None
         if public_url:
             tmp = _bluesky_fetch_to_temp(http, url=public_url)
+            if Path(tmp).stat().st_size <= 0:
+                Path(tmp).unlink(missing_ok=True)
+                raise PreparedPublishError("Bluesky media URL returned an empty file")
             return tmp, tmp
-        return None, None
+        raise PreparedPublishError("Bluesky media artifact has no readable local file or public URL")
 
     if video_items:
         # Bluesky allows a single video per post.
         video = video_items[0]
         local_path, tmp_path = _resolve_local(video)
-        if local_path:
-            try:
-                blob = _bluesky_upload_blob(
-                    http, jwt=auth["accessJwt"], service=cfg["service"],
-                    local_path=local_path, mime="video/mp4",
-                )
-                if blob:
-                    embed: dict[str, Any] = {
-                        "$type": "app.bsky.embed.video",
-                        "video": blob,
-                    }
-                    ratio = _bluesky_video_aspect_ratio(local_path)
-                    if ratio:
-                        embed["aspectRatio"] = ratio
-                    if str(video.get("alt_text") or "").strip():
-                        embed["alt"] = str(video["alt_text"]).strip()
-                    record["embed"] = embed
-                    uploaded_media["videos"] = 1
-            finally:
-                if tmp_path:
-                    Path(tmp_path).unlink(missing_ok=True)
+        try:
+            blob = _bluesky_upload_blob(
+                http, jwt=auth["accessJwt"], service=cfg["service"],
+                local_path=local_path, mime="video/mp4",
+            )
+            if not blob:
+                raise PreparedPublishError("Bluesky video upload returned no blob")
+            embed: dict[str, Any] = {
+                "$type": "app.bsky.embed.video",
+                "video": blob,
+            }
+            ratio = _bluesky_video_aspect_ratio(local_path)
+            if ratio:
+                embed["aspectRatio"] = ratio
+            if str(video.get("alt_text") or "").strip():
+                embed["alt"] = str(video["alt_text"]).strip()
+            record["embed"] = embed
+            uploaded_media["videos"] = 1
+        finally:
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
     elif image_items:
         blobs: list[dict] = []
         alt_texts: list[str] = []
         for item in image_items[:4]:
             local_path, tmp_path = _resolve_local(item)
-            if not local_path:
-                continue
             try:
                 blob = _bluesky_upload_blob(http, jwt=auth["accessJwt"], service=cfg["service"], local_path=local_path)
-                if blob:
-                    blobs.append(blob)
-                    alt_texts.append(str(item.get("alt_text") or "").strip())
+                if not blob:
+                    raise PreparedPublishError("Bluesky image upload returned no blob")
+                blobs.append(blob)
+                alt_texts.append(str(item.get("alt_text") or "").strip())
             finally:
                 if tmp_path:
                     Path(tmp_path).unlink(missing_ok=True)
-        if blobs:
-            images = [
-                {"image": blob, "alt": alt_texts[i] or ""}
-                for i, blob in enumerate(blobs)
-            ]
-            record["embed"] = {
-                "$type": "app.bsky.embed.images",
-                "images": images,
-            }
-            uploaded_media["images"] = len(blobs)
+        images = [
+            {"image": blob, "alt": alt_texts[i] or ""}
+            for i, blob in enumerate(blobs)
+        ]
+        record["embed"] = {
+            "$type": "app.bsky.embed.images",
+            "images": images,
+        }
+        uploaded_media["images"] = len(blobs)
 
     if cfg["label"]:
         record["labels"] = {
