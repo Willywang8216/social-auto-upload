@@ -872,53 +872,50 @@ def publish_discord_sync(account, payload: dict, *, session=None) -> list[Any]:
     if not webhook_url:
         raise PreparedPublishError("Discord publish requires webhookUrl or webhookUrlEnv")
 
-    declared_artifacts = payload.get("artifacts") or []
+    artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
-    if declared_artifacts and not (media["videos"] or media["images"]):
+    all_media = [*media["videos"], *media["images"]]
+    if artifacts and not all_media:
         raise PreparedPublishError("Discord media artifacts were supplied but none is a supported image/video")
-    if len([*media["videos"], *media["images"]]) > 10:
+    if len(all_media) > 10:
         raise PreparedPublishError("Discord webhook supports at most 10 files per post")
 
-    http = _get_session(session)
     message = _payload_message(payload) or _message_title(payload)
-    all_media = [*media["videos"], *media["images"]]
-
-    files = {}
-    open_files = []
-    for item in all_media:
-        local_path = str(item.get("local_path") or "").strip()
-        public_url = str(item.get("public_url") or "").strip()
-        if not local_path and not public_url:
-            raise PreparedPublishError("Discord media artifact has no usable source")
-        if local_path:
-            path = Path(local_path)
-            if not path.is_file() or path.stat().st_size <= 0:
-                raise PreparedPublishError(f"Discord media file is missing or empty: {path}")
-        else:
-            raise PreparedPublishError("Discord media requires a readable local file attachment")
     content_lines = [message] if message else []
+    embeds = []
+    files: dict[str, tuple[str, Any]] = {}
+    open_files = []
     try:
         for index, item in enumerate(all_media):
             local_path = str(item.get("local_path") or "").strip()
             public_url = str(item.get("public_url") or "").strip()
-            path = Path(local_path)
-            handle = path.open("rb")
-            open_files.append(handle)
-            files[f"files[{index}]"] = (path.name, handle)
+            if local_path:
+                path = Path(local_path)
+                if not path.is_file() or path.stat().st_size <= 0:
+                    raise PreparedPublishError(f"Discord media file is missing or empty: {path}")
+                handle = path.open("rb")
+                open_files.append(handle)
+                files[f"files[{index}]"] = (path.name, handle)
+            elif public_url.lower().startswith(("https://", "http://")):
+                if item in media["images"]:
+                    embeds.append({"image": {"url": public_url}})
+                else:
+                    embeds.append({"url": public_url})
+            else:
+                raise PreparedPublishError("Discord media artifact has no valid public URL or local file")
 
+        payload_json = {"content": "\n".join(content_lines).strip()}
+        if embeds:
+            payload_json["embeds"] = embeds
         if files:
-            response = http.post(
+            response = _get_session(session).post(
                 webhook_url,
-                data={"payload_json": json.dumps({"content": "\n".join(content_lines).strip()}, ensure_ascii=False)},
+                data={"payload_json": json.dumps(payload_json, ensure_ascii=False)},
                 files=files,
                 timeout=600,
             )
         else:
-            response = http.post(
-                webhook_url,
-                json={"content": "\n".join(content_lines).strip()},
-                timeout=120,
-            )
+            response = _get_session(session).post(webhook_url, json=payload_json, timeout=120)
         _raise_for_status(response)
         return [_response_payload(response)]
     finally:

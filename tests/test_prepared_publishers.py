@@ -250,20 +250,27 @@ class PreparedPublisherTests(unittest.TestCase):
             )
         self.assertEqual(session.calls[0][1], "https://discord.example/webhook")
         self.assertIn("files[0]", session.calls[0][2]["files"])
+        payload_json = json.loads(session.calls[0][2]["data"]["payload_json"])
+        self.assertEqual(payload_json["content"], "Discord launch")
 
-    def test_discord_rejects_missing_or_url_only_media(self):
+    def test_discord_rejects_missing_media_and_embeds_public_image_url(self):
         account = SimpleNamespace(config={"webhookUrl": "https://discord.example/webhook"})
-        for artifact in (
-            {"local_path": "/tmp/missing-discord.jpg", "artifact_kind": "watermarked_image"},
-            {"public_url": "https://cdn.example/image.jpg", "artifact_kind": "watermarked_image"},
-        ):
-            session = _RecordingSession()
-            with self.subTest(artifact=artifact), self.assertRaises(prepared_publishers.PreparedPublishError):
-                prepared_publishers.publish_discord_sync(
-                    account, {"message": "Discord attachment", "artifacts": [artifact]},
-                    session=session,
-                )
-            self.assertEqual(session.calls, [])
+        session = _RecordingSession()
+        with self.assertRaises(prepared_publishers.PreparedPublishError):
+            prepared_publishers.publish_discord_sync(
+                account, {"message": "Discord attachment", "artifacts": [{
+                    "local_path": "/tmp/missing-discord.jpg", "artifact_kind": "watermarked_image",
+                }]}, session=session,
+            )
+        self.assertEqual(session.calls, [])
+
+        session = _RecordingSession([_FakeResponse({})])
+        prepared_publishers.publish_discord_sync(
+            account, {"message": "Discord attachment", "artifacts": [{
+                "public_url": "https://cdn.example/image.jpg", "artifact_kind": "watermarked_image",
+            }]}, session=session,
+        )
+        self.assertEqual(session.calls[0][2]["json"]["embeds"][0]["image"]["url"], "https://cdn.example/image.jpg")
 
     def test_discord_text_only_without_artifacts_remains_allowed(self):
         session = _RecordingSession([_FakeResponse({})])
