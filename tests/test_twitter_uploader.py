@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from uploader.twitter_uploader.main import (
     PreparedTwitterSegment,
@@ -12,6 +13,7 @@ from uploader.twitter_uploader.main import (
     TWITTER_MAX_VIDEO_SECONDS,
     TWITTER_SPLIT_SEGMENT_SECONDS,
     click_post_button,
+    TwitterThreadVideo,
     extract_created_post_id,
     is_topmost_at_center,
     materialize_thread_segments,
@@ -68,7 +70,30 @@ class _FakePage:
         return _FakeCollection([])
 
 
+class _FakePreviewCollection:
+    def __init__(self, count: int) -> None:
+        self._count = count
+
+    async def count(self) -> int:
+        return self._count
+
+
+class _FakeAttachmentPage:
+    def __init__(self, count: int) -> None:
+        self._count = count
+
+    def locator(self, _selector: str) -> _FakePreviewCollection:
+        return _FakePreviewCollection(self._count)
+
+
 class TwitterUploaderPlanningTests(unittest.TestCase):
+    def test_x_attachment_wait_requires_requested_previews(self) -> None:
+        uploader = TwitterThreadVideo.__new__(TwitterThreadVideo)
+        asyncio.run(uploader._wait_for_attachments(_FakeAttachmentPage(1), expected=1))
+        with patch("uploader.twitter_uploader.main.TWITTER_ATTACHMENT_READY_TIMEOUT_MS", 1):
+            with self.assertRaises(TimeoutError):
+                asyncio.run(uploader._wait_for_attachments(_FakeAttachmentPage(0), expected=1))
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self._tmp.name)
@@ -304,6 +329,9 @@ class TwitterUploaderPlanningTests(unittest.TestCase):
 
         self.assertEqual(seen_previous_ids, [None, "post-0-0", "post-0-1"])
         self.assertEqual(result, ["post-0-0", "post-0-1", "post-1-0"])
+
+    def test_extract_created_post_id_accepts_api_v2_data_id(self) -> None:
+        self.assertEqual(extract_created_post_id({"data": {"id": "api-post-id"}}), "api-post-id")
 
     def test_extract_created_post_id_prefers_create_tweet_branch(self) -> None:
         payload = {

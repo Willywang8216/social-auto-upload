@@ -3750,6 +3750,11 @@ def _fallback_generated_draft(
     request_data: dict,
     media_context: dict,
 ) -> dict:
+    if request_data.get("_accountLanguage"):
+        raise RuntimeError(
+            "Account-language content generation requires an available LLM; "
+            "refusing to publish source-language fallback copy"
+        )
     headline = str(request_data.get("title") or media_group.name).strip()
     notes = str(request_data.get("notes", "") or "").strip()
     transcript = str(media_context.get("transcriptText", "") or "").strip()
@@ -3792,6 +3797,25 @@ def _build_generation_prompt(
         user_lines.append("")
         user_lines.append("Account context (apply any account-specific rules from the system prompt):")
         user_lines.append(account_context)
+    language = str(request_data.get("_accountLanguage") or "").strip()
+    if language:
+        labels = content_generator._parse_languages(language)
+        if len(labels) == 1:
+            user_lines.extend((
+                "",
+                "LANGUAGE REQUIREMENT (highest priority): Write the entire output, "
+                f"including the message, in {labels[0]}. Do not use another language, "
+                "provide a translation, or mix languages.",
+            ))
+        elif len(labels) > 1:
+            primary, *secondary = labels
+            user_lines.extend((
+                "",
+                "LANGUAGE REQUIREMENT (highest priority): This account explicitly "
+                f"requests bilingual copy in {' and '.join(labels)}. Write the complete "
+                f"{primary} version first, then a standalone --- line, then the complete "
+                f"{' then '.join(secondary)} version. Do not omit either language.",
+            ))
     user_lines.append("Return JSON with keys: message, hashtags, firstComment, contactDetails, cta.")
     return system_prompt, "\n".join(user_lines)
 
@@ -3823,6 +3847,11 @@ def _generate_platform_draft(
         os.environ.get("SAU_LLM_API_KEY") and os.environ.get("SAU_LLM_API_BASE_URL")
     )
     should_use_llm = bool(request_data.get("useLlm", True)) and has_ai
+    account_language = str(request_data.get("_accountLanguage") or "").strip()
+    if platform == "twitter" and len(content_generator._parse_languages(account_language)) > 1:
+        raise ValueError("X posts support one audience language per account; configure separate accounts for separate languages")
+    if account_language and not should_use_llm:
+        raise RuntimeError("An LLM is required for language-specific account copy; refusing source-language fallback")
 
     raw_draft = None
     if should_use_llm:
@@ -3866,6 +3895,17 @@ def _generate_platform_draft(
     )
 
 
+def _account_audience_language(account, profile) -> str:
+    config = getattr(account, "config", None) or {}
+    language = config.get("audience_language") or config.get("audienceLanguage")
+    settings = getattr(profile, "settings", None) or {}
+    if isinstance(settings, dict):
+        language = language or settings.get("default_language") or settings.get("defaultLanguage")
+    else:
+        language = language or getattr(profile, "default_language", "")
+    return str(language or "").strip()
+
+
 def _generate_account_draft(
     account: profile_registry.Account,
     profile: profile_registry.Profile,
@@ -3901,6 +3941,7 @@ def _generate_account_draft(
         "'Account specification' section with rules for this account, follow them.",
     ]
     extended_data["_accountContext"] = "\n".join(account_context_lines) + nonce_suffix
+    extended_data["_accountLanguage"] = _account_audience_language(account, profile)
     return _generate_platform_draft(
         account.platform,
         profile,
@@ -6337,46 +6378,47 @@ def campaigns_prepare():
 
         created_posts: list[campaign_store.CampaignPost] = []
         for platform, platform_accounts in grouped_accounts.items():
-            draft = _generate_platform_draft(
-                platform,
-                profile,
-                media_group,
-                data,
-                media_context,
-            )
-            sheet_row = {}
-            if profile_registry.platform_supports_sheet_export(platform):
-                sheet_image_urls = media_context["imageUrls"] or None
-                sheet_video_url = media_context["videoUrl"]
-                if sheet_image_urls and sheet_video_url:
-                    # The downstream sheet import format accepts either images
-                    # or one video URL per row, never both. Prefer the video
-                    # when the group contains mixed media so the row remains
-                    # importable.
-                    sheet_image_urls = None
-                sheet_row = content_rules.build_sheet_row(
-                    message=draft["message"],
-                    platform=platform,
-                    link=str(data.get("link", "") or ""),
-                    image_urls=sheet_image_urls,
-                    video_url=sheet_video_url,
-                    schedule=data.get("schedule"),
-                    watermark="Default" if _derive_watermark_spec(profile, data) else "",
-                    first_comment=str(draft.get("firstComment", "") or ""),
-                    alt_text=str(data.get("altText", "") or ""),
-                    post_preset=str((platform_accounts[0].config or {}).get("sheetPostPreset", "") or ""),
+            for account in platform_accounts:
+                draft = _generate_account_draft(
+                    account,
+                    profile,
+                    media_group,
+                    data,
+                    media_context,
                 )
-            created_posts.append(
-                campaign_store.add_campaign_post(
-                    campaign.id,
-                    platform,
-                    account_ids=[account.id for account in platform_accounts],
-                    draft=draft,
-                    sheet_row=sheet_row,
-                    status=campaign_store.CAMPAIGN_POST_READY,
-                    db_path=db_path,
+                sheet_row = {}
+                if profile_registry.platform_supports_sheet_export(platform):
+                    sheet_image_urls = media_context.get("imageUrls") or None
+                    sheet_video_url = media_context.get("videoUrl") or ""
+                    if sheet_image_urls and sheet_video_url:
+                        # The downstream sheet import format accepts either images
+                        # or one video URL per row, never both. Prefer the video
+                        # when the group contains mixed media so the row remains
+                        # importable.
+                        sheet_image_urls = None
+                    sheet_row = content_rules.build_sheet_row(
+                        message=draft["message"],
+                        platform=platform,
+                        link=str(data.get("link", "") or ""),
+                        image_urls=sheet_image_urls,
+                        video_url=sheet_video_url,
+                        schedule=data.get("schedule"),
+                        watermark="Default" if _derive_watermark_spec(profile, data) else "",
+                        first_comment=str(draft.get("firstComment", "") or ""),
+                        alt_text=str(data.get("altText", "") or ""),
+                        post_preset=str((account.config or {}).get("sheetPostPreset", "") or ""),
+                    )
+                created_posts.append(
+                    campaign_store.add_campaign_post(
+                        campaign.id,
+                        platform,
+                        account_ids=[account.id],
+                        draft=draft,
+                        sheet_row=sheet_row,
+                        status=campaign_store.CAMPAIGN_POST_READY,
+                        db_path=db_path,
+                    )
                 )
-            )
 
         sheet_title = campaign.sheet_title or _default_sheet_title(profile)
         spreadsheet_id = campaign.sheet_spreadsheet_id
@@ -6969,26 +7011,26 @@ def publish_center_preview():
             )
 
             drafts_by_account: dict[int, dict] = {}
-            cached_per_platform: dict[str, dict] = {}
             for account in accounts:
-                cached = cached_per_platform.get(account.platform)
-                if cached is None:
-                    try:
-                        cached = _generate_account_draft(
-                            account, profile, media_group_stub, request_data, media_context
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        rule = content_rules.PLATFORM_RULES.get(account.platform)
-                        max_chars = (rule.max_chars if rule is not None else None) or 1000
-                        cached = {
-                            "message": brief.strip()[:max_chars] or brief.strip(),
-                            "hashtags": [],
-                            "firstComment": "",
-                            "charCount": len(brief.strip()),
-                            "error": str(exc),
-                        }
-                    cached_per_platform[account.platform] = cached
-                drafts_by_account[account.id] = dict(cached)
+                try:
+                    # Account-level audience language and voice are not
+                    # interchangeable merely because platform matches.
+                    draft = _generate_account_draft(
+                        account, profile, media_group_stub, request_data, media_context
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    rule = content_rules.PLATFORM_RULES.get(account.platform)
+                    max_chars = (rule.max_chars if rule is not None else None) or 1000
+                    draft = {
+                        # Do not expose source-language text as a publishable
+                        # draft when an account requires another language.
+                        "message": "" if _account_audience_language(account, profile) else (brief.strip()[:max_chars] or brief.strip()),
+                        "hashtags": [],
+                        "firstComment": "",
+                        "charCount": 0 if _account_audience_language(account, profile) else len(brief.strip()),
+                        "error": str(exc),
+                    }
+                drafts_by_account[account.id] = dict(draft)
 
             results.append(
                 _publish_center_preview_payload(
@@ -8196,7 +8238,7 @@ def api_campaign_generate(campaign_id):
         context = {
             "user_notes": mg_dict.get("notes", "") or mg_dict.get("user_notes", ""),
             "subreddit": acc.config.get("subreddits", [""])[0] if acc.platform == "reddit" else "",
-            "language": acc.config.get("audience_language") or profile_dict.get("default_language") or "",
+            "language": _account_audience_language(acc, profile),
         }
 
         system_prompt, user_prompt = content_generator.build_generation_context(
@@ -9134,12 +9176,20 @@ def inbox_item_publish(item_id):
 
     db_path = _current_db_path()
     try:
-        profile_ids, media_file_paths, brief, schedule = _inbox_publish_payload(
-            item, data, db_path=db_path,
-        )
+        from myUtils.inbox_drive import remote_path_for_item, stage_remote_media
+        remote_path = remote_path_for_item(item)
+        profile_ids = [int(v) for v in (data.get("profileIds") or item.get("profileIds") or []) if v]
+        if not profile_ids:
+            raise ValueError("Inbox item has no profileIds — cannot publish")
         selected_account_ids = _inbox_selected_account_ids(
             profile_ids, item.get("sfwFlag"), db_path=db_path,
-            media_file_paths=media_file_paths,
+            media_file_paths=[str(item.get("sourcePath") or remote_path)],
+        )
+        staged_path = stage_remote_media(remote_path)
+        publish_item = dict(item)
+        publish_item["sourcePath"] = staged_path
+        profile_ids, media_file_paths, brief, schedule = _inbox_publish_payload(
+            publish_item, data, db_path=db_path,
         )
         result = publish_orchestrator.submit_publish(
             profile_ids=profile_ids,
@@ -9157,9 +9207,16 @@ def inbox_item_publish(item_id):
             artifact_payloads_for_platform=_artifact_payloads_for_platform,
             job_to_payload=_job_to_payload,
         )
+        submission_started = bool(result.jobs)
+        if not result.jobs:
+            (Path(BASE_DIR) / "videoFile" / staged_path).unlink(missing_ok=True)
     except LookupError as exc:
+        if "staged_path" in locals() and not locals().get("submission_started", False):
+            (Path(BASE_DIR) / "videoFile" / staged_path).unlink(missing_ok=True)
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
     except Exception as exc:  # noqa: BLE001
+        if "staged_path" in locals() and not locals().get("submission_started", False):
+            (Path(BASE_DIR) / "videoFile" / staged_path).unlink(missing_ok=True)
         logging.getLogger(__name__).exception("inbox publish failed")
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     if result.jobs:

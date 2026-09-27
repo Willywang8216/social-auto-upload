@@ -147,6 +147,116 @@ class JobLifecycleTests(unittest.TestCase):
         self.assertEqual(running[0].id, running_job.id)
 
 
+class StaleRunningRecoveryTests(unittest.TestCase):
+    """jobs.requeue_stale_running — recovery for rows a dead worker left
+    stuck in ``running`` (they otherwise block their job forever and pin
+    their media in offload_to_drive.sh's keep-local set)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "jobs.db"
+        create_table.bootstrap(self.db_path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _backdate_started_at(self, target_id: int, hours: float) -> None:
+        import sqlite3
+        from datetime import datetime as _dt, timedelta as _td
+
+        stale = (_dt.now(tz=timezone.utc).replace(tzinfo=None)
+                 - _td(hours=hours)).isoformat(timespec="seconds")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE publish_job_targets SET started_at = ? WHERE id = ?",
+                (stale, target_id),
+            )
+            conn.commit()
+
+    def test_stale_running_target_is_requeued(self) -> None:
+        jobs.enqueue_job(_spec(), db_path=self.db_path)
+        target = jobs.claim_next_targets(limit=1, db_path=self.db_path)[0]
+        self.assertEqual(target.status, jobs.TARGET_RUNNING)
+
+        self._backdate_started_at(target.id, hours=3)
+        moved = jobs.requeue_stale_running(db_path=self.db_path)
+        self.assertEqual(moved, 1)
+
+        [refreshed] = jobs.list_targets(target.job_id, db_path=self.db_path)
+        self.assertEqual(refreshed.status, jobs.TARGET_RETRYING)
+        self.assertIn("stale", refreshed.last_error or "")
+        # And the job must not finalise: the target is in-flight again.
+        self.assertEqual(
+            jobs.get_job(target.job_id, db_path=self.db_path).status,
+            jobs.JOB_RUNNING,
+        )
+
+    def test_recent_running_target_is_untouched(self) -> None:
+        jobs.enqueue_job(_spec(), db_path=self.db_path)
+        target = jobs.claim_next_targets(limit=1, db_path=self.db_path)[0]
+        # started_at is now (fresh claim) — the 2 h threshold must not fire.
+        moved = jobs.requeue_stale_running(db_path=self.db_path)
+        self.assertEqual(moved, 0)
+        [refreshed] = jobs.list_targets(target.job_id, db_path=self.db_path)
+        self.assertEqual(refreshed.status, jobs.TARGET_RUNNING)
+
+    def test_stale_running_with_exhausted_attempts_fails(self) -> None:
+        import sqlite3
+
+        jobs.enqueue_job(_spec(), db_path=self.db_path)
+        target = jobs.claim_next_targets(limit=1, db_path=self.db_path)[0]
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE publish_job_targets SET attempts = 3 WHERE id = ?",
+                (target.id,),
+            )
+            conn.commit()
+        self._backdate_started_at(target.id, hours=3)
+
+        moved = jobs.requeue_stale_running(max_attempts=3, db_path=self.db_path)
+        self.assertEqual(moved, 1)
+
+        [refreshed] = jobs.list_targets(target.job_id, db_path=self.db_path)
+        self.assertEqual(refreshed.status, jobs.TARGET_FAILED)
+        job = jobs.get_job(target.job_id, db_path=self.db_path)
+        self.assertEqual(job.status, jobs.JOB_FAILED)
+        self.assertEqual(job.failed_targets, 1)
+
+    def test_null_started_at_counts_as_stale(self) -> None:
+        import sqlite3
+
+        jobs.enqueue_job(_spec(), db_path=self.db_path)
+        target = jobs.claim_next_targets(limit=1, db_path=self.db_path)[0]
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE publish_job_targets SET started_at = NULL WHERE id = ?",
+                (target.id,),
+            )
+            conn.commit()
+
+        moved = jobs.requeue_stale_running(db_path=self.db_path)
+        self.assertEqual(moved, 1)
+        [refreshed] = jobs.list_targets(target.job_id, db_path=self.db_path)
+        self.assertEqual(refreshed.status, jobs.TARGET_RETRYING)
+
+    def test_claim_rewrites_started_at_every_time(self) -> None:
+        # A re-claim must refresh started_at (the sweep's liveness signal),
+        # not keep the first claim's timestamp via COALESCE.
+        jobs.enqueue_job(_spec(), db_path=self.db_path)
+        first = jobs.claim_next_targets(limit=1, db_path=self.db_path)[0]
+        self._backdate_started_at(first.id, hours=5)
+        jobs.mark_target_retry(first.id, "transient", db_path=self.db_path)
+
+        [second] = jobs.claim_next_targets(limit=1, db_path=self.db_path)
+        self.assertEqual(second.id, first.id)
+        self.assertIsNotNone(second.started_at)
+        self.assertNotIn("T0", second.started_at.split("T", 1)[-1][:0] or "x")
+        from datetime import datetime as _dt
+        started = _dt.fromisoformat(second.started_at)
+        age_minutes = (_dt.now(tz=timezone.utc).replace(tzinfo=None) - started).total_seconds() / 60
+        self.assertLess(age_minutes, 5, "started_at must date the new claim")
+
+
 class CancelRaceTests(unittest.TestCase):
     """Regressions for the QA-found cancel-race bug.
 

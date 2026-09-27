@@ -36,7 +36,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
@@ -513,11 +513,14 @@ def claim_next_targets(
 
             rows = conn.execute(sql, params).fetchall()
             for row in rows:
+                # ``started_at`` is rewritten on *every* claim rather than
+                # kept from the first one (the old COALESCE): it is the
+                # liveness signal ``requeue_stale_running`` sweeps on, so it
+                # must date the current attempt, not the target's history.
                 conn.execute(
                     """
                     UPDATE publish_job_targets
-                    SET status = ?, attempts = attempts + 1,
-                        started_at = COALESCE(started_at, ?)
+                    SET status = ?, attempts = attempts + 1, started_at = ?
                     WHERE id = ? AND status IN (?, ?)
                     """,
                     (TARGET_RUNNING, now, row["id"],
@@ -657,6 +660,64 @@ def mark_target_failed(
         _maybe_finalise_job(conn, target["job_id"])
         conn.commit()
         return True
+
+
+def requeue_stale_running(
+    *,
+    older_than_minutes: int = 120,
+    max_attempts: int = 3,
+    db_path: Path | None = None,
+) -> int:
+    """Recover targets abandoned in ``running`` by a dead/restarted worker.
+
+    A claim flips a target to ``running``, but if the process dies mid-upload
+    (Gunicorn restart, container bounce) no terminal transition ever runs.
+    Such a row is stuck forever: it blocks its job from finalising and — via
+    ``offload_to_drive.sh``'s in-flight exclusion — pins its media on the VPS
+    indefinitely. This sweep moves stale rows forward: back to ``retrying``
+    while the retry budget lasts, straight to ``failed`` once ``attempts``
+    is exhausted, so the parent job can settle either way.
+
+    The cutoff compares against ``started_at``, which ``claim_next_targets``
+    rewrites on every claim, so it always reflects the current attempt.
+    Rows with a NULL ``started_at`` (pre-upgrade stragglers) are treated as
+    stale. The default 2-hour threshold is deliberately generous: it must
+    never fire on a slow-but-alive upload in another thread of this process.
+
+    Returns the number of targets moved.
+    """
+
+    cutoff = (
+        datetime.now(tz=timezone.utc).replace(tzinfo=None)
+        - timedelta(minutes=int(older_than_minutes))
+    ).isoformat(timespec="seconds")
+
+    with _connect(db_path) as conn:
+        stale = conn.execute(
+            """
+            SELECT id, attempts FROM publish_job_targets
+            WHERE status = ? AND COALESCE(started_at, '') < ?
+            """,
+            (TARGET_RUNNING, cutoff),
+        ).fetchall()
+
+    moved = 0
+    for row in stale:
+        if row["attempts"] >= int(max_attempts):
+            ok = mark_target_failed(
+                row["id"],
+                "requeued as stale: worker died mid-run and retry budget exhausted",
+                db_path=db_path,
+            )
+        else:
+            ok = mark_target_retry(
+                row["id"],
+                "requeued as stale: worker died mid-run; will retry",
+                db_path=db_path,
+            )
+        if ok:
+            moved += 1
+    return moved
 
 
 def _maybe_finalise_job(conn: sqlite3.Connection, job_id: int) -> None:

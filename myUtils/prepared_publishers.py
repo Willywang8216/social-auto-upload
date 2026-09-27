@@ -2059,6 +2059,7 @@ def _x_auth_header(
     consumer_secret: str,
     token_secret: str,
     oauth_params_extra: dict[str, str] | None = None,
+    signature_params_extra: dict[str, str] | None = None,
 ) -> str:
     nonce = secrets.token_hex(16)
     timestamp = str(int(time.time()))
@@ -2075,7 +2076,7 @@ def _x_auth_header(
     signature = _x_oauth1_signature(
         method=method,
         url=url,
-        params={**oauth_params, **(oauth_params_extra or {})},
+        params={**oauth_params, **(signature_params_extra or {})},
         consumer_secret=consumer_secret,
         token_secret=token_secret,
     )
@@ -2090,11 +2091,13 @@ def _x_auth_header(
 
 
 def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access_token: str, access_token_secret: str, session=None) -> str:
-    """Upload a media file to Twitter and return the media_id."""
+    """Upload image/video via X's chunked v1.1 media endpoint."""
     http = _get_session(session)
-    file_size = Path(file_path).stat().st_size
+    source = Path(file_path)
+    file_size = source.stat().st_size
     mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
-
+    media_category = "tweet_video" if mime_type.startswith("video/") else "tweet_image"
+    segment_bytes = 4 * 1024 * 1024
     # INIT
     auth_header = _x_auth_header(
         method="POST", url=X_UPLOAD_URL,
@@ -2108,27 +2111,33 @@ def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access
             "command": "INIT",
             "total_bytes": str(file_size),
             "media_type": mime_type,
+            "media_category": media_category,
         },
         timeout=120,
     )
     _raise_for_status(init_resp)
     media_id = str(init_resp.json().get("media_id_string") or "")
 
-    # APPEND
-    with Path(file_path).open("rb") as fh:
-        auth_header = _x_auth_header(
-            method="POST", url=X_UPLOAD_URL,
-            consumer_key=api_key, token=access_token,
-            consumer_secret=api_key_secret, token_secret=access_token_secret,
-        )
-        append_resp = http.post(
-            X_UPLOAD_URL,
-            headers={"Authorization": auth_header},
-            data={"command": "APPEND", "media_id": media_id, "segment_index": "0"},
-            files={"media": (Path(file_path).name, fh, mime_type)},
-            timeout=600,
-        )
-        _raise_for_status(append_resp)
+    # APPEND bounded chunks; the browser uploader's 50 MB restriction does not
+    # apply here, but X's chunked endpoint still requires a segment per chunk.
+    with source.open("rb") as fh:
+        segment_index = 0
+        while chunk := fh.read(segment_bytes):
+            auth_header = _x_auth_header(
+                method="POST", url=X_UPLOAD_URL,
+                consumer_key=api_key, token=access_token,
+                consumer_secret=api_key_secret, token_secret=access_token_secret,
+            )
+            append_resp = http.post(
+                X_UPLOAD_URL,
+                headers={"Authorization": auth_header},
+                data={"command": "APPEND", "media_id": media_id,
+                      "segment_index": str(segment_index)},
+                files={"media": (source.name, chunk, mime_type)},
+                timeout=600,
+            )
+            _raise_for_status(append_resp)
+            segment_index += 1
 
     # FINALIZE
     auth_header = _x_auth_header(
@@ -2143,6 +2152,36 @@ def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access
         timeout=120,
     )
     _raise_for_status(finalize_resp)
+    processing = finalize_resp.json().get("processing_info") or {}
+    deadline = time.monotonic() + 180
+    while processing:
+        state = str(processing.get("state") or "").lower()
+        if state == "succeeded":
+            break
+        if state == "failed":
+            error = processing.get("error") or {}
+            raise PreparedPublishError(
+                f"X media processing failed: {error.get('message') or error}"
+            )
+        delay = max(float(processing.get("check_after_secs") or 2), 1)
+        if time.monotonic() + delay >= deadline:
+            raise PreparedPublishError("X media processing did not finish within 180 seconds")
+        time.sleep(delay)
+        status_params = {"command": "STATUS", "media_id": media_id}
+        status_header = _x_auth_header(
+            method="GET", url=X_UPLOAD_URL,
+            consumer_key=api_key, token=access_token,
+            consumer_secret=api_key_secret, token_secret=access_token_secret,
+            signature_params_extra=status_params,
+        )
+        status_resp = http.get(
+            X_UPLOAD_URL,
+            headers={"Authorization": status_header},
+            params=status_params,
+            timeout=120,
+        )
+        _raise_for_status(status_resp)
+        processing = status_resp.json().get("processing_info") or {}
     return media_id
 
 
@@ -2208,18 +2247,52 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
 
     http = _get_session(session)
     message = _payload_message(payload)
+    artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
+    media_items = media["images"][:4] + media["videos"][:1]
+    if media["images"] and media["videos"]:
+        raise PreparedPublishError("X API posts cannot mix images and video; split the campaign into separate posts")
+    if len(media["images"]) > 4 or len(media["videos"]) > 1:
+        raise PreparedPublishError("X API posts support up to four images or one video per post")
+    if artifacts and not media_items:
+        raise PreparedPublishError(
+            "Twitter media artifacts were supplied but none is a supported image/video"
+        )
+    for artifact in artifacts:
+        local_path = str(artifact.get("local_path") or "").strip()
+        probe = local_path or str(artifact.get("public_url") or "")
+        kind = str(artifact.get("artifact_kind") or "").lower()
+        declared_media = "image" in kind or "video" in kind or bool(probe)
+        if declared_media and not any(
+            (item.get("local_path") or item.get("public_url")) == probe
+            for item in media_items
+        ):
+            raise PreparedPublishError("Twitter received an unsupported or unclassified media artifact")
+    for item in media_items:
+        local_path = str(item.get("local_path") or "").strip()
+        if not local_path:
+            raise PreparedPublishError(
+                "Twitter API media publishing requires a local media path; "
+                "public URLs alone are not uploaded by the X API"
+            )
+        path = Path(local_path)
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise PreparedPublishError(
+                f"Twitter API media file is missing or empty: {path}"
+            )
+
+    upload_items = media["images"] or media["videos"]
 
     # Upload media first (v1.1 endpoint requires OAuth 1.0a)
     media_ids = []
-    if media["images"][:4] + media["videos"][:1]:
+    if upload_items:
         api_key, api_key_secret, access_token, access_token_secret = _twitter_oauth1_credentials(config)
         if not all([api_key, api_key_secret, access_token, access_token_secret]):
             raise PreparedPublishError(
                 "Twitter media upload requires OAuth 1.0a credentials for the posting account "
                 "(oauth1ApiKey, oauth1ApiKeySecret, oauth1AccessToken, oauth1AccessTokenSecret)"
             )
-        for item in media["images"][:4] + media["videos"][:1]:
+        for item in upload_items:
             local_path = item.get("local_path")
             if local_path:
                 mid = _x_media_upload(

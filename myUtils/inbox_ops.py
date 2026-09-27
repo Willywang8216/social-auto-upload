@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,9 +62,32 @@ def load_state() -> dict:
 
 def save_state(state: dict) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_PATH.with_suffix(".json.tmp")
+    tmp = STATE_PATH.with_name(f"{STATE_PATH.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(STATE_PATH)
+
+
+@contextmanager
+def _state_file_lock():
+    """POSIX lock shared with the host watcher process."""
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = STATE_PATH.with_suffix(".lock")
+    with lock_path.open("a+") as lock_file:
+        try:
+            import fcntl
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except ImportError:  # pragma: no cover - non-POSIX local development
+            pass
+        yield
+
+
+def update_state(mutator):
+    """Serialize read-modify-write with the watcher and publish transitions."""
+    with _lock, _state_file_lock():
+        state = load_state()
+        result = mutator(state)
+        save_state(state)
+        return result
 
 
 def find_item(state: dict, item_id: str, status: str = "ready") -> dict | None:
@@ -120,24 +144,22 @@ def list_items(status: str | None = None) -> dict:
 
 def _mutate(item_id: str, *, to_status: str, metadata: dict | None = None) -> dict:
     """Move a ready item to another list (or drop it), atomically."""
-    state = load_state()
-    entry = find_item(state, item_id, "ready")
-    if entry is None:
-        raise InboxItemNotFound(f"Inbox item not found: {item_id}")
-    state["ready"] = [i for i in state["ready"] if str(i.get("id")) != str(item_id)]
-    meta = dict(metadata or {})
-    if to_status in ("pending", "quarantined"):
-        entry = dict(entry)
-        entry.update({"status": to_status, "at": utcnow(), **(meta or {})})
-        state.setdefault(to_status, []).append(entry)
-    else:
-        # to_status == "processed": record it under processed by id and keep a
-        # readable trail in the list for the UI.
-        entry = dict(entry)
-        entry.update({"status": "processed", **meta})
-        state.setdefault("processed_items", []).append(entry)
-    save_state(state)
-    return entry
+    def mutate(state: dict) -> dict:
+        entry = find_item(state, item_id, "ready")
+        if entry is None:
+            raise InboxItemNotFound(f"Inbox item not found: {item_id}")
+        state["ready"] = [i for i in state["ready"] if str(i.get("id")) != str(item_id)]
+        meta = dict(metadata or {})
+        if to_status in ("pending", "quarantined"):
+            entry = dict(entry)
+            entry.update({"status": to_status, "at": utcnow(), **(meta or {})})
+            state.setdefault(to_status, []).append(entry)
+        else:
+            entry = dict(entry)
+            entry.update({"status": "processed", **meta})
+            state.setdefault("processed_items", []).append(entry)
+        return entry
+    return update_state(mutate)
 
 
 @dataclass
@@ -168,6 +190,7 @@ def item_payload(entry: dict) -> dict:
         "sfwFlag": entry.get("sfwFlag"),
         "kind": entry.get("kind"),
         "sourcePath": entry.get("sourcePath"),
+        "remotePath": entry.get("remotePath"),
         "thumbPath": entry.get("thumbPath"),
         "thumbKind": entry.get("thumbKind"),
         "brief": entry.get("brief") or "",

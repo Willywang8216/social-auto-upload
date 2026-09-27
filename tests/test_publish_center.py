@@ -192,6 +192,31 @@ class PublishCenterPreviewTests(unittest.TestCase):
         resp = self.client.post("/publish-center/preview", json={})
         self.assertEqual(resp.status_code, 400)
 
+    def test_preview_generates_account_specific_language_drafts(self):
+        profile = profile_registry.create_profile("Language Brand", db_path=self.db_path)
+        en = profile_registry.add_account(
+            profile.id, "twitter", "english", auth_type="oauth",
+            config={"audience_language": "en"}, db_path=self.db_path,
+        )
+        zh = profile_registry.add_account(
+            profile.id, "twitter", "mandarin", auth_type="oauth",
+            config={"audience_language": "zh"}, db_path=self.db_path,
+        )
+        seen = []
+
+        def draft(account, *_args, **_kwargs):
+            seen.append((account.id, account.config.get("audience_language")))
+            return {"message": account.config["audience_language"]}
+
+        with patch.object(self.sau_backend, "_generate_account_draft", side_effect=draft):
+            resp = self.client.post("/publish-center/preview", json={
+                "profileIds": [profile.id],
+                "selectedAccountIds": [en.id, zh.id],
+                "brief": "Language routing test",
+            })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(seen, [(en.id, "en"), (zh.id, "zh")])
+
     def test_preview_returns_drafts_for_valid_request(self):
         profile, account = self._create_profile_and_account()
         with patch.object(self.sau_backend, "_generate_account_draft", return_value={

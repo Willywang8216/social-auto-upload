@@ -80,6 +80,9 @@ class WorkerConfig:
 class PublishWorker:
     # Token refresh runs every N ticks (at 1s poll interval ≈ every 5 min by default)
     _MAINTENANCE_TICK_INTERVAL: int = 300
+    # Sweep abandoned `running` targets roughly once a minute (see
+    # jobs.requeue_stale_running). Cheap indexed SELECT when nothing is stale.
+    _STALE_SWEEP_TICK_INTERVAL: int = 60
     _REFRESHABLE_PLATFORMS: frozenset = frozenset({
         "tiktok", "reddit", "youtube", "threads", "facebook", "instagram", "twitter",
     })
@@ -118,6 +121,7 @@ class PublishWorker:
         self._stop = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
         self._maintenance_counter: int = 0
+        self._stale_sweep_counter: int = 0
 
     def stop(self) -> None:
         self._stop.set()
@@ -540,6 +544,25 @@ class PublishWorker:
             self._maintenance_counter = 0
             asyncio.create_task(self._run_maintenance_tick())
 
+        # Recover targets a dead predecessor left stuck in `running`. Without
+        # this, a Gunicorn/container restart mid-upload strands the row
+        # forever: the job never finalises and its media stays pinned local
+        # by offload_to_drive.sh's in-flight exclusion.
+        self._stale_sweep_counter += 1
+        if self._stale_sweep_counter >= self._STALE_SWEEP_TICK_INTERVAL:
+            self._stale_sweep_counter = 0
+            try:
+                requeued = jobs.requeue_stale_running(
+                    max_attempts=self._config.retry.max_attempts,
+                    db_path=self._db_path,
+                )
+                if requeued:
+                    _logger.warning(
+                        f"worker requeued {requeued} stale running target(s)"
+                    )
+            except Exception:
+                _logger.exception("stale-running sweep failed")
+
         in_flight = self._concurrency.in_flight_accounts()
         slots_free = self._config.max_concurrent - len(self._tasks)
         if slots_free <= 0:
@@ -704,14 +727,29 @@ def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
             ).fetchone()
         if not backend:
             return None
-        local_path = Path(BASE_DIR) / "videoFile" / file_ref
+        # Mirror file_records' on-disk layout: paths under uploads/ live in
+        # BASE_DIR/uploads, everything else in BASE_DIR/videoFile — the same
+        # roots offload_to_drive.sh moves and the storage_backends endpoint
+        # points at.
+        if file_ref.startswith("uploads/"):
+            local_path = Path(BASE_DIR) / file_ref
+        else:
+            local_path = Path(BASE_DIR) / "videoFile" / file_ref
         if local_path.exists():
             return local_path
         media_remote_storage.download_from_backend(
             dict(backend), row["storage_key"], local_path
         )
+        _logger.info(
+            f"restored {file_ref} from {backend['provider']} storage"
+        )
         return local_path
-    except Exception:
+    except Exception as exc:
+        # Don't swallow this: a silent None here surfaces later as the
+        # uploader's cryptic "file not found" after the file was offloaded.
+        _logger.warning(
+            f"could not restore {file_ref} from remote storage: {exc!r}"
+        )
         return None
 
 
@@ -728,9 +766,42 @@ def _prepared_artifact_local_paths(payload: dict) -> list[Path]:
 
 
 def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
-    """Download missing artifact files from remote storage before publish."""
+    """Download missing artifact files from remote storage before publish.
+
+    This is the read half of the offload loop: ``offload_to_drive.sh`` moves
+    files the queue no longer needs onto Drive, and this restores them at
+    claim time. Every failure path logs — a silent miss here surfaces only
+    as the uploader's generic "file not found" halfway through a publish.
+    """
     import sqlite3
     import requests as _requests
+
+    def _record_for(artifact: dict, path: Path) -> sqlite3.Row | None:
+        source_id = artifact.get("source_id") or artifact.get("source_file_record_id")
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            if source_id:
+                row = conn.execute(
+                    "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path FROM file_records WHERE id = ?",
+                    (int(source_id),),
+                ).fetchone()
+                if row:
+                    return row
+            # No usable source id: fall back to the path convention shared
+            # with offload_to_drive.sh — the segment after /videoFile/ or
+            # /uploads/ is file_records.file_path.
+            raw = str(path)
+            for marker in ("/videoFile/", "/uploads/"):
+                if marker in raw:
+                    rel = raw.split(marker, 1)[1]
+                    if marker == "/uploads/":
+                        rel = "uploads/" + rel
+                    return conn.execute(
+                        "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path FROM file_records WHERE file_path = ?",
+                        (rel,),
+                    ).fetchone()
+        return None
+
     for artifact in payload.get("artifacts", []) or []:
         local_path = artifact.get("local_path")
         if not local_path:
@@ -738,22 +809,18 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
         p = Path(local_path)
         if p.exists():
             continue
-        # Try to find the source file_record and download from its storage
-        source_id = artifact.get("source_file_record_id")
-        if not source_id:
-            continue
         try:
-            with sqlite3.connect(db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                row = conn.execute(
-                    "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path FROM file_records WHERE id = ?",
-                    (int(source_id),),
-                ).fetchone()
-            if not row:
+            row = _record_for(artifact, p)
+            if row is None:
+                _logger.warning(
+                    f"artifact {local_path} is missing locally and has no "
+                    f"file_record to restore it from"
+                )
                 continue
 
             p.parent.mkdir(parents=True, exist_ok=True)
             downloaded = False
+            last_error: Exception | None = None
 
             # Try 1: Download via the backend that stored it (S3 or rclone)
             if row["storage_key"] and row["storage_backend_id"]:
@@ -768,8 +835,11 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                             dict(backend), row["storage_key"], p
                         )
                         downloaded = True
-                except Exception:
-                    pass
+                except Exception as exc:
+                    last_error = exc
+                    _logger.warning(
+                        f"backend restore failed for {local_path}: {exc!r}"
+                    )
 
             # Try 2: Download via public CDN URL (R2 public bucket)
             if not downloaded and row["storage_cdn_url"]:
@@ -778,8 +848,11 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                     resp.raise_for_status()
                     p.write_bytes(resp.content)
                     downloaded = True
-                except Exception:
-                    pass
+                except Exception as exc:
+                    last_error = exc
+                    _logger.warning(
+                        f"CDN restore failed for {local_path}: {exc!r}"
+                    )
 
             # Try 3: Check media_assets table for R2 public_url
             if not downloaded:
@@ -795,10 +868,17 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                         resp.raise_for_status()
                         p.write_bytes(resp.content)
                         downloaded = True
-                except Exception:
-                    pass
+                except Exception as exc:
+                    last_error = exc
+
+            if not downloaded:
+                _logger.warning(
+                    f"could not restore artifact {local_path} "
+                    f"(file_record={row['file_path']}): {last_error!r}"
+                )
 
         except Exception:
+            _logger.exception(f"artifact restore failed for {local_path}")
             continue
 
 
@@ -963,28 +1043,47 @@ async def _publish_prepared_twitter(
 ) -> None:
     config = dict(account.config or {}) if account else {}
     twitter_auth_type = str(config.get("twitterAuthType") or "cookie")
+    artifacts = payload.get("artifacts") or []
+    if payload.get("campaignId") and not artifacts:
+        raise ValueError("Prepared Twitter campaign has no media artifacts")
+    file_paths = _prepared_artifact_local_paths(payload)
+    if (payload.get("campaignId") or artifacts) and not file_paths:
+        raise ValueError("Prepared Twitter media artifacts have no usable local paths")
+    for path in file_paths:
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise FileNotFoundError(f"Prepared Twitter media file is missing or empty: {path}")
+        if path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}:
+            raise ValueError(f"Unsupported prepared Twitter media type: {path.suffix}")
 
     if twitter_auth_type == "cookie":
-        file_paths = _prepared_artifact_local_paths(payload)
+        if any(not artifact.get("local_path") for artifact in artifacts):
+            raise ValueError("Prepared Twitter media artifacts are missing local paths")
         if not account_file:
             raise ValueError("Prepared Twitter publish requires a cookie-backed account")
         if not file_paths:
-            raise ValueError("Prepared Twitter publish requires local media artifacts")
-
-        await _run_platform_upload(
-            "twitter",
-            {
-                "title": payload.get("message") or payload.get("draft", {}).get("message", ""),
-                "tags": payload.get("draft", {}).get("hashtags", []) or [],
-                "threadFileRefs": [str(path) for path in file_paths],
-            },
-            target,
-            account_file=account_file,
-            thread_file_paths=file_paths,
-        )
+            if payload.get("campaignId") or artifacts:
+                raise ValueError("Prepared Twitter publish requires local media artifacts")
+            return
+        from myUtils.browser_helper import local_browser
+        with local_browser():
+            await _run_platform_upload(
+                "twitter",
+                {
+                    "title": payload.get("message") or payload.get("draft", {}).get("message", ""),
+                    "tags": payload.get("draft", {}).get("hashtags", []) or [],
+                    "threadFileRefs": [str(path) for path in file_paths],
+                },
+                target,
+                account_file=account_file,
+                thread_file_paths=file_paths,
+            )
     else:
         if account is None:
             raise ValueError("Prepared Twitter API publish requires a structured account")
+        if payload.get("campaignId") and not artifacts:
+            raise ValueError("Prepared Twitter campaign has no media artifacts")
+        if any(not artifact.get("local_path") for artifact in artifacts):
+            raise ValueError("Prepared Twitter media artifacts are missing local paths")
         result = await asyncio.to_thread(
             prepared_publishers.publish_twitter_sync, account, payload
         )
@@ -1403,6 +1502,23 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
 
     db_path_str = payload.pop("_db_path", None)
     db_path = Path(db_path_str) if db_path_str else None
+
+    # Thumbnails offload like any other asset — restore before the uploader
+    # opens the path, otherwise a scheduled post fails on a missing cover.
+    thumbnail_ref = str(payload.get("thumbnail") or "")
+    if thumbnail_ref and db_path is not None:
+        thumb = Path(thumbnail_ref)
+        if not thumb.is_absolute():
+            thumb = Path(BASE_DIR) / thumbnail_ref
+        if not thumb.exists():
+            candidates = [thumbnail_ref]
+            if "videoFile/" in thumbnail_ref:
+                candidates.append(thumbnail_ref.split("videoFile/", 1)[1])
+            for ref in candidates:
+                restored = _try_download_from_storage(ref, db_path)
+                if restored is not None and restored.exists():
+                    payload["thumbnail"] = str(restored)
+                    break
 
     structured_account = _resolve_structured_account(target.account_ref)
     canonical_account_file = _resolve_account_path(target.account_ref)

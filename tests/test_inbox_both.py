@@ -109,32 +109,43 @@ class InboxPublishRouteTest(unittest.TestCase):
 
         with patch("sau_backend.publish_orchestrator.submit_publish", side_effect=fake_submit_publish):
             client = app.test_client()
+            from myUtils.security import SecurityPolicy
+            original_policy = app.config["SECURITY_POLICY"]
+            app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
             with patch("myUtils.inbox_ops.list_items") as listed, \
                     patch("myUtils.inbox_ops.approve") as approved, \
-                    patch("sau_backend._start_worker_drain_thread") as drained:
+                    patch("sau_backend._start_worker_drain_thread") as drained, \
+                    patch("myUtils.inbox_drive.remote_path_for_item", return_value="both/video/sfw-demo.mp4"), \
+                    patch("myUtils.inbox_drive.stage_remote_media", return_value="_inbox_cache/demo.mp4"):
                 listed.return_value = {"ready": [dict(BOTH_ITEM)], "pending": [], "quarantined": []}
                 approved.return_value = dict(BOTH_ITEM)
                 resp = client.post("/api/inbox/items/item-both-1/publish", json={})
 
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
         payload = resp.get_json()
         self.assertEqual(payload["code"], 200)
         self.assertEqual(payload["data"]["campaignIds"], [10, 11])
         self.assertEqual(payload["data"]["jobs"], [{"id": 1}, {"id": 2}])
         self.assertEqual(captured["profile_ids"], [1, 3])
-        self.assertEqual(captured["media_file_paths"], ["/app/sau-inbox/both/video/sfw-demo.mp4"])
+        self.assertEqual(len(captured["media_file_paths"]), 1)
+        self.assertTrue(captured["media_file_paths"][0].endswith("/_inbox_cache/demo.mp4"))
         self.assertIsNone(captured["schedule"])
         drained.assert_called_once()
+        app.config["SECURITY_POLICY"] = original_policy
 
     def test_publish_endpoint_missing_item_404(self):
         from sau_backend import app
 
         client = app.test_client()
+        from myUtils.security import SecurityPolicy
+        original_policy = app.config["SECURITY_POLICY"]
+        app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
         with patch("myUtils.inbox_ops.list_items") as listed:
             listed.return_value = {"ready": [], "pending": [], "quarantined": []}
             resp = client.post("/api/inbox/items/nope/publish", json={})
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.get_json()["code"], 404)
+        app.config["SECURITY_POLICY"] = original_policy
 
 
 from types import SimpleNamespace  # noqa: E402

@@ -150,6 +150,45 @@ class CampaignApiTests(unittest.TestCase):
             "queued",
         )
 
+    def test_campaign_prepare_builds_drafts_per_account_language(self) -> None:
+        source_file = self.base_dir / "source.jpg"
+        source_file.write_bytes(b"img")
+        file_record_id = self._insert_file_record("source.jpg", str(source_file))
+        profile_response = self.client.post("/profiles", json={
+            "name": "Mixed-language brand",
+            "settings": {"systemPrompt": "Write for the account's audience."},
+        })
+        profile_id = profile_response.get_json()["data"]["id"]
+        ids = []
+        for name, lang in (("English", "en"), ("nakedhappylife", "zh-Hant")):
+            response = self.client.post(f"/profiles/{profile_id}/accounts", json={
+                "platform": "twitter", "accountName": name, "authType": "oauth",
+                "enabled": True, "config": {"audienceLanguage": lang},
+            })
+            ids.append(response.get_json()["data"]["id"])
+        group = self.client.post("/media-groups", json={
+            "name": "One clip", "items": [{"fileRecordId": file_record_id, "role": "image"}],
+        }).get_json()["data"]["id"]
+        captured = []
+
+        def fake_generate(account, profile, media_group, request_data, media_context):
+            captured.append((
+                account.account_name,
+                self.sau_backend._account_audience_language(account, profile),
+            ))
+            return {"message": f"draft-{account.account_name}", "hashtags": []}
+
+        with patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={"imageUrls": [], "videoUrl": ""}), \
+             patch.object(self.sau_backend, "_generate_account_draft", side_effect=fake_generate):
+            response = self.client.post("/campaigns/prepare", json={
+                "profileId": profile_id, "mediaGroupId": group,
+                "selectedAccountIds": ids, "exportToSheet": False, "uploadToRemote": False,
+            })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(captured[0], ("English", "en"))
+        self.assertEqual(captured[1], ("nakedhappylife", "zh-Hant"))
+
     def test_validate_account_config_warns_when_tiktok_profile_has_watermark(self) -> None:
         profile_response = self.client.post(
             "/profiles",

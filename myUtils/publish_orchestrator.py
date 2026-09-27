@@ -330,10 +330,6 @@ def submit_publish(
         for account in accounts:
             grouped_accounts.setdefault(account.platform, []).append(account)
 
-        # cache for per-platform fallback drafts so we don't re-call the
-        # LLM when several accounts on the same platform share a draft
-        platform_draft_cache: dict[str, dict] = {}
-
         link_in_first_comment = bool((options or {}).get("linkInFirstComment"))
         tiktok_direct_post = bool((options or {}).get("tiktokDirectPost"))
 
@@ -351,21 +347,43 @@ def submit_publish(
                 if isinstance(draft_override, dict) and draft_override.get("message"):
                     draft = dict(draft_override)
                 else:
-                    cached = platform_draft_cache.get(platform)
-                    if cached is None:
-                        try:
-                            cached = generate_account_draft(
-                                account, profile, media_group, request_data, media_context
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            cached = {
-                                "message": (brief or "").strip()[:280],
-                                "hashtags": [],
-                                "firstComment": "",
-                                "error": str(exc),
-                            }
-                        platform_draft_cache[platform] = cached
-                    draft = dict(cached)
+                    try:
+                        # Draft content is account-specific (language, voice,
+                        # and connected identity may differ even on one platform).
+                        request_for_account = dict(request_data)
+                        effective_language = str(
+                            (account.config or {}).get("audience_language")
+                            or (account.config or {}).get("audienceLanguage")
+                            or (profile.settings or {}).get("default_language")
+                            or (profile.settings or {}).get("defaultLanguage")
+                            or ""
+                        ).strip()
+                        if platform == "twitter" and len(effective_language.replace(",", " ").replace("+", " ").split()) > 1:
+                            raise ValueError("X requires one language per account; use distinct account settings instead of a bilingual language list")
+                        if effective_language:
+                            request_for_account["_accountLanguage"] = effective_language
+                        draft = dict(generate_account_draft(
+                            account, profile, media_group, request_for_account, media_context
+                        ))
+                    except Exception as exc:  # noqa: BLE001
+                        account_config = account.config or {}
+                        account_settings = profile.settings or {}
+                        if (account_config.get("audience_language")
+                                or account_config.get("audienceLanguage")
+                                or account_settings.get("default_language")
+                                or account_settings.get("defaultLanguage")):
+                            skipped.append({
+                                "profileId": profile_id,
+                                "accountId": account.id,
+                                "reason": f"language-specific draft generation failed: {exc}",
+                            })
+                            continue
+                        draft = {
+                            "message": (brief or "").strip()[:280],
+                            "hashtags": [],
+                            "firstComment": "",
+                            "error": str(exc),
+                        }
 
                 if not link_in_first_comment or not supports_first_comment:
                     # If the platform does not support a first-comment

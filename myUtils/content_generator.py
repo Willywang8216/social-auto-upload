@@ -600,9 +600,9 @@ def get_platform_prompt_builder(platform: str):
 def _language_label(code: str) -> str:
     """Map an audience_language code to a human instruction label."""
     key = (code or "").strip().lower().replace("_", "-")
-    if key in ("zh-hant", "zh-tw", "zh-hk", "zh", "zht", "cht"):
+    if key in ("zh-hant", "zh-tw", "zh-hk", "zht", "cht"):
         return "Traditional Chinese (Taiwan Mandarin, 繁體中文)"
-    if key in ("zh-hans", "zh-cn", "zhs", "chs"):
+    if key in ("zh", "zh-hans", "zh-cn", "zhs", "chs"):
         return "Simplified Chinese (简体中文)"
     if key in ("en", "en-us", "en-gb", "eng"):
         return "English"

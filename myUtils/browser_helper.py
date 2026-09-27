@@ -5,9 +5,24 @@ to redirect all launch() calls to a remote browserless/chrome instance.
 This avoids editing every uploader file individually.
 """
 
+import contextvars
 import os
+from contextlib import contextmanager
 
 BROWSERLESS_URL = os.environ.get("BROWSERLESS_URL", "")
+_local_browser = contextvars.ContextVar("sau_local_browser", default=False)
+
+
+@contextmanager
+def local_browser():
+    """Use a co-located Chromium browser for code that transfers local files."""
+    token = _local_browser.set(True)
+    try:
+        yield
+    finally:
+        _local_browser.reset(token)
+
+
 # Convert HTTP URL to WebSocket URL (browserless returns 0.0.0.0 in its
 # /json/version response, which breaks cross-container resolution).
 BROWSERLESS_WS = BROWSERLESS_URL.replace("http://", "ws://").replace("https://", "wss://")
@@ -26,8 +41,11 @@ def install_browserless_patch():
     # Patch patchright
     try:
         from patchright.async_api._generated import BrowserType as PatchrightBrowserType
+        original_launch = PatchrightBrowserType.launch
 
         async def _patched_patchright_launch(self, **kwargs):
+            if _local_browser.get():
+                return await original_launch(self, **kwargs)
             kwargs.pop("executable_path", None)
             kwargs.pop("channel", None)
             kwargs.pop("args", None)

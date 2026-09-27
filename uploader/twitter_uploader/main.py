@@ -422,6 +422,13 @@ def _find_create_tweet_payload(payload):
 
 def _find_post_id_in_payload(payload) -> str | None:
     if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict) and isinstance(data.get("id"), (str, int)):
+            return str(data["id"])
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict) and isinstance(data.get("id"), (str, int)):
+            return str(data["id"])
         tweet_results = payload.get("tweet_results")
         if tweet_results is not None:
             found = _find_post_id_in_payload(tweet_results)
@@ -652,14 +659,13 @@ class TwitterThreadVideo(BaseVideoUploader):
             await page.goto(f"{TWITTER_COMPOSE_URL}?in_reply_to={previous_post_id}")
 
     async def _wait_for_attachments(self, page: Page, *, expected: int) -> None:
-        """Best-effort wait for X to render every media preview.
+        """Wait until X visibly renders every requested media attachment.
 
-        The post button stays disabled while media uploads, but the preview
-        list can still lag behind it. Polling the preview count keeps a
-        multi-image post from being submitted half-attached; a timeout just
-        falls back to the post-button gate rather than failing the publish.
+        The post button can become enabled before X finishes attaching one
+        video/image. Submitting at that point creates a successful text-only
+        post, so timeout is a publish failure rather than a best-effort warning.
         """
-        if expected <= 1:
+        if expected <= 0:
             return
 
         deadline = (
@@ -675,6 +681,10 @@ class TwitterThreadVideo(BaseVideoUploader):
             except Exception:  # noqa: BLE001
                 pass
             await asyncio.sleep(TWITTER_POST_BUTTON_POLL_SECONDS)
+        raise TimeoutError(
+            f"X did not render all requested media attachments "
+            f"(expected {expected}) before the timeout"
+        )
 
     async def _fill_composer(
         self,

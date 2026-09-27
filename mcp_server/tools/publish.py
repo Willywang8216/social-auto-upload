@@ -133,24 +133,22 @@ def register(mcp: FastMCP) -> None:
                     brief=brief or "", options=options, profile=profile
                 )
                 drafts_by_account: dict[int, dict[str, Any]] = {}
-                cached_per_platform: dict[str, dict[str, Any]] = {}
                 for account in accounts:
-                    cached = cached_per_platform.get(account.platform)
-                    if cached is None:
-                        try:
-                            cached = _generate_account_draft(
-                                account, profile, media_group_stub, request_data, media_context
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            cached = {
-                                "message": (brief or "").strip()[:1000],
-                                "hashtags": [],
-                                "firstComment": "",
-                                "charCount": len((brief or "").strip()),
-                                "error": str(exc),
-                            }
-                        cached_per_platform[account.platform] = cached
-                    drafts_by_account[account.id] = dict(cached)
+                    try:
+                        draft = _generate_account_draft(
+                            account, profile, media_group_stub, request_data, media_context
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        from sau_backend import _account_audience_language
+                        language_required = bool(_account_audience_language(account, profile))
+                        draft = {
+                            "message": "" if language_required else (brief or "").strip()[:1000],
+                            "hashtags": [],
+                            "firstComment": "",
+                            "charCount": 0 if language_required else len((brief or "").strip()),
+                            "error": str(exc),
+                        }
+                    drafts_by_account[account.id] = dict(draft)
                 results.append(
                     _publish_center_preview_payload(
                         profile=profile, accounts=accounts, drafts_by_account=drafts_by_account

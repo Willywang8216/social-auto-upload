@@ -74,6 +74,15 @@ class PreparedWorkerDispatchTests(unittest.TestCase):
             ],
         }
         captured = {}
+        media_a = Path(self._tmp.name) / "a.jpg"
+        media_b = Path(self._tmp.name) / "b.jpg"
+        media_a.write_bytes(b"image-a")
+        media_b.write_bytes(b"image-b")
+        payload["artifacts"] = [
+            {"local_path": str(media_a)},
+            {"local_path": str(media_a)},
+            {"local_path": str(media_b)},
+        ]
 
         async def fake_run_platform_upload(platform, payload, target, **kwargs):
             captured["platform"] = platform
@@ -93,12 +102,44 @@ class PreparedWorkerDispatchTests(unittest.TestCase):
         self.assertEqual(captured["platform"], "twitter")
         self.assertEqual(
             captured["payload"]["threadFileRefs"],
-            ["/tmp/a.jpg", "/tmp/b.jpg"],
+            [str(media_a), str(media_b)],
         )
         self.assertEqual(
             [str(path) for path in captured["thread_file_paths"]],
-            ["/tmp/a.jpg", "/tmp/b.jpg"],
+            [str(media_a), str(media_b)],
         )
+
+    def test_prepared_twitter_rejects_missing_artifact_file(self) -> None:
+        target = jobs.Target(
+            id=1, job_id=1, account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1", schedule_at=None,
+            status=jobs.TARGET_RUNNING, attempts=1,
+        )
+        account = self.account
+        account.config = {"twitterAuthType": "cookie"}
+        payload = {
+            "artifacts": [{"local_path": "/tmp/missing-x-media.mp4"}],
+            "message": "test",
+        }
+        with self.assertRaises(FileNotFoundError):
+            asyncio.run(worker._publish_prepared_twitter(
+                "twitter", payload, target, account=account,
+                account_file=Path("/tmp/twitter-cookie.json"),
+            ))
+
+    def test_prepared_twitter_rejects_artifact_without_local_path(self) -> None:
+        target = jobs.Target(
+            id=1, job_id=1, account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1", schedule_at=None,
+            status=jobs.TARGET_RUNNING, attempts=1,
+        )
+        account = self.account
+        account.config = {"twitterAuthType": "cookie"}
+        with self.assertRaisesRegex(ValueError, "no usable local paths"):
+            asyncio.run(worker._publish_prepared_twitter(
+                "twitter", {"artifacts": [{"public_url": "https://media.test/x.mp4"}]},
+                target, account=account, account_file=Path("/tmp/twitter-cookie.json"),
+            ))
 
     def test_unimplemented_prepared_platform_raises_clear_error(self) -> None:
         target = jobs.Target(

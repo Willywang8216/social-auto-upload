@@ -314,6 +314,104 @@ class PreparedPublisherTests(unittest.TestCase):
             )
         self.assertIn("media timed out", str(ctx.exception))
 
+    def test_twitter_api_uploads_media_and_attaches_media_id(self):
+        session = _RecordingSession([
+            _FakeResponse({"media_id_string": "mid-1"}),
+            _FakeResponse({}),
+            _FakeResponse({}),
+            _FakeResponse({"data": {"id": "tweet-1", "text": "post"}}),
+        ])
+        account = SimpleNamespace(config={
+            "accessToken": "oauth2",
+            "oauth1ApiKey": "key", "oauth1ApiKeySecret": "secret",
+            "oauth1AccessToken": "user", "oauth1AccessTokenSecret": "user-secret",
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            media_path = Path(tmp) / "clip.mp4"
+            media_path.write_bytes(b"video")
+            result = prepared_publishers.publish_twitter_sync(
+                account,
+                {"message": "scheduled X", "artifacts": [{
+                    "local_path": str(media_path), "artifact_kind": "remote_upload",
+                }]},
+                session=session,
+            )
+        self.assertEqual(result["results"][0]["data"]["id"], "tweet-1")
+        tweet_request = session.calls[-1][2]
+        tweet_body = json.loads(tweet_request["data"])
+        self.assertEqual(tweet_body["media"]["media_ids"], ["mid-1"])
+
+    def test_twitter_api_video_upload_chunks_and_waits_for_processing(self):
+        session = _RecordingSession([
+            _FakeResponse({"media_id_string": "mid-large"}),
+            _FakeResponse({}),
+            _FakeResponse({}),
+            _FakeResponse({"processing_info": {"state": "pending", "check_after_secs": 1}}),
+            _FakeResponse({"processing_info": {"state": "succeeded"}}),
+            _FakeResponse({"data": {"id": "tweet-large", "text": "post"}}),
+        ])
+        account = SimpleNamespace(config={
+            "accessToken": "oauth2",
+            "oauth1ApiKey": "key", "oauth1ApiKeySecret": "secret",
+            "oauth1AccessToken": "user", "oauth1AccessTokenSecret": "user-secret",
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            media_path = Path(tmp) / "clip.mp4"
+            media_path.write_bytes(b"x" * (5 * 1024 * 1024))
+            with patch("myUtils.prepared_publishers.time.sleep"):
+                prepared_publishers.publish_twitter_sync(
+                    account,
+                    {"message": "scheduled X", "artifacts": [{
+                        "local_path": str(media_path), "artifact_kind": "remote_upload",
+                    }]},
+                    session=session,
+                )
+        append_calls = [c for c in session.calls if isinstance(c[2].get("data"), dict) and c[2]["data"].get("command") == "APPEND"]
+        self.assertEqual(len(append_calls), 2)
+        self.assertEqual(append_calls[0][2]["data"]["segment_index"], "0")
+        self.assertEqual(append_calls[1][2]["data"]["segment_index"], "1")
+        status_calls = [c for c in session.calls if c[0] == "GET" and c[2].get("params", {}).get("command") == "STATUS"]
+        self.assertEqual(len(status_calls), 1)
+        create_tweet_call = next(c for c in session.calls if c[1] == prepared_publishers.X_TWEET_URL)
+        self.assertIn("media", json.loads(create_tweet_call[2]["data"]))
+
+    def test_twitter_api_rejects_mixed_media(self):
+        account = SimpleNamespace(config={"accessToken": "oauth2"})
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "photo.jpg"
+            video = Path(tmp) / "clip.mp4"
+            image.write_bytes(b"image")
+            video.write_bytes(b"video")
+            with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "cannot mix"):
+                prepared_publishers.publish_twitter_sync(
+                    account,
+                    {"message": "post", "artifacts": [
+                        {"local_path": str(image), "artifact_kind": "image"},
+                        {"local_path": str(video), "artifact_kind": "video"},
+                    ]},
+                    session=_RecordingSession(),
+                )
+
+    def test_twitter_api_rejects_public_url_only_media(self):
+        account = SimpleNamespace(config={"accessToken": "oauth2"})
+        with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "local media path"):
+            prepared_publishers.publish_twitter_sync(
+                account,
+                {"message": "scheduled X", "artifacts": [{
+                    "public_url": "https://cdn.example/clip.mp4",
+                    "artifact_kind": "remote_upload",
+                }]},
+                session=_RecordingSession(),
+            )
+
+    def test_twitter_api_text_only_remains_allowed(self):
+        session = _RecordingSession([_FakeResponse({"data": {"id": "tweet-2"}})])
+        account = SimpleNamespace(config={"accessToken": "oauth2"})
+        prepared_publishers.publish_twitter_sync(
+            account, {"message": "text-only"}, session=session,
+        )
+        self.assertNotIn("media", json.loads(session.calls[-1][2]["data"]))
+
     def test_threads_text_only_creates_container_then_publishes(self):
         session = _RecordingSession([
             _FakeResponse({"id": "threads-container"}),
