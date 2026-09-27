@@ -274,8 +274,9 @@ class PatreonPost(BasePostUploader):
         self.body_file = self.validate_body_file(self.body_file)
         self.publish_date = self.validate_publish_date(self.publish_date)
         for attachment in self.attachments:
-            if not Path(attachment).exists():
-                raise FileNotFoundError(f"Patreon attachment does not exist: {attachment}")
+            path = Path(attachment)
+            if not path.is_file() or path.stat().st_size <= 0:
+                raise FileNotFoundError(f"Patreon attachment is missing or empty: {attachment}")
 
     async def _open_editor(self, page: Page) -> None:
         await page.goto(PATREON_NEW_POST_URL, wait_until="domcontentloaded")
@@ -338,9 +339,10 @@ class PatreonPost(BasePostUploader):
                 if await spinner.count() == 0:
                     return
                 await asyncio.sleep(1)
-            patreon_logger.warning(_msg("⚠️", "Attachment upload did not visibly settle within 60s"))
+            raise TimeoutError("Patreon attachment upload did not settle within 60s")
         except Exception as exc:
-            patreon_logger.warning(_msg("⚠️", f"Failed to attach media via file input: {exc}"))
+            patreon_logger.error(_msg("❌", f"Failed to attach declared media: {exc}"))
+            raise RuntimeError(f"Patreon media attachment failed; refusing text-only post: {exc}") from exc
 
     async def _choose_access(self, page: Page) -> None:
         """Set who can see the post."""

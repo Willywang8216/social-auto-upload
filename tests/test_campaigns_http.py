@@ -189,6 +189,27 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(captured[0], ("English", "en"))
         self.assertEqual(captured[1], ("nakedhappylife", "zh-Hant"))
 
+    def test_campaign_prepare_missing_expected_media_context_is_not_an_error(self) -> None:
+        source_file = self.base_dir / "context-fallback.jpg"
+        source_file.write_bytes(b"img")
+        file_id = self._insert_file_record(source_file.name, str(source_file))
+        profile = self.client.post("/profiles", json={"name": "Safe sheet"}).get_json()["data"]
+        account = self.client.post(f"/profiles/{profile['id']}/accounts", json={
+            "platform": "discord", "accountName": "safe-sheet", "authType": "manual",
+            "config": {"webhookUrl": "https://discord.example/webhook"},
+        }).get_json()["data"]
+        group = self.client.post("/media-groups", json={
+            "name": "Fallback", "items": [{"fileRecordId": file_id, "role": "image"}],
+        }).get_json()["data"]["id"]
+        with patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={}), \
+             patch.object(self.sau_backend, "_account_audience_language", return_value=""):
+            response = self.client.post("/campaigns/prepare", json={
+                "profileId": profile["id"], "mediaGroupId": group,
+                "selectedAccountIds": [account["id"]],
+                "useLlm": False, "exportToSheet": False, "uploadToRemote": False,
+            })
+        self.assertEqual(response.status_code, 200, response.get_json())
+
     def test_validate_account_config_warns_when_tiktok_profile_has_watermark(self) -> None:
         profile_response = self.client.post(
             "/profiles",

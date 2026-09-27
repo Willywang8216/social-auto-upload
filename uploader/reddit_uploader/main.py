@@ -92,10 +92,16 @@ def _post_via_api(
     proxy_list = _get_proxy_list()
     client = RedditClient(cookie_file, proxy_list)
 
-    # Resolve media to URL if needed
+    # Resolve media to URL if needed. A declared media source must not
+    # degrade into a self/link post when the storage lookup misses.
     media_url = None
     if media_path:
+        path = Path(media_path).expanduser()
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise RuntimeError(f"Reddit media file is missing or empty: {path}")
         media_url = _resolve_media_url(str(media_path), cookie_file)
+        if not media_url or not media_url.startswith("http"):
+            raise RuntimeError("Reddit media was requested but no public media URL could be resolved")
 
     # Submit the post
     if media_url and media_url.startswith("http"):
@@ -130,6 +136,8 @@ async def _post_reddit_cookie(
             body_text, str(media_path) if media_path else None,
         )
     except Exception as e:
+        if media_path:
+            raise RuntimeError(f"Reddit media publish failed; refusing text-only fallback: {e}") from e
         log.warning("API posting failed: %s. Trying browser automation...", e)
         return await _post_via_browser(
             resolved_account, subreddit, title,

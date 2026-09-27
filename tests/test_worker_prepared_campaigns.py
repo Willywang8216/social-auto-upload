@@ -141,6 +141,37 @@ class PreparedWorkerDispatchTests(unittest.TestCase):
                 target, account=account, account_file=Path("/tmp/twitter-cookie.json"),
             ))
 
+    def test_prepared_patreon_rejects_missing_declared_media(self) -> None:
+        target = jobs.Target(
+            id=1, job_id=1, account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1", schedule_at=None,
+            status=jobs.TARGET_RUNNING, attempts=1,
+        )
+        payload = {
+            "campaignId": 10,
+            "campaignPostId": 22,
+            "message": "Patreon post",
+            "artifacts": [{"local_path": "/tmp/missing-patreon.jpg", "artifact_kind": "image"}],
+        }
+        with self.assertRaises(FileNotFoundError):
+            asyncio.run(worker._publish_prepared_patreon(
+                "patreon", payload, target, account=self.account,
+                account_file=Path("/tmp/patreon-cookie.json"),
+            ))
+
+    def test_campaign_without_media_fails_before_prepared_publisher(self) -> None:
+        target = jobs.Target(
+            id=1, job_id=1, account_ref=f"account:{self.account.id}",
+            file_ref="campaign_post:1", schedule_at=None,
+            status=jobs.TARGET_RUNNING, attempts=1,
+        )
+        with patch.object(worker, "PREPARED_PUBLISHER_REGISTRY", {"twitter": unittest.mock.AsyncMock()}):
+            with self.assertRaisesRegex(ValueError, "no media artifacts"):
+                asyncio.run(worker._run_prepared_campaign_upload(
+                    "twitter", {"campaignId": 1, "artifacts": []}, target,
+                    account=self.account, account_file=Path("/tmp/twitter-cookie.json"),
+                ))
+
     def test_unimplemented_prepared_platform_raises_clear_error(self) -> None:
         target = jobs.Target(
             id=1,
@@ -380,7 +411,6 @@ class PreparedWorkerDispatchTests(unittest.TestCase):
             "draft": {"subreddits": ["videos"]},
             "artifacts": [
                 {"local_path": "/tmp/video1.mp4"},
-                {"local_path": "/tmp/video2.mp4"},
             ],
         }
         captured = {}
@@ -389,6 +419,10 @@ class PreparedWorkerDispatchTests(unittest.TestCase):
             "config": {"redditAuthType": "cookie"},
             "account_name": "test",
         })()
+
+        media_file = Path(self._tmp.name) / "video1.mp4"
+        media_file.write_bytes(b"video")
+        payload["artifacts"][0]["local_path"] = str(media_file)
 
         async def fake_main(self_uploader):
             captured["file_path"] = self_uploader.file_path
@@ -403,7 +437,7 @@ class PreparedWorkerDispatchTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(captured["file_path"], "/tmp/video1.mp4")
+        self.assertEqual(captured["file_path"], str(media_file))
 
     def test_reddit_cookie_mode_with_body_text(self) -> None:
         """Cookie mode passes draft body as body_text."""

@@ -559,7 +559,7 @@ def _publish_telegram_to_one(
             files = {}
             open_files = []
             try:
-                for index, item in enumerate(attachments[:10]):
+                for index, item in enumerate(attachments):
                     is_video = item in media["videos"]
                     local_path = item.get("local_path")
                     media_entry = {
@@ -632,6 +632,24 @@ def _telegram_is_mtproto(config: dict[str, Any]) -> bool:
 
 def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
     config = account.config or {}
+    artifacts = payload.get("artifacts") or []
+    media = _extract_media(payload)
+    attachments = [*media["videos"], *media["images"]]
+    if artifacts and not attachments:
+        raise PreparedPublishError("Telegram media artifacts were supplied but none is a supported image/video")
+    if len(attachments) > 10:
+        raise PreparedPublishError("Telegram supports at most 10 media items per album")
+    if len(attachments) > 1 and any(item not in media["images"] for item in attachments):
+        raise PreparedPublishError("Telegram media groups support image albums only; split video and mixed-media jobs")
+    for item in attachments:
+        local_path = str(item.get("local_path") or "").strip()
+        public_url = str(item.get("public_url") or "").strip()
+        if local_path:
+            path = Path(local_path)
+            if not path.is_file() or path.stat().st_size <= 0:
+                raise PreparedPublishError(f"Telegram media file is missing or empty: {path}")
+        elif not public_url:
+            raise PreparedPublishError("Telegram media artifact has no usable local path or public URL")
     if _telegram_is_mtproto(config):
         return _publish_telegram_mtproto_sync(account, payload, session=session)
 
@@ -855,14 +873,57 @@ def publish_discord_sync(account, payload: dict, *, session=None) -> list[Any]:
         raise PreparedPublishError("Discord publish requires webhookUrl or webhookUrlEnv")
 
     declared_artifacts = payload.get("artifacts") or []
-    if declared_artifacts:
-        raise PreparedPublishError("Discord publisher only supports text/webhook here; media artifacts cannot be silently omitted")
+    media = _extract_media(payload)
+    if declared_artifacts and not (media["videos"] or media["images"]):
+        raise PreparedPublishError("Discord media artifacts were supplied but none is a supported image/video")
+    if len([*media["videos"], *media["images"]]) > 10:
+        raise PreparedPublishError("Discord webhook supports at most 10 files per post")
 
     http = _get_session(session)
     message = _payload_message(payload) or _message_title(payload)
-    response = http.post(webhook_url, json={"content": message}, timeout=120)
-    _raise_for_status(response)
-    return [_response_payload(response)]
+    all_media = [*media["videos"], *media["images"]]
+
+    files = {}
+    open_files = []
+    for item in all_media:
+        local_path = str(item.get("local_path") or "").strip()
+        public_url = str(item.get("public_url") or "").strip()
+        if not local_path and not public_url:
+            raise PreparedPublishError("Discord media artifact has no usable source")
+        if local_path:
+            path = Path(local_path)
+            if not path.is_file() or path.stat().st_size <= 0:
+                raise PreparedPublishError(f"Discord media file is missing or empty: {path}")
+        else:
+            raise PreparedPublishError("Discord media requires a readable local file attachment")
+    content_lines = [message] if message else []
+    try:
+        for index, item in enumerate(all_media):
+            local_path = str(item.get("local_path") or "").strip()
+            public_url = str(item.get("public_url") or "").strip()
+            path = Path(local_path)
+            handle = path.open("rb")
+            open_files.append(handle)
+            files[f"files[{index}]"] = (path.name, handle)
+
+        if files:
+            response = http.post(
+                webhook_url,
+                data={"payload_json": json.dumps({"content": "\n".join(content_lines).strip()}, ensure_ascii=False)},
+                files=files,
+                timeout=600,
+            )
+        else:
+            response = http.post(
+                webhook_url,
+                json={"content": "\n".join(content_lines).strip()},
+                timeout=120,
+            )
+        _raise_for_status(response)
+        return [_response_payload(response)]
+    finally:
+        for handle in open_files:
+            handle.close()
 
 
 def validate_facebook_config_live(config: dict[str, Any], *, session=None) -> dict:
@@ -1072,7 +1133,14 @@ def publish_facebook_sync(account, payload: dict, *, session=None) -> dict[str, 
     http = _get_session(session)
     message = _payload_message(payload)
     title = _message_title(payload)
+    artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
+    if artifacts and not (media["videos"] or media["images"]):
+        raise PreparedPublishError("Facebook media artifacts were supplied but none is a supported image/video")
+    if len(media["videos"]) > 1:
+        raise PreparedPublishError("Facebook publishing supports one video per post")
+    if len(media["images"]) > 10:
+        raise PreparedPublishError("Facebook photo attachments support at most ten images per post")
 
     def _do_post():
         results = []
@@ -1282,7 +1350,14 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
 
     http = _get_session(session)
     message = _payload_message(payload)
+    artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
+    if artifacts and not (media["videos"] or media["images"]):
+        raise PreparedPublishError("Instagram media artifacts were supplied but none is a supported image/video")
+    if len(media["videos"]) > 1:
+        raise PreparedPublishError("Instagram publish accepts one video per post")
+    if len(media["images"]) > 10:
+        raise PreparedPublishError("Instagram carousel accepts at most ten images")
 
     def _do_post():
         if media["videos"]:
@@ -1438,7 +1513,14 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
 
     http = _get_session(session)
     message = _payload_message(payload)
+    artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
+    if artifacts and not (media["videos"] or media["images"]):
+        raise PreparedPublishError("Threads media artifacts were supplied but none is a supported image/video")
+    if len(media["videos"]) > 1:
+        raise PreparedPublishError("Threads accepts one video per post")
+    if len(media["images"]) > 10:
+        raise PreparedPublishError("Threads carousel accepts at most ten images")
 
     if media["videos"]:
         public_url = media["videos"][0].get("public_url") or ""
@@ -1644,6 +1726,14 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     config = dict(account.config or {})
     http = _get_session(session)
     access_token, updated_config = _ensure_tiktok_access_token(config, session=http)
+    artifacts = payload.get("artifacts") or []
+    media = _extract_media(payload)
+    if artifacts and not (media["videos"] or media["images"]):
+        raise PreparedPublishError("TikTok media artifacts were supplied but none is a supported image/video")
+    if len(media["videos"]) > 1:
+        raise PreparedPublishError("TikTok supports one video per post")
+    if len(media["images"]) > 35:
+        raise PreparedPublishError("TikTok photo posts support at most 35 images")
     creator_info = query_tiktok_creator_info(config, access_token=access_token, session=http)
     # Store creator_info's max duration for video validation
     ci_data = creator_info.get("data") or creator_info
@@ -1652,7 +1742,6 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         config["_tiktok_max_video_duration_sec"] = int(max_dur)
     if updated_config is not None:
         updated_config = _apply_tiktok_token_payload(updated_config, {'access_token': access_token}, creator_info)
-    media = _extract_media(payload)
     message = _payload_message(payload)
     # Per-publish override has precedence over the account-level default:
     # the Publish Center exposes an explicit "Direct post (skip draft)"
@@ -2527,7 +2616,14 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
         "User-Agent": user_agent,
     }
     message = _payload_message(payload)
+    artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
+    if artifacts and not (media["videos"] or media["images"]):
+        raise PreparedPublishError("Reddit media artifacts were supplied but none is a supported image/video")
+    if len(media["videos"]) > 1:
+        raise PreparedPublishError("Reddit supports one video link per post")
+    if len(media["images"]) > 1:
+        raise PreparedPublishError("Reddit API image publishing supports one image per post")
     # Reddit cannot host video itself, so a video payload keeps the link-post
     # contract it always had (and video wins when both are present). An image
     # payload, by contrast, must become a native image post: submitting the
@@ -2538,8 +2634,12 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
     image = None
     if media["videos"]:
         public_url = media["videos"][0].get("public_url") or ""
+        if not public_url:
+            raise PreparedPublishError("Reddit video artifacts require a public URL; refusing to fall back to a self post")
     elif media["images"]:
         image = media["images"][0]
+    elif artifacts:
+        raise PreparedPublishError("Reddit media artifacts were supplied but none is a supported image/video")
     title = _message_title(payload)
     results = []
     for subreddit in subreddits:

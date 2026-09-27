@@ -1126,6 +1126,9 @@ async def _publish_prepared_reddit(
         or getattr(account, "auth_type", None)
         or "api"
     )
+    artifacts = payload.get("artifacts") or []
+    if artifacts and not any(artifact.get("local_path") or artifact.get("public_url") for artifact in artifacts):
+        raise ValueError("Prepared Reddit media artifacts have no usable source")
 
     if reddit_auth_type == "cookie":
         if not account_file:
@@ -1142,6 +1145,8 @@ async def _publish_prepared_reddit(
         title = payload.get("message") or payload.get("draft", {}).get("message", "") or ""
         file_paths = _prepared_artifact_local_paths(payload)
         media_path = str(file_paths[0]) if file_paths else ""
+        if artifacts and not media_path:
+            raise ValueError("Prepared Reddit media is required but no local file is available")
         body_text = payload.get("draft", {}).get("body", "") or ""
 
         for subreddit in subreddits:
@@ -1361,7 +1366,16 @@ async def _publish_prepared_patreon(
     tags = payload.get("draft", {}).get("hashtags", []) or payload.get("tags", []) or []
 
     file_paths = _prepared_artifact_local_paths(payload)
-    attachments = [str(p) for p in file_paths if p.exists()]
+    artifacts = payload.get("artifacts") or []
+    if payload.get("campaignId") and not artifacts:
+        raise ValueError("Prepared Patreon campaign has no media artifacts")
+    if artifacts and not file_paths:
+        raise ValueError("Prepared Patreon media artifacts have no local paths")
+    if any(not artifact.get("local_path") for artifact in artifacts):
+        raise ValueError("Prepared Patreon media artifacts are missing local paths")
+    if any(not p.is_file() or p.stat().st_size <= 0 for p in file_paths):
+        raise FileNotFoundError("One or more prepared Patreon media files are missing or empty")
+    attachments = [str(p) for p in file_paths]
 
     access_mode = str(config.get("accessMode") or PATREON_ACCESS_PUBLIC).lower()
     tier_name = str(config.get("tierName") or "").strip() or None
@@ -1485,6 +1499,8 @@ async def _run_prepared_campaign_upload(
             if source_id is None or int(source_id) in allowed:
                 kept.append(artifact)
         payload = {**payload, "artifacts": kept}
+    if payload.get("campaignId") and not (payload.get("artifacts") or []):
+        raise ValueError(f"Prepared {platform} campaign has no media artifacts")
     await publisher(platform=platform, payload=payload, target=target, account=account, account_file=account_file)
 
 

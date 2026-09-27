@@ -235,27 +235,30 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[0][1], f"{prepared_publishers.FACEBOOK_GRAPH_ROOT}/123")
         self.assertEqual(result["id"], "123")
 
-    def test_discord_media_rejection_contract(self):
-        session = _RecordingSession()
+    def test_discord_attaches_local_media_with_multipart(self):
+        session = _RecordingSession([_FakeResponse({})])
         account = SimpleNamespace(config={"webhookUrl": "https://discord.example/webhook"})
-        with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "cannot be silently omitted"):
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "cover.jpg"
+            image.write_bytes(b"image")
             prepared_publishers.publish_discord_sync(
                 account,
-                {"message": "Discord launch", "artifacts": [{"local_path": "/tmp/x.jpg", "artifact_kind": "image"}]},
+                {"message": "Discord launch", "artifacts": [{
+                    "local_path": str(image), "artifact_kind": "watermarked_image",
+                }]},
                 session=session,
             )
-        self.assertEqual(session.calls, [])
+        self.assertEqual(session.calls[0][1], "https://discord.example/webhook")
+        self.assertIn("files[0]", session.calls[0][2]["files"])
 
-    def test_discord_rejects_present_and_missing_media_artifacts(self):
+    def test_discord_rejects_missing_or_url_only_media(self):
         account = SimpleNamespace(config={"webhookUrl": "https://discord.example/webhook"})
         for artifact in (
             {"local_path": "/tmp/missing-discord.jpg", "artifact_kind": "watermarked_image"},
-            {"local_path": "/tmp/present-discord.jpg", "artifact_kind": "watermarked_image"},
+            {"public_url": "https://cdn.example/image.jpg", "artifact_kind": "watermarked_image"},
         ):
             session = _RecordingSession()
-            with self.subTest(artifact=artifact), self.assertRaisesRegex(
-                prepared_publishers.PreparedPublishError, "cannot be silently omitted"
-            ):
+            with self.subTest(artifact=artifact), self.assertRaises(prepared_publishers.PreparedPublishError):
                 prepared_publishers.publish_discord_sync(
                     account, {"message": "Discord attachment", "artifacts": [artifact]},
                     session=session,
@@ -1023,6 +1026,25 @@ class RedditPublisherTests(unittest.TestCase):
             prepared_publishers.publish_reddit_sync(account, {"message": "test"}, session=session)
         self.assertIn("r/test", str(ctx.exception))
         self.assertIn("NO_TEXT", str(ctx.exception))
+
+    def test_publish_reddit_rejects_video_without_public_url_instead_of_self_post(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": ["test"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "clip.mp4"
+            video.write_bytes(b"video")
+            with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "public URL"):
+                prepared_publishers.publish_reddit_sync(
+                    account,
+                    {"message": "Video post", "artifacts": [{"local_path": str(video), "artifact_kind": "video"}]},
+                    session=session,
+                )
+        self.assertEqual(len(session.calls), 1)
 
     def test_publish_reddit_uses_self_post_when_no_media(self):
         session = _RecordingSession([
