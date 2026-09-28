@@ -7330,6 +7330,7 @@ _ENTITY_KIND_JOB = "job"
 # endpoint unbounded work. Newest jobs win (list_jobs orders id-desc), which is
 # the order the Publish Center shows anyway.
 _ENTITY_JOB_SCAN_LIMIT = 500
+_ENTITY_CAMPAIGN_SCAN_LIMIT = 500
 _ENTITY_MAX_LIMIT = 200
 _ENTITY_DEFAULT_LIMIT = 50
 
@@ -7916,6 +7917,21 @@ def _collect_publish_entities(
                 campaign_ids_from_jobs.add(int(raw_campaign_id))
         except (TypeError, ValueError):
             pass
+
+    # Also include recent prepared/draft campaigns which have not produced jobs.
+    # The queue list is an operational view, not an unbounded campaign archive.
+    with sqlite3.connect(db_path) as conn:
+        if workspace_id is None:
+            recent_rows = conn.execute(
+                "SELECT id FROM campaigns ORDER BY id DESC LIMIT ?",
+                (_ENTITY_CAMPAIGN_SCAN_LIMIT,),
+            ).fetchall()
+        else:
+            recent_rows = conn.execute(
+                "SELECT id FROM campaigns WHERE workspace_id = ? ORDER BY id DESC LIMIT ?",
+                (workspace_id, _ENTITY_CAMPAIGN_SCAN_LIMIT),
+            ).fetchall()
+    campaign_ids_from_jobs.update(int(row[0]) for row in recent_rows)
 
     campaigns_by_id = {}
     for campaign_id in campaign_ids_from_jobs:
