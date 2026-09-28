@@ -7329,7 +7329,7 @@ _ENTITY_KIND_JOB = "job"
 # Cap the job rows scanned while grouping so a large queue cannot make this
 # endpoint unbounded work. Newest jobs win (list_jobs orders id-desc), which is
 # the order the Publish Center shows anyway.
-_ENTITY_JOB_SCAN_LIMIT = 5000
+_ENTITY_JOB_SCAN_LIMIT = 500
 _ENTITY_MAX_LIMIT = 200
 _ENTITY_DEFAULT_LIMIT = 50
 
