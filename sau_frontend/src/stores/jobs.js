@@ -62,14 +62,17 @@ export const useJobsStore = defineStore('jobs', () => {
     return merged
   }
 
-  async function refreshList({ status, platform, limit = 50 } = {}) {
-    const response = await jobsApi.list({ status, platform, limit })
+  async function refreshList({ status, platform, limit = 50, offset = 0 } = {}) {
+    const response = await jobsApi.list({ status, platform, limit, offset })
     const data = response?.data || []
-    // Reset known-recent ids to the server order so cancelled/old jobs
-    // drop out of the dashboard naturally.
-    recentJobIds.value = data.map((job) => job.id)
+    const previousIds = [...recentJobIds.value]
     data.forEach((job) => _store(job))
-    return data
+    if (offset === 0) {
+      recentJobIds.value = data.map((job) => job.id)
+    } else {
+      recentJobIds.value = [...new Set([...previousIds, ...data.map((job) => job.id)])]
+    }
+    return { items: data, hasMore: data.length === limit }
   }
 
   async function fetchJob(jobId) {
@@ -89,6 +92,21 @@ export const useJobsStore = defineStore('jobs', () => {
   async function cancelJob(jobId) {
     const response = await jobsApi.cancel(jobId)
     return _store(response?.data)
+  }
+
+  async function refreshEntities({ month, status, limit = 100, offset = 0 } = {}) {
+    const response = await jobsApi.publishEntities({ month, status, limit, offset })
+    return response?.data || { items: [], total: 0, hasMore: false }
+  }
+
+  async function fetchEntity(entityId) {
+    const response = await jobsApi.publishEntity(entityId)
+    return response?.data || null
+  }
+
+  async function updateEntityPost(entityId, postId, draft) {
+    const response = await jobsApi.updateEntityPost(entityId, postId, { draft })
+    return response?.data
   }
 
   // --- Calendar / schedule management (2026-09-15) ---
@@ -170,6 +188,9 @@ export const useJobsStore = defineStore('jobs', () => {
     fetchJob,
     refreshList,
     refreshCalendar,
+    refreshEntities,
+    fetchEntity,
+    updateEntityPost,
     rescheduleTarget,
     cancelTarget,
     resubmitTarget,

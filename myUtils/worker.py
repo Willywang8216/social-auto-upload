@@ -23,6 +23,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -41,6 +42,36 @@ from myUtils.job_logging import (
 )
 from utils.concurrency import AccountConcurrency, MAX_CONCURRENT_BROWSERS
 from utils.log import worker_logger as _logger
+
+# Credential shapes that must never ride along into an operator alert. Alert
+# bodies are delivered to chat/email channels and retained off-box, and an
+# uploader exception routinely quotes the failing request URL (``?access_token=``
+# etc.), so scrub before sending. Defence in depth, not a guarantee — keep
+# error text short and credential-free at the source.
+_ALERT_REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"(?i)\b(access[_-]?token|refresh[_-]?token|id[_-]?token|"
+            r"client[_-]?secret|api[_-]?key|apikey|bot[_-]?token|password|"
+            r"secret)\b\s*[=:]\s*[^\s&,;\"')\]}]+"
+        ),
+        r"\1=<redacted>",
+    ),
+    (
+        re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]+"),
+        r"\1 <redacted>",
+    ),
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    """Best-effort mask of credential-like values in free-form alert text."""
+
+    cleaned = str(text or "")
+    for pattern, replacement in _ALERT_REDACT_PATTERNS:
+        cleaned = pattern.sub(replacement, cleaned)
+    return cleaned
+
 
 # A target executor takes (platform, payload, target) and returns an awaitable
 # that resolves to None on success or raises on failure.
@@ -91,6 +122,13 @@ class PublishWorker:
     # so a restart / transient upstream error near expiry can't strand the
     # account. Short-lived-access-token platforms keep the small 5-min skew.
     _LONG_LIVED_TOKEN_PLATFORMS: frozenset = frozenset({"facebook", "instagram", "threads"})
+
+    # In-app route for the JobsView. The SPA uses hash history, so the fragment
+    # below is a self-contained link. ``job`` is the publish_jobs id; it is
+    # passed as a query param so the view can open the job when it grows that
+    # support. Prefixed with ``SAU_PUBLIC_APP_URL`` when configured — never a
+    # guessed domain.
+    _JOB_ROUTE_FRAGMENT: str = "#/jobs?job={job_id}"
     try:
         _LONG_LIVED_REFRESH_MARGIN_SECONDS: int = int(
             os.environ.get("SAU_LONG_LIVED_REFRESH_MARGIN_SECONDS", str(7 * 24 * 3600)) or str(7 * 24 * 3600)
@@ -635,6 +673,11 @@ class PublishWorker:
                 log.error(
                     f"target failed permanently after {attempts} attempts: {message}"
                 )
+                # Only a genuine permanent transition alerts. ``transitioned``
+                # is False when the parent job was cancelled mid-run, and the
+                # retry branch below is deliberately silent — operators should
+                # only hear about targets that will never go out on their own.
+                self._alert_publish_failure(target, message)
             else:
                 log.info(
                     f"target failed permanently but parent job was already "
@@ -651,6 +694,94 @@ class PublishWorker:
         # row up again immediately on the next tick.
         await asyncio.sleep(delay)
         jobs.mark_target_retry(target.id, message, db_path=self._db_path)
+
+    @classmethod
+    def _publish_failure_deep_link(cls, job_id: int) -> str:
+        """Build an in-app deep link for a permanently failed target's job.
+
+        Uses ``SAU_PUBLIC_APP_URL`` as the origin when configured. Without it
+        we return the bare hash-history route fragment rather than inventing a
+        hostname — a guessed domain reads as a working link to an operator and
+        silently sends them nowhere when it is wrong.
+        """
+
+        fragment = cls._JOB_ROUTE_FRAGMENT.format(job_id=int(job_id))
+        base = str(os.environ.get("SAU_PUBLIC_APP_URL", "") or "").strip().rstrip("/")
+        if not base:
+            return fragment
+        from urllib.parse import urlparse
+        parsed = urlparse(base)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            return fragment
+        return f"{base}/{fragment}"
+
+    def _alert_publish_failure(self, target: jobs.Target, error: str) -> None:
+        """Alert the operator that a target has permanently failed.
+
+        Best-effort by contract: the target already transitioned in the DB, so
+        an alerting problem must never propagate back into the worker. Every
+        failure path is swallowed and logged. The alert carries the ids,
+        platform, account, profile, attempt count and error needed to act, and
+        a deep link when one can be built without guessing a hostname.
+        """
+
+        try:
+            job = None
+            target_row = target
+            try:
+                job = jobs.get_job(target.job_id, db_path=self._db_path)
+                for candidate in jobs.list_targets(
+                    target.job_id, db_path=self._db_path
+                ):
+                    if candidate.id == target.id:
+                        target_row = candidate
+                        break
+            except Exception as lookup_exc:  # noqa: BLE001
+                # Still alert with what the in-memory target carries; a missing
+                # job row only costs us platform/profile detail.
+                _logger.warning(
+                    f"publish-failure alert: could not reload job/target "
+                    f"job={target.job_id} target={target.id}: "
+                    f"{_scrub_secrets(repr(lookup_exc))}"
+                )
+
+            platform = (job.platform if job is not None else "") or "unknown"
+            profile_id = job.profile_id if job is not None else None
+            account_ref = str(getattr(target_row, "account_ref", "") or "unknown")
+            attempts = int(getattr(target_row, "attempts", target.attempts) or 0)
+            max_attempts = self._config.retry.max_attempts
+            safe_error = _scrub_secrets(error)
+
+            lines = [
+                "A publish target exhausted its retry budget and failed "
+                "permanently. It will not be retried automatically.",
+                "",
+                f"Job: #{target.job_id} ({platform})",
+                f"Target: #{target.id}",
+                f"Account: {account_ref}",
+                f"Profile: {profile_id if profile_id is not None else 'n/a'}",
+                f"Attempts: {attempts}/{max_attempts}",
+                f"Error: {safe_error}",
+            ]
+            link = self._publish_failure_deep_link(target.job_id)
+            if link:
+                lines.extend(["", f"Open in UI: {link}"])
+
+            from myUtils import ops_alerts
+
+            ops_alerts.send_ops_alert(
+                subject=(
+                    f"[SAU] Publish failed: {platform} target #{target.id} "
+                    f"(job #{target.job_id})"
+                ),
+                body="\n".join(lines),
+            )
+        except Exception as alert_exc:  # noqa: BLE001 — alerting must never
+            # change the worker's outcome; the target is already failed.
+            _logger.warning(
+                f"publish-failure alert failed for job={target.job_id} "
+                f"target={target.id}: {_scrub_secrets(repr(alert_exc))}"
+            )
 
     def _maybe_close_job_sink(self, job_id: int) -> None:
         """Close the per-job log sink once the job has reached terminal status."""

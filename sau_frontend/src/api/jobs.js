@@ -19,8 +19,8 @@ export const jobsApi = {
   },
 
   // List recent jobs. Filters are optional.
-  list({ status, platform, limit = 50 } = {}) {
-    return http.get('/jobs', { status, platform, limit })
+  list({ status, platform, limit = 50, offset = 0 } = {}) {
+    return http.get('/jobs', { status, platform, limit, offset })
   },
 
   // Fetch a single job along with its targets array.
@@ -38,6 +38,17 @@ export const jobsApi = {
   // single-process dev mode where there is no separate worker.
   runDrain() {
     return http.post('/jobs/run')
+  },
+
+  // Content-oriented calendar and queue view.
+  publishEntities(params = {}) {
+    return http.get('/publish-entities', params)
+  },
+  publishEntity(entityId) {
+    return http.get(`/publish-entities/${encodeURIComponent(entityId)}`)
+  },
+  updateEntityPost(entityId, postId, payload) {
+    return http.patch(`/publish-entities/${encodeURIComponent(entityId)}/posts/${postId}`, payload)
   },
 
   // --- Calendar / schedule management (2026-09-15) ---

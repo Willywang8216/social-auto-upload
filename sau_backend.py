@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import ipaddress
 import json
 import hmac
 import logging
@@ -6629,6 +6630,7 @@ def jobs_list():
             status=status,
             platform=platform,
             limit=int(raw_limit),
+            offset=int(request.args.get("offset", "0")),
             workspace_id=_workspace_scope(),
         )
     except ValueError as exc:
@@ -6838,7 +6840,7 @@ def _target_to_payload(target: job_runtime.Target) -> dict:
         "scheduleAt": target.schedule_at,
         "status": target.status,
         "attempts": target.attempts,
-        "lastError": target.last_error,
+        "lastError": _redact_entity_error(target.last_error),
         "startedAt": target.started_at,
         "finishedAt": target.finished_at,
     }
@@ -7298,6 +7300,1049 @@ def publish_center_submit():
             "campaignIds": result.campaign_ids,
             "jobs": result.jobs,
             "skipped": result.skipped,
+        },
+    }), 200
+
+
+# ---------------------------------------------------------------------------
+# Publish Center read view: one content "entity" per shared media group.
+#
+# A Publish Center submission materialises a single media group shared by one
+# campaign per profile, then a campaign post and publish job per (platform,
+# account). Operators need to read that back as one unit, so this view stitches
+# the media group, its campaigns/profile, per-post drafts, artifact links and
+# the underlying job/target state into a single entity. Jobs whose payload
+# carries no campaign (legacy /jobs or /postVideo submissions) fall back to one
+# entity per job, keyed on the media reference its targets carry.
+#
+# Security: nothing here echoes a local filesystem path or a private storage
+# location as a clickable URL. Artifact links are emitted only for public HTTPS
+# URLs, and a media preview URL is minted only from a file_record whose
+# ``file_path`` resolves inside ``videoFile/`` — the same containment rule
+# ``/getFile`` enforces. Workspace scoping is applied through the existing
+# store helpers, so another workspace's entities resolve as not-found.
+# ---------------------------------------------------------------------------
+
+_ENTITY_KIND_MEDIA_GROUP = "media_group"
+_ENTITY_KIND_JOB = "job"
+
+# Cap the job rows scanned while grouping so a large queue cannot make this
+# endpoint unbounded work. Newest jobs win (list_jobs orders id-desc), which is
+# the order the Publish Center shows anyway.
+_ENTITY_JOB_SCAN_LIMIT = 5000
+_ENTITY_MAX_LIMIT = 200
+_ENTITY_DEFAULT_LIMIT = 50
+
+
+def _is_public_https_url(url: str | None) -> bool:
+    """True only for an https URL a browser could actually reach.
+
+    Rejects non-https schemes and loopback / private-network hosts so a stored
+    ``public_url`` can never be rendered as a link into our own file tree or a
+    private storage endpoint.
+    """
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        return False
+    host = parsed.hostname.strip().lower()
+    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"} or host.endswith(".local"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_global
+    except ValueError:
+        return bool(host and "." in host and not host.endswith("."))
+
+
+def _media_preview_url(file_path: str | None) -> str | None:
+    """A same-origin ``/getFile`` URL for a file_record, or ``None``.
+
+    Derived *only* from the record's ``file_path`` and emitted only when it
+    resolves inside ``videoFile/``. A bare name relative to the media root and
+    an absolute path that lives under it both yield a relative URL; an absolute
+    path outside it (or traversal-shaped input) yields ``None`` so no local
+    path is ever exposed.
+    """
+    resolved = _resolve_video_file_path_safely(file_path)
+    if resolved is None:
+        return None
+    base = (Path(BASE_DIR) / "videoFile").resolve()
+    try:
+        relative = resolved.relative_to(base)
+    except ValueError:
+        return None
+    if not relative.name or relative.name in {".", ".."}:
+        return None
+    return url_for("get_file", filename=relative.as_posix())
+
+
+def _redact_entity_error(value: str | None) -> str | None:
+    if not value:
+        return value
+    text = str(value)
+    import re
+    text = re.sub(r'(?i)(token|secret|password|api[_-]?key|authorization)=[^&\s]+', r'\1=[redacted]', text)
+    text = re.sub(r'(?i)bearer\s+[A-Za-z0-9._-]+', 'Bearer [redacted]', text)
+    return text
+
+
+def _sanitize_reference(ref: str | None) -> str:
+    """A display-safe form of a target's account/file reference.
+
+    Structured refs (``account:12``) pass through. Anything that looks like a
+    filesystem path is reduced to its basename so a raw local path can never be
+    echoed to the client.
+    """
+    if not isinstance(ref, str) or not ref:
+        return ""
+    if ref.startswith("account:"):
+        return ref
+    if ref.startswith(('http://', 'https://')) or '@' in ref:
+        return "[unsafe reference]"
+    if "/" in ref or "\\" in ref:
+        return Path(ref).name
+    return ref
+
+
+def _media_type_for_name(name: str | None) -> str:
+    if not name:
+        return "file"
+    if _is_video_file(name):
+        return "video"
+    if _is_image_file(name):
+        return "image"
+    return "file"
+
+
+def _entity_profile_payload(
+    profile_id: int | None, *, db_path: Path, workspace_id: str | None
+) -> dict | None:
+    if profile_id is None:
+        return None
+    try:
+        profile = profile_registry.get_profile(
+            int(profile_id), workspace_id=workspace_id, db_path=db_path
+        )
+    except (LookupError, ValueError, TypeError):
+        return {"id": int(profile_id)}
+    return {"id": profile.id, "name": profile.name, "slug": profile.slug}
+
+
+def _entity_account_payload(
+    account_id: int | str, *, db_path: Path, workspace_id: str | None
+) -> dict:
+    try:
+        numeric_id = int(account_id)
+    except (TypeError, ValueError):
+        return {"id": None, "name": str(account_id)}
+    try:
+        account = profile_registry.get_account(
+            numeric_id, workspace_id=workspace_id, db_path=db_path
+        )
+    except (LookupError, ValueError, TypeError):
+        return {"id": numeric_id}
+    return {
+        "id": account.id,
+        "name": (account.nickname or account.account_name or "").strip(),
+        "platform": account.platform,
+        "enabled": bool(account.enabled),
+    }
+
+
+def _entity_account_ref_payload(
+    account_ref: str | None, *, db_path: Path, workspace_id: str | None
+) -> dict:
+    """Resolve an ``account:<id>`` target ref to a readable account payload."""
+    if isinstance(account_ref, str) and account_ref.startswith("account:"):
+        raw = account_ref.split(":", 1)[1]
+        if raw.isdigit():
+            payload = _entity_account_payload(
+                int(raw), db_path=db_path, workspace_id=workspace_id
+            )
+            payload["ref"] = account_ref
+            return payload
+    return {}
+
+
+def _entity_target_payload(
+    target: "job_runtime.Target", *, db_path: Path, workspace_id: str | None
+) -> dict:
+    account = _entity_account_ref_payload(
+        target.account_ref, db_path=db_path, workspace_id=workspace_id
+    )
+    fallback_ref = _sanitize_reference(target.account_ref)
+    return {
+        "id": target.id,
+        "jobId": target.job_id,
+        "accountRef": account.get("ref") or fallback_ref,
+        "accountName": account.get("name") or fallback_ref,
+        "accountId": account.get("id"),
+        "fileRef": _sanitize_reference(target.file_ref),
+        "scheduleAt": target.schedule_at,
+        "status": target.status,
+        "attempts": target.attempts,
+        "lastError": _redact_entity_error(target.last_error),
+        "startedAt": target.started_at,
+        "finishedAt": target.finished_at,
+    }
+
+
+def _entity_media_item(row: dict) -> dict:
+    """A media group item (or legacy file reference) with a safe preview URL."""
+    file_path = row.get("file_path")
+    filename = row.get("filename") or (Path(file_path).name if file_path else "")
+    item = {
+        "fileRecordId": row.get("file_record_id"),
+        "role": row.get("role"),
+        "sortOrder": row.get("sort_order"),
+        "filename": filename,
+        "filesize": row.get("filesize"),
+        "mediaType": _media_type_for_name(filename),
+    }
+    preview = _media_preview_url(file_path)
+    if preview:
+        item["previewUrl"] = preview
+    return item
+
+
+def _entity_artifact_payload(artifact: dict) -> dict:
+    """Sanitised campaign artifact: public HTTPS link or nothing.
+
+    Local and private remote paths are deliberately dropped entirely — this
+    view is read by browsers and those strings describe our own filesystem and
+    storage layout.
+    """
+    kind = artifact.get("artifact_kind") or ""
+    payload = {
+        "id": artifact.get("id"),
+        "campaignId": artifact.get("campaign_id"),
+        "artifactKind": kind,
+        "kind": kind,
+    }
+    metadata = artifact.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("role"):
+        payload["role"] = metadata["role"]
+    public_url = artifact.get("public_url")
+    if _is_public_https_url(public_url):
+        payload["url"] = public_url
+    return payload
+
+
+def _entity_timestamps(*values: str | None) -> list[str]:
+    return [value for value in values if isinstance(value, str) and value]
+
+
+def _month_keys(timestamps: list[str]) -> set[str]:
+    """The ``YYYY-MM`` prefixes of ISO-ish timestamps, for month filtering."""
+    keys: set[str] = set()
+    for stamp in timestamps:
+        if len(stamp) >= 7 and stamp[4] == "-" and stamp[:4].isdigit() and stamp[5:7].isdigit():
+            keys.add(stamp[:7])
+    return keys
+
+
+def _rollup_entity_status(
+    record_statuses: list[str],
+    job_statuses: list[str],
+    targets: list[dict],
+    *,
+    has_schedule: bool,
+) -> str:
+    """One status for the whole entity, failures and activity taking priority.
+
+    ``record_statuses`` is the campaign + campaign-post statuses; ``targets``
+    are the already-mapped target payloads. The ordering is deliberate: a hard
+    failure anywhere surfaces first, then in-flight work, then scheduled/draft.
+    """
+    records = {status for status in record_statuses if status}
+    jobs = {status for status in job_statuses if status}
+    target_statuses = {t.get("status") for t in targets if t.get("status")}
+
+    if "failed" in records or "failed" in jobs or "failed" in target_statuses:
+        return "failed"
+    if "cancelled" in records or "cancelled" in jobs or "cancelled" in target_statuses:
+        return "cancelled"
+    # "publishing" tracks work actually in flight; a campaign flagged publishing
+    # whose targets are all still pending reads as queued below.
+    if "running" in jobs or "running" in target_statuses:
+        return "publishing"
+    if "needs_review" in records:
+        return "needs_review"
+    if (
+        records & {"queued", "pending"}
+        or jobs & {"pending", "queued"}
+        or target_statuses & {"pending", "retrying"}
+    ):
+        return "scheduled" if has_schedule else "queued"
+    if "preparing" in records:
+        return "preparing"
+    if "published" in records or (jobs and jobs <= {"succeeded"}):
+        return "published"
+    if records & {"prepared", "ready"} or target_statuses & {"succeeded"}:
+        return "scheduled" if has_schedule else "prepared"
+    if "draft" in records:
+        return "draft"
+    return "unknown"
+
+
+def _entity_job_payload(
+    job: "job_runtime.Job", *, db_path: Path, workspace_id: str | None
+) -> dict:
+    targets = [
+        _entity_target_payload(target, db_path=db_path, workspace_id=workspace_id)
+        for target in job_runtime.list_targets(job.id, db_path=db_path)
+    ]
+    return {
+        "id": job.id,
+        "platform": job.platform,
+        "profileId": job.profile_id,
+        "status": job.status,
+        "title": job_runtime._action_title(job.payload or {}),
+        "totalTargets": job.total_targets,
+        "completedTargets": job.completed_targets,
+        "failedTargets": job.failed_targets,
+        "createdAt": job.created_at,
+        "startedAt": job.started_at,
+        "finishedAt": job.finished_at,
+        "targets": targets,
+    }
+
+
+def _finalise_entity(entity: dict, timestamps: list[str]) -> dict:
+    """Attach derived sort/month keys (underscore-private) to an entity."""
+    entity["_timestamps"] = timestamps
+    entity["_sortAt"] = max(timestamps) if timestamps else ""
+    return entity
+
+
+def _build_media_group_entity(
+    media_group_id: int,
+    campaigns: list,
+    jobs: list,
+    *,
+    db_path: Path,
+    workspace_id: str | None,
+) -> dict:
+    """One entity for a media group, folding in every campaign sharing it."""
+    try:
+        media_group = media_group_store.get_media_group(
+            media_group_id, workspace_id=workspace_id, db_path=db_path
+        )
+    except (LookupError, ValueError, TypeError):
+        media_group = None
+
+    media_items = [
+        _entity_media_item(row)
+        for row in _load_media_group_files(media_group_id, db_path=db_path)
+    ]
+
+    posts: list[dict] = []
+    artifacts: list[dict] = []
+    campaigns_payload: list[dict] = []
+    posts_by_id: dict[int, dict] = {}
+    record_statuses: list[str] = []
+    timestamps: list[str] = []
+    profile_id = None
+
+    for campaign in campaigns:
+        if profile_id is None:
+            profile_id = campaign.profile_id
+        record_statuses.append(campaign.status)
+        timestamps.extend(
+            _entity_timestamps(campaign.created_at, campaign.prepared_at, campaign.published_at)
+        )
+        metadata = campaign.metadata if isinstance(campaign.metadata, dict) else {}
+        campaigns_payload.append({
+            "id": campaign.id,
+            "profileId": campaign.profile_id,
+            "status": campaign.status,
+            "title": metadata.get("title") or "",
+            "createdAt": campaign.created_at,
+            "preparedAt": campaign.prepared_at,
+            "publishedAt": campaign.published_at,
+            "lastError": campaign.last_error,
+        })
+        for post in campaign_store.list_campaign_posts(campaign.id, db_path=db_path):
+            record_statuses.append(post.status)
+            account_ids = post.account_ids or []
+            post_payload = {
+                "id": post.id,
+                "campaignId": campaign.id,
+                "platform": post.platform,
+                "accountIds": account_ids,
+                "accounts": [
+                    _entity_account_payload(
+                        account_id, db_path=db_path, workspace_id=workspace_id
+                    )
+                    for account_id in account_ids
+                ],
+                "status": post.status,
+                "draft": post.draft or {},
+                "lastPublishedJobId": post.last_published_job_id,
+                "scheduledAt": None,
+                "jobId": None,
+            }
+            posts.append(post_payload)
+            posts_by_id[post.id] = post_payload
+        for artifact in campaign_store.list_campaign_artifacts(campaign.id, db_path=db_path):
+            artifacts.append(_entity_artifact_payload(artifact.to_dict()))
+
+    jobs_payload = [
+        _entity_job_payload(job, db_path=db_path, workspace_id=workspace_id)
+        for job in jobs
+    ]
+    job_statuses: list[str] = []
+    scheduled_values: list[str] = []
+    all_targets: list[dict] = []
+    for job_entry in jobs_payload:
+        job_statuses.append(job_entry["status"])
+        timestamps.extend(
+            _entity_timestamps(
+                job_entry["createdAt"], job_entry["startedAt"], job_entry["finishedAt"]
+            )
+        )
+        for target in job_entry["targets"]:
+            all_targets.append(target)
+            timestamps.extend(_entity_timestamps(target.get("scheduleAt")))
+            if target.get("scheduleAt"):
+                scheduled_values.append(target["scheduleAt"])
+            file_ref = target.get("fileRef") or ""
+            if file_ref.startswith("campaign_post:"):
+                raw_post_id = file_ref.split(":", 1)[1]
+                if raw_post_id.isdigit():
+                    post_payload = posts_by_id.get(int(raw_post_id))
+                    if post_payload is not None:
+                        post_payload["jobId"] = job_entry["id"]
+                        if post_payload["scheduledAt"] is None and target.get("scheduleAt"):
+                            post_payload["scheduledAt"] = target["scheduleAt"]
+
+    has_schedule = bool(scheduled_values)
+    entity = {
+        "entityId": f"mg-{int(media_group_id)}",
+        "entityType": _ENTITY_KIND_MEDIA_GROUP,
+        "mediaGroupId": int(media_group_id),
+        "mediaGroup": (
+            {
+                "id": media_group.id,
+                "name": media_group.name,
+                "status": media_group.status,
+                "groupType": media_group.group_type,
+                "contentTheme": media_group.content_theme,
+                "primaryVideoFileId": media_group.primary_video_file_id,
+                "createdAt": media_group.created_at,
+            }
+            if media_group is not None
+            else None
+        ),
+        "profileId": profile_id,
+        "profile": _entity_profile_payload(
+            profile_id, db_path=db_path, workspace_id=workspace_id
+        ),
+        "campaignIds": [campaign.id for campaign in campaigns],
+        "campaigns": campaigns_payload,
+        "status": _rollup_entity_status(
+            record_statuses, job_statuses, all_targets, has_schedule=has_schedule
+        ),
+        "createdAt": min(timestamps) if timestamps else None,
+        "updatedAt": max(timestamps) if timestamps else None,
+        "scheduledAt": min(scheduled_values) if scheduled_values else None,
+        "mediaItems": media_items,
+        "artifacts": artifacts,
+        "posts": posts,
+        "jobs": jobs_payload,
+    }
+    return _finalise_entity(entity, timestamps)
+
+
+def _file_records_for_refs(refs: list[str], *, db_path: Path) -> dict[str, dict]:
+    """Read-only lookup of file_records by exact file_path or basename."""
+    found: dict[str, dict] = {}
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            for ref in refs:
+                if not isinstance(ref, str) or not ref:
+                    continue
+                row = conn.execute(
+                    """
+                    SELECT id, filename, file_path, filesize
+                    FROM file_records
+                    WHERE file_path = ? OR filename = ?
+                    LIMIT 1
+                    """,
+                    (ref, Path(ref).name),
+                ).fetchone()
+                if row is not None:
+                    found[ref] = dict(row)
+    except sqlite3.Error:
+        return found
+    return found
+
+
+def _build_legacy_entity(
+    job: "job_runtime.Job", *, db_path: Path, workspace_id: str | None
+) -> dict:
+    """One entity for a job with no campaign — keyed on its media reference."""
+    job_entry = _entity_job_payload(job, db_path=db_path, workspace_id=workspace_id)
+    all_targets = job_entry["targets"]
+
+    file_refs: list[str] = []
+    for target in all_targets:
+        ref = target.get("fileRef") or ""
+        if ref and not ref.startswith("campaign_post:") and ref not in file_refs:
+            file_refs.append(ref)
+    records = _file_records_for_refs(file_refs, db_path=db_path)
+
+    media_items: list[dict] = []
+    for ref in file_refs:
+        row = records.get(ref)
+        if row is not None:
+            media_items.append(_entity_media_item({
+                "file_record_id": row.get("id"),
+                "role": "attachment",
+                "sort_order": len(media_items),
+                "filename": row.get("filename"),
+                "file_path": row.get("file_path"),
+                "filesize": row.get("filesize"),
+            }))
+        else:
+            media_items.append({
+                "fileRecordId": None,
+                "role": "attachment",
+                "sortOrder": len(media_items),
+                "filename": ref,
+                "mediaType": _media_type_for_name(ref),
+            })
+
+    # Payload artifacts carry public HTTPS links for jobs that never went
+    # through campaign artifact staging; surface them as artifacts, not paths.
+    artifacts: list[dict] = []
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    raw_artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
+    for artifact in raw_artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        kind = artifact.get("artifact_kind") or artifact.get("kind") or "artifact"
+        entry = {"id": None, "campaignId": None, "artifactKind": kind, "kind": kind}
+        metadata = artifact.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("role"):
+            entry["role"] = metadata["role"]
+        if _is_public_https_url(artifact.get("public_url") or artifact.get("url")):
+            entry["url"] = artifact.get("public_url") or artifact.get("url")
+        artifacts.append(entry)
+
+    timestamps: list[str] = _entity_timestamps(
+        job_entry["createdAt"], job_entry["startedAt"], job_entry["finishedAt"]
+    )
+    scheduled_values = [
+        target["scheduleAt"] for target in all_targets if target.get("scheduleAt")
+    ]
+    for target in all_targets:
+        timestamps.extend(_entity_timestamps(target.get("scheduleAt")))
+
+    has_schedule = bool(scheduled_values)
+    entity = {
+        "entityId": f"job-{int(job.id)}",
+        "entityType": _ENTITY_KIND_JOB,
+        "mediaGroupId": None,
+        "mediaGroup": None,
+        "profileId": job.profile_id,
+        "profile": _entity_profile_payload(
+            job.profile_id, db_path=db_path, workspace_id=workspace_id
+        ),
+        "campaignIds": [],
+        "campaigns": [],
+        "status": _rollup_entity_status(
+            [], [job_entry["status"]], all_targets, has_schedule=has_schedule
+        ),
+        "createdAt": min(timestamps) if timestamps else None,
+        "updatedAt": max(timestamps) if timestamps else None,
+        "scheduledAt": min(scheduled_values) if scheduled_values else None,
+        "mediaItems": media_items,
+        "artifacts": artifacts,
+        "posts": [],
+        "jobs": [job_entry],
+    }
+    return _finalise_entity(entity, timestamps)
+
+
+def _load_publish_entity_jobs(
+    *, db_path: Path, workspace_id: str | None
+) -> list["job_runtime.Job"]:
+    """Every scoped job, paged through list_jobs up to the scan ceiling."""
+    jobs: list["job_runtime.Job"] = []
+    page_cap = getattr(job_runtime, "LIST_JOBS_MAX_LIMIT", 500)
+    offset = 0
+    while len(jobs) < _ENTITY_JOB_SCAN_LIMIT:
+        page_limit = min(page_cap, _ENTITY_JOB_SCAN_LIMIT - len(jobs))
+        if page_limit < 1:
+            break
+        page = job_runtime.list_jobs(
+            limit=page_limit, offset=offset, workspace_id=workspace_id, db_path=db_path
+        )
+        if not page:
+            break
+        jobs.extend(page)
+        if len(page) < page_limit:
+            break
+        offset += len(page)
+    return jobs
+
+
+def _collect_publish_entities(
+    *,
+    db_path: Path,
+    workspace_id: str | None,
+    profile_id: int | None = None,
+) -> list[dict]:
+    """Group campaigns and jobs into content entities.
+
+    Campaigns anchor media-group entities; jobs are attached to their campaign's
+    media group when the payload names one, otherwise they become a standalone
+    job entity. A profile filter narrows entities without breaking the
+    job-to-campaign mapping (all scoped campaigns are loaded to resolve it).
+    """
+    all_campaigns = campaign_store.list_campaigns(workspace_id=workspace_id, db_path=db_path)
+    campaigns_by_id = {campaign.id: campaign for campaign in all_campaigns}
+
+    entity_campaigns = [
+        campaign
+        for campaign in all_campaigns
+        if profile_id is None or campaign.profile_id == profile_id
+    ]
+    campaigns_by_group: dict[int, list] = {}
+    campaign_ids_in_scope: set[int] = set()
+    for campaign in entity_campaigns:
+        campaigns_by_group.setdefault(campaign.media_group_id, []).append(campaign)
+        campaign_ids_in_scope.add(campaign.id)
+
+    jobs_by_group: dict[int, list] = {}
+    legacy_jobs: list = []
+    for job in _load_publish_entity_jobs(db_path=db_path, workspace_id=workspace_id):
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        campaign_id = payload.get("campaignId")
+        try:
+            parsed_campaign_id = int(campaign_id) if campaign_id is not None else None
+        except (TypeError, ValueError):
+            parsed_campaign_id = None
+
+        campaign = (
+            campaigns_by_id.get(parsed_campaign_id)
+            if parsed_campaign_id is not None
+            else None
+        )
+        if campaign is not None:
+            if campaign.id in campaign_ids_in_scope:
+                jobs_by_group.setdefault(campaign.media_group_id, []).append(job)
+            # A job for a profile excluded by the filter is dropped with it.
+        elif parsed_campaign_id is None:
+            if profile_id is None or job.profile_id == profile_id:
+                legacy_jobs.append(job)
+        elif profile_id is None or job.profile_id == profile_id:
+            # Campaign row is gone but the job still exists: keep it readable
+            # as a standalone job entity rather than hiding the publish.
+            legacy_jobs.append(job)
+
+    entities: list[dict] = []
+    for media_group_id, group_campaigns in campaigns_by_group.items():
+        entities.append(
+            _build_media_group_entity(
+                media_group_id,
+                group_campaigns,
+                jobs_by_group.get(media_group_id, []),
+                db_path=db_path,
+                workspace_id=workspace_id,
+            )
+        )
+    for job in legacy_jobs:
+        entities.append(
+            _build_legacy_entity(job, db_path=db_path, workspace_id=workspace_id)
+        )
+    return entities
+
+
+def _parse_publish_entity_id(entity_id: str) -> tuple[str, int] | None:
+    """Map ``mg-<id>`` / ``job-<id>`` (or a bare media-group id) to a kind+id."""
+    if not isinstance(entity_id, str):
+        return None
+    token = entity_id.strip()
+    for prefix, kind in (("mg-", _ENTITY_KIND_MEDIA_GROUP), ("job-", _ENTITY_KIND_JOB)):
+        if token.startswith(prefix):
+            raw = token[len(prefix):]
+            return (kind, int(raw)) if raw.isdigit() else None
+    if token.isdigit():
+        return (_ENTITY_KIND_MEDIA_GROUP, int(token))
+    return None
+
+
+def _valid_month(value: str | None) -> bool:
+    return bool(
+        value
+        and len(value) == 7
+        and value[:4].isdigit()
+        and value[4] == "-"
+        and value[5:7].isdigit()
+    )
+
+
+@app.route("/publish-entities", methods=["GET"])
+def publish_entities_list():
+    """List content entities (media-group or job) for the Publish Center.
+
+    Query params: ``month`` (YYYY-MM), ``status`` (comma-separated entity
+    status), ``profileId``, ``limit`` (default 50, max 200), ``offset``.
+    """
+    db_path = _current_db_path()
+    workspace_id = _workspace_scope()
+
+    month = (request.args.get("month") or "").strip() or None
+    if month is not None and not _valid_month(month):
+        return jsonify({"code": 400, "msg": "month must be YYYY-MM", "data": None}), 400
+
+    raw_status = (request.args.get("status") or "").strip()
+    statuses = {value.strip() for value in raw_status.split(",") if value.strip()}
+
+    raw_profile_id = (request.args.get("profileId") or "").strip()
+    profile_id = int(raw_profile_id) if raw_profile_id.isdigit() else None
+    if raw_profile_id and profile_id is None:
+        return jsonify({"code": 400, "msg": "profileId must be an integer", "data": None}), 400
+
+    try:
+        limit = int(request.args.get("limit", str(_ENTITY_DEFAULT_LIMIT)))
+        offset = int(request.args.get("offset", "0"))
+    except ValueError:
+        return jsonify({"code": 400, "msg": "limit and offset must be integers", "data": None}), 400
+    if limit < 1:
+        return jsonify({"code": 400, "msg": "limit must be >= 1", "data": None}), 400
+    limit = min(limit, _ENTITY_MAX_LIMIT)
+    offset = max(0, offset)
+
+    entities = _collect_publish_entities(
+        db_path=db_path, workspace_id=workspace_id, profile_id=profile_id
+    )
+
+    if month is not None:
+        entities = [e for e in entities if month in _month_keys(e.get("_timestamps", []))]
+    if statuses:
+        entities = [e for e in entities if e.get("status") in statuses]
+
+    entities.sort(key=lambda e: (e.get("_sortAt") or "", e.get("entityId") or ""), reverse=True)
+    total = len(entities)
+    page = entities[offset:offset + limit]
+
+    items = []
+    for entity in page:
+        entity.pop("_timestamps", None)
+        entity.pop("_sortAt", None)
+        items.append(entity)
+
+    return jsonify({
+        "code": 200,
+        "msg": "ok",
+        "data": {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "hasMore": offset + len(items) < total,
+        },
+    }), 200
+
+
+class _EntityPostEditRefused(Exception):
+    """Raised when a queued entity post can no longer be copied/edited."""
+
+
+def _strip_entity_internals(entity: dict) -> dict:
+    entity.pop("_timestamps", None)
+    entity.pop("_sortAt", None)
+    return entity
+
+
+def _media_group_entity_for(
+    media_group_id: int, *, db_path: Path, workspace_id: str | None
+) -> dict:
+    """Build the entity for a media group, enforcing workspace ownership."""
+    # Ownership gate: a media group in another workspace is not found.
+    media_group_store.get_media_group(
+        media_group_id, workspace_id=workspace_id, db_path=db_path
+    )
+    campaigns = [
+        campaign
+        for campaign in campaign_store.list_campaigns(
+            workspace_id=workspace_id, db_path=db_path
+        )
+        if campaign.media_group_id == media_group_id
+    ]
+    if not campaigns:
+        raise LookupError(f"Media group has no campaigns: id={media_group_id}")
+    campaign_ids = {str(campaign.id) for campaign in campaigns}
+    jobs = [
+        job
+        for job in _load_publish_entity_jobs(db_path=db_path, workspace_id=workspace_id)
+        if isinstance(job.payload, dict)
+        and str(job.payload.get("campaignId", "")) in campaign_ids
+    ]
+    return _build_media_group_entity(
+        media_group_id, campaigns, jobs, db_path=db_path, workspace_id=workspace_id
+    )
+
+
+def _job_entity_for(job_id: int, *, db_path: Path, workspace_id: str | None) -> dict:
+    job = job_runtime.get_job(job_id, workspace_id=workspace_id, db_path=db_path)
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    raw_campaign_id = payload.get("campaignId")
+    try:
+        campaign_id = int(raw_campaign_id) if raw_campaign_id is not None else None
+    except (TypeError, ValueError):
+        campaign_id = None
+    if campaign_id is not None:
+        campaigns = [campaign for campaign in campaign_store.list_campaigns(workspace_id=workspace_id, db_path=db_path) if campaign.id == campaign_id]
+        if campaigns:
+            return _build_media_group_entity(campaigns[0].media_group_id, campaigns, [job], db_path=db_path, workspace_id=workspace_id)
+    return _build_legacy_entity(job, db_path=db_path, workspace_id=workspace_id)
+
+
+def _publish_entity_by_id(
+    entity_id: str, *, db_path: Path, workspace_id: str | None
+) -> dict:
+    parsed = _parse_publish_entity_id(entity_id)
+    if parsed is None:
+        raise LookupError(f"Publish entity not found: {entity_id!r}")
+    kind, entity_key = parsed
+    if kind == _ENTITY_KIND_JOB:
+        return _job_entity_for(entity_key, db_path=db_path, workspace_id=workspace_id)
+    return _media_group_entity_for(entity_key, db_path=db_path, workspace_id=workspace_id)
+
+
+@app.route("/publish-entities/<entity_id>", methods=["GET"])
+def publish_entities_get(entity_id):
+    """One content entity by its stable key (``mg-<id>`` or ``job-<id>``)."""
+    try:
+        entity = _publish_entity_by_id(
+            entity_id, db_path=_current_db_path(), workspace_id=_workspace_scope()
+        )
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Publish entity not found", "data": None}), 404
+    return jsonify({
+        "code": 200,
+        "msg": "ok",
+        "data": _strip_entity_internals(entity),
+    }), 200
+
+
+def _merge_post_draft(current: dict | None, data: dict) -> dict | None:
+    """Merge a PATCH body into a campaign post draft.
+
+    Accepts either an explicit ``draft`` object or the convenience fields
+    ``message`` / ``hashtags`` / ``firstComment``. Returns ``None`` when the
+    body carries neither, so the caller can answer 400.
+    """
+    draft = dict(current) if isinstance(current, dict) else {}
+    provided = False
+    if isinstance(data.get("draft"), dict):
+        draft.update(data["draft"])
+        provided = True
+    if "message" in data:
+        draft["message"] = str(data.get("message") or "")
+        provided = True
+    if "hashtags" in data:
+        hashtags = data.get("hashtags")
+        draft["hashtags"] = [str(tag) for tag in hashtags] if isinstance(hashtags, list) else []
+        provided = True
+    if "firstComment" in data:
+        draft["firstComment"] = str(data.get("firstComment") or "")
+        provided = True
+    return draft if provided else None
+
+
+def _linked_campaign_post_job(
+    post, *, db_path: Path, workspace_id: str | None
+) -> "job_runtime.Job | None":
+    """The live publish job for a campaign post, if one exists.
+
+    Prefers the post's recorded job id, then falls back to matching the job
+    payload's ``campaignPostId`` (older posts predate the back-reference).
+    """
+    if post.last_published_job_id:
+        try:
+            return job_runtime.get_job(
+                int(post.last_published_job_id),
+                workspace_id=workspace_id,
+                db_path=db_path,
+            )
+        except (LookupError, ValueError, TypeError):
+            pass
+    for job in _load_publish_entity_jobs(db_path=db_path, workspace_id=workspace_id):
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        raw = payload.get("campaignPostId")
+        try:
+            post_id = int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            post_id = None
+        if post_id == post.id:
+            return job
+    return None
+
+
+def _sync_post_draft(
+    post_id: int,
+    draft: dict,
+    job: "job_runtime.Job | None",
+    *,
+    db_path: Path,
+    workspace_id: str | None,
+) -> bool:
+    """Atomically write the post draft and mirror it into its queued job.
+
+    Both rows commit in one ``BEGIN IMMEDIATE`` transaction. When a job is
+    linked, its targets are re-checked inside that transaction and the edit is
+    refused unless every target is still ``pending``/``retrying`` — so a worker
+    claiming a target mid-edit can never be raced. Returns whether the job
+    payload was rewritten.
+    """
+    now = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    draft_json = json.dumps(draft, ensure_ascii=False)
+    payload_synced = False
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            # Already inside a transaction (e.g. a caller-managed connection).
+            pass
+        try:
+            if job is not None:
+                if workspace_id is not None:
+                    job_row = conn.execute(
+                        "SELECT payload_json, workspace_id FROM publish_jobs WHERE id = ?",
+                        (job.id,),
+                    ).fetchone()
+                    if job_row is None or job_row["workspace_id"] != workspace_id:
+                        raise LookupError(f"Job not found: id={job.id}")
+                else:
+                    job_row = conn.execute(
+                        "SELECT payload_json FROM publish_jobs WHERE id = ?",
+                        (job.id,),
+                    ).fetchone()
+                    if job_row is None:
+                        raise LookupError(f"Job not found: id={job.id}")
+
+                target_rows = conn.execute(
+                    "SELECT status FROM publish_job_targets WHERE job_id = ?",
+                    (job.id,),
+                ).fetchall()
+                if any(
+                    row["status"] not in ("pending", "retrying") for row in target_rows
+                ):
+                    raise _EntityPostEditRefused(
+                        "Post can no longer be edited: its publish targets are no "
+                        "longer pending or retrying"
+                    )
+
+                payload = json.loads(job_row["payload_json"]) if job_row["payload_json"] else {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                payload["draft"] = draft
+                payload["message"] = draft.get("message", "")
+                conn.execute(
+                    "UPDATE publish_jobs SET payload_json = ? WHERE id = ?",
+                    (
+                        json.dumps(payload, sort_keys=True, ensure_ascii=False),
+                        job.id,
+                    ),
+                )
+                payload_synced = True
+
+            conn.execute(
+                "UPDATE campaign_posts SET draft_json = ?, updated_at = ? WHERE id = ?",
+                (draft_json, now, post_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return payload_synced
+
+
+@app.route("/publish-entities/<entity_id>/posts/<int:post_id>", methods=["PATCH"])
+def publish_entities_post_patch(entity_id, post_id):
+    """Edit a Publish Center post's copy before its targets are claimed.
+
+    Body: ``{"draft": {...}}`` and/or ``message`` / ``hashtags`` /
+    ``firstComment``. Writes ``campaign_posts.draft_json`` and, for a linked
+    queued job, ``publish_jobs.payload_json`` in one transaction. 409 when any
+    associated target is no longer pending/retrying; 404 for a foreign or
+    unknown entity/post.
+    """
+    db_path = _current_db_path()
+    workspace_id = _workspace_scope()
+
+    parsed = _parse_publish_entity_id(entity_id)
+    if parsed is None or parsed[0] != _ENTITY_KIND_MEDIA_GROUP:
+        return jsonify({"code": 404, "msg": "Publish entity not found", "data": None}), 404
+    media_group_id = parsed[1]
+
+    try:
+        # Ownership gate: media group, campaign and post must all resolve in
+        # this workspace before anything is written.
+        media_group_store.get_media_group(
+            media_group_id, workspace_id=workspace_id, db_path=db_path
+        )
+        post = campaign_store.get_campaign_post(post_id, db_path=db_path)
+        campaign = campaign_store.get_campaign(
+            post.campaign_id, workspace_id=workspace_id, db_path=db_path
+        )
+        if campaign.media_group_id != media_group_id:
+            raise LookupError(f"Campaign post not in entity: id={post_id}")
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Publish entity post not found", "data": None}), 404
+
+    try:
+        data = _read_json_body()
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    draft = _merge_post_draft(post.draft, data)
+    if draft is None:
+        return jsonify({
+            "code": 400,
+            "msg": "Provide a draft object or message/hashtags/firstComment",
+            "data": None,
+        }), 400
+
+    job = _linked_campaign_post_job(post, db_path=db_path, workspace_id=workspace_id)
+    try:
+        payload_synced = _sync_post_draft(
+            post_id, draft, job, db_path=db_path, workspace_id=workspace_id
+        )
+    except _EntityPostEditRefused as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    except LookupError:
+        return jsonify({"code": 404, "msg": "Publish entity post not found", "data": None}), 404
+
+    entity = _media_group_entity_for(
+        media_group_id, db_path=db_path, workspace_id=workspace_id
+    )
+    updated_post = next(
+        (candidate for candidate in entity.get("posts", []) if candidate["id"] == post_id),
+        None,
+    )
+    return jsonify({
+        "code": 200,
+        "msg": "updated",
+        "data": {
+            "entity": _strip_entity_internals(entity),
+            "post": updated_post,
+            "postId": post_id,
+            "jobId": job.id if job is not None else None,
+            "payloadSynced": payload_synced,
         },
     }), 200
 

@@ -394,6 +394,7 @@ def list_jobs(
     status: str | None = None,
     platform: str | None = None,
     limit: int = 50,
+    offset: int = 0,
     workspace_id: str | None = None,
     db_path: Path | None = None,
 ) -> list[Job]:
@@ -408,6 +409,10 @@ def list_jobs(
         raise ValueError(f"limit must be >= 1, got {limit_int}")
     if limit_int > LIST_JOBS_MAX_LIMIT:
         limit_int = LIST_JOBS_MAX_LIMIT
+    try:
+        offset_int = max(0, int(offset))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"offset must be a non-negative integer, got {offset!r}") from exc
 
     query = "SELECT * FROM publish_jobs"
     clauses: list[str] = []
@@ -423,8 +428,8 @@ def list_jobs(
         params.append(workspace_id)
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
-    query += " ORDER BY id DESC LIMIT ?"
-    params.append(limit_int)
+    query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+    params.extend((limit_int, offset_int))
 
     with _connect(db_path) as conn:
         rows = conn.execute(query, params).fetchall()

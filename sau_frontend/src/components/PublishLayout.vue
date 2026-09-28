@@ -17,7 +17,7 @@ import SubNav from './SubNav.vue'
 const tabs = [
   { id: 'compose',  label: 'Compose',  path: '/publish/compose' },
   { id: 'calendar', label: 'Calendar', path: '/publish/calendar' },
-  { id: 'queue',   label: 'Queue',   path: '/publish/queue', badge: '12' },
+  { id: 'queue',   label: 'Queue',   path: '/publish/queue' },
   { id: 'inbox',   label: '傳入佇列',  path: '/publish/inbox' },
 ]
 </script>
@@ -27,9 +27,11 @@ const tabs = [
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
 }
 .section-content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 </style>
