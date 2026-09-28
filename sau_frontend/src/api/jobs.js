@@ -56,7 +56,7 @@ export const jobsApi = {
   // List scheduled targets for the calendar grid, optionally filtered by
   // month (YYYY-MM), platform slug, or comma-separated status list.
   calendar(params = {}) {
-    return http.get('/jobs/calendar', { params })
+    return http.get('/jobs/calendar', params)
   },
 
   // Per-target operations. All return the updated target payload.
