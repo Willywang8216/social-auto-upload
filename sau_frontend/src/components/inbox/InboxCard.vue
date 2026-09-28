@@ -3,8 +3,8 @@
     <div class="card-head">
       <div class="thumb-wrap">
         <template v-if="thumbSrc && !previewFailed">
-          <video v-if="kindIsVideo" :src="thumbSrc" class="thumb" controls preload="metadata" />
-          <img v-else :src="thumbSrc" class="thumb" loading="lazy" alt="" @error="previewFailed = true" />
+          <video v-if="kindIsVideo" :src="item.preview.url" class="thumb" controls preload="metadata" />
+          <img v-else :src="item.preview.url" class="thumb" loading="lazy" alt="" @error="previewFailed = true" />
         </template>
         <div v-else class="thumb thumb-placeholder">
           <el-icon :size="22"><VideoCamera v-if="kindIsVideo" /><Picture v-else /></el-icon>
@@ -67,7 +67,6 @@
 import { computed, ref } from 'vue'
 import { Picture, VideoCamera } from '@element-plus/icons-vue'
 
-import { buildApiUrl } from '@/utils/api-url'
 
 const props = defineProps({
   item: { type: Object, required: true },
@@ -83,19 +82,12 @@ const PERSONA_MAP = { nw: 'NW', sw: 'SW', teaching: 'Teaching', msl: 'MSL' }
 
 const briefExpanded = ref(false)
 const previewFailed = ref(false)
-const previewReason = computed(() => props.item.preview?.reason || '預覽不可用')
 
 const personaLabel = computed(() => PERSONA_MAP[props.item.persona] || props.item.persona || '—')
 const kindIsVideo = computed(() => props.item.kind === 'video')
 const isSfw = computed(() => props.item.sfwFlag === 'sfw' || props.item.sfwFlag === true)
 
-const thumbSrc = computed(() => {
-  const path = props.item.thumbPath
-  if (!path) return ''
-  // Public http(s) URLs (e.g. CDN / signed) pass through untouched.
-  if (/^https?:\/\//.test(path)) return path
-  return buildApiUrl(`/getFile?filename=${encodeURIComponent(path)}`)
-})
+
 
 function formatTime(iso) {
   if (!iso) return '—'

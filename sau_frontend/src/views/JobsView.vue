@@ -1,10 +1,10 @@
 <template>
   <div class="jobs-view">
     <section class="entity-queue">
-      <header class="entity-queue-head">
-        <div><h2>發佈佇列</h2><p>{{ entityTotal }} 個內容項目 · 每組媒體只顯示一張卡片</p></div>
-        <el-button @click="allDates = !allDates">{{ allDates ? '顯示全部日期' : '今天' }}</el-button>
-        <div class="entity-filter-row">
+        <header class="entity-queue-head">
+          <div><h2>發佈佇列</h2><p>{{ entityTotal }} 個內容項目 · 每組媒體一張卡片</p></div>
+          <el-button @click="allDates = !allDates">{{ allDates ? '顯示全部日期' : '今天' }}</el-button>
+          <div class="entity-filter-row">
           <el-date-picker v-model="entityDateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="開始日期" end-placeholder="結束日期" />
           <el-select v-model="entityPlatformFilters" multiple collapse-tags clearable placeholder="平台">
             <el-option v-for="platform in platformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
@@ -12,16 +12,20 @@
           <el-select v-model="entityProfileFilters" multiple collapse-tags clearable placeholder="個人檔案">
             <el-option v-for="profile in profiles" :key="profile.id" :label="profile.name" :value="profile.id" />
           </el-select>
+          <el-select v-model="entityAccountFilters" multiple collapse-tags clearable placeholder="帳號">
+            <el-option v-for="account in profileAccounts" :key="account.id" :label="`${account.profileName} · ${account.platform} · ${account.nickname || account.accountName}`" :value="account.id" />
+          </el-select>
           <el-input v-model="entityKeyword" clearable placeholder="搜尋標題、文案或媒體名稱" />
           <el-select v-model="entityStatusFilter" clearable placeholder="狀態" @change="loadEntities(true)">
             <el-option v-for="status in entityStatusOptions" :key="status" :label="entityStatusLabel(status)" :value="status" />
           </el-select>
-          <el-button :loading="entityLoading" @click="loadEntities(true)">重新整理</el-button>
-        </div>
-      </header>
+          <el-button @click="loadJobs">工作紀錄</el-button>
+          <el-button type="primary" @click="drainNow" :loading="draining">排空佇列</el-button>
+          </div>
+        </header>
       <div v-if="entityLoading && !entities.length" class="entity-loading">正在載入排程…</div>
-    <el-empty v-else-if="entities.length === 0" description="目前沒有符合條件的排程" />
-      <div class="entity-card-grid">
+      <el-empty v-else-if="entities.length === 0" description="目前沒有符合條件的排程" />
+      <div v-else class="entity-card-grid">
         <article v-for="entity in entities" :key="entity.entityId" class="entity-card">
           <div class="entity-card-media">
             <video v-if="entity.mediaItems?.[0]?.mediaType === 'video' && entity.mediaItems?.[0]?.previewUrl" :src="entity.mediaItems[0].previewUrl" preload="metadata" muted />
@@ -30,7 +34,7 @@
           </div>
           <div class="entity-card-body">
             <div class="entity-card-heading">
-              <strong>{{ entity.posts?.find((post) => post.draft?.title || post.draft?.message)?.draft?.title || entity.posts?.find((post) => post.draft?.message)?.draft?.message || entity.mediaItems?.[0]?.filename || entity.entityId }}</strong>
+              <strong>{{ entity.posts?.find((post) => post.draft?.title || post.draft?.message)?.draft?.title || entity.mediaItems?.[0]?.filename || entity.entityId }}</strong>
               <el-tag :type="entityTagType(entity.status)" effect="plain">{{ entityStatusLabel(entity.status) }}</el-tag>
             </div>
             <span>{{ entity.scheduledAt || '尚未排程' }}</span>
@@ -55,7 +59,7 @@
       size="min(760px, 95vw)"
     >
       <div v-if="entityDetails" class="entity-drawer-content">
-<div class="entity-summary-row"><el-tag :type="entityTagType(entityDetails.status)" effect="plain">{{ entityStatusLabel(entityDetails.status) }}</el-tag><span>{{ entityDetails.profile?.name || '多個個人檔案' }}</span><span>{{ entityDetails.scheduledAt || '尚未排程' }}</span></div>
+<div class="entity-summary-row"><el-tag :type="entityTagType(entityDetails.status)" effect="plain">{{ entityStatusLabel(entityDetails.status) }}</el-tag><span>{{ entityDetails.profiles?.map((profile) => profile.name).join('、') || entityDetails.profile?.name || '未指定個人檔案' }}</span><span>{{ entityDetails.scheduledAt || '尚未排程' }}</span></div>
         <div class="drawer-media-grid">
           <div v-for="media in entityDetails.mediaItems || []" :key="media.fileRecordId || media.filename">
             <video v-if="media.mediaType === 'video' && media.previewUrl" :src="media.previewUrl" controls preload="metadata" />
@@ -64,7 +68,7 @@
           </div>
         </div>
         <section v-for="post in entityDetails.posts || []" :key="post.id" class="entity-post-detail">
-          <h3>{{ post.platform }} · {{ post.accounts?.map((account) => account.name).filter(Boolean).join(', ') || 'Account unavailable' }}</h3>
+          <h3>{{ post.platform }} · {{ post.accounts?.map((account) => account.name).filter(Boolean).join(', ') || '未設定帳號' }}</h3>
           <el-tag :type="entityTagType(post.status)" effect="plain">{{ entityStatusLabel(post.status) }}</el-tag>
           <template v-if="editingEntityPostId === post.id">
             <el-input v-model="editingEntityCopy" type="textarea" :rows="4" />
@@ -120,9 +124,11 @@ import { getPlatformLabel, getPlatformTagType, PUBLISH_PLATFORM_OPTIONS } from '
 
 const profilesStore = useProfilesStore()
 const profiles = computed(() => profilesStore.profiles)
+const profileAccounts = computed(() => profiles.value.flatMap((profile) => (profilesStore.accountsByProfile[profile.id] || []).map((account) => ({ ...account, profileName: profile.name }))))
 const entityDateRange = ref([])
 const entityPlatformFilters = ref([])
 const entityProfileFilters = ref([])
+const entityAccountFilters = ref([])
 const entityKeyword = ref('')
 const jobsStore = useJobsStore()
 const route = useRoute()
@@ -147,7 +153,8 @@ const entityLoading = ref(false)
 const entityLoadingMore = ref(false)
 const entityPageSize = 50
 const entityStatusOptions = ['scheduled', 'queued', 'publishing', 'published', 'failed', 'cancelled', 'needs_review']
-const todayDate = new Date().toLocaleDateString('en-CA')
+const currentDate = new Date()
+const todayDate = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(currentDate.getDate()).padStart(2, '0')}`
 let entitySearchTimer = null
 const drawerVisible = ref(false)
 const selectedJobId = ref(null)
@@ -168,7 +175,7 @@ function isTerminal(status) {
   return TERMINAL.has(status)
 }
 
-watch([entityDateRange, entityPlatformFilters, entityProfileFilters, entityKeyword], () => {
+watch([entityDateRange, entityPlatformFilters, entityProfileFilters, entityAccountFilters, entityKeyword, entityStatusFilter, allDates], () => {
   if (entitySearchTimer) window.clearTimeout(entitySearchTimer)
   entitySearchTimer = window.setTimeout(() => loadEntities(true), 250)
 })
@@ -191,6 +198,7 @@ async function loadEntities(reset = false) {
       to: entityDateRange.value?.[1],
       platforms: entityPlatformFilters.value.join(','),
       profileIds: entityProfileFilters.value.join(','),
+      accountIds: entityAccountFilters.value.join(','),
       q: entityKeyword.value.trim() || undefined
     })
     entities.value = reset ? response.items || [] : [...entities.value, ...(response.items || [])]
@@ -216,6 +224,7 @@ async function loadMoreEntities() {
       to: entityDateRange.value?.[1],
       platforms: entityPlatformFilters.value.join(','),
       profileIds: entityProfileFilters.value.join(','),
+      accountIds: entityAccountFilters.value.join(','),
       q: entityKeyword.value.trim() || undefined
     })
     entities.value.push(...(response.items || []))
@@ -294,20 +303,20 @@ function entityTagType(status) {
   return 'info'
 }
 
-  function entityStatusLabel(status) {
+function entityStatusLabel(status) {
   return ({ scheduled: '已排程', queued: '佇列中', publishing: '發佈中', published: '已發佈', prepared: '已準備', needs_review: '需要檢查', failed: '失敗', cancelled: '已取消', pending: '待處理', retrying: '重試中', succeeded: '已完成' })[status] || status || '未知'
 }
 
 async function loadJobs() {
   loading.value = true
   try {
-    const result = await jobsStore.refreshList({
+    const response = await jobsStore.refreshList({
       status: statusFilter.value || undefined,
       platform: platformFilter.value || undefined,
       limit: pageSize,
       offset: 0
     })
-    hasMore.value = result.hasMore
+    hasMore.value = response.hasMore
   } catch (error) {
     console.error('載入任務清單失敗:', error)
   } finally {
@@ -435,6 +444,7 @@ function formatTime(iso) {
 
 onMounted(async () => {
   await profilesStore.refreshProfiles()
+  await Promise.all(profiles.value.map((profile) => profilesStore.fetchAccountsForProfile(profile.id)))
   await loadEntities(true)
   if (route.query.entity) {
     await openEntity({ entityId: String(route.query.entity) })
@@ -449,6 +459,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (entitySearchTimer) window.clearTimeout(entitySearchTimer)
   if (refreshTimer) {
     window.clearInterval(refreshTimer)
     refreshTimer = null

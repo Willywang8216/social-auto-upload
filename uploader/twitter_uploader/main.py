@@ -31,7 +31,7 @@ TWITTER_POST_BUTTON_READY_TIMEOUT_MS = 45000
 TWITTER_POST_BUTTON_POLL_SECONDS = 0.25
 TWITTER_POST_BUTTON_TOPMOST_BUDGET_MS = 6000
 TWITTER_POST_CLICK_TIMEOUT_MS = 8000
-TWITTER_ATTACHMENT_READY_TIMEOUT_MS = 120000
+TWITTER_ATTACHMENT_READY_TIMEOUT_MS = 240000
 TWITTER_TEXTBOX_SELECTOR = "[data-testid='tweetTextarea_0']"
 TWITTER_FILE_INPUT_SELECTOR = "input[data-testid='fileInput']"
 TWITTER_ATTACHMENT_SELECTOR = "[data-testid='attachments']"
@@ -674,16 +674,21 @@ class TwitterThreadVideo(BaseVideoUploader):
         previews = page.locator(
             f"{TWITTER_ATTACHMENT_SELECTOR} img, {TWITTER_ATTACHMENT_SELECTOR} video"
         )
+        attachment_inputs = page.locator(TWITTER_FILE_INPUT_SELECTOR)
+        last_input_count = 0
+        last_preview_count = 0
         while asyncio.get_running_loop().time() < deadline:
             try:
-                if await previews.count() >= expected:
+                last_input_count = await attachment_inputs.count()
+                last_preview_count = await previews.count()
+                if last_preview_count >= expected:
                     return
             except Exception:  # noqa: BLE001
                 pass
             await asyncio.sleep(TWITTER_POST_BUTTON_POLL_SECONDS)
         raise TimeoutError(
             f"X did not render all requested media attachments "
-            f"(expected {expected}) before the timeout"
+            f"(expected {expected}, previews {last_preview_count}, file inputs {last_input_count}) before the timeout"
         )
 
     async def _fill_composer(

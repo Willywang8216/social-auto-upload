@@ -343,6 +343,25 @@ class PreparedPublisherTests(unittest.TestCase):
             )
         self.assertIn("media timed out", str(ctx.exception))
 
+    def test_twitter_refresh_failure_is_not_silently_ignored(self):
+        config = {"twitterAuthType": "api", "refreshToken": "refresh", "accessToken": "expired"}
+        with patch("myUtils.prepared_publishers.refresh_twitter_access_token", side_effect=RuntimeError("revoked")):
+            with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "reconnect this account"):
+                prepared_publishers._maybe_refresh_twitter_token(config)
+
+    def test_twitter_refresh_failure_marks_account_reconnect_before_raising(self):
+        config = {"twitterAuthType": "api", "refreshToken": "refresh", "accessToken": "expired"}
+        persisted = []
+        with patch("myUtils.prepared_publishers.refresh_twitter_access_token", side_effect=RuntimeError("revoked")):
+            with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "reconnect this account"):
+                prepared_publishers._maybe_refresh_twitter_token(config, on_refresh=persisted.append)
+        self.assertTrue(persisted[0]["_needsReconnect"])
+        self.assertEqual(persisted[0]["_lastMaintenanceError"], "X OAuth 2.0 refresh failed; reconnect required")
+
+    def test_twitter_media_upload_uses_oauth1_even_with_oauth2_token(self):
+        config = {"accessToken": "oauth2", "oauth1ApiKey": "key", "oauth1ApiKeySecret": "secret", "oauth1AccessToken": "user", "oauth1AccessTokenSecret": "user-secret"}
+        self.assertEqual(prepared_publishers._twitter_oauth1_credentials(config), ("key", "secret", "user", "user-secret"))
+
     def test_twitter_api_uploads_media_and_attaches_media_id(self):
         session = _RecordingSession([
             _FakeResponse({"media_id_string": "mid-1"}),

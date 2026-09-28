@@ -181,7 +181,39 @@ class InboxItem:
     thumb_kind: str | None = None
 
 
+def _safe_local_preview(value: str) -> tuple[str | None, str]:
+    if not value:
+        return None, "縮圖檔案不存在"
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = INBOX_DIR / candidate
+    try:
+        resolved = candidate.resolve()
+        inbox_root = INBOX_DIR.resolve()
+        video_root = (BASE_DIR / "videoFile").resolve()
+        if not resolved.is_file():
+            return None, "縮圖檔案不存在"
+        if resolved.is_relative_to(inbox_root):
+            return None, "縮圖位於私人收件匣，尚未安全暫存"
+        if resolved.is_relative_to(video_root):
+            rel = resolved.relative_to(video_root)
+            return f"/getFile?filename={rel.as_posix()}", ""
+    except (OSError, ValueError):
+        pass
+    return None, "縮圖路徑不在允許的媒體目錄"
+
+
 def item_payload(entry: dict) -> dict:
+    raw_thumb = str(entry.get("thumbPath") or "")
+    preview_url = None
+    if raw_thumb.startswith("https://"):
+        preview_url = raw_thumb
+        preview_reason = ""
+    elif raw_thumb.startswith("http://"):
+        preview_reason = "僅允許安全的 HTTPS 縮圖連結"
+    else:
+        preview_url, preview_reason = _safe_local_preview(raw_thumb)
+    preview = {"kind": entry.get("kind") or "file", "url": preview_url, "available": bool(preview_url), "reason": preview_reason or None}
     return {
         "id": entry.get("id"),
         "persona": entry.get("persona"),
@@ -191,14 +223,9 @@ def item_payload(entry: dict) -> dict:
         "kind": entry.get("kind"),
         "sourcePath": entry.get("sourcePath"),
         "remotePath": entry.get("remotePath"),
-        "thumbPath": entry.get("thumbPath"),
+        "preview": preview,
+        "thumbPath": preview_url,
         "thumbKind": entry.get("thumbKind"),
-        "preview": {
-            "kind": entry.get("kind") or "file",
-            "url": entry.get("thumbPath") if entry.get("thumbPath", "").startswith("https://") else None,
-            "available": bool(entry.get("thumbPath")),
-            "reason": None if entry.get("thumbPath") else "素材尚未暫存或來源不存在",
-        },
         "brief": entry.get("brief") or "",
         "contentNote": entry.get("contentNote"),
         "status": entry.get("status"),

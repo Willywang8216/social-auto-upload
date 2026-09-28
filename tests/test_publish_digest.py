@@ -283,7 +283,7 @@ class DigestTestCase(unittest.TestCase):
         stdout = io.StringIO()
         with patch.object(publish_digest.ops_alerts, "send_ops_alert") as alert:
             with no_app_url(), contextlib.redirect_stdout(stdout):
-                code = publish_digest.main(["--dry-run", "--db-path", str(self.db)])
+                code = publish_digest.main(["--dry-run", "--db-path", str(self.db), "--date", "2026-09-28"])
 
         self.assertEqual(code, 0)
         alert.assert_not_called()

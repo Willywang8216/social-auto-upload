@@ -79,10 +79,13 @@ class _FakePreviewCollection:
 
 
 class _FakeAttachmentPage:
-    def __init__(self, count: int) -> None:
+    def __init__(self, count: int, input_count: int = 1) -> None:
         self._count = count
+        self._input_count = input_count
 
-    def locator(self, _selector: str) -> _FakePreviewCollection:
+    def locator(self, selector: str):
+        if "fileInput" in selector:
+            return _FakePreviewCollection(self._input_count)
         return _FakePreviewCollection(self._count)
 
 
@@ -91,7 +94,7 @@ class TwitterUploaderPlanningTests(unittest.TestCase):
         uploader = TwitterThreadVideo.__new__(TwitterThreadVideo)
         asyncio.run(uploader._wait_for_attachments(_FakeAttachmentPage(1), expected=1))
         with patch("uploader.twitter_uploader.main.TWITTER_ATTACHMENT_READY_TIMEOUT_MS", 1):
-            with self.assertRaises(TimeoutError):
+            with self.assertRaisesRegex(TimeoutError, "expected 1"):
                 asyncio.run(uploader._wait_for_attachments(_FakeAttachmentPage(0), expected=1))
 
     def setUp(self) -> None:

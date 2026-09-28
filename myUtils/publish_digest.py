@@ -550,16 +550,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--db-path", default=None, help="SQLite DB (default: SAU_DB_PATH or the app DB)")
     parser.add_argument("--app-url", default=None, help="Public app origin override (default: SAU_PUBLIC_APP_URL)")
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Build and print the digest without sending or reserving the day",
-    )
+    parser.add_argument("--dry-run", action="store_true", help="Build and print without sending")
+    parser.add_argument("--date", default=None, help="Local digest date YYYY-MM-DD (dry-run preview)")
     args = parser.parse_args(argv)
 
     if args.dry_run:
+        preview_date = date.fromisoformat(args.date) if args.date else _to_local_date(None)
         digest = build_daily_digest(
-            _to_local_date(None), db_path=args.db_path, app_url=args.app_url
+            preview_date, db_path=args.db_path, app_url=args.app_url
         )
         print(f"Subject: {digest['subject']}")
         print()

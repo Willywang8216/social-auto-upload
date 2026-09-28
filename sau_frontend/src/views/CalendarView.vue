@@ -4,11 +4,11 @@
     <div class="cal-head">
       <div class="cal-title">{{ MONTHS[view.m] }} {{ view.y }}</div>
       <div class="cal-nav">
-        <button class="cal-nav-btn" @click="move(-1)" title="Previous">
+        <button class="cal-nav-btn" @click="move(-1)" title="上個月">
           <component :is="icons.collapse" :width="15" :height="15" />
         </button>
-        <button class="cal-nav-btn cal-today" @click="setToday">Today</button>
-        <button class="cal-nav-btn" @click="move(1)" title="Next">
+        <button class="cal-nav-btn cal-today" @click="setToday">今天</button>
+        <button class="cal-nav-btn" @click="move(1)" title="下個月">
           <component :is="icons.expand" :width="15" :height="15" />
         </button>
       </div>
@@ -16,18 +16,20 @@
       <el-switch
         v-model="showAll"
         style="--el-switch-on-color: var(--color-primary);"
-        active-text="含失敗"
-        inactive-text="僅待發"
+        active-text="包含失敗"
+        inactive-text="僅顯示待發佈"
         title="顯示已失敗的排程"
       />
       <router-link to="/publish/compose" class="btn-primary">
-        <component :is="icons.plus" :width="16" :height="16" /> Schedule post
+        <component :is="icons.plus" :width="16" :height="16" /> 排程貼文
       </router-link>
     </div>
 
     <!-- Calendar grid -->
     <div class="cal-grid-scroll">
-      <div class="cal-grid">
+      <div v-if="loading" class="cal-loading">正在載入排程…</div>
+      <el-empty v-else-if="events.length === 0" description="本月沒有排程" />
+      <div v-else class="cal-grid">
         <div v-for="dow in DOW" :key="dow" class="cal-dow">{{ dow }}</div>
         <div
           v-for="(cell, i) in cells"
@@ -51,10 +53,10 @@
             <span class="cd"></span>
             <span class="ct">{{ ev.time }}</span>
             <span class="cl">{{ ev.title }}</span>
-            <span class="cp">{{ ev.destinationCount }} targets</span>
+            <span class="cp">{{ ev.destinationCount }} 個目的地</span>
           </div>
           <button v-if="cell.hiddenCount" class="cal-more" @click="showDay(cell)">
-            +{{ cell.hiddenCount }} more
+            還有 {{ cell.hiddenCount }} 項
           </button>
         </div>
       </div>
@@ -70,9 +72,12 @@
       </div>
     </el-dialog>
 
-    <el-dialog v-model="dialogVisible" :title="selectedEntity?.posts?.find((post) => post.draft?.title || post.draft?.message)?.draft?.title || selectedEntity?.posts?.find((post) => post.draft?.message)?.draft?.message || selectedEntity?.mediaItems?.[0]?.filename || 'Publish details'" width="min(860px, 94vw)" top="5vh">
-      <div v-if="detailLoading" class="entity-loading">Loading publish details…</div>
-      <template v-else-if="selectedEntity">
+    <el-dialog v-model="dialogVisible" :title="selectedEntity?.posts?.find((post) => post.draft?.title || post.draft?.message)?.draft?.title || selectedEntity?.posts?.find((post) => post.draft?.message)?.draft?.message || selectedEntity?.mediaItems?.[0]?.filename || '排程內容詳情'" width="min(860px, 94vw)" top="5vh">
+          <div v-if="detailLoading" class="entity-loading">正在載入內容詳情…</div>
+          <template v-else-if="selectedEntity">
+            <div class="detail-toolbar">
+              <el-button @click="copyListUrl">複製此內容連結</el-button>
+            </div>
         <div v-if="selectedEntity" class="entity-summary">
           <section class="detail-section detail-overview">
             <h3>媒體組與整體狀態</h3>
@@ -86,15 +91,15 @@
             <h3>媒體組</h3>
           <article v-for="media in selectedEntity.mediaItems" :key="media.fileRecordId || media.filename" class="entity-media-item">
             <video v-if="media.mediaType === 'video' && media.previewUrl" :src="media.previewUrl" controls preload="metadata" />
-            <img v-else-if="media.mediaType === 'image' && media.previewUrl" :src="media.previewUrl" :alt="media.filename" />
-              <div v-else class="media-missing">預覽不可用</div>
+            <img v-else-if="media.mediaType === 'image' && media.previewUrl" :src="media.previewUrl" :alt="media.filename" loading="lazy" />
+            <div v-else class="media-missing">預覽不可用</div>
             <div class="media-name">{{ media.filename }}</div>
-            <a v-if="media.publicUrl" :href="media.publicUrl" target="_blank" rel="noopener">Open media link</a>
+            <a v-if="media.publicUrl" :href="media.publicUrl" target="_blank" rel="noopener">開啟媒體</a>
           </article>
         </div>
           <section v-for="post in selectedEntity.posts || []" :key="post.id" class="entity-post detail-section">
             <header><h3>{{ post.platform }} · {{ post.accounts?.map((account) => account.name).filter(Boolean).join(', ') || '帳號未設定' }}</h3><el-tag :type="statusTagType(post.status)" effect="plain">{{ statusLabel(post.status) }}</el-tag></header>
-            <div class="post-copy"><span class="copy-label">目的地文案</span>{{ post.draft?.message || '尚未填寫文案' }}</div>
+          <div class="post-copy"><span class="copy-label">目的地文案</span>{{ post.draft?.message || '尚未填寫文案' }}</div>
           <div v-if="editingPostId === post.id" class="copy-editor">
             <el-input v-model="editedCopy" type="textarea" :rows="4" />
             <el-button type="primary" @click="saveCopy(post)">儲存文案</el-button>
@@ -106,7 +111,7 @@
               <el-tag :type="statusTagType(target.status)" effect="plain">{{ statusLabel(target.status) }}</el-tag>
               <span>{{ target.accountName }}</span><span>{{ target.scheduleAt || '立即發佈' }}</span>
               <span v-if="target.lastError" class="ev-error">{{ target.lastError }}</span>
-              <el-date-picker v-if="target.status === 'pending' || target.status === 'retrying'" v-model="target._editSchedule" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DDTHH:mm:00" placeholder="Reschedule" />
+              <el-date-picker v-if="target.status === 'pending' || target.status === 'retrying'" v-model="target._editSchedule" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DDTHH:mm:00" placeholder="選擇新時間" />
               <el-button v-if="target._editSchedule && (target.status === 'pending' || target.status === 'retrying')" size="small" @click="rescheduleEntityTarget(target)">Save time</el-button>
               <el-button v-if="target.status === 'pending' || target.status === 'retrying'" size="small" type="danger" @click="cancelEntityTarget(target)">Cancel</el-button>
               <el-button v-if="target.status === 'failed'" size="small" type="warning" @click="resubmitEntityTarget(target)">Retry</el-button>
@@ -241,6 +246,16 @@ function showDay(cell) {
   selectedDayEvents.value = cell.evs
   selectedDayLabel.value = `${MONTHS[view.value.m]} ${cell.d}`
   dayDialogVisible.value = true
+}
+
+async function copyListUrl() {
+  if (!selectedEntity.value) return
+  try {
+    await navigator.clipboard.writeText(`${window.location.origin}/#/publish/calendar?entity=${encodeURIComponent(selectedEntity.value.entityId)}`)
+    ElMessage.success('已複製內容連結')
+  } catch {
+    ElMessage.error('無法複製連結，請從網址列複製')
+  }
 }
 
 async function openEvent(ev) {
@@ -556,6 +571,35 @@ function statusTagType(s) {
   color: var(--text-2);
   flex-shrink: 0;
 }
+
+ .entity-summary {
+  display: grid;
+  gap: 14px;
+  max-height: 68vh;
+  overflow-y: auto;
+  padding: 2px 4px 16px;
+}
+
+.detail-section {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.detail-section h3 { margin: 0 0 12px; font-size: 15px; }
+.entity-media { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.entity-media-item { display: grid; align-content: start; gap: 8px; min-width: 0; font-size: 12px; }
+.entity-media-item img, .entity-media-item video { width: 100%; max-height: 180px; object-fit: cover; border-radius: 6px; background: var(--raised); }
+.media-name { overflow-wrap: anywhere; }
+.copy-label { display: block; margin-bottom: 6px; color: var(--text-3); font-size: 12px; }
+.entity-post header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
+.post-copy { padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--raised); border-radius: 6px; }
+.entity-targets { display: grid; gap: 8px; margin-top: 12px; }
+.entity-target { display: grid; grid-template-columns: auto minmax(90px,1fr) minmax(120px,auto) minmax(100px,1fr) auto auto; gap: 8px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+.entity-target .ev-error { grid-column: 1 / -1; }
+.entity-artifacts { display: flex; flex-wrap: wrap; gap: 12px; }
+@media (max-width: 680px) { .entity-target { grid-template-columns: 1fr; } }
 
 .ev-meta {
   display: flex;

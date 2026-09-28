@@ -7674,6 +7674,7 @@ def _build_media_group_entity(
             post_payload = {
                 "id": post.id,
                 "campaignId": campaign.id,
+                "profileId": campaign.profile_id,
                 "platform": post.platform,
                 "accountIds": account_ids,
                 "accounts": [
@@ -7744,6 +7745,26 @@ def _build_media_group_entity(
         "profile": _entity_profile_payload(
             profile_id, db_path=db_path, workspace_id=workspace_id
         ),
+        "profiles": [
+            profile_payload
+            for selected_profile_id in sorted({campaign.profile_id for campaign in campaigns})
+            if (profile_payload := _entity_profile_payload(selected_profile_id, db_path=db_path, workspace_id=workspace_id))
+        ],
+        "platforms": sorted({post.get("platform") for post in posts if post.get("platform")}),
+        "destinations": [
+            {
+                "postId": post["id"],
+                "profileId": post["profileId"],
+                "platform": post["platform"],
+                "accounts": post["accounts"],
+                "copy": post["draft"],
+                "scheduleAt": post["scheduledAt"],
+                "status": post["status"],
+                "jobId": post["jobId"],
+                "targets": [target for job_entry in jobs_payload for target in job_entry["targets"] if target.get("fileRef") == f"campaign_post:{post['id']}"],
+            }
+            for post in posts
+        ],
         "campaignIds": [campaign.id for campaign in campaigns],
         "campaigns": campaigns_payload,
         "profiles": [
@@ -8015,16 +8036,21 @@ def _valid_date(value: str | None) -> bool:
         return False
 
 
-def _entity_matches(entity: dict, *, date_value=None, from_date=None, to_date=None, platforms=None, profile_ids=None, keyword="") -> bool:
-    schedules = [target.get("scheduleAt") for job in entity.get("jobs", []) for target in job.get("targets", []) if target.get("scheduleAt")]
+def _entity_matches(entity: dict, *, date_value=None, from_date=None, to_date=None, platforms=None, profile_ids=None, account_ids=None, keyword="") -> bool:
+    targets = [target for job in entity.get("jobs", []) for target in job.get("targets", [])]
+    schedules = [target.get("scheduleAt") for target in targets if target.get("scheduleAt")]
     if date_value and not any(str(value).startswith(date_value) for value in schedules): return False
     if from_date and not any(str(value)[:10] >= from_date for value in schedules): return False
     if to_date and not any(str(value)[:10] <= to_date for value in schedules): return False
     if platforms and not any(post.get("platform") in platforms for post in entity.get("posts", [])): return False
     if profile_ids and not any(int(c.get("profileId")) in profile_ids for c in entity.get("campaigns", []) if c.get("profileId") is not None): return False
+    if account_ids and not any(target.get("accountId") in account_ids for target in targets): return False
     if keyword:
-        haystack = json.dumps(entity, ensure_ascii=False).lower()
-        if keyword.lower() not in haystack: return False
+        pieces = [entity.get("entityId", ""), *(media.get("filename", "") for media in entity.get("mediaItems", []))]
+        for post in entity.get("posts", []):
+            pieces.extend((post.get("platform", ""), json.dumps(post.get("draft") or {}, ensure_ascii=False)))
+            pieces.extend(account.get("name", "") for account in post.get("accounts", []))
+        if keyword.casefold() not in " ".join(pieces).casefold(): return False
     return True
 
 
@@ -8048,6 +8074,7 @@ def publish_entities_list():
         return jsonify({"code": 400, "msg": "日期格式或範圍無效", "data": None}), 400
     platforms = {value.strip() for value in (request.args.get("platforms") or "").split(",") if value.strip()}
     profile_ids = {int(value) for value in (request.args.get("profileIds") or "").split(",") if value.strip().isdigit()}
+    account_ids = {int(value) for value in (request.args.get("accountIds") or "").split(",") if value.strip().isdigit()}
     keyword = (request.args.get("q") or "").strip()
     raw_status = (request.args.get("status") or "").strip()
     statuses = {value.strip() for value in raw_status.split(",") if value.strip()}
@@ -8075,7 +8102,7 @@ def publish_entities_list():
         entities = [e for e in entities if month in _month_keys(e.get("_timestamps", []))]
     if statuses:
         entities = [e for e in entities if e.get("status") in statuses]
-    entities = [entity for entity in entities if _entity_matches(entity, date_value=date_value, from_date=from_date, to_date=to_date, platforms=platforms, profile_ids=profile_ids, keyword=keyword)]
+    entities = [entity for entity in entities if _entity_matches(entity, date_value=date_value, from_date=from_date, to_date=to_date, platforms=platforms, profile_ids=profile_ids, account_ids=account_ids, keyword=keyword)]
 
     entities.sort(key=lambda e: (e.get("_sortAt") or "", e.get("entityId") or ""), reverse=True)
     total = len(entities)

@@ -2212,7 +2212,7 @@ def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access
     )
     _raise_for_status(finalize_resp)
     processing = finalize_resp.json().get("processing_info") or {}
-    deadline = time.monotonic() + 180
+    deadline = time.monotonic() + 600
     while processing:
         state = str(processing.get("state") or "").lower()
         if state == "succeeded":
@@ -2224,7 +2224,7 @@ def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access
             )
         delay = max(float(processing.get("check_after_secs") or 2), 1)
         if time.monotonic() + delay >= deadline:
-            raise PreparedPublishError("X media processing did not finish within 180 seconds")
+            raise PreparedPublishError("X media processing did not finish within 600 seconds")
         time.sleep(delay)
         status_params = {"command": "STATUS", "media_id": media_id}
         status_header = _x_auth_header(
@@ -2261,8 +2261,16 @@ def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None, on_ref
             pass  # unparseable → try refresh
     try:
         result = refresh_twitter_access_token(config, session=session)
-    except Exception:
-        return config  # best-effort: fall through with old token
+    except Exception as exc:
+        if on_refresh is not None:
+            failed_config = dict(config)
+            failed_config["_needsReconnect"] = True
+            failed_config["_lastMaintenanceError"] = "X OAuth 2.0 refresh failed; reconnect required"
+            failed_config["_lastMaintenanceAttemptAt"] = __import__("datetime").datetime.now().isoformat(timespec="seconds")
+            on_refresh(failed_config)
+        raise PreparedPublishError(
+            "X OAuth 2.0 access token could not be refreshed; reconnect this account before retrying"
+        ) from exc
     updated = dict(config)
     updated["accessToken"] = result["access_token"]
     updated["refreshToken"] = result.get("refresh_token") or refresh_token
