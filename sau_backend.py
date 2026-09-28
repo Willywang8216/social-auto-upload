@@ -7900,69 +7900,62 @@ def _collect_publish_entities(
     workspace_id: str | None,
     profile_id: int | None = None,
 ) -> list[dict]:
-    """Group campaigns and jobs into content entities.
+    """Build recent content entities from the newest queue window.
 
-    Campaigns anchor media-group entities; jobs are attached to their campaign's
-    media group when the payload names one, otherwise they become a standalone
-    job entity. A profile filter narrows entities without breaking the
-    job-to-campaign mapping (all scoped campaigns are loaded to resolve it).
+    Grouping a whole historical queue made the request cost grow with all posts
+    ever submitted. The calendar and queue need current operational work, so we
+    cap the loaded job/campaign set before hydrating details.
     """
-    all_campaigns = campaign_store.list_campaigns(workspace_id=workspace_id, db_path=db_path)
-    campaigns_by_id = {campaign.id: campaign for campaign in all_campaigns}
+    all_jobs = _load_publish_entity_jobs(db_path=db_path, workspace_id=workspace_id)
+    campaign_ids_from_jobs = set()
+    for job in all_jobs:
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        raw_campaign_id = payload.get("campaignId")
+        try:
+            if raw_campaign_id is not None:
+                campaign_ids_from_jobs.add(int(raw_campaign_id))
+        except (TypeError, ValueError):
+            pass
 
-    entity_campaigns = [
-        campaign
-        for campaign in all_campaigns
-        if profile_id is None or campaign.profile_id == profile_id
-    ]
-    campaigns_by_group: dict[int, list] = {}
-    campaign_ids_in_scope: set[int] = set()
-    for campaign in entity_campaigns:
-        campaigns_by_group.setdefault(campaign.media_group_id, []).append(campaign)
-        campaign_ids_in_scope.add(campaign.id)
+    campaigns_by_id = {}
+    for campaign_id in campaign_ids_from_jobs:
+        try:
+            campaign = campaign_store.get_campaign(campaign_id, workspace_id=workspace_id, db_path=db_path)
+        except (LookupError, ValueError, TypeError):
+            continue
+        if profile_id is None or campaign.profile_id == profile_id:
+            campaigns_by_id[campaign.id] = campaign
 
     jobs_by_group: dict[int, list] = {}
     legacy_jobs: list = []
-    for job in _load_publish_entity_jobs(db_path=db_path, workspace_id=workspace_id):
+    for job in all_jobs:
         payload = job.payload if isinstance(job.payload, dict) else {}
-        campaign_id = payload.get("campaignId")
+        raw_campaign_id = payload.get("campaignId")
         try:
-            parsed_campaign_id = int(campaign_id) if campaign_id is not None else None
+            campaign_id = int(raw_campaign_id) if raw_campaign_id is not None else None
         except (TypeError, ValueError):
-            parsed_campaign_id = None
-
-        campaign = (
-            campaigns_by_id.get(parsed_campaign_id)
-            if parsed_campaign_id is not None
-            else None
-        )
+            campaign_id = None
+        campaign = campaigns_by_id.get(campaign_id) if campaign_id is not None else None
         if campaign is not None:
-            if campaign.id in campaign_ids_in_scope:
-                jobs_by_group.setdefault(campaign.media_group_id, []).append(job)
-            # A job for a profile excluded by the filter is dropped with it.
-        elif parsed_campaign_id is None:
-            if profile_id is None or job.profile_id == profile_id:
-                legacy_jobs.append(job)
-        elif profile_id is None or job.profile_id == profile_id:
-            # Campaign row is gone but the job still exists: keep it readable
-            # as a standalone job entity rather than hiding the publish.
+            jobs_by_group.setdefault(campaign.media_group_id, []).append(job)
+        elif campaign_id is None and (profile_id is None or job.profile_id == profile_id):
             legacy_jobs.append(job)
+
+    campaigns_by_group: dict[int, list] = {}
+    for campaign in campaigns_by_id.values():
+        campaigns_by_group.setdefault(campaign.media_group_id, []).append(campaign)
 
     entities: list[dict] = []
     for media_group_id, group_campaigns in campaigns_by_group.items():
-        entities.append(
-            _build_media_group_entity(
-                media_group_id,
-                group_campaigns,
-                jobs_by_group.get(media_group_id, []),
-                db_path=db_path,
-                workspace_id=workspace_id,
-            )
-        )
+        entities.append(_build_media_group_entity(
+            media_group_id,
+            group_campaigns,
+            jobs_by_group.get(media_group_id, []),
+            db_path=db_path,
+            workspace_id=workspace_id,
+        ))
     for job in legacy_jobs:
-        entities.append(
-            _build_legacy_entity(job, db_path=db_path, workspace_id=workspace_id)
-        )
+        entities.append(_build_legacy_entity(job, db_path=db_path, workspace_id=workspace_id))
     return entities
 
 
