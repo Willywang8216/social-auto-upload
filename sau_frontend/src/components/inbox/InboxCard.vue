@@ -2,15 +2,13 @@
   <el-card class="inbox-card" shadow="never" :class="`kind-${item.kind || 'unknown'}`">
     <div class="card-head">
       <div class="thumb-wrap">
-        <img
-          v-if="thumbSrc"
-          :src="thumbSrc"
-          class="thumb"
-          loading="lazy"
-          alt=""
-        />
+        <template v-if="thumbSrc && !previewFailed">
+          <video v-if="kindIsVideo" :src="thumbSrc" class="thumb" controls preload="metadata" />
+          <img v-else :src="thumbSrc" class="thumb" loading="lazy" alt="" @error="previewFailed = true" />
+        </template>
         <div v-else class="thumb thumb-placeholder">
           <el-icon :size="22"><VideoCamera v-if="kindIsVideo" /><Picture v-else /></el-icon>
+          <span>{{ previewReason }}</span>
         </div>
       </div>
       <div class="head-tags">
@@ -84,6 +82,8 @@ const BRIEF_TRUNCATE = 160
 const PERSONA_MAP = { nw: 'NW', sw: 'SW', teaching: 'Teaching', msl: 'MSL' }
 
 const briefExpanded = ref(false)
+const previewFailed = ref(false)
+const previewReason = computed(() => props.item.preview?.reason || '預覽不可用')
 
 const personaLabel = computed(() => PERSONA_MAP[props.item.persona] || props.item.persona || '—')
 const kindIsVideo = computed(() => props.item.kind === 'video')

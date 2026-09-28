@@ -97,10 +97,10 @@
             <div class="post-copy"><span class="copy-label">目的地文案</span>{{ post.draft?.message || '尚未填寫文案' }}</div>
           <div v-if="editingPostId === post.id" class="copy-editor">
             <el-input v-model="editedCopy" type="textarea" :rows="4" />
-            <el-button type="primary" @click="saveCopy(post)">Save copy</el-button>
-            <el-button @click="editingPostId = null">Discard</el-button>
+            <el-button type="primary" @click="saveCopy(post)">儲存文案</el-button>
+            <el-button @click="editingPostId = null">取消</el-button>
           </div>
-          <el-button v-else-if="post.status === 'queued' || post.status === 'ready'" size="small" @click="editingPostId = post.id; editedCopy = post.draft?.message || ''">Edit copy</el-button>
+          <el-button v-else-if="post.status === 'queued' || post.status === 'ready'" size="small" @click="editingPostId = post.id; editedCopy = post.draft?.message || ''">編輯文案</el-button>
           <div v-for="job in (selectedEntity.jobs || []).filter((item) => item.targets?.some((target) => target.fileRef === `campaign_post:${post.id}`))" :key="job.id" class="entity-targets">
             <div v-for="target in job.targets.filter((item) => item.fileRef === `campaign_post:${post.id}`)" :key="target.id" class="entity-target">
               <el-tag :type="statusTagType(target.status)" effect="plain">{{ statusLabel(target.status) }}</el-tag>

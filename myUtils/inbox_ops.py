@@ -193,6 +193,12 @@ def item_payload(entry: dict) -> dict:
         "remotePath": entry.get("remotePath"),
         "thumbPath": entry.get("thumbPath"),
         "thumbKind": entry.get("thumbKind"),
+        "preview": {
+            "kind": entry.get("kind") or "file",
+            "url": entry.get("thumbPath") if entry.get("thumbPath", "").startswith("https://") else None,
+            "available": bool(entry.get("thumbPath")),
+            "reason": None if entry.get("thumbPath") else "素材尚未暫存或來源不存在",
+        },
         "brief": entry.get("brief") or "",
         "contentNote": entry.get("contentNote"),
         "status": entry.get("status"),
