@@ -7746,6 +7746,12 @@ def _build_media_group_entity(
         ),
         "campaignIds": [campaign.id for campaign in campaigns],
         "campaigns": campaigns_payload,
+        "profiles": [
+            profile_payload
+            for profile_id in sorted({campaign.profile_id for campaign in campaigns})
+            if (profile_payload := _entity_profile_payload(profile_id, db_path=db_path, workspace_id=workspace_id))
+        ],
+        "destinations": [],
         "status": _rollup_entity_status(
             record_statuses, job_statuses, all_targets, has_schedule=has_schedule
         ),
@@ -7999,6 +8005,29 @@ def _valid_month(value: str | None) -> bool:
     )
 
 
+def _valid_date(value: str | None) -> bool:
+    if not value:
+        return True
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+
+def _entity_matches(entity: dict, *, date_value=None, from_date=None, to_date=None, platforms=None, profile_ids=None, keyword="") -> bool:
+    schedules = [target.get("scheduleAt") for job in entity.get("jobs", []) for target in job.get("targets", []) if target.get("scheduleAt")]
+    if date_value and not any(str(value).startswith(date_value) for value in schedules): return False
+    if from_date and not any(str(value)[:10] >= from_date for value in schedules): return False
+    if to_date and not any(str(value)[:10] <= to_date for value in schedules): return False
+    if platforms and not any(post.get("platform") in platforms for post in entity.get("posts", [])): return False
+    if profile_ids and not any(int(c.get("profileId")) in profile_ids for c in entity.get("campaigns", []) if c.get("profileId") is not None): return False
+    if keyword:
+        haystack = json.dumps(entity, ensure_ascii=False).lower()
+        if keyword.lower() not in haystack: return False
+    return True
+
+
 @app.route("/publish-entities", methods=["GET"])
 def publish_entities_list():
     """List content entities (media-group or job) for the Publish Center.
@@ -8011,8 +8040,15 @@ def publish_entities_list():
 
     month = (request.args.get("month") or "").strip() or None
     if month is not None and not _valid_month(month):
-        return jsonify({"code": 400, "msg": "month must be YYYY-MM", "data": None}), 400
-
+        return jsonify({"code": 400, "msg": "月份格式無效", "data": None}), 400
+    date_value = (request.args.get("date") or "").strip() or None
+    from_date = (request.args.get("from") or "").strip() or None
+    to_date = (request.args.get("to") or "").strip() or None
+    if any(not _valid_date(value) for value in (date_value, from_date, to_date)) or (from_date and to_date and from_date > to_date):
+        return jsonify({"code": 400, "msg": "日期格式或範圍無效", "data": None}), 400
+    platforms = {value.strip() for value in (request.args.get("platforms") or "").split(",") if value.strip()}
+    profile_ids = {int(value) for value in (request.args.get("profileIds") or "").split(",") if value.strip().isdigit()}
+    keyword = (request.args.get("q") or "").strip()
     raw_status = (request.args.get("status") or "").strip()
     statuses = {value.strip() for value in raw_status.split(",") if value.strip()}
 
@@ -8039,6 +8075,7 @@ def publish_entities_list():
         entities = [e for e in entities if month in _month_keys(e.get("_timestamps", []))]
     if statuses:
         entities = [e for e in entities if e.get("status") in statuses]
+    entities = [entity for entity in entities if _entity_matches(entity, date_value=date_value, from_date=from_date, to_date=to_date, platforms=platforms, profile_ids=profile_ids, keyword=keyword)]
 
     entities.sort(key=lambda e: (e.get("_sortAt") or "", e.get("entityId") or ""), reverse=True)
     total = len(entities)

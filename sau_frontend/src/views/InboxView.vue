@@ -2,7 +2,10 @@
   <div class="inbox-view">
     <SystemHealthCard />
     <div class="page-header">
-      <h1>傳入佇列</h1>
+      <div>
+        <h1>收件匣</h1>
+        <p class="inbox-description">這裡是內容審核區，不是今日排程清單。確認素材後，請前往發佈中心安排排程。</p>
+      </div>
       <div class="page-actions">
         <el-button type="primary" @click="load" :loading="loading">
           <el-icon><Refresh /></el-icon>
@@ -14,9 +17,9 @@
     <el-tabs v-model="activeTab" class="inbox-tabs">
       <el-tab-pane name="ready">
         <template #label>
-          <span class="tab-label">待發佈 <span class="tab-count">{{ ready.length }}</span></span>
+          <span class="tab-label">待審核 <span class="tab-count">{{ ready.length }}</span></span>
         </template>
-        <el-empty v-if="!loading && ready.length === 0" description="目前沒有待發佈的項目" />
+        <el-empty v-if="!loading && ready.length === 0" description="目前沒有待審核項目" />
         <div v-else class="inbox-grid">
           <InboxCard
             v-for="item in ready"
@@ -33,7 +36,7 @@
         <template #label>
           <span class="tab-label">待確認 <span class="tab-count">{{ pending.length }}</span></span>
         </template>
-        <el-empty v-if="!loading && pending.length === 0" description="目前沒有待確認的項目" />
+        <el-empty v-if="!loading && pending.length === 0" description="目前沒有待確認項目" />
         <div v-else class="inbox-grid">
           <InboxCard v-for="item in pending" :key="item.id" :item="item" mode="readonly" />
         </div>
@@ -155,6 +158,11 @@ onMounted(load)
     }
   }
 
+  .inbox-description {
+    margin: 4px 0 0;
+    color: var(--text-2);
+    font-size: 13px;
+  }
   .inbox-tabs {
     :deep(.el-tabs__header) {
       margin-bottom: var(--space-6);

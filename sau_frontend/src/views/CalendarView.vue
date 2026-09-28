@@ -73,28 +73,28 @@
     <el-dialog v-model="dialogVisible" :title="selectedEntity?.posts?.find((post) => post.draft?.title || post.draft?.message)?.draft?.title || selectedEntity?.posts?.find((post) => post.draft?.message)?.draft?.message || selectedEntity?.mediaItems?.[0]?.filename || 'Publish details'" width="min(860px, 94vw)" top="5vh">
       <div v-if="detailLoading" class="entity-loading">Loading publish details…</div>
       <template v-else-if="selectedEntity">
-        <div class="entity-summary">
-          <el-tag :type="statusTagType(selectedEntity.status)" effect="plain">{{ statusLabel(selectedEntity.status) }}</el-tag>
-          <span>{{ selectedEntity.profile?.name || 'Multiple profiles' }}</span>
-          <span>{{ selectedEntity.scheduledAt ? `Next: ${selectedEntity.scheduledAt}` : 'No schedule' }}</span>
-          <span>{{ selectedEntity.jobs?.length || 0 }} destinations</span>
-        </div>
-        <div v-if="selectedEntity.mediaItems?.length" class="entity-media">
+        <div v-if="selectedEntity" class="entity-summary">
+          <section class="detail-section detail-overview">
+            <h3>媒體組與整體狀態</h3>
+            <div class="entity-summary-row">
+              <el-tag :type="statusTagType(selectedEntity.status)" effect="plain">{{ statusLabel(selectedEntity.status) }}</el-tag>
+              <span>{{ selectedEntity.profile?.name || '多個個人檔案' }}</span>
+              <span>{{ selectedEntity.scheduledAt || '尚未排程' }}</span>
+            </div>
+          </section>
+          <div class="entity-media detail-section">
+            <h3>媒體組</h3>
           <article v-for="media in selectedEntity.mediaItems" :key="media.fileRecordId || media.filename" class="entity-media-item">
             <video v-if="media.mediaType === 'video' && media.previewUrl" :src="media.previewUrl" controls preload="metadata" />
             <img v-else-if="media.mediaType === 'image' && media.previewUrl" :src="media.previewUrl" :alt="media.filename" />
-            <div v-else class="media-missing">Preview unavailable</div>
+              <div v-else class="media-missing">預覽不可用</div>
             <div class="media-name">{{ media.filename }}</div>
             <a v-if="media.publicUrl" :href="media.publicUrl" target="_blank" rel="noopener">Open media link</a>
           </article>
         </div>
-        <section v-for="post in selectedEntity.posts || []" :key="post.id" class="entity-post">
-          <header>
-            <strong>{{ post.platform }}</strong>
-            <span>{{ post.accounts?.map((account) => account.name).filter(Boolean).join(', ') || 'Account unavailable' }}</span>
-            <el-tag :type="statusTagType(post.status)" effect="plain">{{ statusLabel(post.status) }}</el-tag>
-          </header>
-          <div class="post-copy">{{ post.draft?.message || post.draft?.title || 'No copy saved' }}</div>
+          <section v-for="post in selectedEntity.posts || []" :key="post.id" class="entity-post detail-section">
+            <header><h3>{{ post.platform }} · {{ post.accounts?.map((account) => account.name).filter(Boolean).join(', ') || '帳號未設定' }}</h3><el-tag :type="statusTagType(post.status)" effect="plain">{{ statusLabel(post.status) }}</el-tag></header>
+            <div class="post-copy"><span class="copy-label">目的地文案</span>{{ post.draft?.message || '尚未填寫文案' }}</div>
           <div v-if="editingPostId === post.id" class="copy-editor">
             <el-input v-model="editedCopy" type="textarea" :rows="4" />
             <el-button type="primary" @click="saveCopy(post)">Save copy</el-button>
@@ -104,7 +104,7 @@
           <div v-for="job in (selectedEntity.jobs || []).filter((item) => item.targets?.some((target) => target.fileRef === `campaign_post:${post.id}`))" :key="job.id" class="entity-targets">
             <div v-for="target in job.targets.filter((item) => item.fileRef === `campaign_post:${post.id}`)" :key="target.id" class="entity-target">
               <el-tag :type="statusTagType(target.status)" effect="plain">{{ statusLabel(target.status) }}</el-tag>
-              <span>{{ target.accountName }}</span><span>{{ target.scheduleAt || 'Immediate' }}</span>
+              <span>{{ target.accountName }}</span><span>{{ target.scheduleAt || '立即發佈' }}</span>
               <span v-if="target.lastError" class="ev-error">{{ target.lastError }}</span>
               <el-date-picker v-if="target.status === 'pending' || target.status === 'retrying'" v-model="target._editSchedule" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DDTHH:mm:00" placeholder="Reschedule" />
               <el-button v-if="target._editSchedule && (target.status === 'pending' || target.status === 'retrying')" size="small" @click="rescheduleEntityTarget(target)">Save time</el-button>
@@ -114,11 +114,12 @@
           </div>
         </section>
         <section v-if="selectedEntity.artifacts?.length" class="entity-artifacts">
-          <h4>Published media links</h4>
+          <h4>已準備的媒體連結</h4>
           <a v-for="artifact in selectedEntity.artifacts.filter((item) => item.url)" :key="artifact.id || artifact.url" :href="artifact.url" target="_blank" rel="noopener">{{ artifact.role || artifact.kind || 'Media' }} · Open link</a>
         </section>
+        </div>
       </template>
-      <template #footer><el-button @click="dialogVisible = false">Close</el-button></template>
+      <template #footer><el-button @click="dialogVisible = false">關閉</el-button></template>
     </el-dialog>
 
   </div>
@@ -358,13 +359,13 @@ const platformLabel = (p) => getPlatformLabel(p)
 const platformTagType = (p) => getPlatformTagType(p)
 
 const STATUS_LABELS = {
-  scheduled: 'Scheduled',
-  queued: 'Queued',
-  publishing: 'Publishing',
-  published: 'Published',
-  prepared: 'Prepared',
-  needs_review: 'Needs review',
-  pending: 'Pending',
+  scheduled: '已排程',
+  queued: '佇列中',
+  publishing: '發佈中',
+  published: '已發佈',
+  prepared: '已準備',
+  needs_review: '需要檢查',
+  pending: '待處理',
   running: '發佈中',
   retrying: '重試中',
   succeeded: '已完成',
