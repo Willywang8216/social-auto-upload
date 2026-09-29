@@ -7753,14 +7753,10 @@ def _build_media_group_entity(
         "platforms": sorted({post.get("platform") for post in posts if post.get("platform")}),
         "destinations": [
             {
-                "postId": post["id"],
-                "profileId": post["profileId"],
-                "platform": post["platform"],
-                "accounts": post["accounts"],
-                "copy": post["draft"],
-                "scheduleAt": post["scheduledAt"],
-                "status": post["status"],
-                "jobId": post["jobId"],
+                "postId": post["id"], "profileId": post["profileId"],
+                "platform": post["platform"], "accounts": post["accounts"],
+                "copy": post["draft"], "scheduleAt": post["scheduledAt"],
+                "status": post["status"], "jobId": post["jobId"],
                 "targets": [target for job_entry in jobs_payload for target in job_entry["targets"] if target.get("fileRef") == f"campaign_post:{post['id']}"],
             }
             for post in posts
@@ -7772,7 +7768,6 @@ def _build_media_group_entity(
             for profile_id in sorted({campaign.profile_id for campaign in campaigns})
             if (profile_payload := _entity_profile_payload(profile_id, db_path=db_path, workspace_id=workspace_id))
         ],
-        "destinations": [],
         "status": _rollup_entity_status(
             record_statuses, job_statuses, all_targets, has_schedule=has_schedule
         ),
@@ -10119,10 +10114,43 @@ def inbox_list():
     """
     from myUtils import inbox_ops
     items = inbox_ops.list_items()
+    def _with_preview(entry):
+        payload = inbox_ops.item_payload(entry)
+        preview = payload.get("preview") or {}
+        if preview.get("url"):
+            return payload
+        raw_remote = str(entry.get("remotePath") or "")
+        try:
+            source = Path(inbox_ops.source_path_for(entry)).resolve()
+            if source.is_file() and any(source.is_relative_to(Path(root).resolve()) for root in (inbox_ops.INBOX_DIR, Path(BASE_DIR) / "videoFile")):
+                from myUtils.inbox_drive import stage_remote_media
+                staged = f"_inbox_cache/{uuid.uuid4().hex}_{source.name}"
+                destination = (Path(BASE_DIR) / "videoFile" / staged).resolve()
+                if destination.parent.is_relative_to((Path(BASE_DIR) / "videoFile").resolve()):
+                    import shutil
+                    shutil.copy2(source, destination)
+                    payload["preview"] = {"kind": entry.get("kind") or "file", "url": f"/getFile?filename={staged}", "available": True, "reason": None}
+                    payload["thumbPath"] = staged
+                    return payload
+        except (OSError, ValueError):
+            pass
+        try:
+            from myUtils.inbox_drive import remote_path_for_item, stage_remote_media
+            rel = remote_path_for_item(entry)
+            suffix = Path(rel).suffix.lower()
+            # Only image/video files are exposed to browser media elements.
+            if suffix in IMAGE_SUFFIXES | VIDEO_SUFFIXES:
+                staged = stage_remote_media(rel)
+                payload["preview"] = {"kind": entry.get("kind") or "file", "url": f"/getFile?filename={staged}", "available": True, "reason": None}
+                payload["thumbPath"] = staged
+                return payload
+        except Exception as exc:
+            payload["preview"] = {**preview, "available": False, "reason": f"雲端素材暫存失敗：{type(exc).__name__}"}
+        return payload
     data = {
-        "ready": [inbox_ops.item_payload(e) for e in items.get("ready", [])],
-        "pending": [inbox_ops.item_payload(e) for e in items.get("pending", [])],
-        "quarantined": [inbox_ops.item_payload(e) for e in items.get("quarantined", [])],
+        "ready": [_with_preview(e) for e in items.get("ready", [])],
+        "pending": [_with_preview(e) for e in items.get("pending", [])],
+        "quarantined": [_with_preview(e) for e in items.get("quarantined", [])],
     }
     return jsonify({"code": 200, "msg": "ok", "data": data}), 200
 

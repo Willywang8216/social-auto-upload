@@ -5,22 +5,22 @@
           <div><h2>發佈佇列</h2><p>{{ entityTotal }} 個內容項目 · 每組媒體一張卡片</p></div>
           <el-button @click="allDates = !allDates">{{ allDates ? '顯示全部日期' : '今天' }}</el-button>
           <div class="entity-filter-row">
-          <el-date-picker v-model="entityDateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="開始日期" end-placeholder="結束日期" />
-          <el-select v-model="entityPlatformFilters" multiple collapse-tags clearable placeholder="平台">
-            <el-option v-for="platform in platformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
-          </el-select>
-          <el-select v-model="entityProfileFilters" multiple collapse-tags clearable placeholder="個人檔案">
-            <el-option v-for="profile in profiles" :key="profile.id" :label="profile.name" :value="profile.id" />
-          </el-select>
-          <el-select v-model="entityAccountFilters" multiple collapse-tags clearable placeholder="帳號">
-            <el-option v-for="account in profileAccounts" :key="account.id" :label="`${account.profileName} · ${account.platform} · ${account.nickname || account.accountName}`" :value="account.id" />
-          </el-select>
-          <el-input v-model="entityKeyword" clearable placeholder="搜尋標題、文案或媒體名稱" />
-          <el-select v-model="entityStatusFilter" clearable placeholder="狀態" @change="loadEntities(true)">
-            <el-option v-for="status in entityStatusOptions" :key="status" :label="entityStatusLabel(status)" :value="status" />
-          </el-select>
-          <el-button @click="loadJobs">工作紀錄</el-button>
-          <el-button type="primary" @click="drainNow" :loading="draining">排空佇列</el-button>
+            <el-date-picker v-model="entityDateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="開始日期" end-placeholder="結束日期" />
+            <el-select v-model="entityPlatformFilters" multiple collapse-tags clearable placeholder="平台">
+              <el-option v-for="platform in platformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
+            </el-select>
+            <el-select v-model="entityProfileFilters" multiple collapse-tags clearable placeholder="個人檔案">
+              <el-option v-for="profile in profiles" :key="profile.id" :label="profile.name" :value="profile.id" />
+            </el-select>
+            <el-select v-model="entityAccountFilters" multiple collapse-tags clearable placeholder="帳號">
+              <el-option v-for="account in profileAccounts" :key="account.id" :label="`${account.profileName} · ${account.platform} · ${account.nickname || account.accountName}`" :value="account.id" />
+            </el-select>
+            <el-input v-model="entityKeyword" clearable placeholder="搜尋標題、文案或媒體名稱" />
+            <el-select v-model="entityStatusFilter" clearable placeholder="狀態" @change="loadEntities(true)">
+              <el-option v-for="status in entityStatusOptions" :key="status" :label="entityStatusLabel(status)" :value="status" />
+            </el-select>
+            <el-button @click="loadJobs">工作紀錄</el-button>
+            <el-button type="primary" @click="drainNow" :loading="draining">排空佇列</el-button>
           </div>
         </header>
       <div v-if="entityLoading && !entities.length" class="entity-loading">正在載入排程…</div>

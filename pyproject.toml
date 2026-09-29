@@ -18,6 +18,7 @@ dependencies = [
   # `boto3` powers DigitalOcean Spaces (S3-compatible) thumbnail/media storage
   "boto3>=1.28",
   "loguru==0.7.3",
+  "opencc-python-reimplemented>=0.1.7",
   # `utils/login_qrcode.py` imports these at runtime. Keep them mirrored
   # with requirements.txt because Docker / legacy installs still use it.
   "opencv-python-headless==4.13.0.92",

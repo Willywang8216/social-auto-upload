@@ -343,12 +343,6 @@ class PreparedPublisherTests(unittest.TestCase):
             )
         self.assertIn("media timed out", str(ctx.exception))
 
-    def test_twitter_refresh_failure_is_not_silently_ignored(self):
-        config = {"twitterAuthType": "api", "refreshToken": "refresh", "accessToken": "expired"}
-        with patch("myUtils.prepared_publishers.refresh_twitter_access_token", side_effect=RuntimeError("revoked")):
-            with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "reconnect this account"):
-                prepared_publishers._maybe_refresh_twitter_token(config)
-
     def test_twitter_refresh_failure_marks_account_reconnect_before_raising(self):
         config = {"twitterAuthType": "api", "refreshToken": "refresh", "accessToken": "expired"}
         persisted = []
