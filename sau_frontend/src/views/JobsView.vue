@@ -59,7 +59,14 @@
       size="min(760px, 95vw)"
     >
       <div v-if="entityDetails" class="entity-drawer-content">
-<div class="entity-summary-row"><el-tag :type="entityTagType(entityDetails.status)" effect="plain">{{ entityStatusLabel(entityDetails.status) }}</el-tag><span>{{ entityDetails.profiles?.map((profile) => profile.name).join('、') || entityDetails.profile?.name || '未指定個人檔案' }}</span><span>{{ entityDetails.scheduledAt || '尚未排程' }}</span></div>
+        <section class="entity-drawer-section">
+          <h3>整體資訊</h3>
+          <div class="entity-summary-row">
+            <el-tag :type="entityTagType(entityDetails.status)" effect="plain">{{ entityStatusLabel(entityDetails.status) }}</el-tag>
+            <span>{{ entityDetails.profiles?.map((profile) => profile.name).join('、') || entityDetails.profile?.name || '未指定個人檔案' }}</span>
+            <span>{{ entityDetails.scheduledAt || '尚未排程' }}</span>
+          </div>
+        </section>
         <div class="drawer-media-grid">
           <div v-for="media in entityDetails.mediaItems || []" :key="media.fileRecordId || media.filename">
             <video v-if="media.mediaType === 'video' && media.previewUrl" :src="media.previewUrl" controls preload="metadata" />
