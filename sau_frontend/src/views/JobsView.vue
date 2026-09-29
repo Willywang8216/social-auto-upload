@@ -1,8 +1,8 @@
 <template>
   <div class="jobs-view">
     <section class="entity-queue">
-        <header class="entity-queue-head">
-          <div><h2>發佈佇列</h2><p>{{ entityTotal }} 個內容項目 · 每組媒體一張卡片</p></div>
+<header class="entity-queue-head">
+          <div class="entity-queue-head-title"><h2>發佈佇列</h2><p>{{ entityTotal }} 個內容項目 · 每組媒體一張卡片</p></div>
           <el-button @click="allDates = !allDates">{{ allDates ? '顯示全部日期' : '今天' }}</el-button>
           <div class="entity-filter-row">
             <el-date-picker v-model="entityDateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="開始日期" end-placeholder="結束日期" />
@@ -455,6 +455,7 @@ onMounted(async () => {
   await loadEntities(true)
   if (route.query.entity) {
     await openEntity({ entityId: String(route.query.entity) })
+    router.replace({ query: { ...route.query, entity: undefined } })
   } else if (route.query.job) {
     const jobId = Number(route.query.job)
     if (Number.isInteger(jobId) && jobId > 0) {
@@ -507,14 +508,14 @@ onBeforeUnmount(() => {
   }
 
   .entity-queue-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: var(--space-4);
-
-    h2 { font-size: 18px; margin: 0; }
-    p { color: var(--text-2); margin: 3px 0 0; font-size: 13px; }
+    display:flex;
+    flex-direction:column;
+    align-items:stretch;
+    gap:12px;
+    margin-bottom:16px;
   }
+  .entity-queue-head-title h2 { font-size:18px; margin:0; }
+  .entity-queue-head-title p { color:var(--text-2); margin:3px 0 0; font-size:13px; }
 
   .entity-card-grid {
     display: grid;
@@ -554,17 +555,33 @@ onBeforeUnmount(() => {
   .entity-card-links { display: flex; gap: 12px; margin-top: 10px; }
   .entity-card-links a, .entity-card-links button, .drawer-artifacts a { color: var(--accent); font-size: 12px; }
   .entity-card-links button { border: 0; background: none; cursor: pointer; }
-  .entity-drawer-content { padding-bottom: 28px; }
-  .entity-summary-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 16px; }
-  .drawer-media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin-bottom: 18px; }
-  .drawer-media-grid > div { display: grid; gap: 5px; font-size: 12px; overflow: hidden; }
-  .drawer-media-grid img, .drawer-media-grid video { width: 100%; max-height: 140px; object-fit: cover; border-radius: 8px; }
-  .entity-post-detail { padding: 14px; border: 1px solid var(--line); border-radius: var(--r-md); margin: 12px 0; }
-  .entity-post-detail h3 { font-size: 14px; margin: 0 0 8px; }
-  .entity-post-detail p { white-space: pre-wrap; }
-  .entity-target-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
-  .entity-error { color: var(--color-danger); overflow-wrap: anywhere; }
-  .drawer-artifacts { display: flex; flex-wrap: wrap; gap: 12px; }
+  .entity-filter-row {
+    display:grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    align-items:center;
+    gap:8px;
+  }
+  .entity-filter-row .el-input { min-width:180px; }
+  .entity-drawer-content { padding: 16px; }
+  .entity-drawer-section { padding: 16px; margin-bottom: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  .entity-drawer-section h3 { margin: 0 0 12px; font-size: 15px; }
+  .entity-summary-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .drawer-media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
+  .drawer-media-grid > div { display: grid; gap: 6px; align-content: start; font-size: 12px; overflow-wrap: anywhere; }
+  .drawer-media-grid img, .drawer-media-grid video { width: 100%; max-height: 150px; object-fit: cover; border-radius: 6px; }
+  .entity-post-detail { padding: 16px; margin-bottom: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  .entity-post-detail header { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px; }
+  .entity-post-detail h3 { margin:0; font-size:15px; }
+  .entity-copy-block { padding: 12px; border-radius: 6px; background: var(--raised); }
+  .entity-copy-block > span { color: var(--text-3); font-size: 12px; }
+  .entity-copy-block p { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .entity-target-row { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:10px 0; border-top:1px solid var(--line); }
+  .entity-error { color:var(--color-danger); overflow-wrap:anywhere; }
+  .entity-links { display:flex; flex-direction:column; align-items:flex-start; gap:8px; }
+  .entity-links a { color:var(--accent); }
+  .entity-filter-row { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+  .entity-filter-row .el-input { width:240px; }
+  @media (max-width: 760px) { .entity-filter-row { justify-content:flex-start; } .entity-filter-row > * { min-width: 140px; flex: 1 1 auto; } .entity-filter-row .el-input { width:auto; } }
 
   @media (max-width: 680px) {
     .entity-card-grid { grid-template-columns: 1fr; }

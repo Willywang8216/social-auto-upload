@@ -71,7 +71,7 @@ SCHEDULED_TARGET_STATUSES = (job_runtime.TARGET_PENDING, job_runtime.TARGET_RETR
 # SPA route fragments (hash history). ``entity=media-group:<id>`` identifies the
 # shared media of a campaign; ``job=<id>`` is the per-job fallback for legacy
 # jobs that never had a campaign.
-_MEDIA_GROUP_ROUTE = "#/publish/calendar?entity=media-group:{ident}"
+_MEDIA_GROUP_ROUTE = "#/publish/queue?entity=mg-{ident}"
 _JOB_ROUTE = "#/publish/queue?job={ident}"
 
 _CREATE_TABLE_SQL = f"""

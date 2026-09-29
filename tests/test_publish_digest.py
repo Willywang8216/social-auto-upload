@@ -167,7 +167,7 @@ class DigestTestCase(unittest.TestCase):
         body = sender.calls[0]["body"]
         self.assertIn("[media-group:42] Morning reel (instagram, tiktok)", body)
         self.assertIn(
-            "link: https://app.example.com/#/publish/calendar?entity=media-group:42", body
+            "link: https://app.example.com/#/publish/queue?entity=mg-42", body
         )
         self.assertIn("[job:12] job #12 (douyin)", body)
         self.assertIn("link: https://app.example.com/#/publish/queue?job=12", body)

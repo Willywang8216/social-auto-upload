@@ -572,8 +572,9 @@ function statusTagType(s) {
   flex-shrink: 0;
 }
 
- .entity-summary {
-  display: grid;
+  .detail-toolbar { display:flex; justify-content:flex-end; margin-bottom:10px; }
+  .entity-summary {
+    display: grid;
   gap: 14px;
   max-height: 68vh;
   overflow-y: auto;
