@@ -33,6 +33,7 @@ from typing import Any, Awaitable, Callable, Protocol
 from utils.conf_defaults import BASE_DIR
 from myUtils import jobs
 from myUtils import media_remote_storage
+from myUtils import media_pipeline
 from myUtils import profiles as profile_registry
 from myUtils import prepared_publishers
 from myUtils.job_logging import (
@@ -939,6 +940,16 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             continue
         p = Path(local_path)
         if p.exists():
+            continue
+        generated_root = media_pipeline.GENERATED_MEDIA_ROOT.resolve()
+        try:
+            expected_generated_root = generated_root
+            resolved_local = p.resolve()
+            is_generated_artifact = resolved_local.is_relative_to(expected_generated_root)
+        except (OSError, ValueError):
+            is_generated_artifact = False
+        if is_generated_artifact:
+            _logger.error(f"Generated artifact is missing from persistent media storage: {local_path}")
             continue
         try:
             row = _record_for(artifact, p)

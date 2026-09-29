@@ -16,7 +16,7 @@ from utils.conf_defaults import BASE_DIR
 
 FFMPEG_COMMAND = "ffmpeg"
 FFPROBE_COMMAND = "ffprobe"
-GENERATED_MEDIA_ROOT = Path(BASE_DIR) / "generated" / "campaigns"
+GENERATED_MEDIA_ROOT = Path(os.environ.get("SAU_GENERATED_MEDIA_ROOT", Path(BASE_DIR) / "generated" / "campaigns"))
 
 # Watermark/overlay text needs a font file that actually contains the glyphs.
 # The slim runtime image only ships Latin fonts (DejaVu), so CJK watermark text

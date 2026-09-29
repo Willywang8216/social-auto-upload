@@ -7763,11 +7763,6 @@ def _build_media_group_entity(
         ],
         "campaignIds": [campaign.id for campaign in campaigns],
         "campaigns": campaigns_payload,
-        "profiles": [
-            profile_payload
-            for profile_id in sorted({campaign.profile_id for campaign in campaigns})
-            if (profile_payload := _entity_profile_payload(profile_id, db_path=db_path, workspace_id=workspace_id))
-        ],
         "status": _rollup_entity_status(
             record_statuses, job_statuses, all_targets, has_schedule=has_schedule
         ),

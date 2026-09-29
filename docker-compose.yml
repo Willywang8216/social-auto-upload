@@ -35,6 +35,7 @@ services:
     volumes:
       - ./videoFile:/app/videoFile
       - ./uploads:/app/uploads
+      - ./generated:/app/generated
       - ./cookiesFile:/app/cookiesFile
       - ./cookies:/app/cookies
       - ${SAU_CONF_FILE:-./conf.py}:/app/conf.py

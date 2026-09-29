@@ -2,13 +2,13 @@
   <el-card class="inbox-card" shadow="never" :class="`kind-${item.kind || 'unknown'}`">
     <div class="card-head">
       <div class="thumb-wrap">
-        <template v-if="thumbSrc && !previewFailed">
+        <template v-if="item.preview?.url && !previewFailed">
           <video v-if="kindIsVideo" :src="item.preview.url" class="thumb" controls preload="metadata" />
           <img v-else :src="item.preview.url" class="thumb" loading="lazy" alt="" @error="previewFailed = true" />
         </template>
         <div v-else class="thumb thumb-placeholder">
           <el-icon :size="22"><VideoCamera v-if="kindIsVideo" /><Picture v-else /></el-icon>
-          <span>{{ previewReason }}</span>
+          <span>{{ previewFailed ? '縮圖載入失敗' : item.preview?.reason || '預覽不可用' }}</span>
         </div>
       </div>
       <div class="head-tags">
