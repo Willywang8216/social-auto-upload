@@ -64,8 +64,15 @@ class RecordingSender:
 
 @contextlib.contextmanager
 def no_app_url():
+    """No origin configured at all.
+
+    Both variables are cleared: links fall back to SAU_PUBLIC_BASE_URL when
+    SAU_PUBLIC_APP_URL is unset, so leaving the former set on a host that has it
+    would make the "no link" assertions depend on the machine.
+    """
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("SAU_PUBLIC_APP_URL", None)
+        os.environ.pop("SAU_PUBLIC_BASE_URL", None)
         yield
 
 
@@ -176,7 +183,7 @@ class DigestTestCase(unittest.TestCase):
         self.assertNotIn("[job:10]", body)
         self.assertNotIn("[job:11]", body)
 
-    def test_links_only_ever_come_from_public_app_url(self):
+    def test_links_only_ever_come_from_a_configured_origin(self):
         self.add_job(1, "douyin")
         self.add_target(1, "account:3", "2026-09-28T02:00:00")
 
@@ -192,6 +199,26 @@ class DigestTestCase(unittest.TestCase):
         self.assertEqual(
             digest["groups"][0]["url"],
             "https://sau.example.net/#/publish/queue?job=1",
+        )
+
+        # With no explicit app url it falls back to the origin the app already
+        # configures, so alert and digest links share one source of truth.
+        with patch.dict(os.environ, {"SAU_PUBLIC_BASE_URL": "https://socialupload.example.com/"}):
+            digest = publish_digest.build_daily_digest(LOCAL_DAY, db_path=self.db)
+        self.assertEqual(
+            digest["groups"][0]["url"],
+            "https://socialupload.example.com/#/publish/queue?job=1",
+        )
+
+        # An explicit override still beats the fallback.
+        with patch.dict(os.environ, {
+            "SAU_PUBLIC_APP_URL": "https://override.example.net/",
+            "SAU_PUBLIC_BASE_URL": "https://socialupload.example.com/",
+        }):
+            digest = publish_digest.build_daily_digest(LOCAL_DAY, db_path=self.db)
+        self.assertEqual(
+            digest["groups"][0]["url"],
+            "https://override.example.net/#/publish/queue?job=1",
         )
 
     def test_send_is_idempotent_per_local_day(self):

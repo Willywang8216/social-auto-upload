@@ -23,9 +23,10 @@ Design notes
   carries a ``campaignId`` we resolve it to the campaign's media group and fold
   every target of that group into a single entry. Legacy jobs without a
   campaign id are grouped per job.
-* **Links only from ``SAU_PUBLIC_APP_URL``.** A guessed hostname reads as a
-  working link and silently sends the operator nowhere, so when no base URL is
-  configured the digest simply omits the link.
+* **Links only from a configured origin.** ``SAU_PUBLIC_APP_URL`` (or the CLI's
+  ``--app-url``) wins, falling back to the app's own ``SAU_PUBLIC_BASE_URL``. A
+  guessed hostname reads as a working link and silently sends the operator
+  nowhere, so when neither is configured the digest simply omits the link.
 * **At most one send per local day.** A small ``publish_digest_log`` table with
   ``UNIQUE(local_date)`` plus a ``BEGIN IMMEDIATE`` reservation transaction makes
   concurrent invocations (cron overlap, a manual run next to the scheduled one)
@@ -170,10 +171,13 @@ def _parse_schedule(value: object) -> datetime | None:
 
 
 def _app_base(app_url: str | None) -> str:
-    """The configured public origin, or ``""`` — never an invented domain."""
+    """The configured public origin, or ``""`` — never an invented domain.
 
-    value = app_url if app_url is not None else os.environ.get("SAU_PUBLIC_APP_URL", "")
-    return str(value or "").strip().rstrip("/")
+    ``SAU_PUBLIC_APP_URL`` if set, else ``SAU_PUBLIC_BASE_URL`` (the app's own
+    public origin); see :func:`myUtils.ops_alerts.public_app_origin`.
+    """
+
+    return ops_alerts.public_app_origin(app_url)
 
 
 def _deep_link(base: str, kind: str, ident: object) -> str | None:
@@ -549,7 +553,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--db-path", default=None, help="SQLite DB (default: SAU_DB_PATH or the app DB)")
-    parser.add_argument("--app-url", default=None, help="Public app origin override (default: SAU_PUBLIC_APP_URL)")
+    parser.add_argument("--app-url", default=None, help="Public app origin override (default: SAU_PUBLIC_APP_URL, else SAU_PUBLIC_BASE_URL)")
     parser.add_argument("--dry-run", action="store_true", help="Build and print without sending")
     parser.add_argument("--date", default=None, help="Local digest date YYYY-MM-DD (dry-run preview)")
     args = parser.parse_args(argv)

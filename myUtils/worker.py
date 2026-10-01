@@ -784,14 +784,17 @@ class PublishWorker:
     def _publish_failure_deep_link(cls, job_id: int) -> str:
         """Build an in-app deep link for a permanently failed target's job.
 
-        Uses ``SAU_PUBLIC_APP_URL`` as the origin when configured. Without it
-        we return the bare hash-history route fragment rather than inventing a
-        hostname — a guessed domain reads as a working link to an operator and
-        silently sends them nowhere when it is wrong.
+        Uses the configured public origin (``SAU_PUBLIC_APP_URL``, else the app's
+        ``SAU_PUBLIC_BASE_URL``) when available. Without it we return the bare
+        hash-history route fragment rather than inventing a hostname — a guessed
+        domain reads as a working link to an operator and silently sends them
+        nowhere when it is wrong.
         """
 
+        from myUtils import ops_alerts
+
         fragment = cls._JOB_ROUTE_FRAGMENT.format(job_id=int(job_id))
-        base = str(os.environ.get("SAU_PUBLIC_APP_URL", "") or "").strip().rstrip("/")
+        base = ops_alerts.public_app_origin()
         if not base:
             return fragment
         from urllib.parse import urlparse

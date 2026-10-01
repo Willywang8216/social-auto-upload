@@ -64,7 +64,10 @@ class PublishFailureAlertTests(unittest.TestCase):
         # Never let a real channel configured on the host leak into the tests.
         self._env = patch.dict(os.environ, {}, clear=False)
         self._env.start()
+        # Neither origin variable may leak in: links fall back from
+        # SAU_PUBLIC_APP_URL to SAU_PUBLIC_BASE_URL.
         os.environ.pop("SAU_PUBLIC_APP_URL", None)
+        os.environ.pop("SAU_PUBLIC_BASE_URL", None)
 
     def tearDown(self) -> None:
         self._env.stop()

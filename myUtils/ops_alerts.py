@@ -48,6 +48,29 @@ def _split_recipients(value: str) -> list[str]:
     return [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
 
 
+def public_app_origin(explicit: str | None = None) -> str:
+    """The public origin operator-facing links should point at, or ``""``.
+
+    ``SAU_PUBLIC_APP_URL`` is honoured as an explicit override (the digest CLI's
+    ``--app-url``), falling back to ``SAU_PUBLIC_BASE_URL`` — the variable the
+    app already keeps its own origin in (``sau_app.config`` reads it, and the
+    Google-login check requires it). Alert and digest links therefore share one
+    source of truth instead of needing a second variable that can drift out of
+    step with the real URL.
+
+    Never invents a hostname: an unconfigured box yields ``""`` and callers omit
+    the link, because a guessed domain reads as a working link to an operator
+    and quietly sends them nowhere.
+    """
+    if explicit is not None:
+        return str(explicit).strip().rstrip("/")
+    for name in ("SAU_PUBLIC_APP_URL", "SAU_PUBLIC_BASE_URL"):
+        value = _env(name)
+        if value:
+            return value.rstrip("/")
+    return ""
+
+
 def _send_telegram(subject: str, body: str) -> bool:
     token = _env("SAU_ALERT_TELEGRAM_BOT_TOKEN")
     chat = _env("SAU_ALERT_TELEGRAM_CHAT_ID")
