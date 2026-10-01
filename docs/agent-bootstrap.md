@@ -239,3 +239,10 @@
 - **LLM pool 已清理：6 → 2。** 逐個直接打 `/chat/completions` 分類（**沒有半個是 429/限流**）：三個 `2c2ch1u11-share-api-0.hf.space` 回 **404**「The requested endpoint '/chat/completions' does not exist」——那台根本不是 OpenAI 相容 API；`muyuan.do` 回 **403** Cloudflare「Just a moment…」挑戰頁。四個都屬於「掛掉/設定錯」故移除；保留 `ooioo.work`(gpt-5.6-terra) 與 `wzw.pp.ua`(deepseek-v4-flash)，兩者實測 200。（`.env` 改前已備份；容器 recreate 後已確認 pool=2。）注意 **vision 能力只有 `ooioo.work` 驗證過**。
 - **Log 輪替（只做缺口，未搬動路徑）：** 兩份 logrotate 設定都加了 **`maxsize 5M`**（原本只有 time-based，才會發生 watch.log 兩天 2.6 MB）；新增 `/home/will/iamwillywang-mail/cron.log` 的 stanza（每分鐘寫、原本完全沒輪替）；`social-auto-upload/logs/jobs/`（788 個 write-once 的 per-job log、3.7 MB）改用 **cron 保留刪除**（`13 4 * * * find … -mtime +14 -delete`）而非輪替；compose 加 `logging: json-file max-size=10m max-file=3`（commit `5466649`，實測已生效）。這些主機設定**不在 repo 內**：`/home/will/.config/logrotate/{logrotate.conf,mailserver-sau.conf}`、crontab、`.env`。
 - **仍待使用者處理：** ①Google consent screen 發佈（YouTube）。②Twitter 光光 改用 OAuth 重連。③`~/.cache` 有東西在清（Playwright 瀏覽器曾整個消失）。
+
+## Agent handoff：為什麼 `~/.cache` 會被清空（2026-10-01 第七輪）
+
+- **root crontab 有一個每週日 03:00 的清理工作**（`0 3 * * 0`），其中一段就是 **`rm -rf /home/will/.cache/*`**，所以 `~/.cache/ms-playwright`（用 `npx playwright install chromium` 下載、約 110–150 MB）**每個星期日都會被刪掉**，下一個 session 得重新下載。同一行還會 `rm -f ~/.bash_history`、`rm -rf ~/.cc-switch/logs/*`、`find /var/lib/docker/containers -name "*-json.log" -truncate -s 0`（這也是 `docker logs` 在本機不可用的原因之一，另一個是沒有 size cap，已於 `5466649` 補上）、`docker builder prune -af`、`docker image prune -f`、`apt-get autoremove --purge -y`。
+  - **因應：** 若不想每週重抓瀏覽器，把 `PLAYWRIGHT_BROWSERS_PATH` 指到 `~/.cache` 之外（例如 `~/.local/share/ms-playwright`）再執行 `npx playwright install chromium`。
+  - **注意：** 今天（週四）瀏覽器是在 session 中途消失的，**不是**這個週日排程造成的；同機可能還有其他 Claude session／手動清理跑過同一段指令。總之這個排程保證每週會清掉一次。
+- **`logrotate -f /home/will/logrotate-will.conf` 是在跑一個不存在的檔案**（同一行工作內，錯誤被 `2>/dev/null` 吞掉）——即「強制輪替」其實從來沒發生，也沒有和 `5466649` 的輪替設定衝突。順帶說明：本機共有**三份** logrotate 相關設定在運作：`~/.config/logrotate/logrotate.conf`（每日，`/home/will/logs/*.log` + watch.log + mail cron.log）、`~/.config/logrotate/mailserver-sau.conf`（每週，monitor.log + `social-auto-upload/logs/*.log`），以及這個不存在的檔案。
