@@ -199,3 +199,10 @@
   （不掛那顆 config 會 `unauthorized`，因為 GHCR 套件需要認證。）
 - **實測已上線：** 容器 `status=running health=healthy`、label `org.opencontainers.image.revision=fd53811`；`/healthz` 200；線上 `/publish-entities?limit=2` 回 200 且**已無 `destinations`**、media item 帶 `availableLocally` 與 `archive`（含 `drive.google.com/drive/search` 連結）；容器內 `sau_frontend/dist/assets` 已含 `mediaState-*.js`（`已封存至`／`availableLocally`）與 `CalendarView-*.js`（`清除篩選`），證實前後端都是新版。
 - **未提交（刻意）：** `rclone-cache.conf`（內含 Drive token）與四個 `db/database.db.before-*.bak` 備份仍留在工作區未追蹤；本 commit 也順帶把 `.dockerignore` 擴大排除 `.env*`、`secrets`、媒體、`logs`、`*.db*`、`*.bak`、`.claude`、`.playwright-mcp`。
+
+## Agent handoff：/getFile 子目錄修復（2026-10-01 第三輪）
+
+- **`/getFile` 只服務 videoFile 根目錄的檔案（嚴重、且是既有的）。** `sau_backend.py` 的 `get_file()` 先把路徑正確 resolve 並驗證在 `videoFile/` 之內，最後卻呼叫 `send_from_directory(str(base_dir), target.name)` —— **只傳 basename**。於是任何放在子目錄的媒體（`_library/`、`_photos/`、`_batch*/`、`_inbox_cache/`）一律 404。實際影響：`file_records` 483 筆中 **482 筆在子目錄**（只有 1 筆在根目錄），其中 **313 筆當下就在磁碟上**卻完全無法預覽。這才是「佇列看不到素材」的主因之一——先前修的 offload 只是「檔案不在本機 → 顯示去了 Drive」那一半。此行為來自舊 commit `51c0d95`，不是本次工作造成。
+- **修法：** 改傳 `str(target.relative_to(base_dir))`（上方的 containment 檢查已保證安全）。新增 `tests/test_sau_backend.py::GetFileServingTests` 5 個測試（巢狀／深層／根目錄／traversal 仍拒絕／缺檔仍 404）；已用「暫時還原舊行」驗證測試真的會抓到（2 個紅、還原後 5 個綠）。commit `5004c11`。
+- **教訓（為什麼之前所有檢查都沒看到）：** entity payload 正確、mock API 的 UI 測試全過、單元測試全過 —— 只有**用瀏覽器打開「已部署的正式站 + 真實資料」**才會打到真正的檔案服務路徑。之後驗證這類「畫面壞掉」問題，請愛用 `live-verify.cjs` 這種對正式站跑真實資料的方式（本次就是這樣才發現）。正式站修復後：同樣那 7 張圖從全 404 變成 **0 個 4xx**，live 檢查 10/10 通過。
+- **部署紀錄：** commit `fd53811` → image `b5192f147b5d`；commit `5004c11` → image `122ceaa21682`。兩次都以 one-shot Watchtower（需掛憑證 config，見上一節）套用，套用前都先確認 `publish_job_targets` 沒有 running/retrying，容器 `health=healthy` 且 revision label 正確。
