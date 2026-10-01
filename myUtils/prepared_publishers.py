@@ -1406,7 +1406,7 @@ def _wait_for_container_status(
     access_token: str,
     *,
     platform: str,
-    timeout: float = 90.0,
+    timeout: float = 180.0,
     interval: float = 2.0,
 ) -> None:
     """Poll a created media container until it is FINISHED (or PUBLISHED).
@@ -1418,6 +1418,11 @@ def _wait_for_container_status(
     not exist"). This helper polls the container status — Instagram exposes
     it as ``status_code``, Threads as ``status`` — and surfaces the
     container's ``error_message`` when it lands in an ERROR state.
+
+    The wait is generous on purpose: Meta transcoding routinely exceeded the old
+    90s ceiling, so threads and instagram runs failed with "not ready after 90s"
+    and only succeeded on a retry - or not at all. A slow container is normal
+    here, and waiting costs far less than a dead target.
     """
     root, field = _container_status_field(platform)
     deadline = time.monotonic() + timeout
