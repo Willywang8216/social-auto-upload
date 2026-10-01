@@ -1055,10 +1055,22 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                     rel = raw.split(marker, 1)[1]
                     if marker == "/uploads/":
                         rel = "uploads/" + rel
-                    return conn.execute(
-                        "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path FROM file_records WHERE file_path = ?",
-                        (rel,),
-                    ).fetchone()
+                    select = (
+                        "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path "
+                        "FROM file_records WHERE file_path = ?"
+                    )
+                    row = conn.execute(select, (rel,)).fetchone()
+                    if row is None:
+                        # file_records use two conventions for the same media: a
+                        # bare media-relative path (_library/..., 307 rows) and
+                        # the same path carrying the videoFile/ prefix
+                        # (videoFile/_batch1/..., 88 rows). Only the bare form was
+                        # looked up, so every record stored with the prefix
+                        # answered "no file record" and its targets failed
+                        # permanently with MediaRestoreError even though the bytes
+                        # were sitting on Drive and registered.
+                        row = conn.execute(select, ("videoFile/" + rel,)).fetchone()
+                    return row
         return None
 
     for artifact in payload.get("artifacts", []) or []:

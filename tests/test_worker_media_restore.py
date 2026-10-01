@@ -83,6 +83,46 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         self.assertEqual(resolved, destination)
         self.assertEqual(destination.read_bytes(), b"restored media")
 
+    def test_artifact_recorded_with_the_video_file_prefix_is_found(self) -> None:
+        """file_records carries two path conventions for the same media.
+
+        A record stored as ``videoFile/_batch1/x.mp4`` was invisible to a lookup
+        that only tried the bare ``_batch1/x.mp4`` form, so those runs failed
+        permanently with MediaRestoreError even though the bytes were registered
+        on a backend the whole time.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO file_records (filename, filesize, file_path, storage_key) VALUES (?, ?, ?, ?)",
+                ("x.mp4", 1.0, "videoFile/_batch1/x.mp4", "_batch1/x.mp4"),
+            )
+            conn.execute(
+                "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("test-drive", "Test Drive", "rclone", "drive", "auto", "sau/videoFile", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            conn.execute(
+                "UPDATE file_records SET storage_backend_id=? WHERE file_path='videoFile/_batch1/x.mp4'",
+                (backend_id,),
+            )
+
+        payload = {"artifacts": [{"local_path": str(self.root / "videoFile" / "_batch1" / "x.mp4")}]}
+
+        def write_media(_backend, _key, temporary_path):
+            Path(temporary_path).write_bytes(b"restored via prefix")
+
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_remote_storage, "download_from_backend", side_effect=write_media
+        ):
+            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
+        self.assertEqual(
+            (self.root / "videoFile" / "_batch1" / "x.mp4").read_bytes(),
+            b"restored via prefix",
+        )
+
+
     def test_generated_campaign_artifact_restores_from_public_url(self) -> None:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
