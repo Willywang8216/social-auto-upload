@@ -67,5 +67,78 @@ class PublicAppOriginTests(unittest.TestCase):
             self.assertEqual(ops_alerts.public_app_origin(), "")
 
 
+class _FakeResponse:
+    def __init__(self, status_code: int = 200) -> None:
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class TelegramChunkingTests(unittest.TestCase):
+    """Telegram caps sendMessage at 4096 characters.
+
+    A longer payload is rejected outright, and since alerting is best-effort the
+    failure is silent — which is how the daily digest (5-6k characters, one line
+    per scheduled target) would have failed to arrive every single morning.
+    """
+
+    def setUp(self) -> None:
+        self._env = patch.dict(
+            os.environ,
+            {"SAU_ALERT_TELEGRAM_BOT_TOKEN": "t", "SAU_ALERT_TELEGRAM_CHAT_ID": "1"},
+            clear=False,
+        )
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
+    def _capture(self, body: str):
+        calls: list[dict] = []
+
+        class FakeRequests:
+            @staticmethod
+            def post(url, json=None, timeout=None):
+                calls.append(json)
+                return _FakeResponse(200)
+
+        with patch.object(ops_alerts, "requests", FakeRequests):
+            ok = ops_alerts._send_telegram("SUBJ", body)
+        return ok, calls
+
+    def test_short_alert_is_one_message(self):
+        ok, calls = self._capture("a short body")
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("SUBJ", calls[0]["text"])
+
+    def test_long_alert_is_split_across_messages(self):
+        body = "\n".join(f"media-group:{i} something scheduled at 21:0{i % 10}" for i in range(200))
+        ok, calls = self._capture(body)
+        self.assertTrue(ok)
+        self.assertGreater(len(calls), 1, "a 5k+ body must not be sent as one message")
+        self.assertTrue(all(len(call["text"]) <= 4096 for call in calls))
+        # Every line is still delivered, in order.
+        delivered = "\n".join(call["text"] for call in calls)
+        for probe in ("media-group:0 ", "media-group:199 "):
+            self.assertIn(probe, delivered)
+
+    def test_split_parts_are_numbered_so_none_looks_like_the_whole_message(self):
+        body = "\n".join(f"line {i}" + "x" * 90 for i in range(100))
+        _ok, calls = self._capture(body)
+        self.assertIn("[1/", calls[0]["text"])
+        self.assertIn("(cont.)", calls[1]["text"])
+
+    def test_an_failed_chunk_does_not_silently_pass(self):
+        class FailingRequests:
+            @staticmethod
+            def post(url, json=None, timeout=None):
+                return _FakeResponse(400)
+
+        with patch.object(ops_alerts, "requests", FailingRequests):
+            with self.assertRaises(RuntimeError):
+                ops_alerts._send_telegram("SUBJ", "body")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -71,6 +71,62 @@ def public_app_origin(explicit: str | None = None) -> str:
     return ""
 
 
+# sendMessage rejects payloads over 4096 characters, so the limit is enforced on
+# our side, with room left for the subject header and the part counter.
+_TELEGRAM_TEXT_LIMIT = 3900
+
+
+def _split_message(text: str, limit: int = _TELEGRAM_TEXT_LIMIT) -> list[str]:
+    """Split text into chunks of at most ``limit`` characters, on line breaks.
+
+    Without this a long alert is rejected wholesale by Telegram (400, "message
+    is too long") and — because every send is deliberately best-effort — it
+    disappears silently: the sender returns False and only a log line records
+    it. The daily publish digest is the usual offender, one line per scheduled
+    target, 5-6k characters on an ordinary day, so the operator would simply
+    never receive it. Splitting happens before escaping, so an HTML entity can
+    never be cut in half.
+    """
+    if len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    current: list[str] = []
+    size = 0
+    for line in text.split("\n"):
+        if len(line) > limit:
+            # No boundary to split on; hard-slice the over-long line.
+            if current:
+                parts.append("\n".join(current))
+                current, size = [], 0
+            parts.extend(line[i:i + limit] for i in range(0, len(line), limit))
+            continue
+        if current and size + len(line) + 1 > limit:
+            parts.append("\n".join(current))
+            current, size = [], 0
+        current.append(line)
+        size += len(line) + 1
+    if current:
+        parts.append("\n".join(current))
+    return parts
+
+
+def _telegram_payloads(subject: str, body: str) -> list[tuple[str, str]]:
+    """(html, plain) message bodies — one pair per chunk Telegram will accept."""
+    chunks = _split_message(body)
+    total = len(chunks)
+    payloads: list[tuple[str, str]] = []
+    for index, chunk in enumerate(chunks, start=1):
+        header = subject if index == 1 else f"{subject} (cont.)"
+        counter = f"\n\n[{index}/{total}]" if total > 1 else ""
+        payloads.append(
+            (
+                f"<b>{html.escape(header)}</b>\n{html.escape(chunk)}{counter}",
+                f"{header}\n{chunk}{counter}",
+            )
+        )
+    return payloads
+
+
 def _send_telegram(subject: str, body: str) -> bool:
     token = _env("SAU_ALERT_TELEGRAM_BOT_TOKEN")
     chat = _env("SAU_ALERT_TELEGRAM_CHAT_ID")
@@ -84,32 +140,31 @@ def _send_telegram(subject: str, body: str) -> bool:
     # to deliver. Send HTML with escaped content (only < > & are special, and we
     # escape them) and fall back to unformatted text if the API still rejects
     # the payload — delivery matters more than the bold subject.
-    html_text = f"<b>{html.escape(subject)}</b>\n{html.escape(body)}"
-    plain_text = f"{subject}\n{body}"
     sent = False
     for chat_id in _split_recipients(chat):
-        resp = requests.post(
-            url,
-            json={
-                "chat_id": chat_id,
-                "text": html_text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            },
-            timeout=30,
-        )
-        if resp.status_code == 400:
+        for html_text, plain_text in _telegram_payloads(subject, body):
             resp = requests.post(
                 url,
                 json={
                     "chat_id": chat_id,
-                    "text": plain_text,
+                    "text": html_text,
+                    "parse_mode": "HTML",
                     "disable_web_page_preview": True,
                 },
                 timeout=30,
             )
-        resp.raise_for_status()
-        sent = True
+            if resp.status_code == 400:
+                resp = requests.post(
+                    url,
+                    json={
+                        "chat_id": chat_id,
+                        "text": plain_text,
+                        "disable_web_page_preview": True,
+                    },
+                    timeout=30,
+                )
+            resp.raise_for_status()
+            sent = True
     return sent
 
 
