@@ -9,6 +9,15 @@ services:
     pull_policy: always
     container_name: social-auto-upload
     restart: always
+    # Docker's default json-file driver never rotates, and `docker logs` already
+    # hangs on this box trying to read the result. Cap it so container output
+    # can't quietly eat the disk; anything worth reading goes to ./logs, which
+    # logrotate manages.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Watchtower:
     #  * `com.centurylinklabs.watchtower.enable=true` opts the container in
     #    to Watchtower polling (the host already runs `Watchtower` with
