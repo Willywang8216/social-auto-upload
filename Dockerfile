@@ -33,6 +33,16 @@ RUN apt-get update \
 
 COPY . .
 
+# Fail the BUILD if any Python file does not compile under this image's own
+# interpreter. The build previously never checked that the app could even be
+# imported, so a syntax error that only the deployment's Python rejects shipped
+# as an image and crash-looped the live container 18 times: an f-string with
+# nested same-type quotes is legal on 3.12 (PEP 701) but fatal on 3.10, and the
+# developer venv here is 3.12. compileall catches exactly that class in seconds,
+# before the image is ever pushed.
+RUN python3 -m compileall -q -x '(node_modules|sau_frontend)' . \
+    || (echo "FATAL: python syntax check failed" && exit 1)
+
 # Copy the built SPA into the exact path Flask prefers first.
 COPY --from=builder /app/dist /app/sau_frontend/dist
 

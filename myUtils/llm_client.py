@@ -191,7 +191,8 @@ def _image_content_part(source):
                 return None
             suffix = path.suffix.lower().lstrip(".") or "jpeg"
             mime = "image/jpeg" if suffix in {"jpg", "jpeg"} else f"image/{suffix}"
-            url = f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode("ascii")}"
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            url = f"data:{mime};base64,{encoded}"
         return {"type": "image_url", "image_url": {"url": url}}
     except Exception:  # noqa: BLE001
         return None
