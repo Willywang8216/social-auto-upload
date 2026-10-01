@@ -258,3 +258,11 @@
 - **修正上一輪的判斷：** 用 `POST /accounts/batch/check-connections`（body `{"accountIds":[…]}`）實測，`光光`(id 103) 目前回 **`status: "ok"`**——它的 **cookie 仍然有效**，所以當晚的 4 筆排程其實會正常發出去。先前從「token 2026-09-11 過期」推論「今晚一定失敗」是錯的：**cookie 模式發文不需要那個 token**。
 - **因此「一週就過期」的精確描述是：** cookie 死掉的那一刻之前都正常，死掉之後**不會有任何自動救援**（`_is_account_stale()` 明文跳過 cookie 型 Twitter），而且**沒有任何前置訊號**——token 過期時間完全不能預測 cookie 何時失效。帳號上還有 **136 筆 pending targets（到 2026-11-22）**，所以 cookie 一死就是連續失敗＋大量告警，直到重新以 OAuth 連接。**結論不變：改用 OAuth 重連才是根治**，但不急（沒有當晚的死線）。
 - **工具備註：** 這個 check-connections 端點只支援 **Facebook／Instagram／Threads／Telegram／Discord／Twitter**；YouTube（＝id 108）會回 "Connection check is implemented only for …" 的 error，不代表帳號壞掉。要判斷某個帳號「現在到底能不能發」，這是最好用的工具（它會實際打平台 API 驗證，且只讀）。
+
+## Agent handoff：修好「大量失敗」的兩個真 bug（2026-10-01 第十輪）
+
+- **媒體還原的路徑前綴 bug（`80e74e0`）——使用者的直覺是對的：檔案一直在 Google Drive 上。** `file_records` 對同一份媒體有**兩種慣例**：裸的相對路徑（`_batch1/x.mp4`，307 筆）與帶 `videoFile/` 前綴（`videoFile/_batch1/x.mp4`，88 筆）。而 `worker._record_for()` 只用裸的形式查詢，於是所有帶前綴的紀錄都回 "no file record"，target 以 `MediaRestoreError` 永久失敗——即使 `storage_key` 早已登記、檔案在 Drive 上。修法：裸查詢 miss 時再用 `videoFile/ + rel` 查一次。**已在正式容器內做到端到端驗證**：一個原本不存在的 artifact 被從 Drive 還原成 83,030,094 bytes。修好後 2,038 個 target 可還原、**125 個已永久失敗的可重新排入**。
+- **Twitter 媒體上傳 401 的真正原因：缺 `media.write` scope（`db9ca3f`）。** 診斷方法值得記下來——**直接拿存下來的 access token 打 Twitter**：`GET /2/users/me` 回 **200**（token 有效、scope 也對得上），但媒體上傳端點 `upload.twitter.com/1.1/media/upload.json`（`prepared_publishers.py` 的 `X_UPLOAD_URL`）對**沒有 `media.write`** 的 OAuth2 user token 一律回 `401 Invalid or expired token (code 89)`——**連剛重授權一分鐘的帳號也一樣**，所以看起來像「重授權沒用」，其實是 app 從來沒要這個 scope。`myUtils/x_auth.py` 的 `DEFAULT_SCOPES` 已加上 `media.write`；**既有帳號必須重新授權一次**（scope 變更只對新的同意生效）。
+- **IG/Threads 容器等待由 90s 放寬到 180s（`ce89d94`）。** `_wait_for_container_status(timeout=...)` 原本 90 秒；Meta 轉碼經常超過，於是 threads/instagram target 以 "not ready after 90s" 失敗（3/3 才死，或靠重試才過）。容器還在處理是常態、不是錯誤，等待成本遠低於一個死掉的 target。
+- **仍然存在、已定位但未修的缺口：** `generated/` 的產物**既沒有 file_records 紀錄、也沒有對應的 storage backend**，所以一旦本機檔案被刪就完全無法還原（目前約 37 個檔案、約 1,021 個 target 引用，且**沒有任何程式碼在保護或登記它們**）。要修就得讓 generated 產物在上傳/刪除前先登記（或保留到發佈完成），這是獨立且需要設計的變更。
+- **`account:124`（nw X）是 `twitterAuthType: cookie`**，走瀏覽器自動化發文，失敗訊息是 X 網頁沒渲染出媒體輸入（timeout），和 API 路徑無關；改用 OAuth 重連（搭配上面的 scope 修正）才是它的解法。
