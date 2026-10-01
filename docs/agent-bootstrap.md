@@ -206,3 +206,18 @@
 - **修法：** 改傳 `str(target.relative_to(base_dir))`（上方的 containment 檢查已保證安全）。新增 `tests/test_sau_backend.py::GetFileServingTests` 5 個測試（巢狀／深層／根目錄／traversal 仍拒絕／缺檔仍 404）；已用「暫時還原舊行」驗證測試真的會抓到（2 個紅、還原後 5 個綠）。commit `5004c11`。
 - **教訓（為什麼之前所有檢查都沒看到）：** entity payload 正確、mock API 的 UI 測試全過、單元測試全過 —— 只有**用瀏覽器打開「已部署的正式站 + 真實資料」**才會打到真正的檔案服務路徑。之後驗證這類「畫面壞掉」問題，請愛用 `live-verify.cjs` 這種對正式站跑真實資料的方式（本次就是這樣才發現）。正式站修復後：同樣那 7 張圖從全 404 變成 **0 個 4xx**，live 檢查 10/10 通過。
 - **部署紀錄：** commit `fd53811` → image `b5192f147b5d`；commit `5004c11` → image `122ceaa21682`。兩次都以 one-shot Watchtower（需掛憑證 config，見上一節）套用，套用前都先確認 `publish_job_targets` 沒有 running/retrying，容器 `health=healthy` 且 revision label 正確。
+
+## Agent handoff：sau-inbox 檔案、每日 TG digest（2026-10-01 第四輪）
+
+- **`sau-inbox/` 的檔案各是什麼（有人一度以為是殘留垃圾，先查再刪）：**
+  - `.sau-inbox-scan-*`：`watch.py` 每次執行的 `tempfile.mkdtemp`（watch.py:287），watch.py 也會清掉遺留的（:284）→ **短暫、自我清理**，不要手動刪（可能正在掃描中）。
+  - `state.lock` / `.watch-run.lock`：**flock 檔**（0 bytes 是設計）（watch.py:144 / `_state_lock`）→ **絕對不要刪**。刪掉正在被持有的鎖檔會讓下一個 run 在**新的 inode** 上取得「同一把」鎖 → 兩個 watcher 同時跑。
+  - `watch.log`：由 **`/etc/cron.d/sau-inbox-watch`（每分鐘一次）** `watch.py --once` 追加 → 約 1.4 MB/天，原本無輪替。已加 logrotate stanza（`size 2M`、rotate 3、copytruncate）到 `/home/will/.config/logrotate/logrotate.conf`，並把現有檔案由 2.6 MB 裁到 28 KB。
+  - `sync.log`：來自 **`/etc/cron.d/sau-inbox-sync.disabled-20260926`**（cron 會忽略檔名含 `.` 的檔案 → 早已停用）→ 已刪。
+  - `~/sau_debug.sh`：368 bytes 的 **NUL 垃圾**、無人引用 → 已刪。
+  - 其餘（`both/ msl/ nw/ sw/ teaching/ _pub/ tests/`、`watch.py`、`thumb.py`、`gen_title.py`、`manual_platforms.py`、`state.json`）都是工具本體，別動。
+- **每日 TG digest 以前根本不會送達（三個獨立原因，都已修）：**
+  1. **沒有任何排程。** 模組刻意不自帶 scheduler。已加入 crontab（`CRON_TZ=Asia/Taipei`）：`0 9 * * * sudo docker exec -w /app social-auto-upload python3 -m myUtils.publish_digest`（修改前已備份 crontab，42→43 行）。
+  2. **UI 連結是關掉的。** digest 與 worker 警報只讀 `SAU_PUBLIC_APP_URL`（未設），而本機的來源存在 `SAU_PUBLIC_BASE_URL`。新增 `ops_alerts.public_app_origin()`（`SAU_PUBLIC_APP_URL`／CLI `--app-url` 優先，回退 `SAU_PUBLIC_BASE_URL`，永不猜網域）。修好後連結長這樣：`link: https://socialupload.iamwillywang.com/#/publish/queue?entity=mg-1863`。
+  3. **超過 Telegram 4096 字上限 → 被靜默丟棄。** digest 平常 5,586 字（每個排程目標一行）；`sendMessage` 回 400，而 alerting 是 best-effort，只留一行 log，digest 回報 `sender returned false`。`ops_alerts._split_message()` / `_telegram_payloads()` 現在按行切塊（單行過長才硬切）、在 HTML escape **之前**切（避免切斷 entity）、並加上 `[i/n]` 編號。**這三個都要靠「真的送一則」才會發現，`--dry-run` 完全看不出來。**
+- **教訓：** alerting「best-effort、失敗只記 log」的設計，讓這條通道可以無聲地死掉好幾個月。日後動 alert 相關程式，請用真實通道各送一次短訊息與長訊息驗證。
