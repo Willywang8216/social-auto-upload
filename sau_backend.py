@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Queue
@@ -3251,8 +3251,7 @@ def _ensure_file_record_for_path(file_path: str, *, db_path: Path) -> int:
 
 
 def _load_media_group_files(media_group_id: int, *, db_path: Path) -> list[dict]:
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with _entity_read_conn(db_path) as conn:
         rows = conn.execute(
             """
             SELECT
@@ -3263,7 +3262,10 @@ def _load_media_group_files(media_group_id: int, *, db_path: Path) -> list[dict]
                 mgi.sort_order,
                 fr.filename,
                 fr.file_path,
-                fr.filesize
+                fr.filesize,
+                fr.storage_key,
+                fr.storage_backend_id,
+                fr.storage_cdn_url
             FROM media_group_items AS mgi
             JOIN file_records AS fr ON fr.id = mgi.file_record_id
             WHERE mgi.media_group_id = ?
@@ -7360,15 +7362,9 @@ def _is_public_https_url(url: str | None) -> bool:
         return bool(host and "." in host and not host.endswith("."))
 
 
-def _media_preview_url(file_path: str | None) -> str | None:
-    """A same-origin ``/getFile`` URL for a file_record, or ``None``.
-
-    Derived *only* from the record's ``file_path`` and emitted only when it
-    resolves inside ``videoFile/``. A bare name relative to the media root and
-    an absolute path that lives under it both yield a relative URL; an absolute
-    path outside it (or traversal-shaped input) yields ``None`` so no local
-    path is ever exposed.
-    """
+def _media_local_relative(file_path: str | None) -> Path | None:
+    """The file's path relative to ``videoFile/``, or ``None`` when the stored
+    path is not one (absolute path outside it, traversal shape, or empty)."""
     resolved = _resolve_video_file_path_safely(file_path)
     if resolved is None:
         return None
@@ -7378,6 +7374,37 @@ def _media_preview_url(file_path: str | None) -> str | None:
     except ValueError:
         return None
     if not relative.name or relative.name in {".", ".."}:
+        return None
+    return relative
+
+
+def _media_local_available(file_path: str | None) -> tuple[Path | None, bool]:
+    """(relative path, is the file actually on this box right now).
+
+    The offloader moves media to Drive and deletes the local copy, so a record
+    can point at a path that no longer exists. Callers need to tell "no
+    preview URL because the path is unsafe" from "no bytes to show".
+    """
+    relative = _media_local_relative(file_path)
+    if relative is None:
+        return None, False
+    try:
+        return relative, (Path(BASE_DIR) / "videoFile" / relative).is_file()
+    except OSError:
+        return relative, False
+
+
+def _media_preview_url(file_path: str | None) -> str | None:
+    """A same-origin ``/getFile`` URL for a file_record, or ``None``.
+
+    Derived *only* from the record's ``file_path`` and emitted only when it
+    resolves inside ``videoFile/``. A bare name relative to the media root and
+    an absolute path that lives under it both yield a relative URL; an absolute
+    path outside it (or traversal-shaped input) yields ``None`` so no local
+    path is ever exposed.
+    """
+    relative = _media_local_relative(file_path)
+    if relative is None:
         return None
     return url_for("get_file", filename=relative.as_posix())
 
@@ -7390,6 +7417,36 @@ def _redact_entity_error(value: str | None) -> str | None:
     text = re.sub(r'(?i)(token|secret|password|api[_-]?key|authorization)=[^&\s]+', r'\1=[redacted]', text)
     text = re.sub(r'(?i)bearer\s+[A-Za-z0-9._-]+', 'Bearer [redacted]', text)
     return text
+
+
+@app.after_request
+def _redact_credentials_in_error_bodies(response):
+    """Scrub credentials out of an error body on the way out.
+
+    Handlers answer failures with ``str(exc)``, and an exception raised by an
+    HTTP client carries the whole request URL — for an OAuth endpoint that URL
+    includes ``client_secret``, so a failed Meta refresh was handing the caller
+    the app secret verbatim. Only error responses are rewritten and only their
+    ``msg``, so a large success payload is never touched or rescanned.
+    """
+    try:
+        if response.status_code < 400 or not response.is_json:
+            return response
+        payload = response.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return response
+        message = payload.get("msg")
+        if not isinstance(message, str) or not message:
+            return response
+        redacted = _redact_entity_error(message)
+        if redacted == message:
+            return response
+        payload["msg"] = redacted
+        response.set_data(json.dumps(payload, ensure_ascii=False))
+        response.headers["Content-Length"] = str(len(response.get_data()))
+    except Exception:  # noqa: BLE001 — never break a response over redaction
+        pass
+    return response
 
 
 def _sanitize_reference(ref: str | None) -> str:
@@ -7420,33 +7477,7 @@ def _media_type_for_name(name: str | None) -> str:
     return "file"
 
 
-def _entity_profile_payload(
-    profile_id: int | None, *, db_path: Path, workspace_id: str | None
-) -> dict | None:
-    if profile_id is None:
-        return None
-    try:
-        profile = profile_registry.get_profile(
-            int(profile_id), workspace_id=workspace_id, db_path=db_path
-        )
-    except (LookupError, ValueError, TypeError):
-        return {"id": int(profile_id)}
-    return {"id": profile.id, "name": profile.name, "slug": profile.slug}
-
-
-def _entity_account_payload(
-    account_id: int | str, *, db_path: Path, workspace_id: str | None
-) -> dict:
-    try:
-        numeric_id = int(account_id)
-    except (TypeError, ValueError):
-        return {"id": None, "name": str(account_id)}
-    try:
-        account = profile_registry.get_account(
-            numeric_id, workspace_id=workspace_id, db_path=db_path
-        )
-    except (LookupError, ValueError, TypeError):
-        return {"id": numeric_id}
+def _account_payload_from_account(account) -> dict:
     return {
         "id": account.id,
         "name": (account.nickname or account.account_name or "").strip(),
@@ -7455,26 +7486,267 @@ def _entity_account_payload(
     }
 
 
+def _profile_payload_from_profile(profile) -> dict:
+    return {"id": profile.id, "name": profile.name, "slug": profile.slug}
+
+
+def _entity_read_conn(db_path: Path) -> sqlite3.Connection:
+    """Row-dict SQLite connection for the entity read path.
+
+    Waits out the publish worker's writes instead of failing the request
+    outright ("database is locked"), mirroring the busy timeout the store
+    modules' ``_connect`` helpers set.
+    """
+    conn = sqlite3.connect(db_path, timeout=15)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 15000")
+    return conn
+
+
+def _load_media_group_files_for_groups(media_group_ids, *, db_path: Path) -> dict[int, list[dict]]:
+    """Batch form of :func:`_load_media_group_files`; every id gets a list."""
+    ids = sorted({int(media_group_id) for media_group_id in media_group_ids})
+    grouped: dict[int, list[dict]] = {media_group_id: [] for media_group_id in ids}
+    if not ids:
+        return grouped
+    with _entity_read_conn(db_path) as conn:
+        for start in range(0, len(ids), 400):
+            chunk = ids[start:start + 400]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"""
+                SELECT
+                    mgi.id,
+                    mgi.media_group_id,
+                    mgi.file_record_id,
+                    mgi.role,
+                    mgi.sort_order,
+                    fr.filename,
+                    fr.file_path,
+                    fr.filesize,
+                    fr.storage_key,
+                    fr.storage_backend_id,
+                    fr.storage_cdn_url
+                FROM media_group_items AS mgi
+                JOIN file_records AS fr ON fr.id = mgi.file_record_id
+                WHERE mgi.media_group_id IN ({placeholders})
+                ORDER BY mgi.media_group_id, mgi.sort_order, mgi.id
+                """,
+                chunk,
+            ).fetchall()
+            for row in rows:
+                grouped.setdefault(row["media_group_id"], []).append(
+                    {key: row[key] for key in row.keys()}
+                )
+    return grouped
+
+
+class _EntityLoadCache:
+    """Per-request memo + batch preloader for the entity builders.
+
+    The queue/calendar endpoints hydrate a few hundred jobs, campaigns, posts
+    and targets and then resolve the same handful of accounts and profiles
+    over and over — one measured request did 2102 account lookups for just 21
+    distinct accounts. Every accessor here is memoised and :meth:`preload`
+    fills them with one query per table, so an entity build costs a handful of
+    queries instead of one fresh SQLite connection per row.
+    """
+
+    def __init__(self, *, db_path: Path, workspace_id: str | None) -> None:
+        self.db_path = db_path
+        self.workspace_id = workspace_id
+        self._account_payloads: dict[int, dict] = {}
+        self._profile_payloads: dict[int, dict | None] = {}
+        self._targets: dict[int, list] = {}
+        self._posts: dict[int, list] = {}
+        self._artifacts: dict[int, list] = {}
+        self._media_groups: dict[int, object | None] = {}
+        self._media_group_files: dict[int, list[dict]] = {}
+        self._storage_backends: dict[int, dict] | None = None
+
+    def storage_backend(self, backend_id: int) -> dict | None:
+        """storage_backends row by id; the table is tiny, so one query fills all."""
+        if self._storage_backends is None:
+            loaded: dict[int, dict] = {}
+            with _entity_read_conn(self.db_path) as conn:
+                for row in conn.execute(
+                    "SELECT id, provider, bucket, endpoint FROM storage_backends"
+                ):
+                    loaded[int(row["id"])] = {key: row[key] for key in row.keys()}
+            self._storage_backends = loaded
+        return self._storage_backends.get(int(backend_id))
+
+    def account_payload(self, account_id: int | str) -> dict:
+        """Read-only shared dict; copy before mutating the result."""
+        try:
+            numeric_id = int(account_id)
+        except (TypeError, ValueError):
+            return {"id": None, "name": str(account_id)}
+        if numeric_id not in self._account_payloads:
+            try:
+                account = profile_registry.get_account(
+                    numeric_id, workspace_id=self.workspace_id, db_path=self.db_path
+                )
+            except (LookupError, ValueError, TypeError):
+                self._account_payloads[numeric_id] = {"id": numeric_id}
+            else:
+                self._account_payloads[numeric_id] = _account_payload_from_account(account)
+        return self._account_payloads[numeric_id]
+
+    def profile_payload(self, profile_id: int | None) -> dict | None:
+        if profile_id is None:
+            return None
+        numeric_id = int(profile_id)
+        if numeric_id not in self._profile_payloads:
+            try:
+                profile = profile_registry.get_profile(
+                    numeric_id, workspace_id=self.workspace_id, db_path=self.db_path
+                )
+            except (LookupError, ValueError, TypeError):
+                self._profile_payloads[numeric_id] = {"id": numeric_id}
+            else:
+                self._profile_payloads[numeric_id] = _profile_payload_from_profile(profile)
+        return self._profile_payloads[numeric_id]
+
+    def targets_for_job(self, job_id: int) -> list:
+        if job_id not in self._targets:
+            self._targets[job_id] = job_runtime.list_targets(job_id, db_path=self.db_path)
+        return self._targets[job_id]
+
+    def posts_for_campaign(self, campaign_id: int) -> list:
+        if campaign_id not in self._posts:
+            self._posts[campaign_id] = campaign_store.list_campaign_posts(
+                campaign_id, db_path=self.db_path
+            )
+        return self._posts[campaign_id]
+
+    def artifacts_for_campaign(self, campaign_id: int) -> list:
+        if campaign_id not in self._artifacts:
+            self._artifacts[campaign_id] = campaign_store.list_campaign_artifacts(
+                campaign_id, db_path=self.db_path
+            )
+        return self._artifacts[campaign_id]
+
+    def media_group(self, media_group_id: int):
+        if media_group_id not in self._media_groups:
+            try:
+                group = media_group_store.get_media_group(
+                    media_group_id, workspace_id=self.workspace_id, db_path=self.db_path
+                )
+            except (LookupError, ValueError, TypeError):
+                group = None
+            self._media_groups[media_group_id] = group
+        return self._media_groups[media_group_id]
+
+    def media_group_files(self, media_group_id: int) -> list[dict]:
+        if media_group_id not in self._media_group_files:
+            self._media_group_files[media_group_id] = _load_media_group_files(
+                media_group_id, db_path=self.db_path
+            )
+        return self._media_group_files[media_group_id]
+
+    def preload(self, *, jobs, campaigns) -> None:
+        """Fill every cache with batched queries ahead of the build loop."""
+        job_ids = [job.id for job in jobs]
+        if job_ids:
+            self._targets.update(
+                job_runtime.list_targets_for_jobs(job_ids, db_path=self.db_path)
+            )
+
+        campaign_ids = [campaign.id for campaign in campaigns]
+        if campaign_ids:
+            self._posts.update(
+                campaign_store.list_posts_for_campaigns(campaign_ids, db_path=self.db_path)
+            )
+            self._artifacts.update(
+                campaign_store.list_artifacts_for_campaigns(campaign_ids, db_path=self.db_path)
+            )
+
+        media_group_ids = sorted({
+            campaign.media_group_id for campaign in campaigns
+            if campaign.media_group_id is not None
+        })
+        if media_group_ids:
+            self._media_groups.update(
+                media_group_store.get_media_groups_by_ids(
+                    media_group_ids, workspace_id=self.workspace_id, db_path=self.db_path
+                )
+            )
+            for media_group_id in media_group_ids:
+                self._media_groups.setdefault(media_group_id, None)
+            self._media_group_files.update(
+                _load_media_group_files_for_groups(media_group_ids, db_path=self.db_path)
+            )
+
+        # Accounts are referenced by every post's account list and every
+        # target's account:<id> ref, so both sources feed one batch query.
+        account_ids: set[int] = set()
+        for posts in self._posts.values():
+            for post in posts:
+                for account_id in (post.account_ids or []):
+                    try:
+                        account_ids.add(int(account_id))
+                    except (TypeError, ValueError):
+                        continue
+        for targets in self._targets.values():
+            for target in targets:
+                ref = target.account_ref or ""
+                if isinstance(ref, str) and ref.startswith("account:"):
+                    raw = ref.split(":", 1)[1]
+                    if raw.isdigit():
+                        account_ids.add(int(raw))
+        if account_ids:
+            for account_id, account in profile_registry.get_accounts_by_ids(
+                account_ids, workspace_id=self.workspace_id, db_path=self.db_path
+            ).items():
+                self._account_payloads[account_id] = _account_payload_from_account(account)
+            for account_id in account_ids:
+                self._account_payloads.setdefault(account_id, {"id": account_id})
+
+        profile_ids = {
+            campaign.profile_id for campaign in campaigns
+            if campaign.profile_id is not None
+        }
+        profile_ids.update(job.profile_id for job in jobs if job.profile_id is not None)
+        if profile_ids:
+            for profile_id, profile in profile_registry.get_profiles_by_ids(
+                profile_ids, workspace_id=self.workspace_id, db_path=self.db_path
+            ).items():
+                self._profile_payloads[profile_id] = _profile_payload_from_profile(profile)
+            for profile_id in profile_ids:
+                self._profile_payloads.setdefault(profile_id, {"id": profile_id})
+
+
+def _entity_profile_payload(
+    profile_id: int | None, *, cache: "_EntityLoadCache"
+) -> dict | None:
+    return cache.profile_payload(profile_id)
+
+
+def _entity_account_payload(account_id: int | str, *, cache: "_EntityLoadCache") -> dict:
+    return cache.account_payload(account_id)
+
+
 def _entity_account_ref_payload(
-    account_ref: str | None, *, db_path: Path, workspace_id: str | None
+    account_ref: str | None, *, cache: "_EntityLoadCache"
 ) -> dict:
     """Resolve an ``account:<id>`` target ref to a readable account payload."""
     if isinstance(account_ref, str) and account_ref.startswith("account:"):
         raw = account_ref.split(":", 1)[1]
         if raw.isdigit():
-            payload = _entity_account_payload(
-                int(raw), db_path=db_path, workspace_id=workspace_id
-            )
+            # Copy: the cache hands out one shared dict per account, and the
+            # ``ref`` key below must not leak into other callers' payloads.
+            payload = dict(cache.account_payload(int(raw)))
             payload["ref"] = account_ref
             return payload
     return {}
 
 
 def _entity_target_payload(
-    target: "job_runtime.Target", *, db_path: Path, workspace_id: str | None
+    target: "job_runtime.Target", *, cache: "_EntityLoadCache"
 ) -> dict:
     account = _entity_account_ref_payload(
-        target.account_ref, db_path=db_path, workspace_id=workspace_id
+        target.account_ref, cache=cache
     )
     fallback_ref = _sanitize_reference(target.account_ref)
     return {
@@ -7493,8 +7765,41 @@ def _entity_target_payload(
     }
 
 
-def _entity_media_item(row: dict) -> dict:
-    """A media group item (or legacy file reference) with a safe preview URL."""
+def _media_archive_payload(row: dict, *, cache: "_EntityLoadCache") -> dict | None:
+    """Where the offloader put this file, or ``None`` when it never moved.
+
+    A queue card needs to explain *why* there is no thumbnail. The remote path
+    itself is deliberately not echoed (it describes our storage layout), so
+    this names the storage provider and, for Drive, links a filename search the
+    operator can follow in a browser.
+    """
+    key = row.get("storage_key")
+    backend_id = row.get("storage_backend_id")
+    if not key or backend_id is None:
+        return None
+    backend = cache.storage_backend(int(backend_id)) or {}
+    provider = backend.get("provider") or "remote"
+    bucket = str(backend.get("bucket") or "")
+    payload: dict = {"archived": True, "provider": provider}
+    filename = row.get("filename") or Path(str(key)).name
+    if provider == "rclone" and filename and "drive" in bucket.lower():
+        payload["label"] = "Google Drive"
+        payload["openUrl"] = (
+            "https://drive.google.com/drive/search?q=" + quote(filename)
+        )
+    return payload
+
+
+def _entity_media_item(row: dict, *, cache: "_EntityLoadCache") -> dict:
+    """A media group item (or legacy file reference) with safe media links.
+
+    ``previewUrl`` keeps its long-standing meaning (a same-origin URL derived
+    from the stored path — the path is expected to be a ``videoFile/`` record).
+    ``availableLocally`` says whether the bytes are still on this box, which is
+    what the UI needs to avoid rendering a broken thumbnail for a file the
+    offloader has moved to Drive, and ``publicUrl``/``archive`` describe where
+    it went instead.
+    """
     file_path = row.get("file_path")
     filename = row.get("filename") or (Path(file_path).name if file_path else "")
     item = {
@@ -7508,6 +7813,14 @@ def _entity_media_item(row: dict) -> dict:
     preview = _media_preview_url(file_path)
     if preview:
         item["previewUrl"] = preview
+    _relative, local_available = _media_local_available(file_path)
+    item["availableLocally"] = local_available
+    public_url = row.get("storage_cdn_url")
+    if _is_public_https_url(public_url):
+        item["publicUrl"] = public_url
+    archive = _media_archive_payload(row, cache=cache)
+    if archive:
+        item["archive"] = archive
     return item
 
 
@@ -7591,12 +7904,10 @@ def _rollup_entity_status(
     return "unknown"
 
 
-def _entity_job_payload(
-    job: "job_runtime.Job", *, db_path: Path, workspace_id: str | None
-) -> dict:
+def _entity_job_payload(job: "job_runtime.Job", *, cache: "_EntityLoadCache") -> dict:
     targets = [
-        _entity_target_payload(target, db_path=db_path, workspace_id=workspace_id)
-        for target in job_runtime.list_targets(job.id, db_path=db_path)
+        _entity_target_payload(target, cache=cache)
+        for target in cache.targets_for_job(job.id)
     ]
     return {
         "id": job.id,
@@ -7628,18 +7939,15 @@ def _build_media_group_entity(
     *,
     db_path: Path,
     workspace_id: str | None,
+    cache: "_EntityLoadCache | None" = None,
 ) -> dict:
     """One entity for a media group, folding in every campaign sharing it."""
-    try:
-        media_group = media_group_store.get_media_group(
-            media_group_id, workspace_id=workspace_id, db_path=db_path
-        )
-    except (LookupError, ValueError, TypeError):
-        media_group = None
+    cache = cache or _EntityLoadCache(db_path=db_path, workspace_id=workspace_id)
+    media_group = cache.media_group(media_group_id)
 
     media_items = [
-        _entity_media_item(row)
-        for row in _load_media_group_files(media_group_id, db_path=db_path)
+        _entity_media_item(row, cache=cache)
+        for row in cache.media_group_files(media_group_id)
     ]
 
     posts: list[dict] = []
@@ -7668,7 +7976,7 @@ def _build_media_group_entity(
             "publishedAt": campaign.published_at,
             "lastError": campaign.last_error,
         })
-        for post in campaign_store.list_campaign_posts(campaign.id, db_path=db_path):
+        for post in cache.posts_for_campaign(campaign.id):
             record_statuses.append(post.status)
             account_ids = post.account_ids or []
             post_payload = {
@@ -7678,9 +7986,7 @@ def _build_media_group_entity(
                 "platform": post.platform,
                 "accountIds": account_ids,
                 "accounts": [
-                    _entity_account_payload(
-                        account_id, db_path=db_path, workspace_id=workspace_id
-                    )
+                    _entity_account_payload(account_id, cache=cache)
                     for account_id in account_ids
                 ],
                 "status": post.status,
@@ -7691,11 +7997,11 @@ def _build_media_group_entity(
             }
             posts.append(post_payload)
             posts_by_id[post.id] = post_payload
-        for artifact in campaign_store.list_campaign_artifacts(campaign.id, db_path=db_path):
+        for artifact in cache.artifacts_for_campaign(campaign.id):
             artifacts.append(_entity_artifact_payload(artifact.to_dict()))
 
     jobs_payload = [
-        _entity_job_payload(job, db_path=db_path, workspace_id=workspace_id)
+        _entity_job_payload(job, cache=cache)
         for job in jobs
     ]
     job_statuses: list[str] = []
@@ -7742,25 +8048,18 @@ def _build_media_group_entity(
             else None
         ),
         "profileId": profile_id,
-        "profile": _entity_profile_payload(
-            profile_id, db_path=db_path, workspace_id=workspace_id
-        ),
+        "profile": _entity_profile_payload(profile_id, cache=cache),
         "profiles": [
             profile_payload
             for selected_profile_id in sorted({campaign.profile_id for campaign in campaigns})
-            if (profile_payload := _entity_profile_payload(selected_profile_id, db_path=db_path, workspace_id=workspace_id))
+            if (profile_payload := _entity_profile_payload(selected_profile_id, cache=cache))
         ],
         "platforms": sorted({post.get("platform") for post in posts if post.get("platform")}),
-        "destinations": [
-            {
-                "postId": post["id"], "profileId": post["profileId"],
-                "platform": post["platform"], "accounts": post["accounts"],
-                "copy": post["draft"], "scheduleAt": post["scheduledAt"],
-                "status": post["status"], "jobId": post["jobId"],
-                "targets": [target for job_entry in jobs_payload for target in job_entry["targets"] if target.get("fileRef") == f"campaign_post:{post['id']}"],
-            }
-            for post in posts
-        ],
+        # No "destinations" key: it restated posts[].draft and
+        # jobs[].targets[] a second time (~40% of the response body) and no
+        # client read it — the queue and calendar both build their own view
+        # from posts + jobs. If you reintroduce it, gate it behind a flag
+        # rather than paying for it on every list request.
         "campaignIds": [campaign.id for campaign in campaigns],
         "campaigns": campaigns_payload,
         "status": _rollup_entity_status(
@@ -7781,14 +8080,14 @@ def _file_records_for_refs(refs: list[str], *, db_path: Path) -> dict[str, dict]
     """Read-only lookup of file_records by exact file_path or basename."""
     found: dict[str, dict] = {}
     try:
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with _entity_read_conn(db_path) as conn:
             for ref in refs:
                 if not isinstance(ref, str) or not ref:
                     continue
                 row = conn.execute(
                     """
-                    SELECT id, filename, file_path, filesize
+                    SELECT id, filename, file_path, filesize,
+                           storage_key, storage_backend_id, storage_cdn_url
                     FROM file_records
                     WHERE file_path = ? OR filename = ?
                     LIMIT 1
@@ -7803,10 +8102,15 @@ def _file_records_for_refs(refs: list[str], *, db_path: Path) -> dict[str, dict]
 
 
 def _build_legacy_entity(
-    job: "job_runtime.Job", *, db_path: Path, workspace_id: str | None
+    job: "job_runtime.Job",
+    *,
+    db_path: Path,
+    workspace_id: str | None,
+    cache: "_EntityLoadCache | None" = None,
 ) -> dict:
     """One entity for a job with no campaign — keyed on its media reference."""
-    job_entry = _entity_job_payload(job, db_path=db_path, workspace_id=workspace_id)
+    cache = cache or _EntityLoadCache(db_path=db_path, workspace_id=workspace_id)
+    job_entry = _entity_job_payload(job, cache=cache)
     all_targets = job_entry["targets"]
 
     file_refs: list[str] = []
@@ -7827,7 +8131,10 @@ def _build_legacy_entity(
                 "filename": row.get("filename"),
                 "file_path": row.get("file_path"),
                 "filesize": row.get("filesize"),
-            }))
+                "storage_key": row.get("storage_key"),
+                "storage_backend_id": row.get("storage_backend_id"),
+                "storage_cdn_url": row.get("storage_cdn_url"),
+            }, cache=cache))
         else:
             media_items.append({
                 "fileRecordId": None,
@@ -7870,9 +8177,7 @@ def _build_legacy_entity(
         "mediaGroupId": None,
         "mediaGroup": None,
         "profileId": job.profile_id,
-        "profile": _entity_profile_payload(
-            job.profile_id, db_path=db_path, workspace_id=workspace_id
-        ),
+        "profile": _entity_profile_payload(job.profile_id, cache=cache),
         "campaignIds": [],
         "campaigns": [],
         "status": _rollup_entity_status(
@@ -7889,27 +8194,85 @@ def _build_legacy_entity(
     return _finalise_entity(entity, timestamps)
 
 
+def _next_month_key(value: str) -> str:
+    year, month = (int(part) for part in value.split("-", 1))
+    if month == 12:
+        return f"{year + 1:04d}-01-01"
+    return f"{year:04d}-{month + 1:02d}-01"
+
+
 def _load_publish_entity_jobs(
-    *, db_path: Path, workspace_id: str | None
+    *,
+    db_path: Path,
+    workspace_id: str | None,
+    profile_id: int | None = None,
+    job_statuses: set[str] | None = None,
+    month: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    date_value: str | None = None,
+    platforms: set[str] | None = None,
+    account_ids: set[int] | None = None,
 ) -> list["job_runtime.Job"]:
-    """Every scoped job, paged through list_jobs up to the scan ceiling."""
-    jobs: list["job_runtime.Job"] = []
-    page_cap = getattr(job_runtime, "LIST_JOBS_MAX_LIMIT", 500)
-    offset = 0
-    while len(jobs) < _ENTITY_JOB_SCAN_LIMIT:
-        page_limit = min(page_cap, _ENTITY_JOB_SCAN_LIMIT - len(jobs))
-        if page_limit < 1:
-            break
-        page = job_runtime.list_jobs(
-            limit=page_limit, offset=offset, workspace_id=workspace_id, db_path=db_path
+    """Load a bounded, SQL-filtered candidate page before hydrating targets."""
+    limit = min(_ENTITY_JOB_SCAN_LIMIT, getattr(job_runtime, "LIST_JOBS_MAX_LIMIT", 500))
+    clauses: list[str] = []
+    params: list = []
+    if workspace_id is not None:
+        clauses.append("j.workspace_id = ?")
+        params.append(workspace_id)
+    if profile_id is not None:
+        clauses.append("j.profile_id = ?")
+        params.append(profile_id)
+    if job_statuses:
+        # Entity status is a rollup of campaigns, posts, jobs and targets; the
+        # exact status filter remains after hydration to avoid false negatives.
+        pass
+    if platforms:
+        placeholders = ",".join("?" for _ in platforms)
+        clauses.append(f"j.platform IN ({placeholders})")
+        params.extend(sorted(platforms))
+    if account_ids:
+        placeholders = ",".join("?" for _ in account_ids)
+        clauses.append(
+            "j.id IN (SELECT t.job_id FROM publish_job_targets t "
+            "WHERE t.account_ref IN (" + placeholders + "))"
         )
-        if not page:
-            break
-        jobs.extend(page)
-        if len(page) < page_limit:
-            break
-        offset += len(page)
-    return jobs
+        params.extend(f"account:{account_id}" for account_id in sorted(account_ids))
+    if month or from_date or to_date or date_value:
+        schedule_clauses = ["t.job_id = j.id", "t.schedule_at IS NOT NULL", "t.schedule_at != ''"]
+        schedule_params = []
+        if month:
+            schedule_clauses.append("t.schedule_at >= ? AND t.schedule_at < ?")
+            schedule_params.extend((f"{month}-01", _next_month_key(month)))
+        if date_value:
+            schedule_clauses.append("t.schedule_at >= ? AND t.schedule_at < ?")
+            schedule_params.extend((date_value, (datetime.strptime(date_value, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")))
+        if from_date:
+            schedule_clauses.append("t.schedule_at >= ?")
+            schedule_params.append(from_date)
+        if to_date:
+            schedule_clauses.append("t.schedule_at < ?")
+            schedule_params.append((datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d"))
+        clauses.append(
+            "(j.id IN (SELECT t.job_id FROM publish_job_targets t WHERE "
+            + " AND ".join(schedule_clauses)
+            + "))"
+        )
+        params.extend(schedule_params)
+    query = "SELECT j.id FROM publish_jobs j"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY j.id DESC LIMIT ?"
+    params.append(limit)
+    with _entity_read_conn(db_path) as conn:
+        candidate_ids = [row[0] for row in conn.execute(query, params).fetchall()]
+
+    found = job_runtime.get_jobs_by_ids(
+        candidate_ids, workspace_id=workspace_id, db_path=db_path
+    )
+    # Keep the candidate query's newest-first order.
+    return [found[job_id] for job_id in candidate_ids if job_id in found]
 
 
 def _collect_publish_entities(
@@ -7917,6 +8280,13 @@ def _collect_publish_entities(
     db_path: Path,
     workspace_id: str | None,
     profile_id: int | None = None,
+    month: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    date_value: str | None = None,
+    job_statuses: set[str] | None = None,
+    platforms: set[str] | None = None,
+    account_ids: set[int] | None = None,
 ) -> list[dict]:
     """Build recent content entities from the newest queue window.
 
@@ -7924,7 +8294,18 @@ def _collect_publish_entities(
     ever submitted. The calendar and queue need current operational work, so we
     cap the loaded job/campaign set before hydrating details.
     """
-    all_jobs = _load_publish_entity_jobs(db_path=db_path, workspace_id=workspace_id)
+    all_jobs = _load_publish_entity_jobs(
+        db_path=db_path,
+        workspace_id=workspace_id,
+        profile_id=profile_id,
+        job_statuses=job_statuses,
+        date_value=date_value,
+        month=month,
+        from_date=from_date,
+        to_date=to_date,
+        platforms=platforms,
+        account_ids=account_ids,
+    )
     campaign_ids_from_jobs = set()
     for job in all_jobs:
         payload = job.payload if isinstance(job.payload, dict) else {}
@@ -7937,7 +8318,7 @@ def _collect_publish_entities(
 
     # Also include recent prepared/draft campaigns which have not produced jobs.
     # The queue list is an operational view, not an unbounded campaign archive.
-    with sqlite3.connect(db_path) as conn:
+    with _entity_read_conn(db_path) as conn:
         if workspace_id is None:
             recent_rows = conn.execute(
                 "SELECT id FROM campaigns ORDER BY id DESC LIMIT ?",
@@ -7950,14 +8331,14 @@ def _collect_publish_entities(
             ).fetchall()
     campaign_ids_from_jobs.update(int(row[0]) for row in recent_rows)
 
-    campaigns_by_id = {}
-    for campaign_id in campaign_ids_from_jobs:
-        try:
-            campaign = campaign_store.get_campaign(campaign_id, workspace_id=workspace_id, db_path=db_path)
-        except (LookupError, ValueError, TypeError):
-            continue
-        if profile_id is None or campaign.profile_id == profile_id:
-            campaigns_by_id[campaign.id] = campaign
+    loaded_campaigns = campaign_store.get_campaigns_by_ids(
+        campaign_ids_from_jobs, workspace_id=workspace_id, db_path=db_path
+    )
+    campaigns_by_id = {
+        campaign.id: campaign
+        for campaign in loaded_campaigns.values()
+        if profile_id is None or campaign.profile_id == profile_id
+    }
 
     jobs_by_group: dict[int, list] = {}
     legacy_jobs: list = []
@@ -7978,6 +8359,12 @@ def _collect_publish_entities(
     for campaign in campaigns_by_id.values():
         campaigns_by_group.setdefault(campaign.media_group_id, []).append(campaign)
 
+    # One shared loader for the whole request: batch every table up front so
+    # the builders below read from memory instead of opening a connection per
+    # row (that per-row pattern is what made these views take seconds).
+    cache = _EntityLoadCache(db_path=db_path, workspace_id=workspace_id)
+    cache.preload(jobs=all_jobs, campaigns=list(campaigns_by_id.values()))
+
     entities: list[dict] = []
     for media_group_id, group_campaigns in campaigns_by_group.items():
         entities.append(_build_media_group_entity(
@@ -7986,9 +8373,12 @@ def _collect_publish_entities(
             jobs_by_group.get(media_group_id, []),
             db_path=db_path,
             workspace_id=workspace_id,
+            cache=cache,
         ))
     for job in legacy_jobs:
-        entities.append(_build_legacy_entity(job, db_path=db_path, workspace_id=workspace_id))
+        entities.append(_build_legacy_entity(
+            job, db_path=db_path, workspace_id=workspace_id, cache=cache
+        ))
     return entities
 
 
@@ -8084,8 +8474,18 @@ def publish_entities_list():
     limit = min(limit, _ENTITY_MAX_LIMIT)
     offset = max(0, offset)
 
+    started_at = time.perf_counter()
     entities = _collect_publish_entities(
-        db_path=db_path, workspace_id=workspace_id, profile_id=profile_id
+        db_path=db_path,
+        workspace_id=workspace_id,
+        profile_id=profile_id,
+        month=month,
+        from_date=from_date,
+        to_date=to_date,
+        date_value=date_value,
+        job_statuses=statuses if any(status in {"pending", "running", "failed", "cancelled", "succeeded"} for status in statuses) else None,
+        platforms=platforms or None,
+        account_ids=account_ids or None,
     )
 
     if month is not None:
@@ -8094,6 +8494,7 @@ def publish_entities_list():
         entities = [e for e in entities if e.get("status") in statuses]
     entities = [entity for entity in entities if _entity_matches(entity, date_value=date_value, from_date=from_date, to_date=to_date, platforms=platforms, profile_ids=profile_ids, account_ids=account_ids, keyword=keyword)]
 
+    scanned_entities = len(entities)
     entities.sort(key=lambda e: (e.get("_sortAt") or "", e.get("entityId") or ""), reverse=True)
     total = len(entities)
     page = entities[offset:offset + limit]
@@ -8103,6 +8504,27 @@ def publish_entities_list():
         entity.pop("_timestamps", None)
         entity.pop("_sortAt", None)
         items.append(entity)
+
+    current_app.logger.info(
+        "publish_entities_list candidates=%d results=%d limit=%d offset=%d elapsed_ms=%.2f filters=%s",
+        scanned_entities,
+        total,
+        limit,
+        offset,
+        (time.perf_counter() - started_at) * 1000,
+        ",".join(sorted({
+            name for name, enabled in (
+                ("month", bool(month)),
+                ("date", bool(date_value)),
+                ("range", bool(from_date or to_date)),
+                ("status", bool(statuses)),
+                ("platform", bool(platforms)),
+                ("profile", bool(profile_ids or profile_id)),
+                ("account", bool(account_ids)),
+                ("keyword", bool(keyword)),
+            ) if enabled
+        })),
+    )
 
     return jsonify({
         "code": 200,

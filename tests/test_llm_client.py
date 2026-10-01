@@ -33,6 +33,17 @@ class _FakeSession:
         return _FakeResponse(self.payload)
 
 
+def _llm_env(**overrides):
+    """A single-endpoint LLM env with the *pool* explicitly switched off.
+
+    The client prefers SAU_LLM_POOL over the legacy SAU_LLM_* variables (see
+    _load_pool), so on a box that configures a pool the legacy vars are ignored,
+    the request goes to the pooled endpoint, and these URL assertions fail for
+    a reason that has nothing to do with the code under test.
+    """
+    return patch.dict(os.environ, {"SAU_LLM_POOL": "", **overrides}, clear=False)
+
+
 class LlmClientTests(unittest.TestCase):
     def test_generate_chat_completion_parses_json_content(self) -> None:
         session = _FakeSession(
@@ -42,13 +53,9 @@ class LlmClientTests(unittest.TestCase):
                 ]
             }
         )
-        with patch.dict(
-            os.environ,
-            {
-                "SAU_LLM_API_BASE_URL": "https://llm.example.com",
-                "SAU_LLM_API_KEY": "test-key",
-            },
-            clear=False,
+        with _llm_env(
+            SAU_LLM_API_BASE_URL="https://llm.example.com",
+            SAU_LLM_API_KEY="test-key",
         ):
             result = llm_client.generate_chat_completion(
                 "system",
@@ -61,13 +68,9 @@ class LlmClientTests(unittest.TestCase):
 
     def test_transcribe_audio_hits_openai_compatible_endpoint(self) -> None:
         session = _FakeSession({"text": "transcript"})
-        with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(
-            os.environ,
-            {
-                "SAU_LLM_API_BASE_URL": "https://llm.example.com/v1",
-                "SAU_LLM_API_KEY": "test-key",
-            },
-            clear=False,
+        with tempfile.TemporaryDirectory() as tmp_dir, _llm_env(
+            SAU_LLM_API_BASE_URL="https://llm.example.com/v1",
+            SAU_LLM_API_KEY="test-key",
         ):
             audio_file = Path(tmp_dir) / "audio.wav"
             audio_file.write_bytes(b"wav")

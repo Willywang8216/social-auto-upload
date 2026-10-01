@@ -41,8 +41,8 @@ export const jobsApi = {
   },
 
   // Content-oriented calendar and queue view.
-  publishEntities(params = {}) {
-    return http.get('/publish-entities', params)
+  publishEntities(params = {}, config = {}) {
+    return http.get('/publish-entities', params, config)
   },
   publishEntity(entityId) {
     return http.get(`/publish-entities/${encodeURIComponent(entityId)}`)

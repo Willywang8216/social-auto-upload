@@ -45,7 +45,8 @@ def _resolve_remote_name(remote_name: str | None) -> str:
 
 
 def _resolve_remote_root(remote_root: str | None) -> str:
-    return (remote_root or os.environ.get(DEFAULT_PATH_ENV, "")).strip("/")
+    configured = os.environ.get(DEFAULT_PATH_ENV, "") if remote_root is None else remote_root
+    return configured.strip("/")
 
 
 def _render_public_url_template(
@@ -170,6 +171,9 @@ def download_artifact(
         capture_output=True,
         text=True,
     )
+    if not destination.is_file() or destination.stat().st_size == 0:
+        destination.unlink(missing_ok=True)
+        raise RuntimeError(f"rclone restore produced a missing or empty file: {destination.name}")
     return destination
 
 

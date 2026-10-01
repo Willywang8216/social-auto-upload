@@ -27,10 +27,37 @@
       <el-empty v-else-if="entities.length === 0" description="目前沒有符合條件的排程" />
       <div v-else class="entity-card-grid">
         <article v-for="entity in entities" :key="entity.entityId" class="entity-card">
-          <div class="entity-card-media">
-            <video v-if="entity.mediaItems?.[0]?.mediaType === 'video' && entity.mediaItems?.[0]?.previewUrl" :src="entity.mediaItems[0].previewUrl" preload="metadata" muted />
-            <img v-else-if="entity.mediaItems?.[0]?.previewUrl" :src="entity.mediaItems[0].previewUrl" :alt="entity.mediaItems[0].filename" loading="lazy" />
-            <span v-else>預覽不可用</span>
+          <div class="entity-card-media-grid">
+            <div
+              v-for="media in entity.mediaItems?.slice(0, 3) || []"
+              :key="media.fileRecordId || media.filename"
+              class="entity-card-media-item"
+              :title="`${media.filename} · ${mediaStateLabel(media)}`"
+            >
+              <template v-if="mediaPreviewSource(media) && media.mediaType === 'video'">
+                <video :src="mediaPreviewSource(media)" preload="metadata" muted />
+              </template>
+              <img
+                v-else-if="mediaPreviewSource(media)"
+                :src="mediaPreviewSource(media)"
+                :alt="media.filename"
+                loading="lazy"
+              />
+              <span v-else class="entity-card-media-placeholder">
+                <span>{{ media.mediaType === 'video' ? '影片' : media.mediaType === 'image' ? '圖片' : '檔案' }}</span>
+                <span class="entity-card-media-name">{{ media.filename }}</span>
+                <a
+                  v-if="media.archive?.openUrl"
+                  :href="media.archive.openUrl"
+                  target="_blank"
+                  rel="noopener"
+                  class="entity-card-media-link"
+                  :title="`在 ${media.archive.label || '雲端'} 開啟 ${media.filename}`"
+                  @click.stop
+                >{{ media.archive.label || '雲端' }}</a>
+              </span>
+            </div>
+            <span v-if="(entity.mediaItems?.length || 0) > 3" class="entity-card-media-overflow">+{{ entity.mediaItems.length - 3 }}</span>
           </div>
           <div class="entity-card-body">
             <div class="entity-card-heading">
@@ -63,42 +90,37 @@
           <h3>整體資訊</h3>
           <div class="entity-summary-row">
             <el-tag :type="entityTagType(entityDetails.status)" effect="plain">{{ entityStatusLabel(entityDetails.status) }}</el-tag>
-            <span>{{ entityDetails.profiles?.map((profile) => profile.name).join('、') || entityDetails.profile?.name || '未指定個人檔案' }}</span>
+            <span>{{ entityDetails.profiles?.map((profile) => profile.name).filter(Boolean).join('、') || entityDetails.profile?.name || '未指定個人檔案' }}</span>
             <span>{{ entityDetails.scheduledAt || '尚未排程' }}</span>
           </div>
         </section>
-        <div class="drawer-media-grid">
-          <div v-for="media in entityDetails.mediaItems || []" :key="media.fileRecordId || media.filename">
-            <video v-if="media.mediaType === 'video' && media.previewUrl" :src="media.previewUrl" controls preload="metadata" />
-            <img v-else-if="media.mediaType === 'image' && media.previewUrl" :src="media.previewUrl" :alt="media.filename" />
-            <span>{{ media.filename }}</span>
-          </div>
-        </div>
-        <section v-for="post in entityDetails.posts || []" :key="post.id" class="entity-post-detail">
-          <h3>{{ post.platform }} · {{ post.accounts?.map((account) => account.name).filter(Boolean).join(', ') || '未設定帳號' }}</h3>
-          <el-tag :type="entityTagType(post.status)" effect="plain">{{ entityStatusLabel(post.status) }}</el-tag>
-          <template v-if="editingEntityPostId === post.id">
-            <el-input v-model="editingEntityCopy" type="textarea" :rows="4" />
-            <el-button type="primary" @click="saveEntityCopy(post)">儲存文案</el-button>
-            <el-button @click="editingEntityPostId = null">取消</el-button>
-          </template>
-<template v-else>
-            <p>{{ post.draft?.message || '尚未填寫文案' }}</p>
-            <el-button v-if="post.status === 'queued' || post.status === 'ready'" size="small" @click="editingEntityPostId = post.id; editingEntityCopy = post.draft?.message || ''">編輯文案</el-button>
-            <el-button v-if="post.status === 'queued' || post.status === 'ready'" size="small" type="danger" @click="cancelPostTargets(post)">取消排程</el-button>
-        </template>
-          <div v-for="job in (entityDetails.jobs || []).filter((item) => item.targets?.some((target) => target.fileRef === `campaign_post:${post.id}`))" :key="job.id">
-            <div v-for="target in job.targets.filter((item) => item.fileRef === `campaign_post:${post.id}`)" :key="target.id" class="entity-target-row">
-              <el-tag :type="entityTagType(target.status)" effect="plain">{{ entityStatusLabel(target.status) }}</el-tag><span>{{ target.accountName }} · {{ target.scheduleAt || '立即發佈' }}</span>
-              <span v-if="target.lastError" class="entity-error">{{ target.lastError }}</span>
-              <el-date-picker v-if="target.status === 'pending' || target.status === 'retrying'" v-model="target._editSchedule" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DDTHH:mm:00" />
-              <el-button v-if="target._editSchedule && (target.status === 'pending' || target.status === 'retrying')" size="small" @click="manageTarget('reschedule', target)">儲存時間</el-button>
-              <el-button v-if="target.status === 'pending' || target.status === 'retrying'" size="small" type="danger" @click="manageTarget('cancel', target)">取消</el-button>
-              <el-button v-if="target.status === 'failed'" size="small" type="warning" @click="manageTarget('retry', target)">重試</el-button>
+        <section class="entity-drawer-section">
+          <h3>本次媒體</h3>
+          <div class="drawer-media-grid">
+            <div v-for="media in entityDetails.mediaItems || []" :key="media.fileRecordId || media.filename">
+              <template v-if="mediaPreviewSource(media) && media.mediaType === 'video'">
+                <video :src="mediaPreviewSource(media)" controls preload="metadata" />
+              </template>
+              <img
+                v-else-if="mediaPreviewSource(media)"
+                :src="mediaPreviewSource(media)"
+                :alt="media.filename"
+                loading="lazy"
+              />
+              <div v-else class="media-missing">預覽不可用</div>
+              <span>{{ media.filename }} · {{ mediaStateLabel(media) }}</span>
+              <a v-if="media.archive?.openUrl" :href="media.archive.openUrl" target="_blank" rel="noopener">在 {{ media.archive.label || '雲端' }} 開啟</a>
+              <a v-else-if="media.publicUrl" :href="media.publicUrl" target="_blank" rel="noopener">開啟媒體</a>
             </div>
           </div>
         </section>
-        <section class="drawer-artifacts"><a v-for="artifact in entityDetails.artifacts?.filter((item) => item.url)" :key="artifact.id || artifact.url" :href="artifact.url" target="_blank" rel="noopener">{{ artifact.role || artifact.kind || 'Media' }} · Open public link</a></section>
+        <section v-for="post in entityDetails.posts || []" :key="post.id" class="entity-post-detail">
+          <header><h3>{{ post.platform }} · {{ post.accounts?.map((account) => account.name).filter(Boolean).join(', ') || '未設定帳號' }}</h3><el-tag :type="entityTagType(post.status)" effect="plain">{{ entityStatusLabel(post.status) }}</el-tag></header>
+          <div v-if="editingEntityPostId === post.id"><el-input v-model="editingEntityCopy" type="textarea" :rows="4" /><el-button type="primary" @click="saveEntityCopy(post)">儲存文案</el-button><el-button @click="editingEntityPostId = null">取消</el-button></div>
+          <div v-else class="entity-copy-block"><span>此平台文案</span><p>{{ post.draft?.message || '尚未填寫文案' }}</p><el-button v-if="post.status === 'queued' || post.status === 'ready'" size="small" @click="editingEntityPostId = post.id; editingEntityCopy = post.draft?.message || ''">編輯文案</el-button><el-button v-if="post.status === 'queued' || post.status === 'ready'" size="small" type="danger" @click="cancelPostTargets(post)">取消此貼文排程</el-button></div>
+          <div v-for="job in (entityDetails.jobs || []).filter((item) => item.targets?.some((target) => target.fileRef === `campaign_post:${post.id}`))" :key="job.id"><div v-for="target in job.targets.filter((item) => item.fileRef === `campaign_post:${post.id}`)" :key="target.id" class="entity-target-row"><el-tag :type="entityTagType(target.status)" effect="plain">{{ entityStatusLabel(target.status) }}</el-tag><span>{{ target.accountName }} · {{ target.scheduleAt || '立即發佈' }}</span><span v-if="target.lastError" class="entity-error">{{ target.lastError }}</span><el-date-picker v-if="target.status === 'pending' || target.status === 'retrying'" v-model="target._editSchedule" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DDTHH:mm:00" /><el-button v-if="target._editSchedule && (target.status === 'pending' || target.status === 'retrying')" size="small" @click="manageTarget('reschedule', target)">儲存時間</el-button><el-button v-if="target.status === 'pending' || target.status === 'retrying'" size="small" type="danger" @click="manageTarget('cancel', target)">取消</el-button><el-button v-if="target.status === 'failed'" size="small" type="warning" @click="manageTarget('retry', target)">重試</el-button></div></div>
+        </section>
+        <section v-if="entityDetails.artifacts?.some((item) => item.url)" class="entity-drawer-section entity-links"><h3>媒體連結</h3><a v-for="artifact in entityDetails.artifacts.filter((item) => item.url)" :key="artifact.id || artifact.url" :href="artifact.url" target="_blank" rel="noopener">{{ artifact.role || artifact.kind || '媒體' }} · 開啟連結</a></section>
       </div>
     </el-drawer>
 
@@ -128,6 +150,7 @@ import { jobsApi } from '@/api/jobs'
 import { useJobsStore, JOB_STATUS } from '@/stores/jobs'
 import { useProfilesStore } from '@/stores/profiles'
 import { getPlatformLabel, getPlatformTagType, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
+import { mediaPreviewSource, mediaStateLabel } from '@/utils/mediaState'
 
 const profilesStore = useProfilesStore()
 const profiles = computed(() => profilesStore.profiles)
@@ -532,19 +555,15 @@ onBeforeUnmount(() => {
     background: var(--panel);
   }
 
-  .entity-card-media {
-    width: 110px;
-    min-height: 138px;
-    flex-shrink: 0;
-    display: grid;
-    place-items: center;
-    background: var(--raised);
-    color: var(--text-3);
-    font-size: 12px;
-    overflow: hidden;
-
-    img, video { width: 100%; height: 100%; object-fit: cover; }
-  }
+  .entity-card-media-grid { width: 126px; min-height: 138px; flex-shrink: 0; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); grid-auto-rows:minmax(58px,1fr); gap:2px; position:relative; background:var(--raised); overflow:hidden; }
+  .entity-card-media-item { min-width:0; min-height:0; overflow:hidden; background:var(--raised); display:grid; place-items:center; }
+  .entity-card-media-item img, .entity-card-media-item video { width:100%; height:100%; object-fit:cover; }
+  .entity-card-media-placeholder { color:var(--text-3); font-size:11px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; padding:4px; text-align:center; overflow:hidden; min-width:0; }
+  .entity-card-media-name { color:var(--text-2); font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+  .entity-card-media-link { color:var(--accent); font-size:10px; text-decoration:none; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .entity-card-media-link:hover { text-decoration:underline; }
+  .media-missing { color:var(--text-3); font-size:11px; display:grid; place-items:center; min-height:60px; border-radius:6px; background:var(--raised); }
+  .entity-card-media-overflow { position:absolute; right:4px; bottom:4px; padding:2px 5px; border-radius:10px; background:rgba(0,0,0,.68); color:#fff; font-size:11px; }
 
   .entity-card-body { flex: 1; min-width: 0; padding: 12px; }
   .entity-card-heading { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
@@ -586,7 +605,7 @@ onBeforeUnmount(() => {
   @media (max-width: 680px) {
     .entity-card-grid { grid-template-columns: 1fr; }
     .entity-card { flex-direction: column; }
-    .entity-card-media { width: 100%; height: 180px; }
+    .entity-card-media-grid { width:100%; height:180px; min-height:180px; grid-template-columns:repeat(3,minmax(0,1fr)); grid-auto-rows:1fr; }
   }
 
   .jobs-pagination {

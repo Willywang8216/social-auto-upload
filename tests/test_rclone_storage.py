@@ -122,6 +122,7 @@ class RcloneDownloadTests(unittest.TestCase):
         calls: list[list[str]] = []
 
         def fake_runner(command, **kwargs):
+            Path(command[3]).write_bytes(b"video")
             calls.append(list(command))
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
@@ -149,10 +150,25 @@ class RcloneDownloadTests(unittest.TestCase):
             ],
         )
 
+    def test_download_artifact_checks_nonempty_destination(self) -> None:
+        def fake_runner(command, **kwargs):
+            Path(command[3]).write_bytes(b"")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "clip.mp4"
+            with self.assertRaisesRegex(RuntimeError, "empty"):
+                rclone_storage.download_artifact(
+                    "clip.mp4", destination, remote_name="drive", remote_root="",
+                    runner=fake_runner,
+                )
+            self.assertFalse(destination.exists())
+
     def test_download_artifact_without_a_root_uses_the_key_as_given(self) -> None:
         calls: list[list[str]] = []
 
         def fake_runner(command, **kwargs):
+            Path(command[3]).write_bytes(b"video")
             calls.append(list(command))
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 

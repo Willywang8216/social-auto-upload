@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # SAU media cache: move published assets off the VPS into Google Drive so the
 # box stays lean, and RECORD where they went so the worker can pull them back
-# when a scheduled post needs them. Runs as ROOT (the SAU container writes
-# videoFile/ as root, so only root can delete them).
+# when a scheduled post needs them.
 # --min-age 10m is a mid-write guard only (NOT retention). Installed 2026-09-04.
+# Cron runs as `will`, but the SAU container mounts videoFile/ as root, so most
+# media is root-owned and rclone-as-will cannot unlink it. Therefore transfer is
+# `rclone copy` and local deletion is a SEPARATE verified step that sudo-unlinks
+# (see purge_verified_sources); the rclone config stays readable only to `will`.
 #
 # The loop this implements, end to end:
 #   素材上傳 → 發布 → offload 到 GDrive（省空間）→ 到點抓回來發 → 發完清除
@@ -17,9 +20,10 @@
 #     file_records is updated with the remote location + backend id so
 #     myUtils.worker can download it back at claim time
 #     (worker._resolve_file_path / worker._ensure_artifact_paths_local)
-#   * the move IS the purge: rclone only unlinks the source after a verified
-#     transfer, so "gone locally + present remotely" is the safe signal we
-#     register on. A half-failed move leaves the file where it was.
+#   * the verified purge IS the delete: rclone copies the bytes up, then each
+#     source is unlinked ONLY after `rclone check --size-only --one-way` agrees
+#     the remote holds it, so "gone locally + present remotely" is the safe
+#     signal we register on. A file whose copy can't be verified stays put.
 #   * after a target succeeds its file falls out of the exclusion set and the
 #     next run archives it back to Drive automatically.
 #
@@ -37,9 +41,75 @@ mkdir -p "$SRC/logs"
 if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 1048576 ]; then
   tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
 fi
-RC="rclone --config $CONF"
+RCLONE_BIN=${RCLONE_BIN:-/usr/bin/rclone}
+RC=("$RCLONE_BIN" --config "$CONF")
 ts(){ date -u +%Y-%m-%dT%H:%M:%SZ; }
 rc=0
+
+purge_verified_sources() {
+  local source_root="$1"
+  local remote_root="$2"
+  local paths relative failed=0
+  paths=$("${RC[@]}" lsf "$source_root" --recursive --files-only --min-age 10m --exclude-from "$EXCLUDES") || return 1
+  while IFS= read -r relative; do
+    [ -n "$relative" ] || continue
+    case "$relative" in
+      /*|..|../*|*/../*|*/..)
+        echo "[$(ts)] refusing unsafe source path from rclone: $relative"
+        failed=1
+        continue
+        ;;
+    esac
+    # rclone check needs DIRECTORIES on both sides: passing the file itself as
+    # the destination aborts with "is a file not a directory", which silently
+    # disabled this whole purge (every rc=1 offload). Compare the two roots
+    # with an include scoped to this one file instead. --one-way because the
+    # only property we need is "the bytes we still hold are safely on Drive".
+    if "${RC[@]}" check "$source_root" "$remote_root" --size-only --one-way \
+         --include "/$relative" >/dev/null 2>&1; then
+      # One un-unlinkable file must not block cleanup of every other one, so
+      # record the failure and keep going.
+      sudo -n rm -- "$source_root/$relative" || { echo "[$(ts)] could not unlink verified source: $relative"; failed=1; }
+    else
+      echo "[$(ts)] keeping $relative: remote copy is missing or differs"
+      failed=1
+    fi
+  done <<< "$paths"
+  return "$failed"
+}
+
+# The rc of the run BEFORE this one, read back from the log (the block below
+# appends this run's line last, so the second-newest is the previous run).
+offload_previous_rc() {
+  grep -o 'offload done rc=[0-9]*' "$LOG" 2>/dev/null | tail -2 | head -1 | sed 's/.*rc=//'
+}
+
+# Best-effort operator notice: page on failure and send exactly ONE recovery
+# line when a failing run goes healthy again.
+#
+# Every message carries its own UTC timestamp because a "FAILED" line with no
+# time is indistinguishable from a live failure once Telegram delivers it late:
+# a stale alert for an already-fixed incident looked current and sent the
+# operator chasing a run that had been clean for hours. The recovery line is
+# what closes that loop — one message, on the failing -> healthy transition
+# only, so it never becomes a heartbeat.
+notify() {
+  local current_rc="$1"
+  local previous_rc="$2"
+  [ -f "$TGENV" ] || return 0
+  local text=""
+  if [ "$current_rc" -ne 0 ]; then
+    text="SAU->Drive offload FAILED (rc=$current_rc) at $(ts) on $(hostname). Check $LOG"
+  elif [ -n "$previous_rc" ] && [ "$previous_rc" -ne 0 ]; then
+    text="SAU->Drive offload RECOVERED (rc=0) at $(ts) on $(hostname) — the previous run (rc=$previous_rc) has cleared."
+  fi
+  [ -n "$text" ] || return 0
+  . "$TGENV"
+  curl -s -m 20 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${TG_CHAT}" \
+    --data-urlencode "text=$text" >/dev/null 2>&1
+  return 0
+}
 
 # Emit one rclone filter pattern per line for every file that must stay on
 # local disk. Exclusion set (all anchored to the transfer root, glob
@@ -47,7 +117,7 @@ rc=0
 #   1. artifacts of running/retrying targets - in-flight uploads read the
 #      file from disk directly and cannot tolerate it vanishing mid-send
 #   2. artifacts of pending targets due within DUE_SOON_MINUTES - the
-#      claim-race window between this list and the actual rclone move
+#      claim-race window between this list and the actual rclone copy
 #      (NULL/empty schedule_at means "claimable now", so those count as due)
 #   3. files with no file_records row - nothing to restore from, moving
 #      them would strand the pipeline (the bytes stay on Drive, but no
@@ -291,12 +361,32 @@ PY
   echo "[$(ts)] offload start"
   EXCLUDES=$(mktemp)
   if pending_excludes > "$EXCLUDES" && grep -q '^# excludes=' "$EXCLUDES"; then
-    KEEP_COUNT=$(grep -vc '^#' "$EXCLUDES" || true)
+          KEEP_COUNT=$(grep -vc '^#' "$EXCLUDES" || true)
     echo "[$(ts)] keeping ${KEEP_COUNT} file(s) local (in-flight / due soon / unrecorded / _library)"
     for d in videoFile uploads; do
       [ -d "$SRC/$d" ] || continue
-      $RC move "$SRC/$d" "$DST/$d" --min-age 10m --exclude-from "$EXCLUDES" \
-        --transfers 4 --checkers 8 --stats-one-line -v 2>&1 || rc=$?
+      source_root="$SRC/$d"
+      destination_root="$DST/$d"
+      if [ "$d" = videoFile ]; then
+        rclone_source="$SRC/videoFile"
+        rclone_destination="$DST/videoFile"
+      else
+        rclone_source="$SRC/uploads"
+        rclone_destination="$DST/uploads"
+      fi
+      # copy, never move: this cron runs as `will` but the SAU container writes
+      # videoFile/ as root, so a move aborts with "permission denied" on every
+      # container-written source (which is most of them). Deletion is the
+      # separate, verified step below.
+      if "${RC[@]}" copy "$rclone_source" "$rclone_destination" --min-age 10m --exclude-from "$EXCLUDES" \
+        --transfers 4 --checkers 8 --stats-one-line -v 2>&1; then
+        if ! purge_verified_sources "$source_root" "$destination_root"; then
+          echo "[$(ts)] could not remove all verified sources under $source_root"
+          rc=1
+        fi
+      else
+        rc=$?
+      fi
     done
     if ! register_offloaded 2>&1; then
       echo "[$(ts)] WARNING: could not register offloaded files in file_records"
@@ -309,10 +399,5 @@ PY
   rm -f "$EXCLUDES"
   echo "[$(ts)] offload done rc=$rc local videoFile=$(find "$SRC/videoFile" -type f 2>/dev/null | wc -l) uploads=$(find "$SRC/uploads" -type f 2>/dev/null | wc -l)"
 } >> "$LOG" 2>&1
-if [ "$rc" -ne 0 ] && [ -f "$TGENV" ]; then
-  . "$TGENV"
-  curl -s -m 20 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-    --data-urlencode "chat_id=${TG_CHAT}" \
-    --data-urlencode "text=SAU->Drive offload FAILED (rc=$rc) on $(hostname). Check $LOG" >/dev/null 2>&1
-fi
-exit 0
+notify "$rc" "$(offload_previous_rc)"
+exit "$rc"

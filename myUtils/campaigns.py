@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator, Sequence
 
 from utils.conf_defaults import BASE_DIR
 
@@ -92,13 +92,22 @@ def _resolve_db_path(db_path: Path | None) -> Path:
 def _connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
     resolved = _resolve_db_path(db_path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(resolved)
+    # Wait out a concurrent writer (the publish worker) instead of failing the
+    # read outright; see the matching note in myUtils.jobs._connect.
+    conn = sqlite3.connect(resolved, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 15000")
     try:
         yield conn
     finally:
         conn.close()
+
+
+def _chunk(values: Sequence[int], size: int = 400) -> Iterator[Sequence[int]]:
+    """Split ids for ``IN (...)`` clauses; SQLite's variable limit is the cap."""
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
 
 
 def _now_iso() -> str:
@@ -519,6 +528,75 @@ def list_campaign_posts(
     with _connect(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
     return [_row_to_campaign_post(row) for row in rows]
+
+
+def get_campaigns_by_ids(
+    campaign_ids: Iterable[int],
+    *,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> dict[int, Campaign]:
+    """Batch form of :func:`get_campaign`; missing ids are absent from the map."""
+    ids = sorted({int(campaign_id) for campaign_id in campaign_ids})
+    if not ids:
+        return {}
+    found: dict[int, Campaign] = {}
+    with _connect(db_path) as conn:
+        for chunk in _chunk(ids):
+            placeholders = ",".join("?" * len(chunk))
+            query = f"SELECT * FROM campaigns WHERE id IN ({placeholders})"
+            params: list = list(chunk)
+            if workspace_id is not None:
+                query += " AND workspace_id = ?"
+                params.append(workspace_id)
+            for row in conn.execute(query, params):
+                campaign = _row_to_campaign(row)
+                found[campaign.id] = campaign
+    return found
+
+
+def list_posts_for_campaigns(
+    campaign_ids: Iterable[int], *, db_path: Path | None = None
+) -> dict[int, list[CampaignPost]]:
+    """Batch form of :func:`list_campaign_posts`; every id gets a list."""
+    ids = sorted({int(campaign_id) for campaign_id in campaign_ids})
+    grouped: dict[int, list[CampaignPost]] = {campaign_id: [] for campaign_id in ids}
+    if not ids:
+        return grouped
+    with _connect(db_path) as conn:
+        for chunk in _chunk(ids):
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"SELECT * FROM campaign_posts WHERE campaign_id IN ({placeholders}) "
+                "ORDER BY campaign_id, id",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                post = _row_to_campaign_post(row)
+                grouped.setdefault(post.campaign_id, []).append(post)
+    return grouped
+
+
+def list_artifacts_for_campaigns(
+    campaign_ids: Iterable[int], *, db_path: Path | None = None
+) -> dict[int, list[CampaignArtifact]]:
+    """Batch form of :func:`list_campaign_artifacts`; every id gets a list."""
+    ids = sorted({int(campaign_id) for campaign_id in campaign_ids})
+    grouped: dict[int, list[CampaignArtifact]] = {campaign_id: [] for campaign_id in ids}
+    if not ids:
+        return grouped
+    with _connect(db_path) as conn:
+        for chunk in _chunk(ids):
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"SELECT * FROM campaign_artifacts WHERE campaign_id IN ({placeholders}) "
+                "ORDER BY campaign_id, id",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                artifact = _row_to_campaign_artifact(row)
+                grouped.setdefault(artifact.campaign_id, []).append(artifact)
+    return grouped
 
 
 def update_campaign_post(

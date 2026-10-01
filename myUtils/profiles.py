@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Sequence
 
 from utils.conf_defaults import BASE_DIR
 from myUtils import config_crypto
@@ -156,13 +156,22 @@ class Account:
 @contextmanager
 def _connect(db_path: Path = DB_PATH) -> Iterator[sqlite3.Connection]:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    # Wait out a concurrent writer (the publish worker) instead of failing the
+    # read outright; see the matching note in myUtils.jobs._connect.
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 15000")
     try:
         yield conn
     finally:
         conn.close()
+
+
+def _chunk(values: Sequence[int], size: int = 400) -> Iterator[Sequence[int]]:
+    """Split ids for ``IN (...)`` clauses; SQLite's variable limit is the cap."""
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
 
 
 _PROFILE_FIELDS = {f.name for f in fields(Profile)}
@@ -363,6 +372,31 @@ def get_profile(profile_id: int, *, workspace_id: str | None = None, db_path: Pa
     return _row_to_profile(row)
 
 
+def get_profiles_by_ids(
+    profile_ids: Iterable[int],
+    *,
+    workspace_id: str | None = None,
+    db_path: Path = DB_PATH,
+) -> dict[int, Profile]:
+    """Batch form of :func:`get_profile`; missing ids are absent from the map."""
+    ids = sorted({int(profile_id) for profile_id in profile_ids})
+    if not ids:
+        return {}
+    found: dict[int, Profile] = {}
+    with _connect(db_path) as conn:
+        for chunk in _chunk(ids):
+            placeholders = ",".join("?" * len(chunk))
+            query = f"SELECT * FROM profiles WHERE id IN ({placeholders})"
+            params: list = list(chunk)
+            if workspace_id is not None:
+                query += " AND workspace_id = ?"
+                params.append(workspace_id)
+            for row in conn.execute(query, params):
+                profile = _row_to_profile(row)
+                found[profile.id] = profile
+    return found
+
+
 def get_profile_by_slug(slug: str, *, db_path: Path = DB_PATH) -> Profile:
     with _connect(db_path) as conn:
         row = conn.execute("SELECT * FROM profiles WHERE slug = ?", (slug,)).fetchone()
@@ -531,6 +565,41 @@ def get_account(account_id: int, *, workspace_id: str | None = None, db_path: Pa
     if row is None:
         raise LookupError(f"Account not found: id={account_id}")
     return _row_to_account(row)
+
+
+def get_accounts_by_ids(
+    account_ids: Iterable[int],
+    *,
+    workspace_id: str | None = None,
+    db_path: Path = DB_PATH,
+) -> dict[int, Account]:
+    """Batch form of :func:`get_account` (same profiles JOIN), keyed by id.
+
+    The queue/calendar payloads resolve an account per post-account and per
+    target, so a single request asked for the same handful of accounts
+    thousands of times. Missing ids are absent from the map.
+    """
+    ids = sorted({int(account_id) for account_id in account_ids})
+    if not ids:
+        return {}
+    found: dict[int, Account] = {}
+    with _connect(db_path) as conn:
+        for chunk in _chunk(ids):
+            placeholders = ",".join("?" * len(chunk))
+            query = (
+                "SELECT accounts.*, profiles.name AS profile_name, "
+                "profiles.slug AS profile_slug "
+                "FROM accounts LEFT JOIN profiles ON profiles.id = accounts.profile_id "
+                f"WHERE accounts.id IN ({placeholders})"
+            )
+            params: list = list(chunk)
+            if workspace_id is not None:
+                query += " AND accounts.workspace_id = ?"
+                params.append(workspace_id)
+            for row in conn.execute(query, params):
+                account = _row_to_account(row)
+                found[account.id] = account
+    return found
 
 
 def find_account(

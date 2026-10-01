@@ -1342,7 +1342,13 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '123', 'name': 'Brand Page 2', 'access_token': 'page-token-2'}]}):
+        # debug_token_info is a LIVE Graph API call, so without pinning it the
+        # verdict depends on whether the test box has network: online, Facebook
+        # rejects the fake token, the code rotates it, and the request makes a
+        # real exchange call. Pin it (valid, never-expiring) so the test is
+        # hermetic and exercises the intended no-rotation resync.
+        with patch.object(self.sau_backend.meta_auth, 'debug_token_info', return_value={'is_valid': True, 'expires_at': 0}), \
+                patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '123', 'name': 'Brand Page 2', 'access_token': 'page-token-2'}]}):
             response = self.client.post(f'/accounts/{account_id}/refresh-token')
         self.assertEqual(response.status_code, 200)
         config = self._stored_config(account_id)
@@ -1368,7 +1374,9 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '321', 'name': 'Brand Page', 'access_token': 'page-token-2', 'instagram_business_account': {'id': 'ig-1', 'username': 'brand_ig_2'}}]}):
+        # See the Facebook sibling: pin the live debug call for hermeticity.
+        with patch.object(self.sau_backend.meta_auth, 'debug_token_info', return_value={'is_valid': True, 'expires_at': 0}), \
+                patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '321', 'name': 'Brand Page', 'access_token': 'page-token-2', 'instagram_business_account': {'id': 'ig-1', 'username': 'brand_ig_2'}}]}):
             response = self.client.post(f'/accounts/{account_id}/refresh-token')
         self.assertEqual(response.status_code, 200)
         config = self._stored_config(account_id)
@@ -1376,6 +1384,47 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(config['instagramUserName'], 'brand_ig_2')
         self.assertEqual(config['accessToken'], 'page-token-2')
         self.assertTrue(config['lastManualRefreshAt'])
+
+    def test_refresh_error_body_does_not_leak_the_app_secret(self) -> None:
+        """A failing refresh must not echo our own OAuth credentials.
+
+        An HTTP client's exception carries the whole request URL, and the Meta
+        token URL includes client_secret — answering with str(exc) used to hand
+        the caller the app secret in the error body.
+        """
+        profile_id = self.client.post('/profiles', json={'name': 'Meta Brand'}).get_json()['data']['id']
+        account_id = self.client.post(
+            f'/profiles/{profile_id}/accounts',
+            json={
+                'platform': 'facebook',
+                'accountName': 'brand-facebook',
+                'authType': 'oauth',
+                'config': {
+                    'pageId': '123',
+                    'accessToken': 'page-token',
+                    'metaUserAccessToken': 'meta-user-token',
+                },
+            },
+        ).get_json()['data']['id']
+        leaky_message = (
+            '400 Client Error: Bad Request for url: '
+            'https://graph.facebook.com/v25.0/oauth/access_token'
+            '?grant_type=fb_exchange_token&client_id=123'
+            '&client_secret=SUPERSECRETVALUE&fb_exchange_token=meta-user-token'
+        )
+        with patch.object(self.sau_backend.meta_auth, 'debug_token_info', return_value={'is_valid': False}), \
+                patch.object(self.sau_backend.meta_auth, 'exchange_for_long_lived_token',
+                             side_effect=RuntimeError(leaky_message)):
+            response = self.client.post(f'/accounts/{account_id}/refresh-token')
+
+        self.assertEqual(response.status_code, 400)
+        body = response.get_json()['msg']
+        self.assertNotIn('SUPERSECRETVALUE', body)
+        self.assertIn('client_secret=[redacted]', body)
+        self.assertIn('fb_exchange_token=[redacted]', body)
+        # The harmless query parameter must survive so the operator can still read
+        # what failed.
+        self.assertIn('grant_type=fb_exchange_token', body)
 
     def test_accounts_maintenance_run_resyncs_facebook_credentials(self) -> None:
         profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})

@@ -94,8 +94,8 @@ export const useJobsStore = defineStore('jobs', () => {
     return _store(response?.data)
   }
 
-  async function refreshEntities({ month, status, limit = 100, offset = 0 } = {}) {
-    const response = await jobsApi.publishEntities({ month, status, limit, offset })
+  async function refreshEntities(params = {}, config = {}) {
+    const response = await jobsApi.publishEntities(params, config)
     return response?.data || { items: [], total: 0, hasMore: false }
   }
 

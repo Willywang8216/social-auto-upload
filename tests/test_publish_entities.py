@@ -256,6 +256,51 @@ class PublishEntitiesApiTests(unittest.TestCase):
         self.assertEqual(len(page["items"]), 1)
         self.assertFalse(page["hasMore"])
 
+    def test_calendar_month_includes_entity_when_later_target_is_in_month(self) -> None:
+        profile_id = self._profile()
+        account_id = self._account(profile_id)
+        seeded = self._seed_campaign_entity(account_id=account_id, profile_id=profile_id)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE publish_job_targets SET schedule_at=? WHERE job_id=?",
+                ("2026-10-12T14:00:00", seeded["job_id"]),
+            )
+
+        response = self.client.get("/publish-entities?month=2026-10")
+
+        self.assertEqual(response.status_code, 200)
+        items = response.get_json()["data"]["items"]
+        self.assertEqual(len(items), 1)
+        target = items[0]["jobs"][0]["targets"][0]
+        self.assertEqual(target["scheduleAt"], "2026-10-12T14:00:00")
+
+    def test_entity_contains_distinct_destination_schedules(self) -> None:
+        profile_id = self._profile()
+        account_id = self._account(profile_id)
+        seeded = self._seed_campaign_entity(account_id=account_id, profile_id=profile_id)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO publish_jobs (idempotency_key, profile_id, platform, payload_json, status, total_targets) VALUES (?, ?, ?, ?, ?, ?)",
+                ("later-target-job", profile_id, "twitter", json.dumps({"campaignId": seeded["campaign_id"], "campaignPostId": seeded["post_id"], "message": "hello world"}), "pending", 1),
+            )
+            later_job_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "INSERT INTO publish_job_targets (job_id, account_ref, file_ref, schedule_at, status) VALUES (?, ?, ?, ?, ?)",
+                (later_job_id, f"account:{account_id}", f"campaign_post:{seeded['post_id']}", "2026-10-15T16:30:00", "pending"),
+            )
+            conn.execute(
+                "UPDATE publish_job_targets SET schedule_at=? WHERE job_id=?",
+                ("2026-10-12T14:00:00", seeded["job_id"]),
+            )
+
+        detail = self.client.get(f"/publish-entities/mg-{seeded['media_group_id']}")
+
+        self.assertEqual(detail.status_code, 200)
+        targets = [target for job in detail.get_json()["data"]["jobs"] for target in job["targets"]]
+        self.assertEqual({target["scheduleAt"] for target in targets}, {
+            "2026-10-12T14:00:00", "2026-10-15T16:30:00"
+        })
+
     def test_public_media_url_filter_rejects_private_hosts(self) -> None:
         self.assertFalse(self.sau_backend._is_public_https_url("https://127.0.0.1/media.mp4"))
         self.assertFalse(self.sau_backend._is_public_https_url("https://localhost/media.mp4"))

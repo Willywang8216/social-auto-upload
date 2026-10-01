@@ -23,13 +23,8 @@ def _pending_generated_posts(conn: sqlite3.Connection):
     ).fetchall()
 
 
-def _looks_simplified(text: str) -> bool:
-    markers = "这为后里发会说话该从来个们时还对开关体见实进过连经东车门云风电网书乐业产区医药长后面里头个种只并妈发张报台万与专东点头号应欢鸡户礼轻书习术树阳台边复选适运响担斗粮楼标乐难干系适制筑园远练组线红纪宝时买乱庆农胶饭馆闻图讯妇务价务场节团队里面内容质量统一默认程序失败错误结果进度系统设定简体"
-    return any(character in markers for character in text)
-
-
 def preview_scheduled_copy(db_path: Path) -> dict:
-    """Preview Simplified-to-Traditional conversion of active scheduled drafts."""
+    """Preview OpenCC changes to active scheduled campaign drafts."""
     if OpenCC is None:
         raise RuntimeError("Install opencc-python-reimplemented to convert queued Chinese copy")
     converter = OpenCC("s2t")
@@ -39,9 +34,16 @@ def preview_scheduled_copy(db_path: Path) -> dict:
     for post_id, raw, payload_raw, job_id in rows:
         draft = json.loads(raw or "{}")
         payload = json.loads(payload_raw or "{}")
-        if not isinstance(draft, dict) or not _looks_simplified(str(draft.get("message") or "")):
+        if not isinstance(draft, dict):
             continue
         if isinstance(payload.get("draft"), dict) and payload["draft"] != draft:
+            continue
+        payload_draft = payload.get("draft")
+        if not isinstance(payload_draft, dict):
+            continue
+        # Pending targets must publish the exact converted copy shown in the
+        # calendar; do not convert when the legacy top-level message diverges.
+        if payload.get("message") and payload["message"] != draft.get("message"):
             continue
         source = json.dumps(draft, ensure_ascii=False)
         converted = converter.convert(source)
@@ -88,5 +90,9 @@ def apply_scheduled_copy(db_path: Path, *, confirm: bool = False) -> dict:
                 if isinstance(payload.get("draft"), dict): payload["draft"] = item["after"]
                 payload["message"] = item["after"].get("message", payload.get("message", ""))
                 conn.execute("UPDATE publish_jobs SET payload_json=? WHERE id=?", (json.dumps(payload, ensure_ascii=False), job_id))
+            conn.execute(
+                "UPDATE scheduled_copy_conversion_audit SET converted_draft_json=? WHERE post_id=? AND converted_at=?",
+                (draft_json, post_id, now),
+            )
         conn.commit()
     return {"eligible": preview["eligible"], "changed": preview["changed"], "appliedAt": now}

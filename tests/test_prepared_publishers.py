@@ -32,7 +32,9 @@ class _FakeResponse:
         self.text = text
 
     def raise_for_status(self):
-        return None
+        if self.status_code >= 400:
+            from requests import HTTPError
+            raise HTTPError(f"status {self.status_code}")
 
     def json(self):
         return self._payload
@@ -45,7 +47,10 @@ class _RecordingSession:
 
     def _next(self):
         if self.responses:
-            return self.responses.pop(0)
+            response = self.responses.pop(0)
+            if isinstance(response, BaseException):
+                raise response
+            return response
         return _FakeResponse({})
 
     def post(self, url, **kwargs):
@@ -171,32 +176,68 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(sent_chat_ids, ["@override"])
 
     def test_telegram_publish_partial_failure_returns_per_chat_status(self):
-        # First chat succeeds, second raises HTTPError. The wrapper records
-        # per-chat results so callers can see which chats failed; since at
-        # least one chat succeeded it does NOT raise.
+        # Partial delivery raises so the worker can retry only chats without a
+        # confirmed completed operation, while retaining the status summary.
         from requests import HTTPError
 
         bad = _FakeResponse({}, status_code=400)
-        def raise_for_status():
-            raise HTTPError("400 chat not found")
-        bad.raise_for_status = raise_for_status
-
-        session = _RecordingSession([
-            _FakeResponse({"ok": True}),
-            bad,
-        ])
+        bad.raise_for_status = lambda: (_ for _ in ()).throw(HTTPError("400 chat not found"))
+        session = _RecordingSession([_FakeResponse({"ok": True}), bad])
         account = SimpleNamespace(config={"botToken": "token", "chatIds": ["@good", "@bad"]})
-        results = prepared_publishers.publish_telegram_sync(
-            account,
-            {"message": "mixed"},
-            session=session,
+        payload = {"message": "mixed"}
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as raised:
+            prepared_publishers.publish_telegram_sync(account, payload, session=session)
+
+        self.assertEqual(raised.exception.details["platform"], "telegram")
+        self.assertTrue(raised.exception.details["partial"])
+        self.assertEqual(raised.exception.details["chats"][0]["chatId"], "@good")
+        self.assertTrue(raised.exception.details["chats"][0]["ok"])
+        self.assertEqual(raised.exception.details["chats"][1]["chatId"], "@bad")
+        self.assertFalse(raised.exception.details["chats"][1]["ok"])
+        self.assertEqual(payload["telegramCompletedByDelivery"]["default"]["@good"], ["message"])
+
+    def test_telegram_partial_failure_preserves_results_and_completed_operations(self):
+        bad = _FakeResponse({"ok": False, "description": "chat not found"}, status_code=400)
+        account = SimpleNamespace(config={"botToken": "token", "chatIds": ["@good", "@bad"]})
+        payload = {"message": "mixed"}
+        first_session = _RecordingSession([_FakeResponse({"ok": True}), bad])
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as raised:
+            prepared_publishers.publish_telegram_sync(account, payload, session=first_session)
+        self.assertTrue(raised.exception.retryable)
+        self.assertTrue(raised.exception.details["partial"])
+        self.assertEqual(
+            payload["telegramCompletedByDelivery"]["default"]["@good"], ["message"]
         )
-        self.assertEqual(len(results), 2)
-        self.assertEqual(results[0]["chatId"], "@good")
-        self.assertTrue(results[0]["ok"])
-        self.assertEqual(results[1]["chatId"], "@bad")
-        self.assertFalse(results[1]["ok"])
-        self.assertTrue(results[1]["errors"])
+        self.assertEqual(payload["telegramCompletedByDelivery"]["default"]["@bad"], [])
+
+        second_session = _RecordingSession([_FakeResponse({"ok": True})])
+        prepared_publishers.publish_telegram_sync(account, payload, session=second_session)
+        self.assertEqual(len(second_session.calls), 1)
+        self.assertEqual(second_session.calls[0][2]["data"]["chat_id"], "@bad")
+
+    def test_telegram_send_timeout_is_not_blindly_retried(self):
+        session = _RecordingSession([TimeoutError("connection timed out after sending")])
+        account = SimpleNamespace(config={"botToken": "token", "chatId": "@chat"})
+        payload = {"message": "may have been accepted"}
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as raised:
+            prepared_publishers.publish_telegram_sync(account, payload, session=session)
+        self.assertFalse(raised.exception.retryable)
+        self.assertIn(
+            "ambiguous:message",
+            payload["telegramCompletedByDelivery"]["default"]["@chat"],
+        )
+
+    def test_telegram_completion_state_is_scoped_per_worker_target(self):
+        account = SimpleNamespace(config={"botToken": "token", "chatId": "@chat"})
+        first_target_payload = {"message": "first", "_telegramDeliveryKey": "target-1"}
+        prepared_publishers.publish_telegram_sync(
+            account, first_target_payload, session=_RecordingSession([_FakeResponse({"ok": True})])
+        )
+        second_target_payload = {"message": "second", "_telegramDeliveryKey": "target-2"}
+        second_session = _RecordingSession([_FakeResponse({"ok": True})])
+        prepared_publishers.publish_telegram_sync(account, second_target_payload, session=second_session)
+        self.assertEqual(len(second_session.calls), 1)
+        self.assertEqual(second_session.calls[0][2]["data"]["text"], "second")
 
     def test_telegram_publish_all_chats_fail_raises(self):
         # Every chat fails -> aggregate error so the worker marks the job failed.

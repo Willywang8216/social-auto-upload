@@ -25,6 +25,22 @@
       </router-link>
     </div>
 
+    <div class="cal-filters">
+      <el-select v-model="profileFilters" multiple collapse-tags clearable placeholder="個人檔案">
+        <el-option v-for="profile in profiles" :key="profile.id" :label="profile.name" :value="profile.id" />
+      </el-select>
+      <el-select v-model="platformFilters" multiple collapse-tags clearable placeholder="平台">
+        <el-option v-for="platform in platformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
+      </el-select>
+      <el-select v-model="accountFilters" multiple collapse-tags clearable placeholder="帳號">
+        <el-option v-for="account in profileAccounts" :key="account.id" :label="`${account.profileName} · ${account.platform} · ${account.nickname || account.accountName}`" :value="account.id" />
+      </el-select>
+      <el-input v-model="keyword" clearable placeholder="搜尋標題、文案或媒體名稱" />
+      <el-button v-if="activeFilterCount" class="cal-filter-clear" @click="clearFilters">
+        清除篩選（{{ activeFilterCount }}）
+      </el-button>
+    </div>
+
     <!-- Calendar grid -->
     <div class="cal-grid-scroll">
       <div v-if="loading" class="cal-loading">正在載入排程…</div>
@@ -43,21 +59,24 @@
           </div>
           <div v-if="cell.loading" class="cal-cell-loading">…</div>
           <div
-            v-for="(ev, j) in cell.evs"
-            :key="ev.entityId"
+            v-for="ev in cell.evs"
+            :key="ev.eventId"
             class="cal-ev"
-            :class="[`st-${ev.status}`, { err: ev.status === 'failed' }]"
-            :title="`${ev.title} · ${ev.time} · ${ev.status}`"
+            :class="[`st-${ev.targetStatus}`, { err: ev.targetStatus === 'failed' }]"
+            :title="`${ev.time} · ${ev.destinationLabel} · ${ev.title}`"
             @click="openEvent(ev)"
           >
             <span class="cd"></span>
             <span class="ct">{{ ev.time }}</span>
-            <span class="cl">{{ ev.title }}</span>
-            <span class="cp">{{ ev.destinationCount }} 個目的地</span>
+            <span class="cl">{{ ev.summary }}</span>
+            <button
+              v-if="ev.hasMore"
+              class="cal-ev-more"
+              :title="`檢視完整內容：${ev.title}`"
+              @click.stop="openEvent(ev)"
+            >更多</button>
           </div>
-          <button v-if="cell.hiddenCount" class="cal-more" @click="showDay(cell)">
-            還有 {{ cell.hiddenCount }} 項
-          </button>
+          <button v-if="cell.hiddenCount" class="cal-more" @click="showDay(cell)">查看更多（{{ cell.hiddenCount }}）</button>
         </div>
       </div>
     </div>
@@ -65,9 +84,9 @@
     <!-- Event detail / action dialog -->
     <el-dialog v-model="dayDialogVisible" :title="selectedDayLabel" width="min(720px, 92vw)">
       <div class="day-event-list">
-        <button v-for="ev in selectedDayEvents" :key="ev.entityId" class="day-event" @click="dayDialogVisible = false; openEvent(ev)">
-          <span>{{ ev.time }} · {{ ev.title }}</span>
-          <el-tag :type="statusTagType(ev.status)" effect="plain">{{ statusLabel(ev.status) }}</el-tag>
+        <button v-for="ev in selectedDayEvents" :key="ev.eventId" class="day-event" @click="dayDialogVisible = false; openEvent(ev)">
+          <span>{{ ev.time }} · {{ ev.destinationLabel }} · {{ ev.summary }}</span>
+          <el-tag :type="statusTagType(ev.targetStatus)" effect="plain">{{ statusLabel(ev.targetStatus) }}</el-tag>
         </button>
       </div>
     </el-dialog>
@@ -80,25 +99,33 @@
             </div>
         <div v-if="selectedEntity" class="entity-summary">
           <section class="detail-section detail-overview">
-            <h3>媒體組與整體狀態</h3>
-            <div class="entity-summary-row">
+            <h3>整體資訊與個人檔案</h3>
+        <section class="entity-summary-row">
               <el-tag :type="statusTagType(selectedEntity.status)" effect="plain">{{ statusLabel(selectedEntity.status) }}</el-tag>
-              <span>{{ selectedEntity.profile?.name || '多個個人檔案' }}</span>
+              <span>{{ selectedEntity.profiles?.map((profile) => profile.name).filter(Boolean).join('、') || selectedEntity.profile?.name || '未指定個人檔案' }}</span>
               <span>{{ selectedEntity.scheduledAt || '尚未排程' }}</span>
-            </div>
+            </section>
           </section>
           <div class="entity-media detail-section">
             <h3>媒體組</h3>
           <article v-for="media in selectedEntity.mediaItems" :key="media.fileRecordId || media.filename" class="entity-media-item">
-            <video v-if="media.mediaType === 'video' && media.previewUrl" :src="media.previewUrl" controls preload="metadata" />
-            <img v-else-if="media.mediaType === 'image' && media.previewUrl" :src="media.previewUrl" :alt="media.filename" loading="lazy" />
+            <template v-if="mediaPreviewSource(media) && media.mediaType === 'video'">
+              <video :src="mediaPreviewSource(media)" controls preload="metadata" />
+            </template>
+            <img
+              v-else-if="mediaPreviewSource(media)"
+              :src="mediaPreviewSource(media)"
+              :alt="media.filename"
+              loading="lazy"
+            />
             <div v-else class="media-missing">預覽不可用</div>
-            <div class="media-name">{{ media.filename }}</div>
-            <a v-if="media.publicUrl" :href="media.publicUrl" target="_blank" rel="noopener">開啟媒體</a>
+            <div class="media-name">{{ media.filename }}<span class="media-state"> · {{ mediaStateLabel(media) }}</span></div>
+            <a v-if="media.archive?.openUrl" :href="media.archive.openUrl" target="_blank" rel="noopener">在 {{ media.archive.label || '雲端' }} 開啟</a>
+            <a v-else-if="media.publicUrl" :href="media.publicUrl" target="_blank" rel="noopener">開啟媒體</a>
           </article>
         </div>
           <section v-for="post in selectedEntity.posts || []" :key="post.id" class="entity-post detail-section">
-            <header><h3>{{ post.platform }} · {{ post.accounts?.map((account) => account.name).filter(Boolean).join(', ') || '帳號未設定' }}</h3><el-tag :type="statusTagType(post.status)" effect="plain">{{ statusLabel(post.status) }}</el-tag></header>
+            <header><h3>{{ platformLabel(post.platform) }} · {{ post.accounts?.map((account) => account.name).filter(Boolean).join(', ') || '帳號未設定' }}</h3><el-tag :type="statusTagType(post.status)" effect="plain">{{ statusLabel(post.status) }}</el-tag></header>
           <div class="post-copy"><span class="copy-label">目的地文案</span>{{ post.draft?.message || '尚未填寫文案' }}</div>
           <div v-if="editingPostId === post.id" class="copy-editor">
             <el-input v-model="editedCopy" type="textarea" :rows="4" />
@@ -109,18 +136,18 @@
           <div v-for="job in (selectedEntity.jobs || []).filter((item) => item.targets?.some((target) => target.fileRef === `campaign_post:${post.id}`))" :key="job.id" class="entity-targets">
             <div v-for="target in job.targets.filter((item) => item.fileRef === `campaign_post:${post.id}`)" :key="target.id" class="entity-target">
               <el-tag :type="statusTagType(target.status)" effect="plain">{{ statusLabel(target.status) }}</el-tag>
-              <span>{{ target.accountName }}</span><span>{{ target.scheduleAt || '立即發佈' }}</span>
+              <span>{{ target.accountName || '未設定帳號' }}</span><span>{{ target.scheduleAt || '立即發佈' }}</span>
               <span v-if="target.lastError" class="ev-error">{{ target.lastError }}</span>
               <el-date-picker v-if="target.status === 'pending' || target.status === 'retrying'" v-model="target._editSchedule" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DDTHH:mm:00" placeholder="選擇新時間" />
-              <el-button v-if="target._editSchedule && (target.status === 'pending' || target.status === 'retrying')" size="small" @click="rescheduleEntityTarget(target)">Save time</el-button>
-              <el-button v-if="target.status === 'pending' || target.status === 'retrying'" size="small" type="danger" @click="cancelEntityTarget(target)">Cancel</el-button>
-              <el-button v-if="target.status === 'failed'" size="small" type="warning" @click="resubmitEntityTarget(target)">Retry</el-button>
+              <el-button v-if="target._editSchedule && (target.status === 'pending' || target.status === 'retrying')" size="small" @click="rescheduleEntityTarget(target)">儲存時間</el-button>
+              <el-button v-if="target.status === 'pending' || target.status === 'retrying'" size="small" type="danger" @click="cancelEntityTarget(target)">取消排程</el-button>
+              <el-button v-if="target.status === 'failed'" size="small" type="warning" @click="resubmitEntityTarget(target)">重試發佈</el-button>
             </div>
           </div>
         </section>
         <section v-if="selectedEntity.artifacts?.length" class="entity-artifacts">
           <h4>已準備的媒體連結</h4>
-          <a v-for="artifact in selectedEntity.artifacts.filter((item) => item.url)" :key="artifact.id || artifact.url" :href="artifact.url" target="_blank" rel="noopener">{{ artifact.role || artifact.kind || 'Media' }} · Open link</a>
+          <a v-for="artifact in selectedEntity.artifacts.filter((item) => item.url)" :key="artifact.id || artifact.url" :href="artifact.url" target="_blank" rel="noopener">{{ artifact.role || artifact.kind || '媒體' }} · 開啟連結</a>
         </section>
         </div>
       </template>
@@ -136,18 +163,48 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { icons } from '@/utils/icons'
 import { useJobsStore } from '@/stores/jobs'
-import { getPlatformLabel, getPlatformTagType } from '@/utils/platforms'
+import { useProfilesStore } from '@/stores/profiles'
+import { getPlatformLabel, getPlatformTagType, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
+import { mediaPreviewSource, mediaStateLabel } from '@/utils/mediaState'
+import {
+  applyCalendarFiltersToQuery,
+  currentMonthKey,
+  parseCalendarFilters,
+  sameCalendarFilterQuery
+} from '@/utils/calendarFilters'
 
-const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December']
+const DOW = ['週日', '週一', '週二', '週三', '週四', '週五', '週六']
+// Entries render on ONE line; a longer title gets a 更多 button that opens the
+// full detail dialog instead of stretching the day cell.
+const EVENT_SUMMARY_LENGTH = 34
+const MONTHS = ['1 月', '2 月', '3 月', '4 月', '5 月', '6 月',
+  '7 月', '8 月', '9 月', '10 月', '11 月', '12 月']
 
 const today = new Date()
 const view = ref({ y: today.getFullYear(), m: today.getMonth() })
+// The visible month as the URL/API spell it; the watcher below keeps the query
+// in step so a month view is shareable and survives a refresh.
+const monthKey = computed(() => `${view.value.y}-${String(view.value.m + 1).padStart(2, '0')}`)
 
 const jobsStore = useJobsStore()
+const profilesStore = useProfilesStore()
+const profiles = computed(() => profilesStore.profiles)
+const profileAccounts = computed(() => profiles.value.flatMap((profile) =>
+  (profilesStore.accountsByProfile[profile.id] || []).map((account) => ({ ...account, profileName: profile.name }))
+))
+const platformOptions = PUBLISH_PLATFORM_OPTIONS
 const route = useRoute()
 const router = useRouter()
+const initialFilters = parseCalendarFilters(route.query)
+// A ?month=YYYY-MM link opens that month; otherwise today's.
+if (initialFilters.month) {
+  const [year, month] = initialFilters.month.split('-').map(Number)
+  view.value = { y: year, m: month - 1 }
+}
+const profileFilters = ref(initialFilters.profiles)
+const platformFilters = ref(initialFilters.platforms)
+const accountFilters = ref(initialFilters.accounts)
+const keyword = ref(initialFilters.q)
 const events = ref([])
 const loading = ref(false)
 const showAll = ref(false)
@@ -160,7 +217,45 @@ const dayDialogVisible = ref(false)
 const selectedDayEvents = ref([])
 const selectedDayLabel = ref('')
 const selectedEv = ref(null)
-const rescheduleTime = ref('')
+let filterTimer = null
+let requestSequence = 0
+let activeController = null
+
+function syncFilterQuery() {
+  const next = applyCalendarFiltersToQuery(route.query, {
+    profiles: profileFilters.value,
+    platforms: platformFilters.value,
+    accounts: accountFilters.value,
+    q: keyword.value,
+    month: monthKey.value
+  })
+  // The no-op guard is also what stops the URL -> state watcher from bouncing
+  // back into another navigation.
+  if (sameCalendarFilterQuery(next, route.query)) return
+  // A filter tweak is a refinement, not a new place: replace, so Back does not
+  // step through every checkbox.
+  router.replace({ query: next })
+}
+
+watch([profileFilters, platformFilters, accountFilters, keyword], () => {
+  if (filterTimer) window.clearTimeout(filterTimer)
+  filterTimer = window.setTimeout(() => { syncFilterQuery(); loadEvents() }, 250)
+})
+
+// Back/forward, or a pasted link, drives the filters and the month too.
+watch(() => route.query, (query) => {
+  const next = parseCalendarFilters(query)
+  if (next.profiles.join(',') !== profileFilters.value.join(',')) profileFilters.value = next.profiles
+  if (next.platforms.join(',') !== profileFilters.value.join(',')) platformFilters.value = next.platforms
+  if (next.accounts.join(',') !== accountFilters.value.join(',')) accountFilters.value = next.accounts
+  if (next.q !== keyword.value) keyword.value = next.q
+  // An absent month means the current one (sync omits it as the default).
+  const wantedMonth = next.month || currentMonthKey()
+  if (wantedMonth !== monthKey.value) {
+    const [year, month] = wantedMonth.split('-').map(Number)
+    view.value = { y: year, m: month - 1 }
+  }
+})
 
 const first = computed(() => new Date(view.value.y, view.value.m, 1).getDay())
 const days = computed(() => new Date(view.value.y, view.value.m + 1, 0).getDate())
@@ -168,21 +263,26 @@ const prevDays = computed(() => new Date(view.value.y, view.value.m, 0).getDate(
 
 const cells = computed(() => {
   const result = []
+  const eventsByDay = new Map()
+  for (const event of events.value) {
+    const key = event.scheduleAt?.slice(0, 10)
+    if (!key) continue
+    const dayEvents = eventsByDay.get(key) || []
+    dayEvents.push(event)
+    eventsByDay.set(key, dayEvents)
+  }
   const start = prevDays.value - first.value + 1
   for (let i = 0; i < first.value; i++) result.push({ d: start + i, dim: true, evs: [], today: false, loading: false })
   for (let d = 1; d <= days.value; d++) {
     const isToday = view.value.y === today.getFullYear() && view.value.m === today.getMonth() && d === today.getDate()
-    const key = keyOf(d)
+    const dayEvents = (eventsByDay.get(keyOf(d)) || []).sort((a, b) => a.scheduleAt.localeCompare(b.scheduleAt))
     result.push({
       d,
       dim: false,
       today: isToday,
       loading: loading.value,
-      evs: events.value
-        .filter((e) => e.scheduleAt && e.scheduleAt.slice(0, 10) === key)
-        .sort((a, b) => a.scheduleAt.localeCompare(b.scheduleAt))
-        .slice(0, 5),
-      hiddenCount: Math.max(0, events.value.filter((e) => e.scheduleAt && e.scheduleAt.slice(0, 10) === key).length - 5)
+      evs: dayEvents.slice(0, 5),
+      hiddenCount: Math.max(0, dayEvents.length - 5)
     })
   }
   while (result.length % 7) result.push({ d: 1, dim: true, evs: [], today: false, loading: false })
@@ -194,37 +294,76 @@ function keyOf(d) {
 }
 
 async function loadEvents() {
+  const sequence = ++requestSequence
+  activeController?.abort()
+  activeController = new AbortController()
+  const controller = activeController
   loading.value = true
   try {
     const month = `${view.value.y}-${String(view.value.m + 1).padStart(2, '0')}`
     const result = await jobsStore.refreshEntities({
       month,
-      status: showAll.value ? 'scheduled,queued,publishing,failed,cancelled,published' : 'scheduled,queued,publishing'
-    })
-    events.value = (result.items || []).map((entity) => {
-      const destinations = (entity.jobs || []).flatMap((job) => job.targets || [])
-      const stamps = destinations.map((target) => target.scheduleAt).filter(Boolean)
-      const stamp = stamps.sort((a, b) => a.localeCompare(b))[0] || entity.scheduledAt
+      status: showAll.value ? 'scheduled,queued,publishing,failed,cancelled,published' : 'scheduled,queued,publishing',
+      profileIds: profileFilters.value.join(','),
+      platforms: platformFilters.value.join(','),
+      accountIds: accountFilters.value.join(','),
+      q: keyword.value.trim(),
+      limit: 200
+    }, { signal: controller.signal })
+    if (sequence !== requestSequence) return
+    events.value = (result.items || []).flatMap((entity) => {
+      const postsByRef = new Map((entity.posts || []).map((post) => [`campaign_post:${post.id}`, post]))
+      const destinations = (entity.jobs || []).flatMap((job) => (job.targets || []).map((target) => ({
+        ...target,
+        jobId: target.jobId || job.id,
+        post: postsByRef.get(target.fileRef)
+      }))).filter((target) => target.scheduleAt)
       const mediaName = entity.mediaItems?.[0]?.filename
       const postCopy = entity.posts?.find((post) => post.draft?.title || post.draft?.message)?.draft
-      return {
-        ...entity,
-        scheduleAt: stamp,
-        time: stamp ? stamp.slice(11, 16) : '',
-        title: postCopy?.title || postCopy?.message || mediaName || `Publish ${entity.entityId}`,
-        destinationCount: destinations.length
+      const title = postCopy?.title || postCopy?.message || mediaName || `Publish ${entity.entityId}`
+      if (!destinations.length && entity.scheduledAt) {
+        destinations.push({
+          id: `entity:${entity.entityId}`,
+          scheduleAt: entity.scheduledAt,
+          status: entity.status,
+          accountName: '',
+          post: null
+        })
       }
-    }).filter((entity) => entity.scheduleAt)
+      return destinations.map((target) => {
+        const targetDraft = target.post?.draft
+        const targetTitle = targetDraft?.title || targetDraft?.message || title
+        const normalizedTitle = String(targetTitle).replace(/\s+/g, ' ').trim()
+        return {
+          ...entity,
+          eventId: `${entity.entityId}:${target.jobId || 'entity'}:${target.id}`,
+          targetId: target.id,
+          jobId: target.jobId,
+          targetStatus: target.status,
+          targetFileRef: target.fileRef,
+          scheduleAt: target.scheduleAt,
+          time: target.scheduleAt.slice(11, 16),
+          title: targetTitle,
+          destinationLabel: [target.post?.platform, target.accountName].filter(Boolean).join(' · ') || '內容排程',
+          summary: normalizedTitle.slice(0, EVENT_SUMMARY_LENGTH),
+          hasMore: normalizedTitle.length > EVENT_SUMMARY_LENGTH
+        }
+      })
+    })
   } catch (err) {
-    ElMessage.error(err?.message || '載入行事曆失敗')
+    if (sequence === requestSequence && err?.code !== 'ERR_CANCELED' && err?.name !== 'CanceledError') {
+      ElMessage.error(err?.message || '載入行事曆失敗')
+    }
   } finally {
-    loading.value = false
+    if (sequence === requestSequence) loading.value = false
   }
 }
 
-watch(() => `${view.value.y}-${view.value.m}`, loadEvents)
+watch(monthKey, () => { syncFilterQuery(); loadEvents() })
 watch(showAll, loadEvents)
 onMounted(async () => {
+  await profilesStore.refreshProfiles()
+  await Promise.all(profiles.value.map((profile) => profilesStore.fetchAccountsForProfile(profile.id)))
   await loadEvents()
   if (route.query.entity) {
     openEvent({ entityId: String(route.query.entity) })
@@ -243,7 +382,10 @@ const move = (delta) => {
 const setToday = () => { view.value = { y: today.getFullYear(), m: today.getMonth() } }
 
 function showDay(cell) {
-  selectedDayEvents.value = cell.evs
+  const key = keyOf(cell.d)
+  selectedDayEvents.value = events.value
+    .filter((event) => event.scheduleAt?.slice(0, 10) === key)
+    .sort((a, b) => a.scheduleAt.localeCompare(b.scheduleAt))
   selectedDayLabel.value = `${MONTHS[view.value.m]} ${cell.d}`
   dayDialogVisible.value = true
 }
@@ -388,6 +530,21 @@ const STATUS_LABELS = {
   cancelled: '已取消'
 }
 function statusLabel(s) { return STATUS_LABELS[s] || s }
+
+const activeFilterCount = computed(() =>
+  profileFilters.value.length
+  + platformFilters.value.length
+  + accountFilters.value.length
+  + (keyword.value.trim() ? 1 : 0)
+)
+
+function clearFilters() {
+  profileFilters.value = []
+  platformFilters.value = []
+  accountFilters.value = []
+  keyword.value = ''
+}
+
 function statusTagType(s) {
   switch (s) {
     case 'published':
@@ -417,7 +574,17 @@ function statusTagType(s) {
   gap: var(--space-4);
   margin-bottom: var(--space-6);
   flex-shrink: 0;
+  flex-wrap: wrap;
 }
+
+.cal-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  margin: -10px 0 var(--space-4);
+}
+
+.cal-filter-clear { justify-self: start; }
 
 .cal-title {
   font-size: 20px;
@@ -450,19 +617,19 @@ function statusTagType(s) {
 
 .cal-grid {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 1px;
   background: var(--line);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
-  overflow: visible;
-  min-height: 720px;
-  min-width: 900px;
+  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
 }
 
 .cal-grid-scroll {
   flex: 1;
-  min-height: 720px;
+  min-height: 0;
   min-width: 0;
   overflow: auto;
   border-radius: var(--r-lg);
@@ -478,10 +645,11 @@ function statusTagType(s) {
 
 .cal-cell {
   background: var(--panel);
-  padding: 6px 8px;
+  padding: 6px 7px;
   position: relative;
-  overflow: visible;
-  min-height: 112px;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 104px;
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -504,12 +672,12 @@ function statusTagType(s) {
   cursor: pointer;
   display: flex;
   align-items: center;
+  min-width: 0;
   gap: 4px;
   font-size: 11px;
   line-height: 1.2;
-  padding: 1px 2px;
+  padding: 2px 3px;
   border-radius: 4px;
-  white-space: nowrap;
   color: var(--text);
 }
 
@@ -561,7 +729,23 @@ function statusTagType(s) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* One line per entry: a wrapped summary made day cells tall and the calendar
+     hard to scan. The full text is one click away (the entry, or 更多). */
+  white-space: nowrap;
 }
+
+.cal-ev-more {
+  flex-shrink: 0;
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.cal-ev-more:hover { text-decoration: underline; }
 
 .cal-ev .cp {
   background: var(--bg-2);
@@ -593,14 +777,22 @@ function statusTagType(s) {
 .entity-media-item { display: grid; align-content: start; gap: 8px; min-width: 0; font-size: 12px; }
 .entity-media-item img, .entity-media-item video { width: 100%; max-height: 180px; object-fit: cover; border-radius: 6px; background: var(--raised); }
 .media-name { overflow-wrap: anywhere; }
+.media-state { color: var(--text-2); }
 .copy-label { display: block; margin-bottom: 6px; color: var(--text-3); font-size: 12px; }
 .entity-post header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
 .post-copy { padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--raised); border-radius: 6px; }
 .entity-targets { display: grid; gap: 8px; margin-top: 12px; }
-.entity-target { display: grid; grid-template-columns: auto minmax(90px,1fr) minmax(120px,auto) minmax(100px,1fr) auto auto; gap: 8px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
-.entity-target .ev-error { grid-column: 1 / -1; }
-.entity-artifacts { display: flex; flex-wrap: wrap; gap: 12px; }
-@media (max-width: 680px) { .entity-target { grid-template-columns: 1fr; } }
+  .entity-target { display: grid; grid-template-columns: auto minmax(90px,1fr) minmax(120px,auto) minmax(100px,1fr) auto auto; gap: 8px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--raised); }
+  .entity-target .ev-error { grid-column: 1 / -1; }
+  .entity-post { display: grid; gap: 12px; }
+  .entity-post header { margin-bottom: 0; }
+  .entity-post h3 { overflow-wrap: anywhere; }
+  .entity-artifacts { padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  .entity-artifacts h4 { margin: 0 0 10px; }
+  @media (max-width: 680px) {
+    .entity-target { grid-template-columns: 1fr; }
+    .entity-summary { max-height: 68vh; }
+  }
 
 .ev-meta {
   display: flex;

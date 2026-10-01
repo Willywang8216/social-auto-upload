@@ -28,6 +28,52 @@ def _spec(targets):
     )
 
 
+class WorkerShutdownTests(unittest.TestCase):
+    def test_shutdown_waits_for_inflight_target_and_tracks_maintenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runtime.db"
+            create_table.bootstrap(db_path)
+            job = jobs.enqueue_job(_spec([("acct-1", "f1", None)]), db_path=db_path)
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def executor(*_args):
+                entered.set()
+                await release.wait()
+
+            async def drive():
+                worker = PublishWorker(
+                    executor,
+                    config=WorkerConfig(
+                        poll_interval=0.001,
+                        batch_size=1,
+                        max_concurrent=1,
+                        retry=RetryPolicy(max_attempts=1),
+                    ),
+                    db_path=db_path,
+                )
+                await worker._tick()
+                await entered.wait()
+                worker.stop()
+                release.set()
+                await worker._finish_shutdown()
+                self.assertFalse(worker._tasks)
+                self.assertIsNone(worker._maintenance_task)
+
+            asyncio.run(drive())
+            self.assertEqual(jobs.get_job(job.id, db_path=db_path).status, jobs.JOB_SUCCEEDED)
+
+    def test_tick_does_not_schedule_maintenance_after_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runtime.db"
+            create_table.bootstrap(db_path)
+            worker = PublishWorker(lambda *_args: None, db_path=db_path)
+            worker._MAINTENANCE_TICK_INTERVAL = 1
+            worker.stop()
+            asyncio.run(worker._tick())
+            self.assertIsNone(worker._maintenance_task)
+
+
 class StructuredLoggingTests(unittest.TestCase):
     """Worker emits correlated log records, one file per job, closed on terminal."""
 
@@ -115,6 +161,70 @@ class CliEntryPointTests(unittest.TestCase):
         self.assertEqual(args.batch_size, 8)
         self.assertEqual(args.max_concurrent, 5)
         self.assertEqual(args.max_attempts, 4)
+
+    def test_maintenance_task_is_tracked_and_shutdown_awaits_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runtime.db"
+            create_table.bootstrap(db_path)
+            worker = PublishWorker(
+                lambda *_args: asyncio.sleep(0),
+                config=WorkerConfig(poll_interval=0.001, max_concurrent=1),
+                db_path=db_path,
+            )
+            worker._MAINTENANCE_TICK_INTERVAL = 1
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def maintenance():
+                entered.set()
+                await release.wait()
+
+            async def drive():
+                with patch.object(worker, "_run_maintenance_tick", maintenance):
+                    await worker._tick()
+                    await entered.wait()
+                    self.assertIsNotNone(worker._maintenance_task)
+                    worker.stop()
+                    release.set()
+                    await worker._finish_shutdown()
+                    self.assertIsNone(worker._maintenance_task)
+
+            asyncio.run(drive())
+
+    def test_shutdown_waits_for_inflight_targets_without_repolling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runtime.db"
+            create_table.bootstrap(db_path)
+            job = jobs.enqueue_job(_spec([("acct-1", "f1", None)]), db_path=db_path)
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def executor(*_args):
+                entered.set()
+                await release.wait()
+
+            async def drive():
+                worker = PublishWorker(
+                    executor,
+                    config=WorkerConfig(
+                        poll_interval=0.001,
+                        batch_size=1,
+                        max_concurrent=1,
+                        retry=RetryPolicy(max_attempts=1),
+                    ),
+                    db_path=db_path,
+                )
+                await worker._tick()
+                await entered.wait()
+                worker.stop()
+                finish = asyncio.create_task(worker._finish_shutdown())
+                await asyncio.sleep(0)
+                release.set()
+                await finish
+                self.assertFalse(worker._tasks)
+
+            asyncio.run(drive())
+            self.assertEqual(jobs.get_job(job.id, db_path=db_path).status, jobs.JOB_SUCCEEDED)
 
     def test_cli_drains_pending_jobs_in_once_mode(self) -> None:
         # End-to-end: stage one pending job, run --once, expect it to finish.

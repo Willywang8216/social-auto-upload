@@ -105,6 +105,17 @@ def _tiktok_validate_pull_from_url(public_url: str) -> str:
 class PreparedPublishError(RuntimeError):
     """Raised when a prepared publish cannot be completed."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(message)
+        self.details = details or {}
+        self.retryable = retryable
+
 
 def _first_comment_text(payload: dict) -> str:
     """Return the trimmed first-comment text, or empty string."""
@@ -194,6 +205,16 @@ def _raise_for_status(response) -> None:
         if detail:
             raise PreparedPublishError(f"HTTP {status}: {detail}") from None
         raise PreparedPublishError(_redact_tokens(str(exc))) from None
+
+
+    try:
+        body = response.json()
+    except Exception:
+        body = {}
+    if isinstance(body, dict) and body.get("ok") is False:
+        description = str(body.get("description") or "Telegram API rejected the request")
+        description = _redact_tokens(description)
+        raise PreparedPublishError(f"Telegram API error: {description}")
 
 
 def _raise_tiktok_error(response) -> None:
@@ -496,6 +517,7 @@ def _publish_telegram_to_one(
     silent: str,
     disable_preview: str,
     media: dict[str, list[dict[str, str]]],
+    completed_operations: set[str] | None = None,
 ) -> dict[str, Any]:
     """Send the given payload to a single Telegram chat and return a status dict.
 
@@ -505,11 +527,50 @@ def _publish_telegram_to_one(
     attachments = [*media["videos"], *media["images"]]
     responses: list[Any] = []
     errors: list[str] = []
+    retry_safe = True
+    completed = completed_operations if completed_operations is not None else set()
 
-    def _post(method: str, **kwargs):
-        response = http.post(TELEGRAM_API_ROOT.format(token=token, method=method), **kwargs)
-        _raise_for_status(response)
+    def _post(operation_key: str, method: str, **kwargs):
+        nonlocal retry_safe
+        if f"ambiguous:{operation_key}" in completed:
+            retry_safe = False
+            raise PreparedPublishError(
+                f"Telegram {operation_key} may already have been accepted; reconcile delivery before retrying",
+                retryable=False,
+            )
+        if operation_key in completed:
+            return None
+        try:
+            response = http.post(TELEGRAM_API_ROOT.format(token=token, method=method), **kwargs)
+        except Exception:
+            retry_safe = False
+            completed.add(f"ambiguous:{operation_key}")
+            raise
+        try:
+            _raise_for_status(response)
+        except PreparedPublishError:
+            status = int(getattr(response, "status_code", 0) or 0)
+            if status >= 500 or status == 0:
+                retry_safe = False
+                completed.add(f"ambiguous:{operation_key}")
+            raise
+        try:
+            body = response.json()
+            if isinstance(body, dict) and body.get("ok") is False:
+                description = _redact_tokens(str(body.get("description") or "Telegram API rejected the request"))
+                status = int(getattr(response, "status_code", 0) or 0)
+                if status != 429:
+                    retry_safe = False
+                    completed.add(f"ambiguous:{operation_key}")
+                raise PreparedPublishError(
+                    f"Telegram API error: {description}", retryable=status == 429
+                )
+        except PreparedPublishError:
+            raise
+        except Exception:
+            pass
         responses.append(response)
+        completed.add(operation_key)
         return response
 
     try:
@@ -522,7 +583,7 @@ def _publish_telegram_to_one(
             }
             if parse_mode:
                 data["parse_mode"] = parse_mode
-            _post("sendMessage", data=data, timeout=120)
+            _post("message", "sendMessage", data=data, timeout=120)
         elif len(attachments) == 1:
             item = attachments[0]
             is_video = item in media["videos"]
@@ -538,12 +599,13 @@ def _publish_telegram_to_one(
             local_path = item.get("local_path")
             if local_path:
                 with Path(local_path).open("rb") as handle:
-                    _post(method, data=data, files={field_name: (Path(local_path).name, handle)}, timeout=600)
+                    _post("media", method, data=data, files={field_name: (Path(local_path).name, handle)}, timeout=600)
             else:
                 data[field_name] = item.get("public_url")
-                _post(method, data=data, timeout=120)
-            if overflow_message:
+                _post("media", method, data=data, timeout=120)
+            if overflow_message and "media" in completed:
                 _post(
+                    "overflow",
                     "sendMessage",
                     data={
                         "chat_id": chat_id,
@@ -554,7 +616,7 @@ def _publish_telegram_to_one(
                     },
                     timeout=120,
                 )
-        else:
+        elif len(attachments) > 1:
             media_payload = []
             files = {}
             open_files = []
@@ -588,8 +650,9 @@ def _publish_telegram_to_one(
             finally:
                 for handle in open_files:
                     handle.close()
-            if overflow_message:
+            if overflow_message and "album" in completed:
                 _post(
+                    "overflow",
                     "sendMessage",
                     data={
                         "chat_id": chat_id,
@@ -602,14 +665,19 @@ def _publish_telegram_to_one(
                 )
     except PreparedPublishError as exc:
         errors.append(str(exc))
+        if exc.retryable is False:
+            retry_safe = False
     except Exception as exc:  # noqa: BLE001
         errors.append(str(exc))
+        retry_safe = False
 
     return {
         "chatId": chat_id,
         "ok": not errors,
         "errors": errors,
         "responses": responses,
+        "retrySafe": retry_safe,
+        "completedOperations": sorted(completed),
     }
 
 
@@ -668,33 +736,66 @@ def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
     disable_preview = "true" if bool(config.get("disableWebPreview", False)) else "false"
     media = _extract_media(payload)
 
+    delivery_key = str(payload.get("_telegramDeliveryKey") or "default")
+    stored_completion = payload.get("telegramCompletedByDelivery")
+    if not isinstance(stored_completion, dict):
+        stored_completion = {}
+    completed_by_chat = stored_completion.get(delivery_key)
+    if not isinstance(completed_by_chat, dict):
+        completed_by_chat = {}
+
     results: list[dict[str, Any]] = []
     for chat_id in chat_ids:
-        results.append(
-            _publish_telegram_to_one(
-                http,
-                token=token,
-                chat_id=chat_id,
-                message=message,
-                caption=caption,
-                overflow_message=overflow_message,
-                parse_mode=parse_mode,
-                silent=silent,
-                disable_preview=disable_preview,
-                media=media,
-            )
+        completed = completed_by_chat.get(chat_id)
+        if not isinstance(completed, list):
+            completed = []
+        result = _publish_telegram_to_one(
+            http,
+            token=token,
+            chat_id=chat_id,
+            message=message,
+            caption=caption,
+            overflow_message=overflow_message,
+            parse_mode=parse_mode,
+            silent=silent,
+            disable_preview=disable_preview,
+            media=media,
+            completed_operations=set(completed),
+        )
+        results.append(result)
+        completed_by_chat[chat_id] = sorted(
+            set(completed) | set(result.get("completedOperations", []))
         )
 
-    # Aggregate: if any chat failed, surface a single error so the worker
-    # marks the job accordingly; successful chats' responses are still in
-    # ``results[i].responses`` for callers that want per-chat detail.
+    payload.setdefault("telegramCompletedByDelivery", {})[delivery_key] = completed_by_chat
     failures = [item for item in results if not item["ok"]]
-    if failures and len(failures) == len(results):
+    if failures:
+        successful = [item for item in results if item["ok"]]
+        retry_safe = all(item.get("retrySafe", True) for item in failures)
+        summary = {
+            "platform": "telegram",
+            "partial": bool(successful),
+            "retrySafe": retry_safe,
+            "chats": [
+                {
+                    "chatId": item["chatId"],
+                    "ok": item["ok"],
+                    "retrySafe": item.get("retrySafe", True),
+                    "errors": item["errors"],
+                }
+                for item in results
+            ],
+        }
         joined = "; ".join(
             f"{item['chatId']}: {'; '.join(item['errors']) or 'unknown error'}"
             for item in failures
         )
-        raise PreparedPublishError(f"Telegram publish failed for all chats: {joined}")
+        partial_label = "partial" if successful else "all"
+        raise PreparedPublishError(
+            f"Telegram publish failed for {partial_label} delivery ({len(successful)} succeeded, {len(failures)} failed): {joined}",
+            details=summary,
+            retryable=retry_safe,
+        )
     return results
 
 
@@ -732,6 +833,7 @@ def _publish_telegram_mtproto_one(
     overflow_message: str,
     silent: bool,
     media: dict[str, list[dict[str, str]]],
+    completed_operations: set[str] | None = None,
 ) -> dict[str, Any]:
     """Send the payload to a single chat over MTProto (as the user account).
 
@@ -742,44 +844,60 @@ def _publish_telegram_mtproto_one(
 
     attachments = [*media["videos"], *media["images"]]
     errors: list[str] = []
+    retry_safe = True
+    completed = completed_operations if completed_operations is not None else set()
 
     async def _send():
+        nonlocal retry_safe
         peer = await client.get_input_entity(chat_id)
         if not attachments:
-            text = message
-            if caption and caption != text:
-                text = caption
-            await client.send_message(peer, text, silent=silent)
-            if overflow_message and overflow_message != text:
-                await client.send_message(peer, overflow_message, silent=silent)
+            text = message if not caption or caption == message else caption
+            if "message" not in completed:
+                try:
+                    await client.send_message(peer, text, silent=silent)
+                    completed.add("message")
+                except Exception:
+                    retry_safe = False
+                    raise
+            if overflow_message and overflow_message != text and "overflow" not in completed:
+                try:
+                    await client.send_message(peer, overflow_message, silent=silent)
+                    completed.add("overflow")
+                except Exception:
+                    retry_safe = False
+                    raise
             return
-        # First image/video carries the caption; send it as an album when there
-        # is more than one image so they group, otherwise a single media file.
+
         first = attachments[0]
         first_path = first.get("local_path") or first.get("public_url")
         if not first_path:
             errors.append("MTProto publish requires a local_path or public_url per media item")
             return
-        remaining = attachments[1:]
-        if len(attachments) == 1:
-            await client.send_file(peer, first_path, caption=caption or None, silent=silent)
-        elif all(item in media["images"] for item in attachments):
-            # Multi-image album.
-            paths = [item.get("local_path") or item.get("public_url") for item in attachments]
-            await client.send_file(
-                peer,
-                [p for p in paths if p],
-                caption=caption or None,
-                silent=silent,
-            )
-        else:
-            await client.send_file(peer, first_path, caption=caption or None, silent=silent)
-            for item in remaining:
-                item_path = item.get("local_path") or item.get("public_url")
-                if item_path:
-                    await client.send_file(peer, item_path, silent=silent)
-        if overflow_message:
-            await client.send_message(peer, overflow_message, silent=silent)
+        if "media" not in completed:
+            try:
+                remaining = attachments[1:]
+                if len(attachments) == 1:
+                    await client.send_file(peer, first_path, caption=caption or None, silent=silent)
+                elif all(item in media["images"] for item in attachments):
+                    paths = [item.get("local_path") or item.get("public_url") for item in attachments]
+                    await client.send_file(peer, [path for path in paths if path], caption=caption or None, silent=silent)
+                else:
+                    await client.send_file(peer, first_path, caption=caption or None, silent=silent)
+                    for item in remaining:
+                        item_path = item.get("local_path") or item.get("public_url")
+                        if item_path:
+                            await client.send_file(peer, item_path, silent=silent)
+                completed.add("media")
+            except Exception:
+                retry_safe = False
+                raise
+        if overflow_message and "overflow" not in completed:
+            try:
+                await client.send_message(peer, overflow_message, silent=silent)
+                completed.add("overflow")
+            except Exception:
+                retry_safe = False
+                raise
 
     try:
         client.loop.run_until_complete(_send())
@@ -792,6 +910,8 @@ def _publish_telegram_mtproto_one(
         "chatId": chat_id,
         "ok": not errors,
         "errors": errors,
+        "retrySafe": retry_safe,
+        "completedOperations": sorted(completed),
         "mode": "mtproto",
     }
 
@@ -828,29 +948,52 @@ def _publish_telegram_mtproto_sync(account, payload: dict, *, session=None) -> l
     silent = bool(config.get("silent", False))
     media = _extract_media(payload)
 
+    delivery_key = str(payload.get("_telegramDeliveryKey") or "default")
+    stored_completion = payload.get("telegramCompletedByDelivery")
+    if not isinstance(stored_completion, dict):
+        stored_completion = {}
+    completed_by_chat = stored_completion.get(delivery_key)
+    if not isinstance(completed_by_chat, dict):
+        completed_by_chat = {}
     client = TelegramClient(StringSession(session_string), api_id, api_hash)
     client.start()
     try:
         results: list[dict[str, Any]] = []
         for chat_id in chat_ids:
-            results.append(
-                _publish_telegram_mtproto_one(
-                    client,
-                    chat_id=chat_id,
-                    message=message,
-                    caption=caption,
-                    overflow_message=overflow_message,
-                    silent=silent,
-                    media=media,
-                )
+            completed = completed_by_chat.get(chat_id)
+            if not isinstance(completed, list):
+                completed = []
+            result = _publish_telegram_mtproto_one(
+                client,
+                chat_id=chat_id,
+                message=message,
+                caption=caption,
+                overflow_message=overflow_message,
+                silent=silent,
+                media=media,
+                completed_operations=set(completed),
             )
+            results.append(result)
+            completed_by_chat[chat_id] = sorted(set(completed) | set(result.get("completedOperations", [])))
+        payload.setdefault("telegramCompletedByDelivery", {})[delivery_key] = completed_by_chat
         failures = [item for item in results if not item["ok"]]
-        if failures and len(failures) == len(results):
-            joined = "; ".join(
-                f"{item['chatId']}: {'; '.join(item['errors']) or 'unknown error'}"
-                for item in failures
+        if failures:
+            successful = [item for item in results if item["ok"]]
+            retry_safe = all(item.get("retrySafe", True) for item in failures)
+            details = {
+                "platform": "telegram",
+                "partial": bool(successful),
+                "retrySafe": retry_safe,
+                "chats": [
+                    {"chatId": item["chatId"], "ok": item["ok"], "retrySafe": item.get("retrySafe", True), "errors": item["errors"]}
+                    for item in results
+                ],
+            }
+            raise PreparedPublishError(
+                f"Telegram MTProto delivery failed ({len(successful)} succeeded, {len(failures)} failed)",
+                details=details,
+                retryable=retry_safe,
             )
-            raise PreparedPublishError(f"Telegram MTProto publish failed for all chats: {joined}")
         return results
     finally:
         client.disconnect()

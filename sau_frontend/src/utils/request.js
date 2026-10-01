@@ -95,18 +95,22 @@ request.interceptors.response.use(
         default:
           ElMessage.error(backendMsg || '請求失敗')
       }
-    } else {
-      ElMessage.error('網路連線失敗')
-    }
-
-    return Promise.reject(error)
+      } else {
+        if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+          ElMessage.error('請求逾時，請縮小篩選範圍或稍後重試')
+        } else if (error.code === 'ERR_CANCELED' || error.name === 'CanceledError') {
+          // A newer filter request superseded this one; don't show an error.
+        } else {
+          ElMessage.error('網路連線失敗，請檢查連線或稍後重試')
+        }
+      }
   }
 )
 
 // 封装常用的请求方法
 export const http = {
-  get(url, params) {
-    return request.get(url, { params })
+  get(url, params, config = {}) {
+    return request.get(url, { ...config, params })
   },
   
   post(url, data, config = {}) {

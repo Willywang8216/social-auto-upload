@@ -134,9 +134,16 @@ def _resolve_db_path(db_path: Path | None) -> Path:
 def _connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
     resolved = _resolve_db_path(db_path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(resolved)
+    # A long UI read and the worker's write can overlap; without a generous
+    # busy timeout the loser of that race fails immediately ("database is
+    # locked"), which the browser surfaces as a schedule request that never
+    # loads. Waits instead of erroring. (journal_mode stays the default
+    # "delete": the backup/offload scripts copy database.db as a plain file,
+    # and WAL content lives in side files those copies would miss.)
+    conn = sqlite3.connect(resolved, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 15000")
     try:
         yield conn
     finally:
@@ -147,6 +154,12 @@ def _now_iso() -> str:
     # Use timezone-aware UTC and strip the offset so the isoformat string
     # remains compatible with the existing ``DATETIME`` SQLite columns.
     return datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def _chunk(values: Sequence[int], size: int = 400) -> Iterator[Sequence[int]]:
+    """Split ids for ``IN (...)`` clauses; SQLite's variable limit is the cap."""
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
 
 
 def _claimable_clause(now: str) -> tuple[str, list]:
@@ -316,6 +329,19 @@ def enqueue_job(spec: JobSpec, *, workspace_id: str | None = None, db_path: Path
         )
 
 
+def update_job_payload(job_id: int, payload: dict, *, db_path: Path | None = None) -> None:
+    """Persist a worker-maintained payload update without changing job state."""
+    payload_json = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    with _connect(db_path) as conn:
+        cursor = conn.execute(
+            "UPDATE publish_jobs SET payload_json=? WHERE id=?",
+            (payload_json, job_id),
+        )
+        if cursor.rowcount != 1:
+            raise LookupError(f"Job not found: id={job_id}")
+        conn.commit()
+
+
 def get_job(job_id: int, *, workspace_id: str | None = None, db_path: Path | None = None) -> Job:
     """Fetch a job. When ``workspace_id`` is given, a job owned by another
     workspace is treated as not found (tenant isolation)."""
@@ -443,6 +469,60 @@ def list_targets(job_id: int, *, db_path: Path | None = None) -> list[Target]:
             (job_id,),
         ).fetchall()
     return [_row_to_target(row) for row in rows]
+
+
+def get_jobs_by_ids(
+    job_ids: Iterable[int],
+    *,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> dict[int, Job]:
+    """Batch form of :func:`get_job` for list views.
+
+    One connection and one query per chunk instead of a connect+SELECT per id;
+    the entity/queue endpoints hydrate hundreds of jobs per request, so the
+    per-row form dominated their latency. Missing ids are simply absent from
+    the result, matching the ``LookupError``-skipping callers.
+    """
+    ids = sorted({int(job_id) for job_id in job_ids})
+    if not ids:
+        return {}
+    found: dict[int, Job] = {}
+    with _connect(db_path) as conn:
+        for chunk in _chunk(ids):
+            placeholders = ",".join("?" * len(chunk))
+            query = f"SELECT * FROM publish_jobs WHERE id IN ({placeholders})"
+            params: list = list(chunk)
+            if workspace_id is not None:
+                query += " AND workspace_id = ?"
+                params.append(workspace_id)
+            for row in conn.execute(query, params):
+                job = _row_to_job(row)
+                found[job.id] = job
+    return found
+
+
+def list_targets_for_jobs(
+    job_ids: Iterable[int], *, db_path: Path | None = None
+) -> dict[int, list[Target]]:
+    """Batch form of :func:`list_targets`; every requested id gets a list
+    (empty when the job has no targets) so callers can index directly."""
+    ids = sorted({int(job_id) for job_id in job_ids})
+    grouped: dict[int, list[Target]] = {job_id: [] for job_id in ids}
+    if not ids:
+        return grouped
+    with _connect(db_path) as conn:
+        for chunk in _chunk(ids):
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"SELECT * FROM publish_job_targets WHERE job_id IN ({placeholders}) "
+                "ORDER BY job_id, id",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                target = _row_to_target(row)
+                grouped.setdefault(target.job_id, []).append(target)
+    return grouped
 
 
 def cancel_job(job_id: int, *, db_path: Path | None = None) -> Job:

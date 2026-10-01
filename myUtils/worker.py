@@ -161,9 +161,13 @@ class PublishWorker:
         self._tasks: set[asyncio.Task] = set()
         self._maintenance_counter: int = 0
         self._stale_sweep_counter: int = 0
+        self._maintenance_task: asyncio.Task | None = None
 
     def stop(self) -> None:
         self._stop.set()
+        task = self._maintenance_task
+        if task is not None and not task.done():
+            task.cancel()
 
     async def drain(self) -> None:
         """Run until the queue is empty AND no in-flight tasks remain.
@@ -176,8 +180,10 @@ class PublishWorker:
         while not self._stop.is_set():
             await self._tick()
             if not self._tasks and not self._has_pending():
+                await self._finish_maintenance()
                 return
             await asyncio.sleep(self._config.poll_interval)
+        await self._finish_shutdown()
 
     async def run_forever(self) -> None:
         """Long-running variant for a real worker process."""
@@ -185,6 +191,24 @@ class PublishWorker:
         while not self._stop.is_set():
             await self._tick()
             await asyncio.sleep(self._config.poll_interval)
+        await self._finish_shutdown()
+
+    async def _finish_maintenance(self) -> None:
+        task = self._maintenance_task
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._maintenance_task = None
+
+    async def _finish_shutdown(self) -> None:
+        await self._finish_maintenance()
+        while self._tasks:
+            await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+            done = {task for task in self._tasks if task.done()}
+            self._tasks.difference_update(done)
+
 
     def _has_pending(self) -> bool:
         # Only targets that are due *now* count. A target scheduled for later
@@ -562,8 +586,8 @@ class PublishWorker:
                 break
             # Run refresh synchronously in a thread pool so it doesn't block the async loop
             import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                await asyncio.get_event_loop().run_in_executor(pool, self._refresh_account, account)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._refresh_account, account)
 
     async def _tick(self) -> None:
         # Reap finished tasks first so their account_refs free up.
@@ -581,7 +605,10 @@ class PublishWorker:
         self._maintenance_counter += 1
         if self._maintenance_counter >= self._MAINTENANCE_TICK_INTERVAL:
             self._maintenance_counter = 0
-            asyncio.create_task(self._run_maintenance_tick())
+            if not self._stop.is_set() and (
+                self._maintenance_task is None or self._maintenance_task.done()
+            ):
+                self._maintenance_task = asyncio.create_task(self._run_maintenance_tick())
 
         # Recover targets a dead predecessor left stuck in `running`. Without
         # this, a Gunicorn/container restart mid-upload strands the row
@@ -618,6 +645,7 @@ class PublishWorker:
 
     async def _run_target(self, target: jobs.Target) -> None:
         job = jobs.get_job(target.job_id, db_path=self._db_path)
+        payload_state = {"payload": dict(job.payload)}
         log = bind_job_logger(
             job_id=target.job_id,
             target_id=target.id,
@@ -630,10 +658,25 @@ class PublishWorker:
         try:
             async with self._concurrency.slot(target.account_ref):
                 # Inject db_path into payload so executors can resolve remote files
-                payload = {**job.payload, "_db_path": str(self._db_path)}
+                payload = {
+                    **payload_state["payload"],
+                    "_db_path": str(self._db_path),
+                    "_telegramDeliveryKey": str(target.id),
+                }
                 result = self._executor(job.platform, payload, target)
                 if inspect.isawaitable(result):
-                    await result
+                    outcome = await result
+                else:
+                    outcome = result
+                updated_payload = {
+                    key: value for key, value in payload.items()
+                    if key not in {"_db_path", "_telegramDeliveryKey"}
+                }
+                if updated_payload != job.payload:
+                    payload_state["payload"] = updated_payload
+                    jobs.update_job_payload(
+                        target.job_id, updated_payload, db_path=self._db_path
+                    )
         except asyncio.CancelledError:
             log.warning("target cancelled mid-run; queued for retry")
             jobs.mark_target_retry(
@@ -644,8 +687,37 @@ class PublishWorker:
             self._maybe_close_job_sink(target.job_id)
             raise
         except Exception as exc:  # noqa: BLE001 — we want the message regardless
+            if "payload" in locals():
+                updated_payload = {
+                    key: value for key, value in payload.items()
+                    if key not in {"_db_path", "_telegramDeliveryKey"}
+                }
+                if updated_payload != job.payload:
+                    payload_state["payload"] = updated_payload
+                    try:
+                        jobs.update_job_payload(
+                            target.job_id, updated_payload, db_path=self._db_path
+                        )
+                    except Exception:
+                        log.exception("could not persist target recovery state")
             await self._handle_failure(target, exc, log)
         else:
+            outcome = locals().get("outcome")
+            if isinstance(outcome, dict) and outcome.get("retryableFailure"):
+                error = str(outcome.get("error") or "publisher reported partial delivery")
+                jobs.update_job_payload(
+                    target.job_id, payload_state["payload"], db_path=self._db_path
+                )
+                await self._handle_failure(
+                    target,
+                    prepared_publishers.PreparedPublishError(
+                        error,
+                        details=outcome.get("details") if isinstance(outcome.get("details"), dict) else None,
+                        retryable=True,
+                    ),
+                    log,
+                )
+                return
             transitioned = jobs.mark_target_success(
                 target.id, db_path=self._db_path
             )
@@ -665,7 +737,19 @@ class PublishWorker:
         self, target: jobs.Target, exc: BaseException, log
     ) -> None:
         message = f"{type(exc).__name__}: {exc}"
+        error_details = getattr(exc, "details", None)
+        if isinstance(error_details, dict) and error_details:
+            message += f" | details={json.dumps(error_details, ensure_ascii=False, separators=(',', ':'))}"
         attempts = target.attempts  # already incremented when claimed
+        if getattr(exc, "retryable", True) is False:
+            transitioned = jobs.mark_target_failed(
+                target.id, message, db_path=self._db_path
+            )
+            if transitioned:
+                log.error(f"target failed without retry: {message}")
+                self._alert_publish_failure(target, message)
+            self._maybe_close_job_sink(target.job_id)
+            return
         if attempts >= self._config.retry.max_attempts:
             transitioned = jobs.mark_target_failed(
                 target.id, message, db_path=self._db_path
@@ -825,31 +909,69 @@ def _resolve_account_path(account_ref: str) -> Path:
     return candidate  # let the uploader complain with its own error
 
 
+def _download_atomically(destination: Path, download: Callable[[Path], Any]) -> None:
+    """Download into a sibling temporary file and publish it only when complete."""
+    import tempfile
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".part", dir=destination.parent
+    )
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        download(temporary)
+        if not temporary.is_file() or temporary.stat().st_size == 0:
+            raise RuntimeError("download returned an empty media file")
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+class MediaRestoreError(RuntimeError):
+    """A required publish media file could not be restored locally."""
+
+
 def _resolve_file_path(file_ref: str, *, db_path: Path | None = None) -> Path:
     candidate = Path(file_ref)
-    if candidate.is_absolute() and candidate.exists():
+    if candidate.is_absolute() and candidate.is_file():
         return candidate
-    legacy = Path(BASE_DIR) / "videoFile" / file_ref
-    if legacy.exists():
-        return legacy
-    # Try downloading from remote storage
+
+    if file_ref.startswith("uploads/"):
+        local_path = Path(BASE_DIR) / file_ref
+        storage_ref = file_ref
+    else:
+        relative = file_ref.removeprefix("videoFile/")
+        local_path = Path(BASE_DIR) / "videoFile" / relative
+        storage_ref = file_ref
+    if local_path.is_file():
+        return local_path
     if db_path is not None:
-        downloaded = _try_download_from_storage(file_ref, db_path)
-        if downloaded is not None:
+        downloaded = _try_download_from_storage(storage_ref, db_path)
+        if downloaded is not None and downloaded.is_file():
             return downloaded
-    return candidate
+    raise MediaRestoreError(f"Required media is unavailable locally or in storage: {file_ref}")
 
 
 def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
     """Look up file_ref in file_records. If stored remotely, download to local."""
     import sqlite3
     try:
+        if file_ref.startswith("uploads/"):
+            lookup_refs = (file_ref,)
+        else:
+            relative = file_ref.removeprefix("videoFile/")
+            lookup_refs = (file_ref, relative)
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT storage_key, storage_backend_id FROM file_records WHERE file_path = ? AND storage_key IS NOT NULL",
-                (file_ref,),
-            ).fetchone()
+            row = None
+            for lookup_ref in lookup_refs:
+                row = conn.execute(
+                    "SELECT storage_key, storage_backend_id FROM file_records WHERE file_path = ? AND storage_key IS NOT NULL",
+                    (lookup_ref,),
+                ).fetchone()
+                if row:
+                    break
         if not row:
             return None
         with sqlite3.connect(db_path) as conn:
@@ -866,23 +988,26 @@ def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
         if file_ref.startswith("uploads/"):
             local_path = Path(BASE_DIR) / file_ref
         else:
-            local_path = Path(BASE_DIR) / "videoFile" / file_ref
-        if local_path.exists():
+            local_path = Path(BASE_DIR) / "videoFile" / file_ref.removeprefix("videoFile/")
+        if local_path.is_file():
             return local_path
-        media_remote_storage.download_from_backend(
-            dict(backend), row["storage_key"], local_path
+        _download_atomically(
+            local_path,
+            lambda temporary: media_remote_storage.download_from_backend(
+                dict(backend), row["storage_key"], temporary
+            ),
         )
         _logger.info(
             f"restored {file_ref} from {backend['provider']} storage"
         )
         return local_path
     except Exception as exc:
-        # Don't swallow this: a silent None here surfaces later as the
-        # uploader's cryptic "file not found" after the file was offloaded.
+        # A known remote record that cannot be restored is a publishing failure,
+        # not a missing file that should be delegated to the platform uploader.
         _logger.warning(
             f"could not restore {file_ref} from remote storage: {exc!r}"
         )
-        return None
+        raise MediaRestoreError(f"Remote restore failed for {file_ref}: {exc}") from exc
 
 
 def _prepared_artifact_local_paths(payload: dict) -> list[Path]:
@@ -906,7 +1031,6 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
     as the uploader's generic "file not found" halfway through a publish.
     """
     import sqlite3
-    import requests as _requests
 
     def _record_for(artifact: dict, path: Path) -> sqlite3.Row | None:
         source_id = artifact.get("source_id") or artifact.get("source_file_record_id")
@@ -943,22 +1067,27 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             continue
         generated_root = media_pipeline.GENERATED_MEDIA_ROOT.resolve()
         try:
-            expected_generated_root = generated_root
-            resolved_local = p.resolve()
-            is_generated_artifact = resolved_local.is_relative_to(expected_generated_root)
+            is_generated_artifact = p.resolve().is_relative_to(generated_root)
         except (OSError, ValueError):
             is_generated_artifact = False
+        try:
+            row = _record_for(artifact, p)
+        except Exception as exc:
+            raise MediaRestoreError(f"Could not find artifact source record for {local_path}: {exc}") from exc
         if is_generated_artifact:
-            _logger.error(f"Generated artifact is missing from persistent media storage: {local_path}")
+            public_url = str(artifact.get("public_url") or "")
+            if not _public_https_url(public_url):
+                raise MediaRestoreError(
+                    f"Generated artifact is missing and has no safe public HTTPS recovery URL: {local_path}"
+                )
+            _download_public_artifact(public_url, p)
             continue
         try:
             row = _record_for(artifact, p)
             if row is None:
-                _logger.warning(
-                    f"artifact {local_path} is missing locally and has no "
-                    f"file_record to restore it from"
+                raise MediaRestoreError(
+                    f"Artifact {local_path} is missing locally and has no file record"
                 )
-                continue
 
             p.parent.mkdir(parents=True, exist_ok=True)
             downloaded = False
@@ -973,8 +1102,11 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                             "SELECT * FROM storage_backends WHERE id = ?", (row["storage_backend_id"],)
                         ).fetchone()
                     if backend:
-                        media_remote_storage.download_from_backend(
-                            dict(backend), row["storage_key"], p
+                        _download_atomically(
+                            p,
+                            lambda temporary: media_remote_storage.download_from_backend(
+                                dict(backend), row["storage_key"], temporary
+                            ),
                         )
                         downloaded = True
                 except Exception as exc:
@@ -986,9 +1118,7 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             # Try 2: Download via public CDN URL (R2 public bucket)
             if not downloaded and row["storage_cdn_url"]:
                 try:
-                    resp = _requests.get(row["storage_cdn_url"], timeout=60)
-                    resp.raise_for_status()
-                    p.write_bytes(resp.content)
+                    _download_public_artifact(row["storage_cdn_url"], p)
                     downloaded = True
                 except Exception as exc:
                     last_error = exc
@@ -1006,22 +1136,22 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                             (f"%{p.name}%",),
                         ).fetchone()
                     if asset and asset["public_url"]:
-                        resp = _requests.get(asset["public_url"], timeout=60)
-                        resp.raise_for_status()
-                        p.write_bytes(resp.content)
+                        _download_public_artifact(asset["public_url"], p)
                         downloaded = True
                 except Exception as exc:
                     last_error = exc
 
             if not downloaded:
-                _logger.warning(
-                    f"could not restore artifact {local_path} "
-                    f"(file_record={row['file_path']}): {last_error!r}"
+                raise MediaRestoreError(
+                    f"Could not restore artifact {local_path} "
+                    f"(file_record={row['file_path']}): {last_error or 'no usable storage source'}"
                 )
 
-        except Exception:
+        except MediaRestoreError:
+            raise
+        except Exception as exc:
             _logger.exception(f"artifact restore failed for {local_path}")
-            continue
+            raise MediaRestoreError(f"Artifact restore failed for {local_path}: {exc}") from exc
 
 
 def _now_utc_naive() -> datetime:
@@ -1646,6 +1776,81 @@ async def _run_prepared_campaign_upload(
     await publisher(platform=platform, payload=payload, target=target, account=account, account_file=account_file)
 
 
+def _public_https_url(value: str) -> bool:
+    from ipaddress import ip_address
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        return False
+    host = parsed.hostname.lower().rstrip(".")
+    if host == "localhost" or host.endswith((".localhost", ".local")):
+        return False
+    try:
+        return ip_address(host).is_global
+    except ValueError:
+        return "." in host and not host.endswith(".")
+
+
+def _download_public_artifact(url: str, destination: Path) -> None:
+    import requests
+    from urllib.parse import urljoin
+
+    current = url
+    for redirect_count in range(6):
+        if not _public_https_url(current):
+            raise MediaRestoreError("Artifact URL must use a public HTTPS host")
+        with requests.get(
+            current, timeout=(10, 120), stream=True, allow_redirects=False
+        ) as response:
+            if response.is_redirect or response.is_permanent_redirect:
+                location = response.headers.get("Location")
+                if not location or redirect_count == 5:
+                    raise MediaRestoreError("Artifact URL redirect limit exceeded")
+                current = urljoin(current, location)
+                continue
+            response.raise_for_status()
+            _download_atomically(
+                destination,
+                lambda temporary: _write_response_chunks(response, temporary),
+            )
+            return
+    raise MediaRestoreError("Artifact URL redirect limit exceeded")
+
+
+def _write_response_chunks(response, destination: Path) -> None:
+    with destination.open("wb") as output:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                output.write(chunk)
+
+
+def _restore_optional_thumbnail(payload: dict, *, db_path: Path) -> None:
+    thumbnail_ref = str(payload.get("thumbnail") or "")
+    if not thumbnail_ref:
+        return
+    thumb = Path(thumbnail_ref)
+    if not thumb.is_absolute():
+        thumb = Path(BASE_DIR) / thumbnail_ref
+    if thumb.exists():
+        return
+    candidates = [thumbnail_ref]
+    if "videoFile/" in thumbnail_ref:
+        candidates.append(thumbnail_ref.split("videoFile/", 1)[1])
+    for ref in candidates:
+        try:
+            restored = _try_download_from_storage(ref, db_path)
+        except MediaRestoreError as exc:
+            _logger.warning(f"optional thumbnail restore failed for {thumbnail_ref}: {exc}")
+            continue
+        if restored is not None and restored.exists():
+            payload["thumbnail"] = str(restored)
+            return
+
+
 async def default_executor(platform: str, payload: dict, target: jobs.Target) -> None:
     """Default platform router used by the Flask publish endpoints.
 
@@ -1663,20 +1868,8 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
 
     # Thumbnails offload like any other asset — restore before the uploader
     # opens the path, otherwise a scheduled post fails on a missing cover.
-    thumbnail_ref = str(payload.get("thumbnail") or "")
-    if thumbnail_ref and db_path is not None:
-        thumb = Path(thumbnail_ref)
-        if not thumb.is_absolute():
-            thumb = Path(BASE_DIR) / thumbnail_ref
-        if not thumb.exists():
-            candidates = [thumbnail_ref]
-            if "videoFile/" in thumbnail_ref:
-                candidates.append(thumbnail_ref.split("videoFile/", 1)[1])
-            for ref in candidates:
-                restored = _try_download_from_storage(ref, db_path)
-                if restored is not None and restored.exists():
-                    payload["thumbnail"] = str(restored)
-                    break
+    if db_path is not None:
+        _restore_optional_thumbnail(payload, db_path=db_path)
 
     structured_account = _resolve_structured_account(target.account_ref)
     canonical_account_file = _resolve_account_path(target.account_ref)

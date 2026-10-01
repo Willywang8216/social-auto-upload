@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterable, Iterator, Sequence
 
 from utils.conf_defaults import BASE_DIR
 
@@ -76,13 +76,22 @@ def _resolve_db_path(db_path: Path | None) -> Path:
 def _connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
     resolved = _resolve_db_path(db_path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(resolved)
+    # Wait out a concurrent writer (the publish worker) instead of failing the
+    # read outright; see the matching note in myUtils.jobs._connect.
+    conn = sqlite3.connect(resolved, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 15000")
     try:
         yield conn
     finally:
         conn.close()
+
+
+def _chunk(values: Sequence[int], size: int = 400) -> Iterator[Sequence[int]]:
+    """Split ids for ``IN (...)`` clauses; SQLite's variable limit is the cap."""
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
 
 
 def _now_iso() -> str:
@@ -155,6 +164,31 @@ def get_media_group(media_group_id: int, *, workspace_id: str | None = None, db_
     if row is None:
         raise LookupError(f"Media group not found: id={media_group_id}")
     return _row_to_media_group(row)
+
+
+def get_media_groups_by_ids(
+    media_group_ids: Iterable[int],
+    *,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> dict[int, MediaGroup]:
+    """Batch form of :func:`get_media_group`; missing ids are absent."""
+    ids = sorted({int(media_group_id) for media_group_id in media_group_ids})
+    if not ids:
+        return {}
+    found: dict[int, MediaGroup] = {}
+    with _connect(db_path) as conn:
+        for chunk in _chunk(ids):
+            placeholders = ",".join("?" * len(chunk))
+            query = f"SELECT * FROM media_groups WHERE id IN ({placeholders})"
+            params: list = list(chunk)
+            if workspace_id is not None:
+                query += " AND workspace_id = ?"
+                params.append(workspace_id)
+            for row in conn.execute(query, params):
+                group = _row_to_media_group(row)
+                found[group.id] = group
+    return found
 
 
 def list_media_groups(*, workspace_id: str | None = None, db_path: Path | None = None) -> list[MediaGroup]:
