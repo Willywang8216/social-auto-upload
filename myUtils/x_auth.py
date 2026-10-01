@@ -21,7 +21,12 @@ except ModuleNotFoundError:  # pragma: no cover
 X_AUTHORIZE_URL = "https://x.com/i/oauth2/authorize"
 X_TOKEN_URL = "https://api.x.com/2/oauth2/token"
 X_ME_URL = "https://api.x.com/2/users/me"
-DEFAULT_SCOPES = ("tweet.read", "tweet.write", "users.read", "offline.access")
+# media.write is not optional: the media upload goes to
+# upload.twitter.com/1.1/media/upload.json, and an OAuth2 user token without it
+# is rejected with 401 "Invalid or expired token" (code 89) - for every account,
+# including a freshly re-authorised one, which makes it look like the login
+# failed. X_UPLOAD_URL in prepared_publishers.py is that endpoint.
+DEFAULT_SCOPES = ("tweet.read", "tweet.write", "media.write", "users.read", "offline.access")
 CLIENT_ID_ENV = "X_CLIENT_ID"
 CLIENT_SECRET_ENV = "X_CLIENT_SECRET"
 REDIRECT_URI_ENV = "SAU_TWITTER_CALLBACK_URL"
