@@ -147,7 +147,7 @@
         </section>
         <section v-if="selectedEntity.artifacts?.length" class="entity-artifacts">
           <h4>已準備的媒體連結</h4>
-          <a v-for="artifact in selectedEntity.artifacts.filter((item) => item.url)" :key="artifact.id || artifact.url" :href="artifact.url" target="_blank" rel="noopener">{{ artifact.role || artifact.kind || '媒體' }} · 開啟連結</a>
+          <a v-for="link in artifactLinks(selectedEntity.artifacts, 5)" :key="link.key" :href="link.url" target="_blank" rel="noopener">{{ link.text === '開啟媒體' ? '開啟媒體' : link.text + ' · 開啟連結' }}</a>
         </section>
         </div>
       </template>
@@ -166,6 +166,7 @@ import { useJobsStore } from '@/stores/jobs'
 import { useProfilesStore } from '@/stores/profiles'
 import { getPlatformLabel, getPlatformTagType, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
 import { mediaPreviewSource, mediaStateLabel } from '@/utils/mediaState'
+import { artifactLinks } from '@/utils/entityLinks'
 import {
   applyCalendarFiltersToQuery,
   currentMonthKey,

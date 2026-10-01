@@ -43,8 +43,15 @@
                 :alt="media.filename"
                 loading="lazy"
               />
-              <span v-else class="entity-card-media-placeholder">
-                <span>{{ media.mediaType === 'video' ? '影片' : media.mediaType === 'image' ? '圖片' : '檔案' }}</span>
+              <!-- No preview is not the same as a broken image: the file is
+                   usually offloaded to Drive, so say so rather than leaving a
+                   blank tile that reads as a failed load. -->
+              <span
+                v-else
+                class="entity-card-media-placeholder"
+                :class="{ archived: Boolean(media.archive?.archived) }"
+              >
+                <span class="entity-card-media-badge">{{ media.archive?.archived ? '已封存' : '無預覽' }}</span>
                 <span class="entity-card-media-name">{{ media.filename }}</span>
                 <a
                   v-if="media.archive?.openUrl"
@@ -70,7 +77,7 @@
             </div>
             <p v-if="entity.jobs?.some((job) => job.failedTargets)" class="entity-failure-count">{{ entity.jobs.reduce((total, job) => total + job.failedTargets, 0) }} 個目的地發佈失敗</p>
             <div class="entity-card-links">
-              <a v-for="artifact in entity.artifacts?.filter((item) => item.url).slice(0, 2)" :key="artifact.id || artifact.url" :href="artifact.url" target="_blank" rel="noopener">開啟媒體</a>
+              <a v-for="link in artifactLinks(entity.artifacts)" :key="link.key" :href="link.url" target="_blank" rel="noopener">{{ link.text }}</a>
               <button @click="openEntity(entity)">管理內容</button>
             </div>
           </div>
@@ -120,7 +127,7 @@
           <div v-else class="entity-copy-block"><span>此平台文案</span><p>{{ post.draft?.message || '尚未填寫文案' }}</p><el-button v-if="post.status === 'queued' || post.status === 'ready'" size="small" @click="editingEntityPostId = post.id; editingEntityCopy = post.draft?.message || ''">編輯文案</el-button><el-button v-if="post.status === 'queued' || post.status === 'ready'" size="small" type="danger" @click="cancelPostTargets(post)">取消此貼文排程</el-button></div>
           <div v-for="job in (entityDetails.jobs || []).filter((item) => item.targets?.some((target) => target.fileRef === `campaign_post:${post.id}`))" :key="job.id"><div v-for="target in job.targets.filter((item) => item.fileRef === `campaign_post:${post.id}`)" :key="target.id" class="entity-target-row"><el-tag :type="entityTagType(target.status)" effect="plain">{{ entityStatusLabel(target.status) }}</el-tag><span>{{ target.accountName }} · {{ target.scheduleAt || '立即發佈' }}</span><span v-if="target.lastError" class="entity-error">{{ target.lastError }}</span><el-date-picker v-if="target.status === 'pending' || target.status === 'retrying'" v-model="target._editSchedule" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DDTHH:mm:00" /><el-button v-if="target._editSchedule && (target.status === 'pending' || target.status === 'retrying')" size="small" @click="manageTarget('reschedule', target)">儲存時間</el-button><el-button v-if="target.status === 'pending' || target.status === 'retrying'" size="small" type="danger" @click="manageTarget('cancel', target)">取消</el-button><el-button v-if="target.status === 'failed'" size="small" type="warning" @click="manageTarget('retry', target)">重試</el-button></div></div>
         </section>
-        <section v-if="entityDetails.artifacts?.some((item) => item.url)" class="entity-drawer-section entity-links"><h3>媒體連結</h3><a v-for="artifact in entityDetails.artifacts.filter((item) => item.url)" :key="artifact.id || artifact.url" :href="artifact.url" target="_blank" rel="noopener">{{ artifact.role || artifact.kind || '媒體' }} · 開啟連結</a></section>
+        <section v-if="entityDetails.artifacts?.some((item) => item.url)" class="entity-drawer-section entity-links"><h3>媒體連結</h3><a v-for="link in artifactLinks(entityDetails.artifacts, 5)" :key="link.key" :href="link.url" target="_blank" rel="noopener">{{ link.text === '開啟媒體' ? '開啟媒體' : link.text + ' · 開啟連結' }}</a></section>
       </div>
     </el-drawer>
 
@@ -151,6 +158,7 @@ import { useJobsStore, JOB_STATUS } from '@/stores/jobs'
 import { useProfilesStore } from '@/stores/profiles'
 import { getPlatformLabel, getPlatformTagType, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
 import { mediaPreviewSource, mediaStateLabel } from '@/utils/mediaState'
+import { artifactLinks } from '@/utils/entityLinks'
 
 const profilesStore = useProfilesStore()
 const profiles = computed(() => profilesStore.profiles)
@@ -210,6 +218,22 @@ watch([entityDateRange, entityPlatformFilters, entityProfileFilters, entityAccou
   entitySearchTimer = window.setTimeout(() => loadEntities(true), 250)
 })
 
+// One source for the current filter set: the list, "load more" and the
+// background refresh all have to ask the same question.
+function entityQuery(overrides = {}) {
+  return {
+    status: entityStatusFilter.value || undefined,
+    date: allDates.value ? undefined : todayDate,
+    from: entityDateRange.value?.[0],
+    to: entityDateRange.value?.[1],
+    platforms: entityPlatformFilters.value.join(','),
+    profileIds: entityProfileFilters.value.join(','),
+    accountIds: entityAccountFilters.value.join(','),
+    q: entityKeyword.value.trim() || undefined,
+    ...overrides
+  }
+}
+
 async function loadEntities(reset = false) {
   if (entityLoading.value) return
   if (reset) {
@@ -218,19 +242,9 @@ async function loadEntities(reset = false) {
   }
   entityLoading.value = true
   try {
-    const offset = reset ? 0 : entities.value.length
-    const response = await jobsStore.refreshEntities({
-      limit: entityPageSize,
-      offset,
-      status: entityStatusFilter.value || undefined,
-      date: allDates.value ? undefined : todayDate,
-      from: entityDateRange.value?.[0],
-      to: entityDateRange.value?.[1],
-      platforms: entityPlatformFilters.value.join(','),
-      profileIds: entityProfileFilters.value.join(','),
-      accountIds: entityAccountFilters.value.join(','),
-      q: entityKeyword.value.trim() || undefined
-    })
+    const response = await jobsStore.refreshEntities(
+      entityQuery({ limit: entityPageSize, offset: reset ? 0 : entities.value.length })
+    )
     entities.value = reset ? response.items || [] : [...entities.value, ...(response.items || [])]
     entityTotal.value = response.total || 0
     entityHasMore.value = Boolean(response.hasMore)
@@ -241,22 +255,34 @@ async function loadEntities(reset = false) {
   }
 }
 
+// The 30s poll used to call loadEntities(true), which empties `entities` before
+// refetching — so the whole grid blanked and repainted every half minute, which
+// reads as constant flashing and makes the list hard to read. Refresh in place
+// instead: same filters, never fewer cards than are already on screen, no
+// spinner, and silent on failure because a background poll is not a user action.
+async function refreshEntitiesQuietly() {
+  if (entityLoading.value || entityLoadingMore.value || document.hidden) return
+  try {
+    const response = await jobsStore.refreshEntities(
+      entityQuery({ limit: Math.max(entityPageSize, entities.value.length), offset: 0 })
+    )
+    entities.value = response?.items || []
+    entityTotal.value = response?.total ?? entityTotal.value
+    entityHasMore.value = Boolean(response?.hasMore)
+  } catch {
+    // Keep what is on screen; the next tick tries again.
+  }
+}
+
 async function loadMoreEntities() {
   if (entityLoadingMore.value || !entityHasMore.value) return
   entityLoadingMore.value = true
   try {
-    const response = await jobsStore.refreshEntities({
+    const response = await jobsStore.refreshEntities(entityQuery({
       limit: entityPageSize,
       offset: entities.value.length,
-      status: entityStatusFilter.value || undefined,
-      date: allDates.value ? undefined : todayDate,
-      from: entityDateRange.value?.[0],
-      to: entityDateRange.value?.[1],
-      platforms: entityPlatformFilters.value.join(','),
-      profileIds: entityProfileFilters.value.join(','),
-      accountIds: entityAccountFilters.value.join(','),
       q: entityKeyword.value.trim() || undefined
-    })
+    }))
     entities.value.push(...(response.items || []))
     entityTotal.value = response.total || 0
     entityHasMore.value = Boolean(response.hasMore)
@@ -486,7 +512,7 @@ onMounted(async () => {
     }
   }
   // Refresh recent jobs and entity cards while the page remains open.
-  refreshTimer = window.setInterval(() => { loadEntities(true) }, 30000)
+  refreshTimer = window.setInterval(refreshEntitiesQuietly, 30000)
 })
 
 onBeforeUnmount(() => {
@@ -559,6 +585,8 @@ onBeforeUnmount(() => {
   .entity-card-media-item { min-width:0; min-height:0; overflow:hidden; background:var(--raised); display:grid; place-items:center; }
   .entity-card-media-item img, .entity-card-media-item video { width:100%; height:100%; object-fit:cover; }
   .entity-card-media-placeholder { color:var(--text-3); font-size:11px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; padding:4px; text-align:center; overflow:hidden; min-width:0; }
+  .entity-card-media-badge { font-size:9px; line-height:1.4; padding:0 4px; border-radius:8px; border:1px solid var(--line); background:var(--bg-2); color:var(--text-2); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .entity-card-media-placeholder.archived .entity-card-media-badge { color:var(--accent); border-color:var(--accent); }
   .entity-card-media-name { color:var(--text-2); font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
   .entity-card-media-link { color:var(--accent); font-size:10px; text-decoration:none; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .entity-card-media-link:hover { text-decoration:underline; }
