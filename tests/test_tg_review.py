@@ -182,8 +182,8 @@ class NotifyPostsTest(TgReviewFixture):
             "SAU_TG_REVIEW_BOT_TOKEN": "token",
             "SAU_TG_REVIEW_CHAT_ID": "8633483147",
         }), patch.object(tg_review, "_send_media",
-                         side_effect=lambda chat, m, cap: (sent_media.append({"cap": cap, "media": m})
-                                                           or {"message_id": 777})), \
+                         side_effect=lambda chat, m, cap, url=None: (sent_media.append({"cap": cap, "media": m})
+                                                                     or {"message_id": 777})), \
                 patch.object(tg_review, "_send_text",
                              side_effect=lambda chat, text: (sent_text.append(text) or {"message_id": 778})):
             count = tg_review.notify_posts(cards=[{
@@ -225,6 +225,64 @@ class NotifyPostsTest(TgReviewFixture):
             }], db_path=self.db)
         self.assertEqual(text_send.call_count, 1)
         self.assertIn(long_copy, text_send.call_args[0][1])
+
+
+    def test_media_card_uses_the_public_url_when_the_local_file_is_gone(self):
+        """The offloader deletes local media, so cards arrived with no picture.
+
+        Telegram fetches a URL itself, and the card already carries the public
+        artifact URL — so send it by URL rather than dropping to text.
+        """
+        calls = []
+
+        def fake_api(method, *, data, files=None, timeout=120):
+            calls.append({"method": method, "data": dict(data), "files": files})
+            return {"message_id": 9}
+
+        with patch.object(tg_review, "_api", side_effect=fake_api):
+            result = tg_review._send_media("chat", None, "cap", "https://cdn.example/clip.jpg")
+
+        self.assertEqual(result, {"message_id": 9})
+        self.assertEqual(calls[0]["method"], "sendPhoto")
+        self.assertEqual(calls[0]["data"]["photo"], "https://cdn.example/clip.jpg")
+        # Nothing is uploaded: Telegram fetches it.
+        self.assertIsNone(calls[0]["files"])
+
+    def test_video_url_goes_out_via_send_video(self):
+        calls = []
+
+        def fake_api(method, *, data, files=None, timeout=120):
+            calls.append({"method": method, "data": dict(data)})
+            return {"message_id": 10}
+
+        with patch.object(tg_review, "_api", side_effect=fake_api):
+            tg_review._send_media("chat", None, "cap", "https://cdn.example/clip.mp4?v=2")
+
+        self.assertEqual(calls[0]["method"], "sendVideo")
+        self.assertEqual(calls[0]["data"]["video"], "https://cdn.example/clip.mp4?v=2")
+
+    def test_nothing_is_sent_without_a_file_or_a_public_url(self):
+        with patch.object(tg_review, "_api") as api:
+            self.assertIsNone(tg_review._send_media("chat", None, "cap", None))
+            self.assertIsNone(tg_review._send_media("chat", None, "cap", ""))
+        api.assert_not_called()
+
+    def test_a_non_https_url_is_refused(self):
+        with patch.object(tg_review, "_api") as api:
+            self.assertIsNone(tg_review._send_media("chat", None, "cap", "http://cdn.example/a.jpg"))
+            self.assertIsNone(tg_review._send_media("chat", None, "cap", "file:///etc/passwd"))
+        api.assert_not_called()
+
+    def test_a_missing_local_file_still_prefers_the_url_over_nothing(self):
+        """A path that no longer exists behaves exactly like no path at all."""
+        gone = Path(self._tmp.name) / "deleted.mp4"   # never created: the file is gone
+        calls = []
+        with patch.object(tg_review, "_api",
+                          side_effect=lambda m, **kw: (calls.append(m) or {"message_id": 11})):
+            result = tg_review._send_media("chat", gone, "cap", "https://cdn.example/x.mp4")
+        self.assertEqual(result, {"message_id": 11})
+        self.assertEqual(calls, ["sendVideo"])
+
 
     def test_nothing_is_sent_when_telegram_is_not_configured(self):
         with patch.dict("os.environ", {

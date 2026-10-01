@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Sequence
 
 try:
     import requests
@@ -171,6 +173,30 @@ def _resolve_endpoints(api_base_url: str | None, api_key: str | None, model: str
     return [{"base_url": None, "api_key": None, "model": model, "headers": None}]
 
 
+def _image_content_part(source):
+    """An OpenAI-compatible image part, from a local file or an existing URL.
+
+    Returns None when the source cannot be used, so one unreadable frame never
+    fails the whole call.
+    """
+    try:
+        text = str(source or "").strip()
+        if not text:
+            return None
+        if text.startswith(("data:", "http://", "https://")):
+            url = text
+        else:
+            path = Path(text)
+            if not path.is_file():
+                return None
+            suffix = path.suffix.lower().lstrip(".") or "jpeg"
+            mime = "image/jpeg" if suffix in {"jpg", "jpeg"} else f"image/{suffix}"
+            url = f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode("ascii")}"
+        return {"type": "image_url", "image_url": {"url": url}}
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def generate_chat_completion(
     system_prompt: str,
     user_prompt: str,
@@ -182,6 +208,7 @@ def generate_chat_completion(
     api_key: str | None = None,
     session=None,
     timeout_seconds: int = 120,
+    images: Sequence[str | Path] | None = None,
 ) -> ChatCompletionResult:
     endpoints = _resolve_endpoints(api_base_url, api_key, model)
 
@@ -202,12 +229,23 @@ def generate_chat_completion(
             extra_headers = entry.get("headers")
             if isinstance(extra_headers, dict):
                 headers.update(extra_headers)
+            user_content: object = user_prompt
+            if images:
+                # Vision models take the user message as a parts list. Anything
+                # unreadable is dropped rather than failing the request.
+                parts = [{"type": "text", "text": user_prompt}]
+                parts.extend(
+                    part for part in (_image_content_part(image) for image in images)
+                    if part is not None
+                )
+                if len(parts) > 1:
+                    user_content = parts
             payload = {
                 "model": entry.get("model") or model,
                 "temperature": temperature,
                 "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": user_content},
                 ],
             }
             if response_json:

@@ -44,6 +44,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:
     import requests
@@ -246,10 +247,48 @@ def _poster_frame(video: Path) -> Path | None:
         return None
 
 
-def _send_media(chat_id: str, media: Path | None, caption: str) -> dict | None:
-    """Send the media itself, degrading video → poster frame → text only."""
-    if media is None or not media.exists():
+def _public_https(url: str) -> bool:
+    """True for an https URL a Telegram server could fetch itself."""
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and bool(parsed.hostname) and "." in parsed.hostname
+
+
+def _media_by_url(chat_id: str, url: str, caption: str) -> dict | None:
+    """Have Telegram fetch the media itself.
+
+    Used when the local copy is gone: the offloader moves published media to
+    Drive and deletes the originals, so ``media.exists()`` is false for most
+    cards and they arrived as bare text with no picture to review. The public
+    artifact URL is already in the card, and sendPhoto/sendVideo accept a URL
+    as readily as an upload, so the operator finally sees what they are
+    approving.
+    """
+    if not _public_https(url):
         return None
+    suffix = str(url).split("?", 1)[0].rsplit(".", 1)[-1].lower()
+    is_video = suffix in {"mp4", "mov", "m4v", "webm", "mkv"}
+    try:
+        data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+        if is_video:
+            data["video"] = url
+            data["supports_streaming"] = True
+            return _api("sendVideo", data=data)
+        data["photo"] = url
+        return _api("sendPhoto", data=data)
+    except Exception:  # noqa: BLE001
+        logger.warning("tg_review: remote media send failed for %s", url, exc_info=True)
+        return None
+
+
+def _send_media(
+    chat_id: str, media: Path | None, caption: str, media_url: str | None = None
+) -> dict | None:
+    """Send the media itself, degrading video → poster frame → remote URL → text."""
+    if media is None or not media.exists():
+        return _media_by_url(chat_id, media_url or "", caption)
     suffix = media.suffix.lower()
     size = media.stat().st_size
     try:
@@ -380,7 +419,7 @@ def notify_posts(
             )
 
             for chat_id in _chat_ids():
-                message = _send_media(chat_id, media, header)
+                message = _send_media(chat_id, media, header, card.get("public_url"))
                 if message is None:
                     message = _send_text(chat_id, header)
                 if message is None:

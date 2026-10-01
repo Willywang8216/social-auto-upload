@@ -29,6 +29,7 @@ from myUtils import content_rules
 from myUtils import google_sheets
 from myUtils import jobs as job_runtime
 from myUtils import llm_client
+from myUtils import media_copy_check
 from myUtils import media_groups as media_group_store
 from myUtils import media_pipeline
 from myUtils import platform_capabilities
@@ -7399,6 +7400,35 @@ def _media_local_available(file_path: str | None) -> tuple[Path | None, bool]:
         return relative, False
 
 
+def _first_media_reference_for_group(media_group_id: int | None, *, db_path: Path) -> str | None:
+    """A local path or public URL for a media group's first item, or ``None``.
+
+    Preferred order matters: a local file works for any vision endpoint, while
+    an https URL only works when the model can fetch it. Media the offloader has
+    moved away has no local copy, so the stored public URL is the fallback —
+    without it, copy-vs-media review would silently skip most of the queue.
+    """
+    if media_group_id is None:
+        return None
+    try:
+        rows = _load_media_group_files(int(media_group_id), db_path=db_path)
+    except Exception:  # noqa: BLE001 — advisory path
+        return None
+    for row in rows:
+        local = _resolve_video_file_path_safely(row.get("file_path"))
+        if local is not None:
+            try:
+                if Path(local).is_file():
+                    return str(local)
+            except OSError:
+                continue
+    for row in rows:
+        public = row.get("storage_cdn_url")
+        if _is_public_https_url(public):
+            return str(public).strip()
+    return None
+
+
 def _media_preview_url(file_path: str | None) -> str | None:
     """A same-origin ``/getFile`` URL for a file_record, or ``None``.
 
@@ -9768,6 +9798,12 @@ def api_campaign_generate(campaign_id):
     if not accounts:
         return jsonify({"error": "No accounts found for generation"}), 400
 
+    # One media reference for the whole group, resolved before the loop so every
+    # platform's copy is checked against the same picture.
+    media_reference = _first_media_reference_for_group(
+        getattr(campaign, "media_group_id", None), db_path=db_path
+    )
+
     generated_posts = []
     for acc in accounts:
         context = {
@@ -9787,6 +9823,15 @@ def api_campaign_generate(campaign_id):
             raw_content = result.content
             parsed = content_generator.parse_llm_response(raw_content, acc.platform)
             errors = content_generator.validate_post(acc.platform, parsed)
+            # Advisory copy-vs-media review: hold the post for a human only when
+            # the copy plainly contradicts the media, so matching items (the
+            # large majority) never reach the review queue.
+            if media_reference:
+                verdict = media_copy_check.check_copy_against_media(
+                    media=media_reference, copy=parsed, platform=acc.platform
+                )
+                if verdict.get("contradicts"):
+                    errors = list(errors) + [media_copy_check.review_note(verdict)]
 
             post = content_generator.create_prepared_post(
                 campaign_id=campaign_id,
@@ -9832,6 +9877,15 @@ def api_campaign_validate(campaign_id):
     for post in posts:
         post_data = post.to_dict()
         errors = content_generator.validate_post(post.platform, post_data)
+        media_reference = _first_media_reference_for_group(
+            getattr(post, "media_group_id", None), db_path=Path(BASE_DIR) / "db" / "database.db"
+        )
+        if media_reference:
+            verdict = media_copy_check.check_copy_against_media(
+                media=media_reference, copy=post_data, platform=post.platform
+            )
+            if verdict.get("contradicts"):
+                errors = list(errors) + [media_copy_check.review_note(verdict)]
         if errors:
             content_generator.update_prepared_post(
                 post.id, workspace_id=workspace_id,
