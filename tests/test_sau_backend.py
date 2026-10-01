@@ -76,6 +76,82 @@ class GetFileTraversalGuardTests(unittest.TestCase):
 
 
 @unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
+class GetFileServingTests(unittest.TestCase):
+    """``/getFile`` must serve media that lives in a subdirectory.
+
+    The route resolved the requested path correctly and then handed only the
+    BASENAME to send_from_directory, so anything under _library/, _photos/,
+    _batch*/ or _inbox_cache/ 404'd even though it was on disk — the media
+    library thumbnails in the queue and calendar were all broken because of it.
+    """
+
+    def setUp(self) -> None:
+        import sau_backend
+
+        self.sau_backend = sau_backend
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base_dir = Path(self._tmp.name)
+        (self.base_dir / "videoFile").mkdir(parents=True, exist_ok=True)
+        self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
+        self._base_dir_patch.start()
+
+        from myUtils.security import SecurityPolicy
+        self._orig_policy = sau_backend.app.config["SECURITY_POLICY"]
+        sau_backend.app.config["SECURITY_POLICY"] = SecurityPolicy(
+            tokens=frozenset(), cors_origins=("http://localhost:5173",)
+        )
+        sau_backend.app.config["TESTING"] = True
+        self.client = sau_backend.app.test_client()
+
+    def tearDown(self) -> None:
+        if hasattr(self, "_base_dir_patch"):
+            self._base_dir_patch.stop()
+        if hasattr(self, "_orig_policy"):
+            self.sau_backend.app.config["SECURITY_POLICY"] = self._orig_policy
+        if hasattr(self, "_tmp"):
+            self._tmp.cleanup()
+
+    def _write(self, relative: str, payload: bytes) -> Path:
+        target = self.base_dir / "videoFile" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        return target
+
+    def test_nested_file_is_served(self) -> None:
+        # Percent/plus-encoded exactly as the browser sends it (url_for uses
+        # quote_plus, so a space arrives as '+').
+        from urllib.parse import urlencode
+
+        self._write("_library/NW/clip with spaces.jpg", b"nested-bytes")
+        query = urlencode({"filename": "_library/NW/clip with spaces.jpg"})
+        response = self.client.get(f"/getFile?{query}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"nested-bytes")
+
+    def test_deeply_nested_file_is_served(self) -> None:
+        self._write("_batch1/nsfw/deep. mp4", b"deep-bytes")
+        response = self.client.get("/getFile?filename=_batch1/nsfw/deep.%20mp4")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"deep-bytes")
+
+    def test_root_level_file_still_served(self) -> None:
+        self._write("plain.mp4", b"root-bytes")
+        response = self.client.get("/getFile?filename=plain.mp4")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"root-bytes")
+
+    def test_traversal_out_of_a_subdirectory_is_still_rejected(self) -> None:
+        (self.base_dir / "conf.py").write_bytes(b"secret")
+        response = self.client.get("/getFile?filename=_library/../../conf.py")
+        self.assertEqual(response.status_code, 400)
+
+    def test_missing_nested_file_still_404s(self) -> None:
+        (self.base_dir / "videoFile" / "_library").mkdir(parents=True, exist_ok=True)
+        response = self.client.get("/getFile?filename=_library/nope.jpg")
+        self.assertEqual(response.status_code, 404)
+
+
+@unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
 class LegacyDbBootstrapEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
         import sau_backend

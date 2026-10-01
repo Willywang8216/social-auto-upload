@@ -992,7 +992,12 @@ def get_file():
             return redirect(cdn, code=302)
         return jsonify({"code": 404, "msg": "File not found", "data": None}), 404
 
-    return send_from_directory(str(base_dir), target.name)
+    # Serve the path RELATIVE to the video root. Passing target.name alone only
+    # works for files sitting directly in videoFile/, so everything the pipeline
+    # keeps in a subdirectory (_library/, _photos/, _batch*/, _inbox_cache/)
+    # resolved fine here and then 404'd at send time — which is why queue cards
+    # showed broken thumbnails for media that was on disk the whole time.
+    return send_from_directory(str(base_dir), str(target.relative_to(base_dir)))
 
 
 def _resolve_cookie_path(raw_path: str) -> Path:
