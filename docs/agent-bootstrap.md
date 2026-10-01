@@ -190,3 +190,12 @@
 - **那兩個紅燈測試的真正原因是「測試不隔離」，不是產品壞掉。** `test_refresh_facebook/instagram_token_resyncs_*` 只 mock 了 `fetch_managed_pages`，但路徑上 `meta_auth.debug_token_info()` 是**真的打 Graph API**：在有網路的機器上 Facebook 回報假 token 無效 → 程式決定輪替 → 真的發出 exchange 呼叫 → 400。它們只是在「無網路」的環境下才會過。修法是把 `debug_token_info`（`{'is_valid': True, 'expires_at': 0}`）與 `fetch_managed_pages` 一起 pin 住，與同檔 1080/1107 行既有慣例一致。
 - **`test_llm_client` 的紅燈同理：本機設了 pool。** client 依設計**優先** `SAU_LLM_POOL` 而 `patch.dict` 只設了舊的 `SAU_LLM_API_BASE_URL`，所以請求跑到 pool 的端點、URL 斷言當然失敗。新增 `_llm_env()` helper 明確把 `SAU_LLM_POOL` 設空，兩個測試都改用它（`transcribe_audio` 那個雖然目前會過，但同樣脆弱）。
 - **這一輪的驗證：** 後端全量測試、前端 `vitest run src/` **43 passed**（calendarFilters 16、mediaState 11）、`vite build` 乾淨、正式建置瀏覽器檢查 **21/21 + 月份 8/8**（另有 13 路由回歸掃描全 OK）。
+
+## Agent handoff：部署完成（2026-10-01）
+
+- **已 commit 並 push 到 `main`：** `fd53811`（32 files, +3037/−453）。CI（`ci.yml`）success、App image（`image.yml`）success，新 image digest `b5192f147b5d`。
+- **部署方式與一個重要陷阱：** 主機常駐一個 1Panel 的 `Watchtower` 容器（`--interval 3600 --cleanup --label-enable`，憑證在 `/opt/1panel/apps/watchtower/watchtower/data/config.json`，以 `DOCKER_CONFIG=/config` 掛進 `/config/config.json`）。**這個版本重啟時不會立刻檢查**，只會把下一次排到一小時後（log 會說 "the first check will be performed in 59 minutes"）——所以 `docker restart Watchtower` 不能用來催更新。要立即套用，用同一顆憑證跑 one-shot：
+  `sudo docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v /opt/1panel/apps/watchtower/watchtower/data/config.json:/config/config.json:ro -e DOCKER_CONFIG=/config containrrr/watchtower --run-once --cleanup social-auto-upload`
+  （不掛那顆 config 會 `unauthorized`，因為 GHCR 套件需要認證。）
+- **實測已上線：** 容器 `status=running health=healthy`、label `org.opencontainers.image.revision=fd53811`；`/healthz` 200；線上 `/publish-entities?limit=2` 回 200 且**已無 `destinations`**、media item 帶 `availableLocally` 與 `archive`（含 `drive.google.com/drive/search` 連結）；容器內 `sau_frontend/dist/assets` 已含 `mediaState-*.js`（`已封存至`／`availableLocally`）與 `CalendarView-*.js`（`清除篩選`），證實前後端都是新版。
+- **未提交（刻意）：** `rclone-cache.conf`（內含 Drive token）與四個 `db/database.db.before-*.bak` 備份仍留在工作區未追蹤；本 commit 也順帶把 `.dockerignore` 擴大排除 `.env*`、`secrets`、媒體、`logs`、`*.db*`、`*.bak`、`.claude`、`.playwright-mcp`。
