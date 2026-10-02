@@ -50,9 +50,15 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterator
+from urllib.parse import quote
 
 from myUtils import jobs as job_runtime
 from myUtils import ops_alerts
+
+# A Drive search link is the same "open the asset" affordance the queue uses for
+# archived media (sau_backend._entity_media_item), so the digest and the app
+# point an operator at the same place without exposing the storage layout.
+_DRIVE_SEARCH = "https://drive.google.com/drive/search?q="
 
 # Asia/Shanghai is a fixed UTC+8 offset (no DST since 1991). Using a fixed
 # offset keeps the day window deterministic and avoids depending on the host
@@ -219,6 +225,54 @@ def _load_campaigns(conn: sqlite3.Connection, campaign_ids: set[int]) -> dict[in
     }
 
 
+def _load_group_assets(conn: sqlite3.Connection, media_group_ids: set[int]) -> dict[int, dict]:
+    """One representative asset per media group, for the digest's asset link.
+
+    Prefers a public CDN URL (``storage_cdn_url``); otherwise falls back to a
+    Drive *search* link built from the filename, exactly like the queue UI. Never
+    exposes a storage key or the local path.
+    """
+
+    if not media_group_ids:
+        return {}
+    placeholders = ",".join("?" * len(media_group_ids))
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT mgi.media_group_id AS media_group_id,
+                   fr.filename AS filename,
+                   fr.storage_cdn_url AS cdn_url
+            FROM media_group_items mgi
+            JOIN file_records fr ON fr.id = mgi.file_record_id
+            WHERE mgi.media_group_id IN ({placeholders})
+            ORDER BY mgi.media_group_id ASC,
+                     (mgi.role = 'video') DESC,
+                     mgi.sort_order ASC,
+                     mgi.id ASC
+            """,
+            sorted(media_group_ids),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # A minimal/legacy schema without the media tables still gets a digest,
+        # just without the asset link.
+        return {}
+    assets: dict[int, dict] = {}
+    for row in rows:
+        mgid = int(row["media_group_id"])
+        if mgid in assets:
+            continue  # first row per group is the representative
+        filename = str(row["filename"] or "").strip()
+        cdn = str(row["cdn_url"] or "").strip()
+        if cdn.startswith("http"):
+            url = cdn
+        elif filename:
+            url = _DRIVE_SEARCH + quote(filename)
+        else:
+            url = None
+        assets[mgid] = {"name": filename or None, "url": url}
+    return assets
+
+
 def _campaign_id_from_payload(payload_text: object) -> int | None:
     try:
         payload = json.loads(payload_text) if payload_text else {}
@@ -326,6 +380,18 @@ def build_daily_digest(
         groups.values(), key=lambda g: (g["targets"][0]["when_utc"], g["key"])
     )
 
+    mg_ids = {
+        int(g["id"])
+        for g in ordered_groups
+        if g["kind"] == "media-group" and g["id"] is not None
+    }
+    if mg_ids:
+        with _connect(db_path) as conn:
+            assets = _load_group_assets(conn, mg_ids)
+        for group in ordered_groups:
+            if group["kind"] == "media-group" and group["id"] is not None:
+                group["asset"] = assets.get(int(group["id"]))
+
     platforms: set[str] = set()
     target_count = 0
     for group in ordered_groups:
@@ -388,8 +454,12 @@ def _render(
                 f"  - {target['when_local'].strftime('%H:%M')} · {target['platform']}"
                 f" · {target['account_ref']} · {target['status']}"
             )
+        asset = group.get("asset") or {}
+        if asset.get("url"):
+            lines.append(f"  asset: {asset.get('name') or 'asset'}")
+            lines.append(f"         {asset['url']}")
         if group["url"]:
-            lines.append(f"  link: {group['url']}")
+            lines.append(f"  edit:  {group['url']}")
     return subject, "\n".join(lines)
 
 

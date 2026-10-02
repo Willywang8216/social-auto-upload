@@ -174,10 +174,10 @@ class DigestTestCase(unittest.TestCase):
         body = sender.calls[0]["body"]
         self.assertIn("[media-group:42] Morning reel (instagram, tiktok)", body)
         self.assertIn(
-            "link: https://app.example.com/#/publish/queue?entity=mg-42", body
+            "edit:  https://app.example.com/#/publish/queue?entity=mg-42", body
         )
         self.assertIn("[job:12] job #12 (douyin)", body)
-        self.assertIn("link: https://app.example.com/#/publish/queue?job=12", body)
+        self.assertIn("edit:  https://app.example.com/#/publish/queue?job=12", body)
         # The two campaign jobs are folded together, not listed per job.
         self.assertEqual(body.count("[media-group:42]"), 1)
         self.assertNotIn("[job:10]", body)
