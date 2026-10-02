@@ -354,6 +354,7 @@ def build_caption(
     public_url: str,
     copy_text: str,
     copy_in_caption: bool,
+    app_url: str = "",
 ) -> str:
     """Header caption for the media message (≤ Telegram's 1024-char cap)."""
     lines = ["<b>⏳ Review before publish</b>", ""]
@@ -366,6 +367,10 @@ def build_caption(
     lines.append(f"<b>Media</b>: {html.escape(media_name)}{size}")
     if public_url:
         lines.append(f'<a href="{html.escape(public_url, quote=True)}">open media</a>')
+    if app_url:
+        lines.append(
+            f'<a href="{html.escape(app_url, quote=True)}">open in app · edit / pause</a>'
+        )
     if copy_in_caption and copy_text:
         lines.append("")
         lines.append("<b>Copy</b>")
@@ -416,6 +421,7 @@ def notify_posts(
                 public_url=card.get("public_url") or "",
                 copy_text=copy_text,
                 copy_in_caption=len(copy_text) <= 500,
+                app_url=card.get("app_url") or "",
             )
 
             for chat_id in _chat_ids():

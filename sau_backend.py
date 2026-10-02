@@ -3626,8 +3626,20 @@ def _prepare_campaign_media_artifacts(
             public_url = None
             try:
                 from flask import request as _flask_request
-                base_url = _flask_request.host_url.rstrip("/")
-                served_filename = Path(publish_path).name
+                from myUtils import ops_alerts as _ops_alerts
+                import urllib.parse as _urlparse
+                # Prefer the configured public origin. An internal / API submit
+                # carries request.host_url == http://127.0.0.1:5409, so the link
+                # built from it is unreachable for the operator (and for
+                # Telegram). Only fall back to the request host when no public
+                # origin is configured.
+                base_url = (
+                    _ops_alerts.public_app_origin()
+                    or _flask_request.host_url.rstrip("/")
+                ).rstrip("/")
+                # The whole videoFile-relative path, not just the basename, so
+                # /getFile can serve media kept in subdirectories (_inbox_cache/…).
+                served_filename = _urlparse.quote(str(publish_path).replace("\\", "/"))
                 candidate = f"{base_url}/getFile?filename={served_filename}"
                 _is_public = (
                     base_url.startswith("https://")
@@ -7194,6 +7206,31 @@ def _tg_review_cards(*, jobs: list[dict], db_path: Path) -> list[dict]:
         except Exception:  # noqa: BLE001
             profile_label = f"profile {row['profile_id']}"
 
+        # Deep link into the app so the operator can open this post, edit its
+        # copy, or pause it before it publishes.
+        app_url = None
+        try:
+            from myUtils import ops_alerts as _ops_alerts
+            origin = _ops_alerts.public_app_origin()
+            if origin:
+                mgid = None
+                cid = payload.get("campaignId")
+                if cid is not None:
+                    with sqlite3.connect(db_path) as _c:
+                        _r = _c.execute(
+                            "SELECT media_group_id FROM campaigns WHERE id = ?",
+                            (int(cid),),
+                        ).fetchone()
+                        if _r and _r[0] is not None:
+                            mgid = int(_r[0])
+                app_url = (
+                    f"{origin}/#/publish/queue?entity=mg-{mgid}"
+                    if mgid is not None
+                    else f"{origin}/#/publish/queue?job={int(row['id'])}"
+                )
+        except Exception:  # noqa: BLE001 — a missing link must not break submit
+            app_url = None
+
         cards.append({
             "job_id": int(row["id"]),
             "campaign_id": payload.get("campaignId"),
@@ -7206,6 +7243,7 @@ def _tg_review_cards(*, jobs: list[dict], db_path: Path) -> list[dict]:
             "media_path": media_path or None,
             "media_label": Path(media_path).name if media_path else "",
             "public_url": public_url,
+            "app_url": app_url,
         })
     return cards
 
