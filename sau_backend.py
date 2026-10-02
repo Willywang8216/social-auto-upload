@@ -971,34 +971,42 @@ def get_file():
     if not filename:
         return jsonify({"code": 400, "msg": "filename is required", "data": None}), 400
 
-    # Robust path-traversal guard: resolve the requested path inside the video
-    # directory and reject anything that escapes the base directory. This
-    # handles `..`, absolute paths, Windows backslashes and percent-encoded
-    # variants (which Werkzeug already decoded into `filename`).
-    base_dir = Path(BASE_DIR / "videoFile").resolve()
-    try:
-        target = (base_dir / filename).resolve()
-    except (OSError, ValueError):
-        return jsonify({"code": 400, "msg": "Invalid filename", "data": None}), 400
+    # Media the pipeline keeps lives under videoFile/ (staged source, _library,
+    # _inbox_cache) OR generated/ (watermarked campaign artifacts). Resolve
+    # against each serveable root, keeping the traversal guard per root: a
+    # request that escapes via `..`/absolute/backslash shapes fails the
+    # containment check in every root and is rejected.
+    roots = (
+        Path(BASE_DIR / "videoFile").resolve(),
+        Path(BASE_DIR / "generated").resolve(),
+        Path(BASE_DIR / "uploads").resolve(),
+    )
+    saw_escape = False
+    for base_dir in roots:
+        try:
+            target = (base_dir / filename).resolve()
+        except (OSError, ValueError):
+            saw_escape = True
+            continue
+        if not target.is_relative_to(base_dir):
+            saw_escape = True
+            continue
+        if target.is_file():
+            # Serve RELATIVE to the matched root. Passing target.name alone only
+            # works for files at the root, so _library/, _photos/, _batch*/ and
+            # generated/campaigns/… resolved here and then 404'd at send time.
+            return send_from_directory(str(base_dir), str(target.relative_to(base_dir)))
 
-    if not target.is_relative_to(base_dir):
+    # Not on disk under any root: try the remote-storage CDN, then 404.
+    cdn = _get_cdn_url_for_file(filename)
+    if not cdn and '/' not in filename:
+        # Also try matching by storage_key (full path like uploads/uuid_name.mp4)
+        cdn = _get_cdn_url_for_file_by_key(filename)
+    if cdn:
+        return redirect(cdn, code=302)
+    if saw_escape:
         return jsonify({"code": 400, "msg": "Invalid filename", "data": None}), 400
-    if not target.is_file():
-        # Try redirecting to remote storage CDN
-        cdn = _get_cdn_url_for_file(filename)
-        if not cdn and '/' not in filename:
-            # Also try matching by storage_key (full path like uploads/uuid_name.mp4)
-            cdn = _get_cdn_url_for_file_by_key(filename)
-        if cdn:
-            return redirect(cdn, code=302)
-        return jsonify({"code": 404, "msg": "File not found", "data": None}), 404
-
-    # Serve the path RELATIVE to the video root. Passing target.name alone only
-    # works for files sitting directly in videoFile/, so everything the pipeline
-    # keeps in a subdirectory (_library/, _photos/, _batch*/, _inbox_cache/)
-    # resolved fine here and then 404'd at send time — which is why queue cards
-    # showed broken thumbnails for media that was on disk the whole time.
-    return send_from_directory(str(base_dir), str(target.relative_to(base_dir)))
+    return jsonify({"code": 404, "msg": "File not found", "data": None}), 404
 
 
 def _resolve_cookie_path(raw_path: str) -> Path:
@@ -3637,9 +3645,27 @@ def _prepare_campaign_media_artifacts(
                     _ops_alerts.public_app_origin()
                     or _flask_request.host_url.rstrip("/")
                 ).rstrip("/")
-                # The whole videoFile-relative path, not just the basename, so
-                # /getFile can serve media kept in subdirectories (_inbox_cache/…).
-                served_filename = _urlparse.quote(str(publish_path).replace("\\", "/"))
+                # Serveable path relative to whichever media root holds the
+                # file (videoFile/ for staged source, generated/ for watermarked
+                # campaign artifacts), not the absolute /app/… path — otherwise
+                # /getFile rejects it as outside the root. A path that is already
+                # relative (the staged / file-record convention) is videoFile-
+                # relative and used as-is.
+                _pp = Path(publish_path)
+                _rel = None
+                if _pp.is_absolute():
+                    for _rname in ("videoFile", "generated", "uploads"):
+                        _rbase = (Path(BASE_DIR) / _rname).resolve()
+                        try:
+                            _rel = _pp.resolve().relative_to(_rbase).as_posix()
+                            break
+                        except (ValueError, OSError):
+                            continue
+                    if _rel is None:
+                        _rel = _pp.name
+                else:
+                    _rel = _pp.as_posix()
+                served_filename = _urlparse.quote(_rel)
                 candidate = f"{base_url}/getFile?filename={served_filename}"
                 _is_public = (
                     base_url.startswith("https://")
