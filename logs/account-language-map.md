@@ -68,7 +68,9 @@ and has been corrected to `zh-Hant`.
 
 The NW Chinese channel/group (`@nakedwillzh` / `@nakedwillzhchat`) was created on
 2026-10-06 from the operator's Telegram session; account **127** publishes to it.
-New campaigns for profile 1 now include it automatically.
+New campaigns for profile 1 now include it automatically, and 661 already-queued
+NW campaigns were backfilled to it from the zh-Hant siblings (119/124) with
+`scripts/backfill_account_targets.py`.
 
 There is **no NW (nakedwill) Chinese Telegram channel/group** in the session's
 dialog list (only EN). NW Chinese is covered by Bluesky 119 and X 124.
