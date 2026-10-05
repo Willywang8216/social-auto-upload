@@ -170,3 +170,63 @@ schedule on this evidence.
    confirm whether the thread reply is honoured.
 6. **Duration-aware media prep** so Threads/TikTok stop needing a manual short
    cut.
+
+---
+
+## Addendum — 2026-10-05 ~11:05 UTC (live fixes and final state)
+
+### Root causes fixed after the first audit
+
+1. **Hosted-video readiness** (`sociamonials_fallback`): a just-uploaded
+   video is transcoded asynchronously; attaching `asset://<id>` before
+   `processing_status == "ready"` returned an opaque `422 asset_not_ready`.
+   Now polls `GET /api/v1/media/assets/{id}` (env
+   `SAU_SOCIAMONIALS_ASSET_READY_TIMEOUT`, default 300s) and retries a
+   transient 404 rather than failing open.
+2. **Media upload idempotency key removed**: re-sending the same key after a
+   completed multipart upload made Sociamonials hand back the closed session,
+   whose pre-signed part URLs 404 with `NoSuchUpload`. Dropping the media-level
+   key means each attempt gets a fresh upload; the post-level
+   `sau-target-<id>` key still prevents duplicate posts.
+3. **Non-retryable X falls back** (`worker`): a reconnect-flagged/dead-token X
+   target now tries Sociamonials before being marked failed, because the
+   fallback holds its own OAuth connection.
+4. **Refresh race fixed** (`worker._handle_refresh_failure`): the failure
+   markers are merged into the account's current row instead of writing the
+   pre-refresh snapshot back, so a publish-path refresh that rotated the
+   single-use token is not clobbered.
+5. **Hung targets bounded** (`worker`): the executor runs under
+   `SAU_TARGET_TIMEOUT_SECONDS` (default 1200s) so a stuck CDP/browser
+   connection fails into the retry/fallback path instead of sitting
+   "running" for hours.
+6. **X goes straight to the fallback**: when the fallback is enabled and
+   `SAU_X_DIRECT_PUBLISH` is unset, X skips the direct API/browser path
+   entirely (out of credits, cookie browser hangs). Set it to `1` after a
+   top-up to restore direct-first.
+7. **Media limits**: Bluesky video raised to its current 300 MB / 10 min
+   (`BLUESKY_MAX_VIDEO_BYTES = 295 MB`, `BLUESKY_MAX_VIDEO_SECONDS = 600`);
+   the fallback validates per-network duration before attaching (X 140 s,
+   Bluesky 600 s, Threads 300 s, IG 900 s, TikTok 60 min) and truncates
+   Bluesky copy to 300 chars like X to 280.
+
+Verified live: a 48-minute hung X target completed through the fallback in
+~2 minutes; video fallbacks now create real `platform_post_id`s.
+
+### Failed-target breakdown (all 229)
+
+| category | count | meaning |
+|---|---:|---|
+| duplicate of an already-succeeded post | 76 | content went out via another target; safe to ignore |
+| permanently unrecoverable | 93 | banned subreddit / TikTok app in development / missing media / API access blocked |
+| stale but technically recoverable | 60 | May–July permission/test failures; not worth reposting |
+
+Live failure rate after the deploy: **2–4 per hour** (transient RATELIMIT and a
+per-post TikTok Direct Post refusal), versus the October 3–5 flood.
+
+### Data cleanup applied
+
+- 273 pending same-media/same-day duplicates cancelled.
+- 1,497 pending targets respaced: 0 exact-minute collisions, 0 same-account
+gaps under 30 min, max 4 posts/account/day.
+- 129 recent failures rescheduled through the recovery tool.
+
