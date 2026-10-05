@@ -57,6 +57,17 @@ and has been corrected to `zh-Hant`.
 | 108 | Willy Dev tutor (YouTube) | en |
 | 115 | MSL Blog | en |
 
+## Telegram channels / groups (verified live via `/api/telegram/available-targets`)
+
+| Account | Language | Channel | Group |
+|---|---|---|---|
+| 116 NW TG 本人 | en | `@nakedwilltgchannel` (Nakedwill — Naturism & Nudism (EN)) | `@nakedwill` (Nakedwill Chat (EN) 🌿) |
+| 117 SW TG 本人 | en | `@sexualwilltgchannel` (Sexualwill 🔞 EN (18+)) | `@sexualwill` (Sexualwill Chat 🔞 EN (18+)) |
+| 122 SW TG 中文 | zh-Hant | `@nakedsexualwei` (光光 nakedhappylife 🔞 中文) | `@nakedsexualweiwei` (光光討論群 🔞 中文) |
+
+There is **no NW (nakedwill) Chinese Telegram channel/group** in the session's
+dialog list (only EN). NW Chinese is covered by Bluesky 119 and X 124.
+
 ## Rules enforced in code
 
 - `content_rules.message_matches_language`: a `zh*` target must contain CJK and
