@@ -58,7 +58,10 @@ PERMANENT_ERROR_PATTERNS = re.compile(
     r"not allowed|permission denied|forbidden|invalid_grant|"
     r"requires reconnection|reconnect|media\.write|"
     r"requires a local video|no images|SUBMIT_VALIDATION_LINK_WHITELIST|"
-    r"\[content-guard\]",
+    r"\[content-guard\]|"
+    # Deterministic media/format refusals that a retry cannot fix.
+    r"duration\s+\d+s\s+exceeds|exceeds the\s+\d+\s*(?:s|MB)\s+limit|"
+    r"require[s]? Direct Post",
     re.IGNORECASE,
 )
 
