@@ -223,6 +223,11 @@ def regenerate_one(row: dict, *, db_path: Path = DB_PATH) -> dict:
     request_data["title"] = str(metadata.get("title") or "")
 
     work_payload = {**payload, "_db_path": str(db_path)}
+    restored_paths = [
+        str(a.get("local_path"))
+        for a in (work_payload.get("artifacts") or [])
+        if a.get("local_path") and not Path(str(a["local_path"])).is_file()
+    ]
     try:
         worker._ensure_artifact_paths_local(work_payload, db_path=db_path)
     except Exception as exc:  # noqa: BLE001 - still try with whatever is local
@@ -230,19 +235,28 @@ def regenerate_one(row: dict, *, db_path: Path = DB_PATH) -> dict:
     else:
         restore_error = ""
 
-    with tempfile.TemporaryDirectory(prefix="regen-") as workdir:
-        media_context = _media_context(work_payload, db_path, Path(workdir))
-        try:
-            draft = sau_backend._generate_account_draft(
-                account,
-                profile,
-                media_group,
-                request_data,
-                media_context,
-                regenerate=True,
-            )
-        except Exception as exc:  # noqa: BLE001 - report, never abort the batch
-            return {**row, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:220]}
+    try:
+        with tempfile.TemporaryDirectory(prefix="regen-") as workdir:
+            media_context = _media_context(work_payload, db_path, Path(workdir))
+            try:
+                draft = sau_backend._generate_account_draft(
+                    account,
+                    profile,
+                    media_group,
+                    request_data,
+                    media_context,
+                    regenerate=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - report, never abort the batch
+                return {**row, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:220]}
+    finally:
+        # The frame is already extracted; delete the videos this run pulled back
+        # from Drive so a long regeneration does not fill the disk.
+        for path in restored_paths:
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
     message = str(draft.get("message") or "").strip()
     reason = _bad_reason(message, _account_language(account.config or {}))
     if reason:
