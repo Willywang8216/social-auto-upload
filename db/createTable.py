@@ -734,6 +734,15 @@ def _stamp_alembic_head(db_path: Path) -> None:
     When the head equals ``RAW_SCHEMA_REVISION`` (today's state) step 2 is a
     no-op and behavior is identical to the previous blind-stamp. Alembic may be
     absent in a stripped-down sandbox; we degrade gracefully.
+
+    ``alembic.ini`` declares ``script_location = migrations``, a *relative*
+    path that Alembic resolves against the current working directory, not
+    against the ini file. Any caller whose cwd is not the repository root
+    therefore hit the (swallowed) config error below and silently stamped the
+    raw revision - leaving the schema short of every migration after
+    :data:`RAW_SCHEMA_REVISION` (e.g. ``profiles.workspace_id``) and failing
+    later with "no such column". Resolve it explicitly here so bootstrap is
+    cwd-independent.
     """
 
     try:
@@ -744,6 +753,13 @@ def _stamp_alembic_head(db_path: Path) -> None:
 
     try:
         cfg = Config(str(ALEMBIC_INI_PATH))
+        # An absolute script_location removes the dependency on cwd. Without it
+        # the relative "migrations" is resolved against wherever the process
+        # happens to be, and a miss is indistinguishable from "nothing to do".
+        migrations_dir = _PROJECT_ROOT / "migrations"
+        if migrations_dir.is_dir():
+            cfg.set_main_option("script_location", str(migrations_dir))
+        cfg.set_main_option("sqlalchemy.url", f"sqlite:///{Path(db_path).resolve()}")
         head_rev = ScriptDirectory.from_config(cfg).get_current_head()
     except Exception:
         # Couldn't load the config (e.g. ini missing in a packaged wheel);
@@ -843,6 +859,11 @@ def _alembic_upgrade_head(db_path: Path = DB_PATH) -> None:
 
     This is what ``python db/createTable.py`` invokes — the supported
     production path. Tests use the lighter ``bootstrap()`` path above.
+
+    ``script_location`` is pinned to an absolute path for the same reason as in
+    :func:`_stamp_alembic_head`: the ini's relative ``migrations`` resolves
+    against the current working directory, so an upgrade run from anywhere but
+    the repo root would fail (or, worse, silently do nothing).
     """
 
     from alembic import command
@@ -850,6 +871,9 @@ def _alembic_upgrade_head(db_path: Path = DB_PATH) -> None:
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     cfg = Config(str(ALEMBIC_INI_PATH))
+    migrations_dir = _PROJECT_ROOT / "migrations"
+    if migrations_dir.is_dir():
+        cfg.set_main_option("script_location", str(migrations_dir))
     cfg.set_main_option(
         "sqlalchemy.url", f"sqlite:///{db_path.resolve()}"
     )
