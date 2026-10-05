@@ -511,28 +511,39 @@ class PublishWorker:
         migration is needed."""
         now_dt = self._utc_now()
         now_iso = now_dt.isoformat(timespec="seconds")
-        failures = int(config.get("_maintenanceFailures") or 0) + 1
+        # Base the failure state on the account's CURRENT row, not the snapshot
+        # read before the refresh attempt. A single-use refresh token is rotated
+        # by the token endpoint, so if a publish-path refresh succeeded while
+        # this attempt was in flight, writing our stale snapshot back would
+        # discard the fresh token and strand the account permanently. Re-read
+        # and only overlay the failure markers.
+        try:
+            latest = profile_registry.get_account(account.id, db_path=self._db_path)
+            merged = dict(latest.config or {})
+        except Exception:  # noqa: BLE001 - fall back to the snapshot we have
+            merged = dict(config)
+        failures = int(merged.get("_maintenanceFailures") or 0) + 1
         backoff = min(
             self._MAINTENANCE_BACKOFF_BASE_SECONDS * (2 ** (failures - 1)),
             self._MAINTENANCE_BACKOFF_CAP_SECONDS,
         )
-        config["_maintenanceFailures"] = failures
-        config["_lastMaintenanceError"] = str(exc)[:300]
-        config["_lastMaintenanceAttemptAt"] = now_iso
-        config["_nextMaintenanceAttemptAt"] = (
+        merged["_maintenanceFailures"] = failures
+        merged["_lastMaintenanceError"] = str(exc)[:300]
+        merged["_lastMaintenanceAttemptAt"] = now_iso
+        merged["_nextMaintenanceAttemptAt"] = (
             now_dt + timedelta(seconds=backoff)
         ).isoformat(timespec="seconds")
 
         needs_reconnect = failures >= self._MAINTENANCE_RECONNECT_THRESHOLD
-        should_alert = needs_reconnect and not config.get("_reconnectAlertedAt")
+        should_alert = needs_reconnect and not merged.get("_reconnectAlertedAt")
         if needs_reconnect:
-            config["_needsReconnect"] = True
+            merged["_needsReconnect"] = True
         if should_alert:
-            config["_reconnectAlertedAt"] = now_iso
+            merged["_reconnectAlertedAt"] = now_iso
 
         try:
             profile_registry.update_account(
-                account.id, config=config, db_path=self._db_path,
+                account.id, config=merged, db_path=self._db_path,
             )
         except Exception as persist_exc:  # noqa: BLE001
             _logger.error(
@@ -762,6 +773,18 @@ class PublishWorker:
             message += f" | details={json.dumps(error_details, ensure_ascii=False, separators=(',', ':'))}"
         attempts = target.attempts  # already incremented when claimed
         if getattr(exc, "retryable", True) is False:
+            # X now rides Sociamonials, and Sociamonials holds its own OAuth
+            # connection independently of the SAU account's credential. A dead
+            # or reconnect-flagged SAU X token (or a missing media.write scope)
+            # is therefore still deliverable, so try the fallback before
+            # declaring the target permanently failed. Other platforms keep the
+            # original rule: a permanent content failure (banned subreddit,
+            # missing media) must never be silently re-routed.
+            if await self._try_sociamonials_fallback(
+                target, message, log, only_platform="twitter"
+            ):
+                self._maybe_close_job_sink(target.job_id)
+                return
             transitioned = jobs.mark_target_failed(
                 target.id, message, db_path=self._db_path
             )
@@ -810,7 +833,7 @@ class PublishWorker:
         jobs.mark_target_retry(target.id, message, db_path=self._db_path)
 
     async def _try_sociamonials_fallback(
-        self, target: jobs.Target, message: str, log
+        self, target: jobs.Target, message: str, log, *, only_platform: str | None = None
     ) -> bool:
         """Publish an exhausted target through Sociamonials. Best-effort.
 
@@ -819,6 +842,10 @@ class PublishWorker:
         off, no mapped profile, media unavailable, API error — returns ``False``
         so the caller falls through to the normal permanent-failure path. This
         method must never raise into the worker loop.
+
+        ``only_platform`` restricts the attempt to one platform; the caller
+        uses it to let a permanently-failed X target fall back while leaving
+        permanent content failures on other platforms alone.
         """
 
         if not sociamonials_fallback.is_enabled():
@@ -827,6 +854,8 @@ class PublishWorker:
         try:
             job = jobs.get_job(target.job_id, db_path=self._db_path)
         except Exception:  # noqa: BLE001 — a missing job only costs context
+            return False
+        if only_platform and str(job.platform or "").strip().lower() != only_platform:
             return False
         payload = dict(job.payload or {})
         payload["_db_path"] = str(self._db_path)

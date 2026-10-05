@@ -141,6 +141,86 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
         patched.assert_not_called()
         self.assertEqual(self._status(), jobs.TARGET_FAILED)
 
+    def test_non_retryable_x_failure_falls_back_to_sociamonials(self) -> None:
+        """A dead/flagged X credential must still reach the fallback.
+
+        Sociamonials holds its own X OAuth connection, so a ``retryable=False``
+        X reconnect failure is deliverable even though a permanent failure on
+        any other platform must not be re-routed.
+        """
+        self._enable_fallback()
+        twitter_account_id = profile_registry.add_account(
+            self.profile_id,
+            platform="twitter",
+            account_name="x-acct",
+            auth_type="oauth",
+            config={},
+            db_path=self.db_path,
+        ).id
+        job = jobs.enqueue_job(
+            jobs.JobSpec(
+                platform="twitter",
+                payload={"draft": {"message": "hi"}},
+                targets=[(f"account:{twitter_account_id}", "campaign_post:1", None)],
+                profile_id=self.profile_id,
+                idempotency_key=f"x-fallback-{twitter_account_id}",
+            ),
+            db_path=self.db_path,
+        )
+        self._job_id = job.id
+        with patch.object(
+            sociamonials_fallback,
+            "publish_via_sociamonials",
+            return_value={
+                "ok": True,
+                "post_id": 77,
+                "status": "scheduled",
+                "network": "tw",
+                "delivered": None,
+                "delivery_state": "pending",
+                "warnings": [],
+            },
+        ) as patched:
+            self._drain(exc_type=_BoomPermanent)
+        patched.assert_called_once()
+        self.assertEqual(self._status(), jobs.TARGET_SUCCEEDED)
+
+    def test_refresh_failure_does_not_clobber_a_rotated_token(self) -> None:
+        """The failure handler must merge into the latest row, not the snapshot.
+
+        The refresh endpoint rotates the single-use refresh token, so the
+        publish path can win a race and persist a fresh token while the
+        maintenance attempt is still in flight. Writing the pre-refresh
+        snapshot back would delete that token and strand the account.
+        """
+        account_id = profile_registry.add_account(
+            self.profile_id,
+            platform="twitter",
+            account_name="race-acct",
+            auth_type="oauth",
+            config={"refreshToken": "old", "_maintenanceFailures": 4},
+            db_path=self.db_path,
+        ).id
+        stale_snapshot = dict(profile_registry.get_account(account_id, db_path=self.db_path).config)
+        # A concurrent publish-path refresh persists the rotated token first.
+        profile_registry.update_account(
+            account_id,
+            config={"refreshToken": "rotated", "accessToken": "fresh"},
+            db_path=self.db_path,
+        )
+
+        async def executor(platform, payload, target):  # pragma: no cover - unused
+            return None
+
+        worker = PublishWorker(executor, config=WorkerConfig(), db_path=self.db_path)
+        account = profile_registry.get_account(account_id, db_path=self.db_path)
+        worker._handle_refresh_failure(account, stale_snapshot, RuntimeError("boom"))
+
+        persisted = profile_registry.get_account(account_id, db_path=self.db_path).config
+        self.assertEqual(persisted.get("refreshToken"), "rotated")
+        self.assertEqual(persisted.get("accessToken"), "fresh")
+        self.assertEqual(persisted.get("_maintenanceFailures"), 1)
+
     # ------------------------------------------------------------------
     # success path
     # ------------------------------------------------------------------
