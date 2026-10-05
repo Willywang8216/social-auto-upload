@@ -3935,9 +3935,11 @@ def _bluesky_create_session(http, cfg: dict[str, str]) -> dict[str, str]:
 # depend on exactly how the PDS rounds. Oversized media is downscaled rather
 # than dropped, because a post with no media is still a failed post.
 BLUESKY_MAX_IMAGE_BYTES = 900_000
-# Videos: Bluesky allows a much larger blob, but the service is still the
-# authority. Re-encode only past this ceiling so ordinary clips are untouched.
-BLUESKY_MAX_VIDEO_BYTES = 90_000_000
+# Videos: the app.bsky.embed.video lexicon now allows 300,000,000 bytes and a
+# 10-minute post, so the safety ceiling sits just under 300 MB (the earlier 90 MB
+# figure predated the August 2026 increase and needlessly re-encoded valid clips).
+BLUESKY_MAX_VIDEO_BYTES = 295_000_000
+BLUESKY_MAX_VIDEO_SECONDS = 600.0
 
 
 def _bluesky_shrink_image(local_path: str, *, max_bytes: int = BLUESKY_MAX_IMAGE_BYTES) -> str:
@@ -4172,6 +4174,15 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
         local_path, tmp_path = _resolve_local(video)
         shrunk_path = None
         try:
+            try:
+                duration = media_pipeline.probe_video_duration(local_path)
+            except Exception:  # noqa: BLE001 - a probe failure is not a rejection
+                duration = None
+            if duration and duration > BLUESKY_MAX_VIDEO_SECONDS:
+                raise PreparedPublishError(
+                    f"Bluesky video duration {duration:.0f}s exceeds the "
+                    f"{int(BLUESKY_MAX_VIDEO_SECONDS)}s limit; re-encode a shorter cut"
+                )
             shrunk_path = _bluesky_shrink_video(local_path)
             blob = _bluesky_upload_blob(
                 http, jwt=auth["accessJwt"], service=cfg["service"],

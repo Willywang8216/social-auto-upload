@@ -254,6 +254,31 @@ def test_compose_message_keeps_links_for_non_x_networks():
     assert links == []
 
 
+def test_compose_message_truncates_bluesky_to_300():
+    payload = {"draft": {"message": "x" * 400}}
+    message, _ = sm.compose_message_with_links(payload, network="blsk")
+    assert len(message) <= 300
+
+
+def test_assert_video_duration_rejects_over_limit(tmp_path, monkeypatch):
+    import myUtils.media_pipeline as media_pipeline
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"v" * 32)
+    monkeypatch.setattr(media_pipeline, "probe_video_duration", lambda path: 500.0)
+    with pytest.raises(sm.SociamonialsFallbackError):
+        sm._assert_video_duration("tw", str(video))
+
+
+def test_assert_video_duration_allows_within_limit(tmp_path, monkeypatch):
+    import myUtils.media_pipeline as media_pipeline
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"v" * 32)
+    monkeypatch.setattr(media_pipeline, "probe_video_duration", lambda path: 120.0)
+    sm._assert_video_duration("tw", str(video))
+
+
 # --------------------------------------------------------------------------- #
 # Publishing
 # --------------------------------------------------------------------------- #

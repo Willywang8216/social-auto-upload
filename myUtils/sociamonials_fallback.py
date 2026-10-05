@@ -72,6 +72,22 @@ DEFAULT_ASSET_READY_TIMEOUT = 300.0
 # Networks that only publish with media attached (Sociamonials validation).
 _MEDIA_REQUIRED_NETWORKS = {"in", "tiktok", "yt", "pi"}
 
+# Per-network caps that Sociamonials only surfaces as an opaque 422 at create
+# time. Validate the composed post against them first so the failure names the
+# real reason. X/Twitter standard accounts: 140 s / 280 chars. Bluesky raised
+# video to 10 minutes in Aug 2026 and caps text at 300 graphemes.
+NETWORK_MAX_VIDEO_SECONDS: dict[str, float] = {
+    "tw": 140.0,
+    "blsk": 600.0,
+    "thrd": 300.0,
+    "in": 900.0,
+    "tiktok": 3600.0,
+}
+NETWORK_MAX_MESSAGE_CHARS: dict[str, int] = {
+    "tw": 280,
+    "blsk": 300,
+}
+
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v"}
 
@@ -367,6 +383,33 @@ def _media_kind(path: str) -> str:
         return "video"
     guessed = (mimetypes.guess_type(path)[0] or "").lower()
     return "video" if guessed.startswith("video/") else "image"
+
+
+def _assert_video_duration(network: str, local_path: str | None) -> None:
+    """Refuse a video longer than the target network allows.
+
+    Only the local file can be probed, so a public-URL-only video is passed
+    through and the network's own rejection (if any) still applies. A probe
+    failure is not treated as a rejection.
+    """
+    max_seconds = NETWORK_MAX_VIDEO_SECONDS.get(network)
+    if not max_seconds or not local_path:
+        return
+    path = Path(str(local_path))
+    if not path.is_file():
+        return
+    try:
+        from myUtils import media_pipeline
+
+        duration = media_pipeline.probe_video_duration(str(path))
+    except Exception as exc:  # noqa: BLE001 - a probe failure is not a rejection
+        logger.warning("could not probe video duration for the fallback: %s", exc)
+        return
+    if duration and duration > max_seconds:
+        raise SociamonialsFallbackError(
+            f"{network} video duration {duration:.0f}s exceeds the "
+            f"{int(max_seconds)}s limit"
+        )
 
 
 def collect_media(
@@ -697,8 +740,9 @@ def compose_message_with_links(
     links: list[str] = []
     if network in LINK_IN_MAIN_POST_FORBIDDEN_NETWORKS:
         message, links = _extract_urls(message)
-    if network == "tw" and len(message) > 280:
-        message = message[:279].rstrip() + "…"
+    limit = NETWORK_MAX_MESSAGE_CHARS.get(network)
+    if limit and len(message) > limit:
+        message = message[: limit - 1].rstrip() + "…"
     return message, links
 
 
@@ -894,6 +938,7 @@ def publish_via_sociamonials(
     if media:
         image_refs: list[str] = []
         video_ref: str | None = None
+        video_local_path: str | None = None
         for item in media:
             kind = item["kind"]
             reference: str | None = None
@@ -918,9 +963,11 @@ def publish_via_sociamonials(
                 continue
             if kind == "video":
                 video_ref = reference
+                video_local_path = str(item.get("local_path") or "") or None
             else:
                 image_refs.append(reference)
         if video_ref:
+            _assert_video_duration(network, video_local_path)
             body["video_url"] = video_ref
             if image_refs:
                 warnings.append("both video and image media were present; images were dropped")
