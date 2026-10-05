@@ -831,7 +831,20 @@ class PublishWorker:
         payload = dict(job.payload or {})
         payload["_db_path"] = str(self._db_path)
 
-        account = _resolve_structured_account(target.account_ref, db_path=self._db_path)
+        # ``_resolve_structured_account`` raises LookupError for an account row
+        # that no longer exists (a deleted account whose targets are still
+        # queued). That is a "cannot fall back", not a crash: the caller must
+        # still be allowed to mark the target permanently failed.
+        try:
+            account = _resolve_structured_account(
+                target.account_ref, db_path=self._db_path
+            )
+        except Exception as exc:  # noqa: BLE001 — never raise into the loop
+            log.info(
+                f"sociamonials fallback skipped: account lookup failed for "
+                f"{target.account_ref} ({_scrub_secrets(str(exc))})"
+            )
+            return False
         if account is None:
             log.info("sociamonials fallback skipped: account could not be resolved")
             return False

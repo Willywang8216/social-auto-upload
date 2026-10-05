@@ -206,3 +206,64 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class SociamonialsFallbackMissingAccountTests(unittest.TestCase):
+    """A deleted account must not crash the worker through the fallback.
+
+    ``_resolve_structured_account`` raises LookupError when the account row is
+    gone. Targets for a deleted account can still be queued (the FK is
+    ON DELETE SET NULL, not CASCADE), so the fallback has to treat that as
+    "cannot fall back" and let the caller mark the target permanently failed -
+    not escape into the worker loop, which previously killed the whole task.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "worker.db"
+        create_table.bootstrap(self.db_path)
+        self.profile_id = profile_registry.create_profile(
+            "Missing Account", db_path=self.db_path
+        ).id
+        self._env = patch.dict(os.environ, {}, clear=False)
+        self._env.start()
+        os.environ["SAU_SOCIAMONIALS_FALLBACK"] = "1"
+        os.environ["SOCIAMONIALS_API_KEY"] = "sm_agent_test"
+
+    def tearDown(self) -> None:
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def test_missing_account_falls_through_without_crashing(self) -> None:
+        job = jobs.enqueue_job(
+            jobs.JobSpec(
+                platform="bluesky",
+                payload={"draft": {"message": "hi"}},
+                # account:999999 has no row.
+                targets=[("account:999999", "campaign_post:1", None)],
+                profile_id=self.profile_id,
+                idempotency_key="missing-account",
+            ),
+            db_path=self.db_path,
+        )
+
+        async def executor(platform, payload, target):
+            raise RuntimeError("bluesky said no")
+
+        config = WorkerConfig(
+            poll_interval=0.001,
+            batch_size=4,
+            max_concurrent=1,
+            retry=RetryPolicy(
+                max_attempts=1, base_backoff_seconds=0.001, max_backoff_seconds=0.01
+            ),
+        )
+        worker = PublishWorker(executor, config=config, db_path=self.db_path)
+        with patch.object(
+            sociamonials_fallback, "publish_via_sociamonials"
+        ) as patched:
+            asyncio.run(worker.drain())
+        patched.assert_not_called()
+
+        targets = jobs.list_targets(job.id, db_path=self.db_path)
+        self.assertEqual(targets[0].status, jobs.TARGET_FAILED)

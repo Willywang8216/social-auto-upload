@@ -16,9 +16,22 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 import boto3
 from botocore.config import Config as BotoConfig
+
+
+def _encode_key(key: str) -> str:
+    """Percent-encode an object key for use in a URL path, keeping ``/``.
+
+    Object keys are derived from media filenames, so spaces and non-ASCII are
+    normal. A raw space makes the URL invalid, and the Facebook Graph API
+    rejects it with ``Unable to fetch video file from URL`` (code 389) even
+    though the object exists - the encoded form serves 200. ``safe="/"`` keeps
+    the separators so the path is otherwise untouched.
+    """
+    return quote(str(key), safe="/")
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +92,7 @@ class SpacesClient:
         if content_type:
             extra["ContentType"] = content_type
         client.upload_file(str(local_path), self.bucket, key, ExtraArgs=extra)
-        url = f"{self.cdn_url}/{key}"
+        url = self.cdn_url_for(key)
         logger.debug("Uploaded %s -> %s", local_path, url)
         return url
 
@@ -90,7 +103,7 @@ class SpacesClient:
         if content_type:
             extra["ContentType"] = content_type
         client.put_object(Bucket=self.bucket, Key=key, Body=data, **extra)
-        url = f"{self.cdn_url}/{key}"
+        url = self.cdn_url_for(key)
         logger.debug("Uploaded %d bytes -> %s", len(data), url)
         return url
 
@@ -133,12 +146,20 @@ class SpacesClient:
             Params=params,
             ExpiresIn=expires_in,
         )
-        public_url = f"{self.cdn_url}/{key}"
+        public_url = self.cdn_url_for(key)
         return {"upload_url": upload_url, "public_url": public_url, "key": key, "content_type": ct}
 
     def cdn_url_for(self, key: str) -> str:
-        """Return the public CDN URL for a given key."""
-        return f"{self.cdn_url}/{key}"
+        """Return the public CDN URL for a given key.
+
+        Each path segment is percent-encoded. Keys are built from media
+        filenames, which routinely contain spaces and non-ASCII characters, and
+        a raw space in a URL is not a valid URI: the Facebook Graph API answers
+        ``Unable to fetch video file from URL`` (code 389) for the unencoded
+        form while the encoded form serves 200. The ``/`` separators are
+        preserved so the object path is unchanged.
+        """
+        return f"{self.cdn_url}/{_encode_key(key)}"
 
     # ------------------------------------------------------------------
     # Multipart upload support
@@ -178,7 +199,7 @@ class SpacesClient:
             UploadId=upload_id,
             MultipartUpload={"Parts": sorted_parts},
         )
-        return f"{self.cdn_url}/{key}"
+        return self.cdn_url_for(key)
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         """Abort a multipart upload to clean up."""

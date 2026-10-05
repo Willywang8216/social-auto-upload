@@ -325,3 +325,52 @@ def test_download_from_backend_defaults_to_the_s3_client(monkeypatch, tmp_path):
 
     assert destination.read_bytes() == b"s3"
     assert calls["key"] == "campaigns/1/videos/clip.mp4"
+
+
+class TestSpacesPublicUrlEncoding:
+    """A CDN URL must be a valid URI or URL-fetching platforms reject it.
+
+    Object keys come from media filenames, so they contain spaces and non-ASCII
+    characters. A raw space is not a valid URI path: the Facebook Graph API
+    answered "Unable to fetch video file from URL" (code 389) for the unencoded
+    form while the encoded form served 200 for the same object.
+    """
+
+    def test_spaces_in_key_are_percent_encoded(self):
+        from myUtils import do_spaces
+
+        url = do_spaces._encode_key(
+            "campaigns/2222/videos/SFW lv_0_20260907103730_part3_pub_pub.mp4"
+        )
+        assert " " not in url
+        assert url == (
+            "campaigns/2222/videos/SFW%20lv_0_20260907103730_part3_pub_pub.mp4"
+        )
+
+    def test_path_separators_are_preserved(self):
+        from myUtils import do_spaces
+
+        assert do_spaces._encode_key("a/b/c.png") == "a/b/c.png"
+
+    def test_non_ascii_is_encoded(self):
+        from myUtils import do_spaces
+
+        encoded = do_spaces._encode_key("campaigns/1/img/\u4e2d\u6587 \u6a94\u540d.png")
+        assert "\u4e2d\u6587" not in encoded
+        assert encoded.startswith("campaigns/1/img/")
+        assert encoded.endswith(".png")
+
+    def test_cdn_url_for_encodes_and_upload_file_uses_it(self, monkeypatch):
+        from myUtils import do_spaces
+
+        client = do_spaces.SpacesClient.__new__(do_spaces.SpacesClient)
+        client.bucket = "b"
+        client.region = "sgp1"
+        client.endpoint = ""
+        client.access_key = "k"
+        client.secret_key = "s"
+        client.cdn_url = "https://cdn.example.com"
+
+        assert client.cdn_url_for("a b/c d.png") == (
+            "https://cdn.example.com/a%20b/c%20d.png"
+        )
