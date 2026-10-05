@@ -25,6 +25,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -40,6 +41,31 @@ from myUtils import profiles as profile_registry  # noqa: E402
 from myUtils import publish_orchestrator  # noqa: E402
 
 DB_PATH = Path(os.environ.get("SAU_DB_PATH") or (REPO_ROOT / "db" / "database.db"))
+
+_OPENCC = None
+
+
+def _to_taiwan(text):
+    """Deterministically convert Simplified Chinese to Taiwan Traditional.
+
+    Prompting alone leaves the occasional Simplified character in a rewrite, so
+    the model output is normalised with OpenCC s2twp (with Taiwan phrases).
+    """
+    global _OPENCC
+    if not text:
+        return text
+    value = str(text)
+    try:
+        from opencc import OpenCC
+
+        if _OPENCC is None:
+            try:
+                _OPENCC = OpenCC("s2twp")
+            except Exception:  # noqa: BLE001 - older installs lack s2twp
+                _OPENCC = OpenCC("s2t")
+        return _OPENCC.convert(value)
+    except Exception:  # noqa: BLE001 - a conversion miss must not drop the post
+        return value
 
 HUMANIZER = (
     "Rewrite the supplied social-media copy so it reads like a real person "
@@ -78,6 +104,7 @@ def find_targets(
     platform: str | None = None,
     limit: int | None = None,
     force: bool = False,
+    bad_only: bool = False,
 ) -> list[dict]:
     cutoff = None
     if within_days:
@@ -86,6 +113,10 @@ def find_targets(
         ).isoformat(timespec="seconds")
     conn = _connect(db_path)
     try:
+        langs = {
+            row["id"]: json.loads(row["config_json"] or "{}")
+            for row in conn.execute("SELECT id, config_json FROM accounts")
+        }
         query = (
             "SELECT t.id AS target_id, t.job_id, t.account_ref, t.schedule_at,"
             " j.platform, j.payload_json "
@@ -117,6 +148,19 @@ def find_targets(
             # Already humanized; a re-run should only pick up the ones that
             # failed the first time (usually a transient LLM 503).
             continue
+        if bad_only:
+            try:
+                account_id = int(str(row["account_ref"]).split(":", 1)[1])
+            except (IndexError, ValueError):
+                account_id = None
+            account_config = langs.get(account_id) or {}
+            language = str(
+                account_config.get("audience_language")
+                or account_config.get("audienceLanguage")
+                or ""
+            ).strip()
+            if language and content_rules.message_matches_language(message, language):
+                continue
         out.append(
             {
                 "target_id": int(row["target_id"]),
@@ -166,15 +210,35 @@ def humanize_one(row: dict, *, db_path: Path = DB_PATH) -> dict:
         "description, altText, firstComment, hashtags)."
     )
     try:
-        result = llm_client.generate_chat_completion(
-            system_prompt, user_prompt, temperature=0.7, response_json=True, timeout_seconds=120
-        )
-        rewritten = result.parsed_json or llm_client.coerce_json_object(result.content) or {}
+        rewritten = None
+        last_error = ""
+        for attempt in range(4):
+            try:
+                result = llm_client.generate_chat_completion(
+                    system_prompt, user_prompt, temperature=0.7,
+                    response_json=True, timeout_seconds=120,
+                )
+                rewritten = result.parsed_json or llm_client.coerce_json_object(result.content) or {}
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = f"{type(exc).__name__}: {exc}"[:200]
+                if ("429" in last_error or "503" in last_error) and attempt < 3:
+                    time.sleep(4 * (attempt + 1))
+                    continue
+                break
+        if rewritten is None:
+            return {**row, "ok": False, "error": last_error}
     except Exception as exc:  # noqa: BLE001
         return {**row, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:200]}
     message = str(rewritten.get("message") or "").strip()
     if not content_rules.is_usable_copy(message):
         return {**row, "ok": False, "error": "rewrite is empty/placeholder"}
+    wants_zh = language.lower().startswith("zh")
+    if wants_zh:
+        message = _to_taiwan(message)
+        for key in ("title", "summary", "description", "altText", "firstComment"):
+            if rewritten.get(key):
+                rewritten[key] = _to_taiwan(rewritten[key])
     if language and not content_rules.message_matches_language(message, language):
         return {**row, "ok": False, "error": f"rewrite language mismatch ({language})"}
     merged = dict(draft)
@@ -227,13 +291,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--concurrency", type=int, default=6)
     parser.add_argument("--redo", action="store_true", help="re-humanize even drafts already done")
+    parser.add_argument("--bad-only", action="store_true", help="only drafts whose language is wrong/Simplified")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
 
     db_path = Path(args.db_path)
     targets = find_targets(
         db_path=db_path, within_days=args.within_days, platform=args.platform,
-        limit=args.limit, force=args.redo,
+        limit=args.limit, force=args.redo, bad_only=args.bad_only,
     )
     print(f"pending drafts to humanize: {len(targets)}")
     if not args.apply:
