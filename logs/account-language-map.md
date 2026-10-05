@@ -64,6 +64,11 @@ and has been corrected to `zh-Hant`.
 | 116 NW TG 本人 | en | `@nakedwilltgchannel` (Nakedwill — Naturism & Nudism (EN)) | `@nakedwill` (Nakedwill Chat (EN) 🌿) |
 | 117 SW TG 本人 | en | `@sexualwilltgchannel` (Sexualwill 🔞 EN (18+)) | `@sexualwill` (Sexualwill Chat 🔞 EN (18+)) |
 | 122 SW TG 中文 | zh-Hant | `@nakedsexualwei` (光光 nakedhappylife 🔞 中文) | `@nakedsexualweiwei` (光光討論群 🔞 中文) |
+| **127 NW TG 中文** (new) | **zh-Hant** | `@nakedwillzh` (Nakedwill 中文 🌿) | `@nakedwillzhchat` (Nakedwill 中文討論群 🌿) |
+
+The NW Chinese channel/group (`@nakedwillzh` / `@nakedwillzhchat`) was created on
+2026-10-06 from the operator's Telegram session; account **127** publishes to it.
+New campaigns for profile 1 now include it automatically.
 
 There is **no NW (nakedwill) Chinese Telegram channel/group** in the session's
 dialog list (only EN). NW Chinese is covered by Bluesky 119 and X 124.
