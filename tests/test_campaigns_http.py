@@ -206,6 +206,9 @@ class CampaignApiTests(unittest.TestCase):
             response = self.client.post("/campaigns/prepare", json={
                 "profileId": profile["id"], "mediaGroupId": group,
                 "selectedAccountIds": [account["id"]],
+                # The media context is deliberately empty; a usable brief is what
+                # lets the no-LLM fallback produce copy instead of a placeholder.
+                "notes": "A calm, honest moment in the forest.",
                 "useLlm": False, "exportToSheet": False, "uploadToRemote": False,
             })
         self.assertEqual(response.status_code, 200, response.get_json())

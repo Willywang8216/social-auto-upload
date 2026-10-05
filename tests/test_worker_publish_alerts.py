@@ -68,6 +68,15 @@ class PublishFailureAlertTests(unittest.TestCase):
         # SAU_PUBLIC_APP_URL to SAU_PUBLIC_BASE_URL.
         os.environ.pop("SAU_PUBLIC_APP_URL", None)
         os.environ.pop("SAU_PUBLIC_BASE_URL", None)
+        # myUtils.__init__ loads the repo .env, which may switch the X path to
+        # the Sociamonials fallback and bypass the executor these tests drive.
+        for key in (
+            "SAU_SOCIAMONIALS_FALLBACK",
+            "SOCIAMONIALS_API_KEY",
+            "SOCIAMONIALS_SECRETS_FILE",
+            "SAU_X_DIRECT_PUBLISH",
+        ):
+            os.environ.pop(key, None)
 
     def tearDown(self) -> None:
         self._env.stop()
