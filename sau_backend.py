@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+from html import escape as _html_escape
 import ipaddress
 import json
 import hmac
@@ -375,6 +376,24 @@ def _oauth_post_message_origin() -> str:
     Reads SAU_APP_ORIGIN from env. Falls back to the production frontend origin.
     """
     return str(os.environ.get("SAU_APP_ORIGIN") or "https://up.iamwillywang.com").strip()
+
+
+def _html_safe_json(value) -> str:
+    """JSON that is safe to embed inside an HTML ``<script>`` block.
+
+    Provider-controlled strings (OAuth ``error`` descriptions, account/display
+    names the provider echoes back) reach these callbacks. ``json.dumps`` alone
+    leaves ``</script>`` intact, which closes the script element and injects
+    markup, so escape the characters that can break out of a script context.
+    """
+    return (
+        json.dumps(value, ensure_ascii=False)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace(" ", "\\u2028")
+        .replace(" ", "\\u2029")
+    )
 
 
 @app.before_request
@@ -2372,7 +2391,9 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
             )
             summary = f"TikTok refreshed: {config.get('displayName') or updated.account_name}"
         elif account.platform == profile_registry.PLATFORM_REDDIT:
-            if str(config.get('redditAuthType') or '') == 'cookie':
+            if profile_registry.effective_auth_type(
+                config, account.auth_type, profile_registry.PLATFORM_REDDIT
+            ) == 'cookie':
                 raise ValueError('Cannot refresh token for a cookie-based Reddit account. Switch to OAuth auth type first.')
             refreshed = prepared_publishers.refresh_reddit_access_token(config)
             config.update({
@@ -2605,6 +2626,12 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 config['accessTokenExpiresAt'] = (
                     datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
                 ).isoformat(timespec='seconds')
+            for marker in (
+                '_needsReconnect', '_reconnectAlertedAt', '_maintenanceFailures',
+                '_nextMaintenanceAttemptAt', '_lastMaintenanceError',
+                '_lastMaintenanceAttemptAt',
+            ):
+                config.pop(marker, None)
             updated = profile_registry.update_account(
                 account_id,
                 config=config,
@@ -2639,6 +2666,29 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 metadata={'mode': mode},
                 db_path=db_path,
             )
+        event_error = str(exc)
+        event_metadata = {'timestamp': now, 'mode': mode}
+        if account.platform == profile_registry.PLATFORM_TWITTER:
+            failure_count = int(config.get('_maintenanceFailures') or 0) + 1
+            delay_seconds = min(300 * (2 ** (failure_count - 1)), 21600)
+            failed_at = _utc_now_naive()
+            config['_maintenanceFailures'] = failure_count
+            config['_lastMaintenanceError'] = event_error[:300]
+            config['_lastMaintenanceAttemptAt'] = failed_at.isoformat(timespec='seconds')
+            config['_nextMaintenanceAttemptAt'] = (
+                failed_at + timedelta(seconds=delay_seconds)
+            ).isoformat(timespec='seconds')
+            if getattr(exc, 'error_code', '') in {'invalid_grant', 'invalid_token', 'refresh_token_revoked'}:
+                config['_needsReconnect'] = True
+                config['_reconnectAlertedAt'] = failed_at.isoformat(timespec='seconds')
+            profile_registry.update_account(
+                account.id, config=config, auth_type='oauth', db_path=db_path,
+            )
+            event_metadata.update({
+                'providerStatus': getattr(exc, 'status_code', None),
+                'providerErrorCode': getattr(exc, 'error_code', ''),
+                'retryAfterSeconds': delay_seconds,
+            })
         account_events.record_event(
             account_id=account.id,
             profile_id=account.profile_id,
@@ -2647,8 +2697,8 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
             action='refresh_token',
             status='error',
             summary='Token refresh failed',
-            error_text=str(exc),
-            metadata={'timestamp': now, 'mode': mode},
+            error_text=event_error,
+            metadata=event_metadata,
             db_path=db_path,
         )
         raise
@@ -2829,6 +2879,11 @@ def _effective_refresh_skew(platform: str, skew_seconds: int) -> int:
 
 def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_seconds: int = 300) -> bool:
     config = dict(account.config or {})
+    if config.get('_needsReconnect'):
+        return False
+    retry_at = prepared_publishers._parse_iso_datetime(str(config.get('_nextMaintenanceAttemptAt') or ''))
+    if retry_at is not None and retry_at > prepared_publishers._utc_now():
+        return False
     effective_skew = _effective_refresh_skew(account.platform, skew_seconds)
     if account.platform == profile_registry.PLATFORM_TIKTOK:
         return prepared_publishers._is_tiktok_access_token_stale(config, skew_seconds=skew_seconds)
@@ -2863,9 +2918,13 @@ def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_sec
         if expires_at is None:
             return False
         return expires_at <= (prepared_publishers._utc_now() + timedelta(seconds=effective_skew))
-    # Cookie-based accounts don't have API tokens to refresh
-    auth_type = str(config.get("twitterAuthType") or account.auth_type or "").strip().lower()
-    if account.platform == profile_registry.PLATFORM_TWITTER and auth_type == "cookie":
+    # Cookie-based accounts don't have API tokens to refresh. Use the shared
+    # normalizer for both Reddit and X so DB-only and mixed-case auth modes are
+    # treated consistently by backend maintenance and the worker.
+    auth_type = profile_registry.effective_auth_type(
+        config, account.auth_type, account.platform
+    )
+    if auth_type == "cookie":
         return False
     access_token = str(config.get('accessToken') or '').strip()
     if not access_token:
@@ -4062,15 +4121,16 @@ def _render_oauth_closer(*, ok: bool, message: str, data=None, msg_type: str = '
     import json as _json
     data_json = _json.dumps(data or {}, ensure_ascii=False).replace('</', '<\\/')
     ok_js = 'true' if ok else 'false'
+    origin_js = _json.dumps(_oauth_post_message_origin())
     return f"""<html><head><meta charset="utf-8"></head><body>
-<p style="font-family:sans-serif;padding:24px;text-align:center">{message}</p>
+<p style="font-family:sans-serif;padding:24px;text-align:center">{_html_escape(str(message))}</p>
 <script>
   (function() {{
     var msg = {{ type: {msg_type!r}, ok: {ok_js}, data: {data_json} }};
     try {{
-      if (window.opener && !window.opener.closed) window.opener.postMessage(msg, '*');
+      if (window.opener && !window.opener.closed) window.opener.postMessage(msg, {origin_js});
     }} catch (e) {{
-      try {{ window.opener.postMessage({{ type: {msg_type!r}, ok: {ok_js} }}, '*'); }} catch (e2) {{}}
+      try {{ window.opener.postMessage({{ type: {msg_type!r}, ok: {ok_js} }}, {origin_js}); }} catch (e2) {{}}
     }}
     var tries = 0;
     (function attemptClose() {{
@@ -4172,7 +4232,7 @@ def meta_oauth_callback():
                     {'id': str(p.get('id') or ''), 'name': str(p.get('name') or ''), 'access_token': str(p.get('access_token') or ''), 'pictureUrl': str(p.get('picture', {}).get('data', {}).get('url') or '')}
                     for p in pages if isinstance(p, dict)
                 ]
-                pages_json = json.dumps(savable_pages)
+                pages_json = _html_safe_json(savable_pages)
                 html = f"""<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
             <style>body{{font-family:-apple-system,system-ui,sans-serif;padding:20px;max-width:560px;margin:0 auto;background:#f4f6f8}}
             h2{{text-align:center;color:#1d2129}}.card{{background:#fff;border:2px solid #e4e6eb;border-radius:12px;padding:16px;margin:10px 0;cursor:pointer;transition:all .15s}}
@@ -4188,14 +4248,19 @@ def meta_oauth_callback():
             PAGES.forEach(function(p) {{
               var card = document.createElement('div');
               card.className = 'card';
-              card.innerHTML = '<h3>' + p.name + '</h3><p>ID ' + p.id + '</p>';
+              var h3 = document.createElement('h3');
+              h3.textContent = p.name;
+              var pId = document.createElement('p');
+              pId.textContent = 'ID ' + p.id;
+              card.appendChild(h3);
+              card.appendChild(pId);
               card.onclick = function() {{ selectPage(p); }};
               cards.appendChild(card);
             }});
             function selectPage(p) {{
               try {{
                 if (window.opener && !window.opener.closed) {{
-                  window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'facebook',accountId:ACCOUNT_ID,selectedPage:p,pages:PAGES,tokenData:TOKEN_DATA}}}}, '*');
+                  window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'facebook',accountId:ACCOUNT_ID,selectedPage:p,pages:PAGES,tokenData:TOKEN_DATA}}}}, {json.dumps(_oauth_post_message_origin())});
                 }}
               }} catch (e) {{}}
               window.close();
@@ -4315,7 +4380,7 @@ def meta_oauth_callback():
             function selectIG(ig) {{
               try {{
                 if (window.opener && !window.opener.closed) {{
-                  window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'instagram',accountId:ACCOUNT_ID,selectedPage:{{id:ig.pageId,name:ig.facebookPageName,access_token:ig.pageAccessToken,igUserId:ig.igUserId,instagramUserName:ig.instagramUserName}},tokenData:TOKEN_DATA}}}}, '*');
+                  window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'instagram',accountId:ACCOUNT_ID,selectedPage:{{id:ig.pageId,name:ig.facebookPageName,access_token:ig.pageAccessToken,igUserId:ig.igUserId,instagramUserName:ig.instagramUserName}},tokenData:TOKEN_DATA}}}}, {json.dumps(_oauth_post_message_origin())});
                 }}
               }} catch (e) {{}}
               window.close();
@@ -4415,7 +4480,7 @@ def meta_oauth_callback():
                 metadata={'state': state_token},
                 db_path=db_path,
             )
-        return Response(f"<html><body><p>Meta callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
+        return Response(f"<html><body><p>Meta callback failed: {_html_escape(str(exc))}</p></body></html>", status=500, mimetype='text/html')
 
 
 @app.route('/oauth/youtube/start', methods=['POST'])
@@ -4491,12 +4556,12 @@ def youtube_oauth_callback():
                 metadata={'state': state_token},
                 db_path=db_path,
             )
-        return Response("""<html><body><script>
-            if (window.opener) {
-              window.opener.postMessage({ type: 'sau:youtube-oauth', ok: false, error: %r }, '*');
-            }
+        return Response(f"""<html><body><script>
+            if (window.opener) {{
+              window.opener.postMessage({{ type: 'sau:youtube-oauth', ok: false, error: {_html_safe_json(error)} }}, {_oauth_post_message_origin()!r});
+            }}
             window.close();
-            </script><p>YouTube authorization failed. You may close this window.</p></body></html>""" % error, mimetype='text/html')
+            </script><p>YouTube authorization failed. You may close this window.</p></body></html>""" , mimetype='text/html')
 
     try:
         if not request_state.account_id:
@@ -4583,7 +4648,7 @@ def youtube_oauth_callback():
         )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:youtube-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
+          window.opener.postMessage({{ type: 'sau:youtube-oauth', ok: true, data: {_html_safe_json(callback_payload)} }}, {_oauth_post_message_origin()!r});
         }}
         window.close();
         </script><p>YouTube authorization completed. You may close this window.</p></body></html>"""
@@ -4603,7 +4668,7 @@ def youtube_oauth_callback():
                 metadata={'state': state_token},
                 db_path=db_path,
             )
-        return Response(f"<html><body><p>YouTube callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
+        return Response(f"<html><body><p>YouTube callback failed: {_html_escape(str(exc))}</p></body></html>", status=500, mimetype='text/html')
 
 
 @app.route('/oauth/reddit/start', methods=['POST'])
@@ -4686,12 +4751,12 @@ def reddit_oauth_callback():
                 db_path=db_path,
             )
         return Response(
-            """<html><body><script>
-            if (window.opener) {
-              window.opener.postMessage({ type: 'sau:reddit-oauth', ok: false, error: %r }, '*');
-            }
+            f"""<html><body><script>
+            if (window.opener) {{
+              window.opener.postMessage({{ type: 'sau:reddit-oauth', ok: false, error: {_html_safe_json(error)} }}, {_oauth_post_message_origin()!r});
+            }}
             window.close();
-            </script><p>Reddit authorization failed. You may close this window.</p></body></html>""" % error,
+            </script><p>Reddit authorization failed. You may close this window.</p></body></html>""" ,
             mimetype='text/html',
         )
 
@@ -4723,6 +4788,9 @@ def reddit_oauth_callback():
         if expires_in not in (None, ''):
             merged_config['accessTokenExpiresAt'] = (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
         merged_config['redditUserName'] = str(user_info.get('name') or merged_config.get('redditUserName') or '')
+        # A successful OAuth reconnect supersedes a prior cookie login. Without
+        # this marker the worker may route the account back through browser auth.
+        merged_config['redditAuthType'] = 'api'
         merged_config['scope'] = str(token_payload.get('scope') or merged_config.get('scope') or ' '.join(request_state.scopes))
         merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
         updated = profile_registry.update_account(
@@ -4768,7 +4836,7 @@ def reddit_oauth_callback():
         )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:reddit-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
+          window.opener.postMessage({{ type: 'sau:reddit-oauth', ok: true, data: {_html_safe_json(callback_payload)} }}, {_oauth_post_message_origin()!r});
         }}
         window.close();
         </script><p>Reddit authorization completed. You may close this window.</p></body></html>"""
@@ -4794,7 +4862,7 @@ def reddit_oauth_callback():
                 metadata={'state': state_token},
                 db_path=db_path,
             )
-        return Response(f"<html><body><p>Reddit callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
+        return Response(f"<html><body><p>Reddit callback failed: {_html_escape(str(exc))}</p></body></html>", status=500, mimetype='text/html')
 
 
 @app.route('/oauth/twitter/start', methods=['POST'])
@@ -4875,12 +4943,12 @@ def twitter_oauth_callback():
                 db_path=db_path,
             )
         return Response(
-            """<html><body><script>
-            if (window.opener) {
-              window.opener.postMessage({ type: 'sau:twitter-oauth', ok: false, error: %r }, '*');
-            }
+            f"""<html><body><script>
+            if (window.opener) {{
+              window.opener.postMessage({{ type: 'sau:twitter-oauth', ok: false, error: {_html_safe_json(error)} }}, {_oauth_post_message_origin()!r});
+            }}
             window.close();
-            </script><p>Twitter authorization failed. You may close this window.</p></body></html>""" % error,
+            </script><p>Twitter authorization failed. You may close this window.</p></body></html>""" ,
             mimetype='text/html',
         )
 
@@ -4894,9 +4962,13 @@ def twitter_oauth_callback():
             redirect_uri=request_state.redirect_uri,
             code_verifier=request_state.code_verifier,
         )
-        access_token = str(token_payload.get('access_token') or '')
-        refresh_token = str(token_payload.get('refresh_token') or '')
-        user_info = x_auth.fetch_user_info(access_token=access_token) if access_token else {}
+        access_token = str(token_payload.get('access_token') or '').strip()
+        refresh_token = str(token_payload.get('refresh_token') or '').strip()
+        if not access_token:
+            raise ValueError('X OAuth callback returned no access token')
+        if 'offline.access' in request_state.scopes and not refresh_token:
+            raise ValueError('X OAuth callback returned no refresh token for offline.access')
+        user_info = x_auth.fetch_user_info(access_token=access_token)
         merged_config = dict(config)
         if access_token:
             merged_config['accessToken'] = access_token
@@ -4917,6 +4989,16 @@ def twitter_oauth_callback():
         merged_config['scope'] = str(token_payload.get('scope') or merged_config.get('scope') or ' '.join(request_state.scopes))
         merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
         merged_config['twitterAuthType'] = 'api'
+        # A completed OAuth round-trip is the operator's explicit recovery action.
+        # Clear stale refresh/reconnect backoff only after token exchange and
+        # identity lookup succeeded, otherwise the newly connected account stays
+        # permanently ineligible for automatic refresh.
+        for marker in (
+            '_needsReconnect', '_reconnectAlertedAt', '_maintenanceFailures',
+            '_nextMaintenanceAttemptAt', '_lastMaintenanceError',
+            '_lastMaintenanceAttemptAt',
+        ):
+            merged_config.pop(marker, None)
         updated = profile_registry.update_account(
             account.id,
             config=merged_config,
@@ -4964,7 +5046,7 @@ def twitter_oauth_callback():
         )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:twitter-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
+          window.opener.postMessage({{ type: 'sau:twitter-oauth', ok: true, data: {_html_safe_json(callback_payload)} }}, {_oauth_post_message_origin()!r});
         }}
         window.close();
         </script><p>Twitter authorization completed. You may close this window.</p></body></html>"""
@@ -4990,7 +5072,7 @@ def twitter_oauth_callback():
                 metadata={'state': state_token},
                 db_path=db_path,
             )
-        return Response(f"<html><body><p>Twitter callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
+        return Response(f"<html><body><p>Twitter callback failed: {_html_escape(str(exc))}</p></body></html>", status=500, mimetype='text/html')
 
 
 def _default_scopes_for_platform(platform: str) -> list[str]:
@@ -5188,12 +5270,12 @@ def threads_oauth_callback():
                 metadata={'state': state_token},
                 db_path=db_path,
             )
-        return Response("""<html><body><script>
-            if (window.opener) {
-              window.opener.postMessage({ type: 'sau:threads-oauth', ok: false, error: %r }, '*');
-            }
+        return Response(f"""<html><body><script>
+            if (window.opener) {{
+              window.opener.postMessage({{ type: 'sau:threads-oauth', ok: false, error: {_html_safe_json(error)} }}, {_oauth_post_message_origin()!r});
+            }}
             window.close();
-            </script><p>Threads authorization failed. You may close this window.</p></body></html>""" % error, mimetype='text/html')
+            </script><p>Threads authorization failed. You may close this window.</p></body></html>""" , mimetype='text/html')
 
     try:
         if not request_state.account_id:
@@ -5261,7 +5343,7 @@ def threads_oauth_callback():
         )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:threads-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
+          window.opener.postMessage({{ type: 'sau:threads-oauth', ok: true, data: {_html_safe_json(callback_payload)} }}, {_oauth_post_message_origin()!r});
         }}
         window.close();
         </script><p>Threads authorization completed. You may close this window.</p></body></html>"""
@@ -5281,7 +5363,7 @@ def threads_oauth_callback():
                 metadata={'state': state_token},
                 db_path=db_path,
             )
-        return Response(f"<html><body><p>Threads callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
+        return Response(f"<html><body><p>Threads callback failed: {_html_escape(str(exc))}</p></body></html>", status=500, mimetype='text/html')
 
 
 @app.route('/oauth/tiktok/start', methods=['POST'])
@@ -5352,7 +5434,7 @@ def tiktok_oauth_callback():
         result = request_state.result
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:tiktok-oauth', ok: true, data: {json.dumps(result, ensure_ascii=False)} }}, '*');
+          window.opener.postMessage({{ type: 'sau:tiktok-oauth', ok: true, data: {_html_safe_json(result)} }}, {_oauth_post_message_origin()!r});
         }}
         window.close();
         </script><p>TikTok authorization completed. You may close this window.</p></body></html>"""
@@ -5391,12 +5473,12 @@ def tiktok_oauth_callback():
                 db_path=db_path,
             )
         return Response(
-            """<html><body><script>
-            if (window.opener) {
-              window.opener.postMessage({ type: 'sau:tiktok-oauth', ok: false, error: %r }, '*');
-            }
+            f"""<html><body><script>
+            if (window.opener) {{
+              window.opener.postMessage({{ type: 'sau:tiktok-oauth', ok: false, error: {_html_safe_json(error)} }}, {_oauth_post_message_origin()!r});
+            }}
             window.close();
-            </script><p>TikTok authorization failed. You may close this window.</p></body></html>""" % error,
+            </script><p>TikTok authorization failed. You may close this window.</p></body></html>""" ,
             mimetype='text/html',
         )
 
@@ -5482,7 +5564,7 @@ def tiktok_oauth_callback():
             )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:tiktok-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
+          window.opener.postMessage({{ type: 'sau:tiktok-oauth', ok: true, data: {_html_safe_json(callback_payload)} }}, {_oauth_post_message_origin()!r});
         }}
         window.close();
         </script><p>TikTok authorization completed. You may close this window.</p></body></html>"""
@@ -5521,7 +5603,7 @@ def tiktok_oauth_callback():
                 db_path=db_path,
             )
         return Response(
-            f"<html><body><p>TikTok callback failed: {exc}</p></body></html>",
+            f"<html><body><p>TikTok callback failed: {_html_escape(str(exc))}</p></body></html>",
             status=500,
             mimetype='text/html',
         )
@@ -9103,12 +9185,12 @@ def patreon_oauth_callback():
                 db_path=db_path,
             )
         return Response(
-            """<html><body><script>
-            if (window.opener) {
-              window.opener.postMessage({ type: 'sau:patreon-oauth', ok: false, error: %r }, '*');
-            }
+            f"""<html><body><script>
+            if (window.opener) {{
+              window.opener.postMessage({{ type: 'sau:patreon-oauth', ok: false, error: {_html_safe_json(error)} }}, {_oauth_post_message_origin()!r});
+            }}
             window.close();
-            </script><p>Patreon authorization failed. You may close this window.</p></body></html>""" % error,
+            </script><p>Patreon authorization failed. You may close this window.</p></body></html>""" ,
             mimetype='text/html',
         )
 
@@ -9186,7 +9268,7 @@ def patreon_oauth_callback():
         )
         html = f"""<html><body><script>
         if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:patreon-oauth', ok: true, data: {json.dumps(callback_payload, ensure_ascii=False)} }}, '*');
+          window.opener.postMessage({{ type: 'sau:patreon-oauth', ok: true, data: {_html_safe_json(callback_payload)} }}, {_oauth_post_message_origin()!r});
         }}
         window.close();
         </script><p>Patreon authorization completed. You may close this window.</p></body></html>"""
@@ -9205,7 +9287,7 @@ def patreon_oauth_callback():
                 metadata={'state': state_token},
                 db_path=db_path,
             )
-        return Response(f"<html><body><p>Patreon callback failed: {exc}</p></body></html>", status=500, mimetype='text/html')
+        return Response(f"<html><body><p>Patreon callback failed: {_html_escape(str(exc))}</p></body></html>", status=500, mimetype='text/html')
 
 
 # ---------------------------------------------------------------------------
