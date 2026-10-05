@@ -2053,3 +2053,85 @@ class BlueskyPublisherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RedditSelfPostForWhitelistedSubsTests(unittest.TestCase):
+    """Link-whitelisted subreddits must get a self post, not a foreign link.
+
+    r/NudistMen rejects a link post whose domain is not on its allow-list with
+    SUBMIT_VALIDATION_LINK_WHITELIST. The same video is accepted when submitted
+    as a self post carrying the URL in the body, so such subreddits are marked
+    self-post in config.
+    """
+
+    def _session(self):
+        return _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+
+    def test_whitelisted_subreddit_posts_self_with_url_in_body(self):
+        session = self._session()
+        account = SimpleNamespace(
+            account_name="test",
+            config={
+                "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
+                "subreddits": ["NudistMen"],
+                "selfPostSubreddits": ["NudistMen"],
+            },
+        )
+        prepared_publishers.publish_reddit_sync(
+            account,
+            {
+                "message": "body",
+                "artifacts": [{
+                    "public_url": "https://cdn.example/video.mp4",
+                    "artifact_kind": "remote_upload",
+                }],
+            },
+            session=session,
+        )
+        data = session.calls[1][2]["data"]
+        self.assertEqual(data["kind"], "self")
+        self.assertNotIn("url", data)
+        self.assertIn("https://cdn.example/video.mp4", data["text"])
+
+    def test_unmarked_subreddit_still_posts_a_link(self):
+        session = self._session()
+        account = SimpleNamespace(
+            account_name="test",
+            config={
+                "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
+                "subreddits": ["somewhere"],
+            },
+        )
+        prepared_publishers.publish_reddit_sync(
+            account,
+            {
+                "message": "body",
+                "artifacts": [{
+                    "public_url": "https://cdn.example/video.mp4",
+                    "artifact_kind": "remote_upload",
+                }],
+            },
+            session=session,
+        )
+        data = session.calls[1][2]["data"]
+        self.assertEqual(data["kind"], "link")
+        self.assertEqual(data["url"], "https://cdn.example/video.mp4")
+
+    def test_self_post_flag_applies_to_every_subreddit(self):
+        self.assertTrue(
+            prepared_publishers._reddit_prefers_self_post({}, {"selfPost": True}, "any")
+        )
+        self.assertFalse(
+            prepared_publishers._reddit_prefers_self_post({}, {}, "any")
+        )
+        # A draft list wins over config and tolerates the r/ prefix / case.
+        self.assertTrue(
+            prepared_publishers._reddit_prefers_self_post(
+                {"draft": {"selfPostSubreddits": ["r/nudistmen"]}},
+                {},
+                "NudistMen",
+            )
+        )

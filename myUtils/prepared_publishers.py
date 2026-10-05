@@ -2827,6 +2827,31 @@ def _reddit_content_flair_label(*sources: Any) -> str:
     return REDDIT_DEFAULT_FLAIR
 
 
+def _reddit_prefers_self_post(payload: dict, config: dict, subreddit: str) -> bool:
+    """Whether this subreddit must receive a self post instead of a link post.
+
+    Subreddits that whitelist link domains reject a foreign URL with
+    ``SUBMIT_VALIDATION_LINK_WHITELIST``; the same content is accepted as a self
+    post. Accepts either a list of subreddits or a boolean:
+
+    * ``draft.selfPostSubreddits`` / ``config.selfPostSubreddits``: names,
+    * ``draft.selfPost`` / ``config.selfPost``: applies to every destination.
+    """
+    draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else {}
+    for source in (draft, config):
+        names = source.get("selfPostSubreddits")
+        if isinstance(names, str):
+            names = [part.strip() for part in names.split(",") if part.strip()]
+        if isinstance(names, list):
+            lowered = {str(name).strip().lower().lstrip("r/") for name in names}
+            if subreddit.strip().lower().lstrip("r/") in lowered:
+                return True
+    for source in (draft, config):
+        if source.get("selfPost") is True:
+            return True
+    return False
+
+
 def _reddit_flair_id(payload: dict, config: dict, subreddit: str) -> str:
     """Resolve the post-flair id for one subreddit, or "" when unset.
 
@@ -3057,15 +3082,26 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
         flair_id = _reddit_flair_id(payload, config, subreddit)
         if flair_id:
             data["flair_id"] = flair_id
+        # Some subreddits restrict link posts to a whitelist of domains
+        # (r/NudistMen allows only imgur/blogspot/youtube/... - not an arbitrary
+        # CDN). A link post is then refused with SUBMIT_VALIDATION_LINK_WHITELIST
+        # even when the media is fine, so those subreddits take the video as a
+        # self post with the URL in the body instead, which the same rules allow.
+        # Configure per subreddit, or globally, via account config.
+        prefer_self_post = _reddit_prefers_self_post(payload, config, subreddit)
         if native_url:
             data["kind"] = "image"
             data["url"] = native_url
-        elif public_url:
+        elif public_url and not prefer_self_post:
             data["kind"] = "link"
             data["url"] = public_url
         else:
             data["kind"] = "self"
-            data["text"] = message
+            data["text"] = (
+                f"{message}\n\n{public_url}"
+                if public_url and prefer_self_post
+                else message
+            )
         response = http.post(REDDIT_SUBMIT_URL, headers=headers, data=data, timeout=120)
         _raise_for_status(response)
         body = response.json()
