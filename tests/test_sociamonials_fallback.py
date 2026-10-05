@@ -234,6 +234,21 @@ def test_compose_message_truncates_twitter():
     assert len(message) <= 280
 
 
+def test_compose_message_with_links_strips_x_links_and_returns_them():
+    payload = {"draft": {"message": "Read more at https://nakedwill.com/post today"}}
+    message, links = sm.compose_message_with_links(payload, network="tw")
+    assert "http" not in message.lower()
+    assert "Read more at" in message and "today" in message
+    assert links == ["https://nakedwill.com/post"]
+
+
+def test_compose_message_keeps_links_for_non_x_networks():
+    payload = {"draft": {"message": "Read more at https://nakedwill.com/post today"}}
+    message, links = sm.compose_message_with_links(payload, network="facebook")
+    assert "https://nakedwill.com/post" in message
+    assert links == []
+
+
 # --------------------------------------------------------------------------- #
 # Publishing
 # --------------------------------------------------------------------------- #
@@ -278,6 +293,57 @@ def test_publish_maps_network_and_idempotency_key():
     assert body["idempotency_key"] == "sau-target-4321"
     assert "Hello there" in body["message"]
     assert "#naturism" in body["message"]
+
+
+def test_publish_x_moves_links_from_body_to_first_comment():
+    session = FakeSession(_posts_handler())
+    sm.publish_via_sociamonials(
+        platform="twitter",
+        account=_Account(124),
+        payload={"draft": {"message": "New post: https://nakedwill.com/x"}},
+        target_id=321,
+        api_key="sm_agent_x",
+        session=session,
+        delivery_timeout=0,
+    )
+    body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
+    assert "http" not in body["message"].lower()
+    assert body["first_comment"] == "https://nakedwill.com/x"
+
+
+def test_publish_x_appends_links_to_existing_first_comment():
+    session = FakeSession(_posts_handler())
+    sm.publish_via_sociamonials(
+        platform="twitter",
+        account=_Account(124),
+        payload={
+            "draft": {
+                "message": "Body https://a.example/1",
+                "firstComment": "Reply text",
+            }
+        },
+        api_key="sm_agent_x",
+        session=session,
+        delivery_timeout=0,
+    )
+    body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
+    assert "http" not in body["message"].lower()
+    assert "Reply text" in body["first_comment"]
+    assert "https://a.example/1" in body["first_comment"]
+
+
+def test_publish_non_x_keeps_link_in_body():
+    session = FakeSession(_posts_handler())
+    sm.publish_via_sociamonials(
+        platform="facebook",
+        account=_Account(11, platform="facebook"),
+        payload={"draft": {"message": "Body https://a.example/1"}},
+        api_key="sm_agent_x",
+        session=session,
+        delivery_timeout=0,
+    )
+    body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
+    assert "https://a.example/1" in body["message"]
 
 
 def test_publish_uses_direct_video_url_without_uploading():

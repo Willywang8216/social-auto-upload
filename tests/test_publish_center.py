@@ -75,6 +75,55 @@ class ResolveBaseTimeTests(unittest.TestCase):
         }))
 
 
+class NextFreeSlotTests(unittest.TestCase):
+    """Tests for the anti-jam schedule allocator."""
+
+    def setUp(self):
+        self._gap = publish_orchestrator.MIN_GAP_MINUTES
+        self._cap = publish_orchestrator.MAX_POSTS_PER_ACCOUNT_PER_DAY
+        publish_orchestrator.MIN_GAP_MINUTES = 30
+        publish_orchestrator.MAX_POSTS_PER_ACCOUNT_PER_DAY = 3
+        self.base = datetime(2026, 10, 6, 13, 0, 0)
+
+    def tearDown(self):
+        publish_orchestrator.MIN_GAP_MINUTES = self._gap
+        publish_orchestrator.MAX_POSTS_PER_ACCOUNT_PER_DAY = self._cap
+
+    def test_publish_now_is_unchanged(self):
+        self.assertIsNone(publish_orchestrator._next_free_slot(1, None, 0, {}))
+        self.assertIsNotNone(publish_orchestrator._next_free_slot(1, None, 1, {}))
+
+    def test_exact_collision_is_pushed_past_the_gap(self):
+        booked = {1: ["2026-10-06T13:00:00"]}
+        slot = publish_orchestrator._next_free_slot(1, self.base, 0, booked)
+        self.assertEqual(slot, datetime(2026, 10, 6, 13, 30, 0))
+
+    def test_daily_cap_rolls_to_the_next_day_same_slot(self):
+        booked = {1: ["2026-10-06T13:00:00", "2026-10-06T13:30:00", "2026-10-06T14:00:00"]}
+        slot = publish_orchestrator._next_free_slot(1, self.base, 0, booked)
+        self.assertEqual(slot, datetime(2026, 10, 7, 13, 0, 0))
+
+    def test_allocations_in_one_submit_do_not_collide(self):
+        booked = {}
+        slots = [
+            publish_orchestrator._next_free_slot(1, self.base, i, booked)
+            for i in range(3)
+        ]
+        self.assertEqual(len(set(slots)), 3)
+        for earlier, later in zip(slots, slots[1:]):
+            self.assertGreaterEqual((later - earlier).total_seconds(), 30 * 60)
+
+    def test_different_accounts_do_not_share_a_cap(self):
+        booked = {1: ["2026-10-06T13:00:00", "2026-10-06T13:30:00", "2026-10-06T14:00:00"]}
+        slot = publish_orchestrator._next_free_slot(2, self.base, 0, booked)
+        self.assertEqual(slot, datetime(2026, 10, 6, 13, 0, 0))
+
+    def test_load_booked_slots_is_best_effort(self):
+        self.assertEqual(
+            publish_orchestrator._load_booked_slots("/nonexistent/db.sqlite"), {}
+        )
+
+
 class RequestDataForOptionsTests(unittest.TestCase):
     """Tests for _request_data_for_options."""
 

@@ -21,6 +21,8 @@ The interesting business logic this module owns is:
 
 from __future__ import annotations
 
+import os
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,6 +38,18 @@ from myUtils import profiles as profile_registry
 
 
 STAGGER_MINUTES = 5
+
+# Anti-spam spacing for scheduled targets. Independent submits used to reset
+# their stagger offset to zero, so four campaigns queued for the same "21:00
+# Taipei" window all landed on the same account at the exact same minute.
+# ``_next_free_slot`` now consults the targets already booked for an account
+# (and the ones allocated earlier in the same submit) and walks forward until
+# it finds a minute at least ``MIN_GAP_MINUTES`` from any existing booking and
+# within the per-account daily cap.
+MIN_GAP_MINUTES = int(os.environ.get("SAU_PUBLISH_MIN_GAP_MINUTES", "30") or 30)
+MAX_POSTS_PER_ACCOUNT_PER_DAY = int(
+    os.environ.get("SAU_PUBLISH_MAX_PER_DAY", "3") or 3
+)
 
 
 @dataclass(slots=True)
@@ -257,6 +271,7 @@ def submit_publish(
     queued_jobs: list[dict] = []
     skipped: list[dict] = []
     stagger_offset = 0  # global ordering of targets across profiles
+    booked_slots = _load_booked_slots(db_path)
 
     # Content rating is derived from the filenames — the operator's rule is
     # that only a name starting or ending with "sfw" is SFW, everything else is
@@ -454,7 +469,7 @@ def submit_publish(
                         (
                             f"account:{account.id}",
                             f"campaign_post:{post.id}",
-                            _compute_schedule_at(base_time, stagger_offset),
+                            _next_free_slot(account.id, base_time, stagger_offset, booked_slots),
                         )
                     ]
                     stagger_offset += 1
@@ -487,7 +502,7 @@ def submit_publish(
                             (
                                 f"account:{account.id}",
                                 f"campaign_post:{post.id}",
-                                _compute_schedule_at(base_time, stagger_offset),
+                                _next_free_slot(account.id, base_time, stagger_offset, booked_slots),
                             )
                         ]
                         stagger_offset += 1
@@ -514,6 +529,100 @@ def _compute_schedule_at(base_time: datetime | None, offset_index: int) -> datet
         return None
     anchor = base_time or datetime.now(tz=timezone.utc).replace(tzinfo=None)
     return anchor + timedelta(minutes=STAGGER_MINUTES * offset_index)
+
+
+def _parse_schedule(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _load_booked_slots(db_path: Path | str) -> dict[int, list[str]]:
+    """Account id -> schedule_at strings already queued for that account.
+
+    Read-only and best-effort: a missing/older schema must never break a
+    publish submit, so any failure falls back to an empty booking map.
+    """
+    booked: dict[int, list[str]] = {}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT account_ref, schedule_at FROM publish_job_targets "
+                "WHERE status IN ('pending', 'retrying') "
+                "AND schedule_at IS NOT NULL AND account_ref LIKE 'account:%'"
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return booked
+    for account_ref, schedule_at in rows:
+        try:
+            account_id = int(str(account_ref).split(":", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        booked.setdefault(account_id, []).append(str(schedule_at))
+    for times in booked.values():
+        times.sort()
+    return booked
+
+
+def _next_free_slot(
+    account_id: int,
+    base_time: datetime | None,
+    offset_index: int,
+    booked: dict[int, list[str]],
+    *,
+    min_gap_minutes: int | None = None,
+    max_per_day: int | None = None,
+) -> datetime | None:
+    """A collision-free schedule slot for one target of ``account_id``.
+
+    ``base_time is None`` (publish-now) keeps the historical behaviour: the
+    first target is immediate, later ones are nudged by the stagger so a
+    single-media fan-out does not fire all at once. A scheduled submit is
+    walked forward until it clears every existing booking for the account.
+    ``min_gap_minutes`` / ``max_per_day`` override the module defaults (used
+    by the recovery tool, which admits a few extra posts a day).
+    """
+    candidate = _compute_schedule_at(base_time, offset_index)
+    if candidate is None or base_time is None:
+        return candidate
+
+    gap = timedelta(
+        minutes=max(1, min_gap_minutes if min_gap_minutes is not None else MIN_GAP_MINUTES)
+    )
+    cap = max(
+        0,
+        max_per_day if max_per_day is not None else MAX_POSTS_PER_ACCOUNT_PER_DAY,
+    )
+    taken = booked.setdefault(int(account_id), [])
+    slot_time = candidate.time()  # keep the intended wall-clock slot when rolling a day
+    while True:
+        existing_times = [t for t in (_parse_schedule(v) for v in taken) if t is not None]
+        same_day = sum(1 for t in existing_times if t.date() == candidate.date())
+        conflict = any(
+            abs((t - candidate).total_seconds()) < gap.total_seconds()
+            for t in existing_times
+        )
+        if not conflict and not (cap and same_day >= cap):
+            break
+        if cap and same_day >= cap:
+            # The day is full: roll to the same wall-clock slot tomorrow.
+            candidate = datetime.combine(candidate.date() + timedelta(days=1), slot_time)
+        else:
+            candidate = candidate + gap
+    taken.append(candidate.isoformat(timespec="seconds"))
+    return candidate
 
 
 def _build_payload(

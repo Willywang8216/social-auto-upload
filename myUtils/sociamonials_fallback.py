@@ -37,6 +37,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
@@ -572,8 +573,42 @@ def _draft_from_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     return draft if isinstance(draft, Mapping) else {}
 
 
-def compose_message(payload: Mapping[str, Any], *, network: str) -> str:
-    """Extract the publishable caption from the job payload."""
+_URL_RE = re.compile(r"https?://[^\s<>\"')]+", re.IGNORECASE)
+
+# Networks whose main post must not contain a URL. Sociamonials' X/Twitter
+# hand-off rejects a tweet body that carries a link, so any URL found in the
+# composed X message is stripped out and carried in the follow-up reply
+# (``first_comment``) instead. This is the single place that remembers the
+# restriction; if Sociamonials ever lifts it, drop ``tw`` from this set and
+# update the module docstring.
+LINK_IN_MAIN_POST_FORBIDDEN_NETWORKS: frozenset[str] = frozenset({"tw"})
+
+
+def _extract_urls(text: str) -> tuple[str, list[str]]:
+    """Return ``(text_without_urls, urls)``, preserving the surrounding copy."""
+    raw = text or ""
+    urls = _URL_RE.findall(raw)
+    if not urls:
+        return raw.strip(), []
+    cleaned = _URL_RE.sub("", raw)
+    # Collapse the whitespace/blank lines the removal leaves behind.
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    # De-duplicate while keeping the original order.
+    return cleaned, list(dict.fromkeys(urls))
+
+
+def compose_message_with_links(
+    payload: Mapping[str, Any], *, network: str
+) -> tuple[str, list[str]]:
+    """Compose the caption, returning ``(message, moved_links)``.
+
+    For a network in :data:`LINK_IN_MAIN_POST_FORBIDDEN_NETWORKS` (X/Twitter)
+    every URL is removed from the body and returned so the caller can carry it
+    in the follow-up reply. The body is truncated to the platform limit *after*
+    the links are removed, so a long URL cannot consume the whole post.
+    """
     payload = payload or {}
     draft = _draft_from_payload(payload)
     message = _stringify(draft.get("message") or payload.get("message"))
@@ -590,8 +625,17 @@ def compose_message(payload: Mapping[str, Any], *, network: str) -> str:
         missing = [tag for tag in joined.split() if tag.lower() not in low]
         if missing:
             message = f"{message}\n\n{' '.join(missing)}".strip()
+    links: list[str] = []
+    if network in LINK_IN_MAIN_POST_FORBIDDEN_NETWORKS:
+        message, links = _extract_urls(message)
     if network == "tw" and len(message) > 280:
         message = message[:279].rstrip() + "…"
+    return message, links
+
+
+def compose_message(payload: Mapping[str, Any], *, network: str) -> str:
+    """Extract the publishable caption from the job payload."""
+    message, _ = compose_message_with_links(payload, network=network)
     return message
 
 
@@ -727,7 +771,8 @@ def publish_via_sociamonials(
     headers = _headers(key)
     ws = str(workspace_id or get_workspace_id()).strip()
 
-    message = compose_message(payload, network=network)
+    warnings: list[str] = []
+    message, moved_links = compose_message_with_links(payload, network=network)
     if not message:
         raise SociamonialsFallbackError("payload contained no publishable message")
 
@@ -739,6 +784,17 @@ def publish_via_sociamonials(
     if _workspace_int(ws) is not None:
         body["workspace_registration_id"] = _workspace_int(ws)
     first_comment = _first_comment(payload)
+    if moved_links:
+        # X/Twitter cannot carry a link in the main post; put it in the
+        # follow-up reply. Whether Sociamonials honours ``first_comment`` for
+        # ``tw`` is not yet proven - the warning makes that visible if it is
+        # ever rejected so the operator can fall back to link-free posts.
+        moved = "\n".join(moved_links)
+        first_comment = f"{first_comment}\n{moved}".strip() if first_comment else moved
+        warnings.append(
+            f"{network} forbids links in the main post; moved "
+            f"{len(moved_links)} link(s) to the first comment/reply"
+        )
     if first_comment:
         body["first_comment"] = first_comment
     options = _network_options(payload, network)
@@ -748,7 +804,6 @@ def publish_via_sociamonials(
         body["idempotency_key"] = f"sau-target-{target_id}"
 
     media = collect_media(payload, media_paths)
-    warnings: list[str] = []
     if media:
         image_refs: list[str] = []
         video_ref: str | None = None
