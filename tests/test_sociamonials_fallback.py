@@ -406,6 +406,20 @@ def test_publish_waits_for_a_video_asset_to_become_ready(tmp_path):
     assert session.calls_for("POST", "/api/v1/posts")
 
 
+def test_wait_for_asset_ready_retries_a_transient_404():
+    polls = {"n": 0}
+
+    class Sess:
+        def get(self, url, **kw):
+            polls["n"] += 1
+            if polls["n"] == 1:
+                return FakeResponse(404, {})
+            return FakeResponse(200, {"asset_id": 7, "processing_status": "ready"})
+
+    sm._wait_for_asset_ready(Sess(), {}, 7, timeout=5, interval=0.001)
+    assert polls["n"] == 2
+
+
 def test_publish_raises_when_a_video_asset_never_becomes_ready(tmp_path):
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"v" * 64)

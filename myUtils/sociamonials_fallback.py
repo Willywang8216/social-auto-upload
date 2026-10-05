@@ -506,25 +506,29 @@ def _wait_for_asset_ready(
             response = session.get(
                 f"{MEDIA_ASSETS_URL}/{asset_id}", headers=dict(headers), timeout=30
             )
+            if int(getattr(response, "status_code", 0) or 0) == 200:
+                body = _json_body(response)
+                asset = body.get("asset") if isinstance(body.get("asset"), Mapping) else body
+                last_status = str((asset or {}).get("processing_status") or "").strip().lower()
+                if last_status == "ready":
+                    return
+                if last_status in {"failed", "error"}:
+                    raise SociamonialsFallbackError(
+                        f"media asset {asset_id} failed processing (status={last_status})"
+                    )
+            else:
+                # A freshly-completed upload is briefly absent from the asset
+                # index; keep polling rather than handing a not-ready asset to
+                # the post call (which returns an opaque 422 asset_not_ready).
+                logger.warning(
+                    "sociamonials asset readiness poll HTTP %s for asset %s",
+                    getattr(response, "status_code", "?"),
+                    asset_id,
+                )
+        except SociamonialsFallbackError:
+            raise
         except Exception as exc:  # noqa: BLE001 - a poll failure is not proof of anything
             logger.warning("sociamonials asset readiness poll failed: %s", exc)
-            return
-        if int(getattr(response, "status_code", 0) or 0) != 200:
-            logger.warning(
-                "sociamonials asset readiness poll HTTP %s for asset %s",
-                getattr(response, "status_code", "?"),
-                asset_id,
-            )
-            return
-        body = _json_body(response)
-        asset = body.get("asset") if isinstance(body.get("asset"), Mapping) else body
-        last_status = str((asset or {}).get("processing_status") or "").strip().lower()
-        if last_status == "ready":
-            return
-        if last_status in {"failed", "error"}:
-            raise SociamonialsFallbackError(
-                f"media asset {asset_id} failed processing (status={last_status})"
-            )
         if _time.monotonic() >= deadline:
             raise SociamonialsFallbackError(
                 f"media asset {asset_id} was not ready within {timeout:.0f}s "
