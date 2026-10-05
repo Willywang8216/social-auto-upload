@@ -77,6 +77,7 @@ def find_targets(
     within_days: int | None = None,
     platform: str | None = None,
     limit: int | None = None,
+    force: bool = False,
 ) -> list[dict]:
     cutoff = None
     if within_days:
@@ -111,6 +112,10 @@ def find_targets(
         draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else {}
         message = str(draft.get("message") or payload.get("message") or "").strip()
         if not content_rules.is_usable_copy(message):
+            continue
+        if draft.get("_humanizedAt") and not force:
+            # Already humanized; a re-run should only pick up the ones that
+            # failed the first time (usually a transient LLM 503).
             continue
         out.append(
             {
@@ -185,6 +190,7 @@ def humanize_one(row: dict, *, db_path: Path = DB_PATH) -> dict:
         cta=str(draft.get("cta") or ""),
         default_hashtags=draft.get("hashtags") or [],
     )
+    prepared["_humanizedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return {**row, "ok": True, "draft": prepared, "new_message": prepared["message"]}
 
 
@@ -220,12 +226,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--platform", default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--concurrency", type=int, default=6)
+    parser.add_argument("--redo", action="store_true", help="re-humanize even drafts already done")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
 
     db_path = Path(args.db_path)
     targets = find_targets(
-        db_path=db_path, within_days=args.within_days, platform=args.platform, limit=args.limit
+        db_path=db_path, within_days=args.within_days, platform=args.platform,
+        limit=args.limit, force=args.redo,
     )
     print(f"pending drafts to humanize: {len(targets)}")
     if not args.apply:
