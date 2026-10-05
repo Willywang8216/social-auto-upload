@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Iterator
 
 from utils.conf_defaults import BASE_DIR
+from myUtils import platform_limits
 
 DB_PATH = Path(BASE_DIR) / "db" / "database.db"
 
@@ -46,17 +47,9 @@ SHEET_COLUMN_ORDER = [
 # Platforms excluded from Google Sheet export by default
 SHEET_EXCLUDED_PLATFORMS = {"telegram", "patreon", "discord"}
 
-# Platform message character limits for validation
-PLATFORM_CHAR_LIMITS = {
-    "facebook": 63206,
-    "instagram": 2200,
-    "bluesky": 300,
-    "linkedin": 3000,
-    "twitter": 280,
-    "google_my_business": 1500,
-    "pinterest": 500,
-    "tiktok": 150,
-}
+# Platform message character limits for validation, from the single source of
+# truth (myUtils/platform_limits.py).
+PLATFORM_CHAR_LIMITS = dict(platform_limits.MESSAGE_MAX_CHARS)
 
 # Maximum images per row for sheet export
 MAX_IMAGE_URLS = 4

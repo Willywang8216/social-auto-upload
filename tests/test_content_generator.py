@@ -27,7 +27,7 @@ class TestPlatformCharLimits:
         assert content_generator.PLATFORM_CHAR_LIMITS["instagram"] == 2200
 
     def test_tiktok_limit(self):
-        assert content_generator.PLATFORM_CHAR_LIMITS["tiktok"] == 150
+        assert content_generator.PLATFORM_CHAR_LIMITS["tiktok"] == 2200
 
 
 class TestParseLLMResponse:
@@ -88,9 +88,9 @@ class TestValidatePost:
 
     def test_tiktok_over_limit(self):
         errors = content_generator.validate_post("tiktok", {
-            "message": "x" * 200,
+            "message": "x" * 2300,
         })
-        assert any("150" in e for e in errors)
+        assert any("2200" in e for e in errors)
 
     def test_valid_post_no_errors(self):
         errors = content_generator.validate_post("instagram", {

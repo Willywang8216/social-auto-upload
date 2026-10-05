@@ -15,11 +15,12 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus, unquote, urlparse
+from urllib.parse import quote, quote_plus, unquote, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
 from myUtils import media_pipeline
+from myUtils import platform_limits
 from myUtils import tiktok_auth
 
 try:
@@ -56,24 +57,79 @@ YOUTUBE_PLAYLIST_INSERT_URL = (
 YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 FACEBOOK_GRAPH_ROOT = "https://graph.facebook.com/v25.0"
 THREADS_GRAPH_ROOT = "https://graph.threads.net/v1.0"
-THREADS_MAX_TEXT_CHARS = 500
+THREADS_MAX_TEXT_CHARS = platform_limits.message_max_chars("threads") or 500
 # Threads video posts are capped at 5 minutes / 1 GB (Instagram Reels, by
 # contrast, allow up to 15 minutes). Overshoot is accepted at container
 # creation and only fails later as an opaque container ``ERROR``, so probe the
 # local artifact and fail fast with an actionable message.
-THREADS_MAX_VIDEO_SECONDS = 300.0
-THREADS_MAX_VIDEO_BYTES = 1024 * 1024 * 1024  # 1 GB
+THREADS_MAX_VIDEO_SECONDS = platform_limits.video_max_seconds("threads") or 300.0
+THREADS_MAX_VIDEO_BYTES = (platform_limits.media_max_mb("threads") or 1024) * 1_000_000
 THREADS_ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v"}
 TIKTOK_API_ROOT = "https://open.tiktokapis.com"
 TIKTOK_CREATOR_INFO_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/creator_info/query/"
 TIKTOK_VIDEO_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/video/init/"
 TIKTOK_CONTENT_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/content/init/"
 TIKTOK_STATUS_FETCH_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/status/fetch/"
-TIKTOK_MAX_PULL_FROM_URL_BYTES = 4 * 1024 * 1024 * 1024
+TIKTOK_MAX_PULL_FROM_URL_BYTES = (platform_limits.media_max_mb("tiktok") or 4096) * 1_000_000
 TIKTOK_MIN_VIDEO_SECONDS = 3.0
-TIKTOK_MAX_VIDEO_SECONDS = 60 * 60  # 60 minutes (TikTok expanded from 10 min)
-TIKTOK_MAX_CAPTION_CHARS = 2200
+TIKTOK_MAX_VIDEO_SECONDS = int(platform_limits.video_max_seconds("tiktok") or 3600)
+TIKTOK_MAX_CAPTION_CHARS = platform_limits.message_max_chars("tiktok") or 2200
 TIKTOK_ALLOWED_VIDEO_SUFFIXES = {".mp4", ".webm"}
+
+
+def _enforce_message_limit(message: str, platform: str) -> str:
+    """Trim a caption to the platform's hard message limit.
+
+    Generation already trims, but a prepared/import/API payload arrives with a
+    finished draft and skips that path; the publisher is the last line of
+    defence. Returns the message unchanged when the platform has no cap.
+    """
+    limit = platform_limits.message_max_chars(platform)
+    text = str(message or "")
+    if limit is None or len(text) <= limit:
+        return text
+    logger.warning(
+        "%s message is %d chars, over the %d-char limit; truncating",
+        platform,
+        len(text),
+        limit,
+    )
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _enforce_video_limits(local_path: str, platform: str) -> None:
+    """Fail fast when a local video breaks the platform's size/duration caps.
+
+    The media-prep shrink is best-effort and only runs on the Publish Center
+    import path; a prepared/API payload can reach a publisher unchecked. Probe
+    the local artifact here so the error names the real limit instead of an
+    opaque platform rejection later. A probe/size failure is not a rejection.
+    """
+    path = Path(str(local_path or ""))
+    if not path.is_file():
+        return
+    size_limit_mb = platform_limits.media_max_mb(platform)
+    if size_limit_mb:
+        try:
+            size_bytes = path.stat().st_size
+        except OSError:
+            size_bytes = 0
+        if size_bytes > size_limit_mb * 1_000_000:
+            raise PreparedPublishError(
+                f"{platform} video {size_bytes / 1_000_000:.0f} MB exceeds the "
+                f"{size_limit_mb} MB limit"
+            )
+    max_seconds = platform_limits.video_max_seconds(platform)
+    if max_seconds:
+        try:
+            duration = media_pipeline.probe_video_duration(str(path))
+        except Exception:  # noqa: BLE001 - a probe failure is not a rejection
+            duration = None
+        if duration and duration > max_seconds:
+            raise PreparedPublishError(
+                f"{platform} video duration {duration:.0f}s exceeds the "
+                f"{max_seconds:.0f}s limit"
+            )
 
 
 def _tiktok_verified_url_prefixes() -> list[str]:
@@ -382,11 +438,38 @@ def _ensure_tiktok_access_token(config: dict[str, Any], *, session=None) -> tupl
     return str(next_config.get('accessToken') or ''), next_config
 
 
+def _normalize_public_url(url: str) -> str:
+    """Percent-encode characters a platform's media fetcher rejects.
+
+    Stored artifacts written before the CDN encoding fix (and any generated key
+    with a literal space, e.g. ``SFW clip.mp4``) otherwise reach the Graph /
+    Threads / TikTok fetch guard as an invalid URL and fail with an opaque
+    "Unable to fetch" 400. Only the unsafe characters are encoded, so an
+    already-encoded URL is unchanged.
+    """
+    text = str(url or "").strip()
+    if not text:
+        return text
+    parts = urlparse(text)
+    if not parts.scheme or not parts.netloc:
+        return text
+    return urlunparse(
+        (
+            parts.scheme,
+            parts.netloc,
+            quote(parts.path, safe="/%:@!$&'()*+,;="),
+            parts.params,
+            quote(parts.query, safe="=&%?+:;,/"),
+            quote(parts.fragment, safe=""),
+        )
+    )
+
+
 def _extract_media(payload: dict) -> dict[str, list[dict[str, str]]]:
     items_by_key: dict[str, dict[str, str]] = {}
     for artifact in payload.get("artifacts", []) or []:
         local_path = artifact.get("local_path") or ""
-        public_url = artifact.get("public_url") or ""
+        public_url = _normalize_public_url(artifact.get("public_url") or "")
         key = local_path or public_url
         if not key:
             continue
@@ -1307,7 +1390,7 @@ def publish_facebook_sync(account, payload: dict, *, session=None) -> dict[str, 
         raise PreparedPublishError("Facebook publish requires accessToken or accessTokenEnv")
 
     http = _get_session(session)
-    message = _payload_message(payload)
+    message = _enforce_message_limit(_payload_message(payload), "facebook")
     title = _message_title(payload)
     artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
@@ -1315,6 +1398,8 @@ def publish_facebook_sync(account, payload: dict, *, session=None) -> dict[str, 
         raise PreparedPublishError("Facebook media artifacts were supplied but none is a supported image/video")
     if len(media["videos"]) > 1:
         raise PreparedPublishError("Facebook publishing supports one video per post")
+    if media["videos"]:
+        _enforce_video_limits(str(media["videos"][0].get("local_path") or ""), "facebook")
     if len(media["images"]) > 10:
         raise PreparedPublishError("Facebook photo attachments support at most ten images per post")
 
@@ -1560,7 +1645,7 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
         raise PreparedPublishError("Instagram publish requires accessToken or accessTokenEnv")
 
     http = _get_session(session)
-    message = _payload_message(payload)
+    message = _enforce_message_limit(_payload_message(payload), "instagram")
     artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
     if artifacts and not (media["videos"] or media["images"]):
@@ -1569,6 +1654,8 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
         raise PreparedPublishError("Instagram publish accepts one video per post")
     if len(media["images"]) > 10:
         raise PreparedPublishError("Instagram carousel accepts at most ten images")
+    if media["videos"]:
+        _enforce_video_limits(str(media["videos"][0].get("local_path") or ""), "instagram")
 
     def _do_post():
         if media["videos"]:
@@ -1688,8 +1775,8 @@ def _validate_threads_video_artifact(item: dict[str, Any]) -> None:
     file_size = source.stat().st_size
     if file_size > THREADS_MAX_VIDEO_BYTES:
         raise PreparedPublishError(
-            f"Threads video size {file_size / (1024 ** 2):.0f} MB exceeds the "
-            f"{THREADS_MAX_VIDEO_BYTES // (1024 ** 2)} MB limit"
+            f"Threads video size {file_size / 1_000_000:.0f} MB exceeds the "
+            f"{platform_limits.media_max_mb('threads')} MB limit"
         )
     try:
         duration_seconds = media_pipeline.probe_video_duration(source)
@@ -1925,7 +2012,10 @@ def _validate_tiktok_video_artifact(item: dict[str, Any], *, message: str, confi
 
         file_size = source.stat().st_size
         if file_size > TIKTOK_MAX_PULL_FROM_URL_BYTES:
-            raise PreparedPublishError("TikTok video uploads currently support up to 1 GB")
+            raise PreparedPublishError(
+                "TikTok video uploads support up to "
+                f"{platform_limits.media_max_mb('tiktok')} MB"
+            )
 
         duration_seconds = media_pipeline.probe_video_duration(source)
         if duration_seconds < TIKTOK_MIN_VIDEO_SECONDS:
@@ -2688,7 +2778,7 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
         )
 
     http = _get_session(session)
-    message = _payload_message(payload)
+    message = _enforce_message_limit(_payload_message(payload), "twitter")
     artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
     media_items = media["images"][:4] + media["videos"][:1]
@@ -2739,6 +2829,9 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
                 "X media upload requires the media.write scope; reconnect the account and grant it",
                 retryable=False,
             )
+        if media["videos"]:
+            for item in upload_items:
+                _enforce_video_limits(str(item.get("local_path") or ""), "twitter")
         for item in upload_items:
             local_path = item.get("local_path")
             try:
@@ -3124,7 +3217,7 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
         "Authorization": f"Bearer {access_token}",
         "User-Agent": user_agent,
     }
-    message = _payload_message(payload)
+    message = _enforce_message_limit(_payload_message(payload), "reddit")
     artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
     if artifacts and not (media["videos"] or media["images"]):
@@ -3310,6 +3403,11 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
             "YouTube publishing requires a video artifact; the selected campaign media contains no video.",
             retryable=False,
         )
+    if len(media["videos"]) > 1:
+        raise PreparedPublishError(
+            "YouTube accepts one video per upload; split the campaign into separate targets",
+            retryable=False,
+        )
     if not media["videos"][0].get("local_path"):
         raise PreparedPublishError("YouTube publish requires a local video artifact", retryable=False)
     video_path = Path(media["videos"][0]["local_path"])
@@ -3349,6 +3447,7 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
     first_comment = str(draft.get("firstComment") or "").strip()
     if first_comment and first_comment not in description:
         description = f"{description}\n\n{first_comment}" if description else first_comment
+    description = _enforce_message_limit(description, "youtube")
 
     # Tags
     tags = draft.get("hashtags") or draft.get("tags") or []
@@ -3939,7 +4038,7 @@ BLUESKY_MAX_IMAGE_BYTES = 900_000
 # 10-minute post, so the safety ceiling sits just under 300 MB (the earlier 90 MB
 # figure predated the August 2026 increase and needlessly re-encoded valid clips).
 BLUESKY_MAX_VIDEO_BYTES = 295_000_000
-BLUESKY_MAX_VIDEO_SECONDS = 600.0
+BLUESKY_MAX_VIDEO_SECONDS = platform_limits.video_max_seconds("bluesky") or 600.0
 
 
 def _bluesky_shrink_image(local_path: str, *, max_bytes: int = BLUESKY_MAX_IMAGE_BYTES) -> str:

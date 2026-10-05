@@ -1196,7 +1196,7 @@ class PreparedPublisherTests(unittest.TestCase):
                     },
                     session=session,
                 )
-        self.assertIn('1 GB', str(ctx.exception))
+        self.assertIn('4096 MB', str(ctx.exception))
 
     def test_tiktok_video_rejects_duration_over_sixty_minutes(self):
         session = _RecordingSession([

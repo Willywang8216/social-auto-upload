@@ -8,6 +8,8 @@ import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
+from myUtils import platform_limits
+
 
 # The LLM is asked for a single ``message`` string, but it sometimes answers
 # with the whole draft object instead — a real dict, a JSON/Python-stringified
@@ -153,10 +155,10 @@ def message_matches_language(message: str | None, language: str | None) -> bool:
     return has_cjk if wants_zh else not has_cjk
 
 SHEET_MESSAGE_MAX_CHARS = {
-    "facebook": 63206,
-    "instagram": 2200,
-    "twitter": 280,
-    "tiktok": 150,
+    "facebook": platform_limits.message_max_chars("facebook"),
+    "instagram": platform_limits.message_max_chars("instagram"),
+    "twitter": platform_limits.message_max_chars("twitter"),
+    "tiktok": platform_limits.message_max_chars("tiktok"),
 }
 
 SHEET_COLUMN_ORDER = [
@@ -198,19 +200,21 @@ class PlatformRule:
 
 
 PLATFORM_RULES: dict[str, PlatformRule] = {
-    "twitter": PlatformRule("twitter", max_chars=280, hashtag_count=3, require_emoji=True),
-    "threads": PlatformRule("threads", max_chars=500, require_contact_details=True, require_cta=True),
+    "twitter": PlatformRule("twitter", max_chars=platform_limits.message_max_chars("twitter"), hashtag_count=3, require_emoji=True),
+    "threads": PlatformRule("threads", max_chars=platform_limits.message_max_chars("threads"), require_contact_details=True, require_cta=True),
     "patreon": PlatformRule("patreon", long_form=True),
-    "instagram": PlatformRule("instagram", max_chars=2200, long_form=True),
-    "facebook": PlatformRule("facebook", max_chars=63206, long_form=True),
-    "telegram": PlatformRule("telegram"),
-    "youtube": PlatformRule("youtube"),
-    "tiktok": PlatformRule("tiktok", max_chars=2200),
-    "reddit": PlatformRule("reddit"),
-    "discord": PlatformRule("discord"),
+    "instagram": PlatformRule("instagram", max_chars=platform_limits.message_max_chars("instagram"), long_form=True),
+    "facebook": PlatformRule("facebook", max_chars=platform_limits.message_max_chars("facebook"), long_form=True),
+    "telegram": PlatformRule("telegram", max_chars=platform_limits.message_max_chars("telegram")),
+    "youtube": PlatformRule("youtube", max_chars=platform_limits.message_max_chars("youtube")),
+    "tiktok": PlatformRule("tiktok", max_chars=platform_limits.message_max_chars("tiktok")),
+    "reddit": PlatformRule("reddit", max_chars=platform_limits.message_max_chars("reddit")),
+    "discord": PlatformRule("discord", max_chars=platform_limits.message_max_chars("discord")),
+    "linkedin": PlatformRule("linkedin", max_chars=platform_limits.message_max_chars("linkedin")),
+    "pinterest": PlatformRule("pinterest", max_chars=platform_limits.message_max_chars("pinterest")),
     "teaching_blog": PlatformRule("teaching_blog", long_form=True),
     "nw_sw_blog": PlatformRule("nw_sw_blog", long_form=True),
-    "bluesky": PlatformRule("bluesky", max_chars=300, hashtag_count=3),
+    "bluesky": PlatformRule("bluesky", max_chars=platform_limits.message_max_chars("bluesky"), hashtag_count=3),
 }
 
 

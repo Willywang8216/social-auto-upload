@@ -16,25 +16,13 @@ from pathlib import Path
 from typing import Iterator
 
 from utils.conf_defaults import BASE_DIR
+from myUtils import platform_limits
 
 DB_PATH = Path(BASE_DIR) / "db" / "database.db"
 
-# Platform character limits for generated content
-PLATFORM_CHAR_LIMITS = {
-    "twitter": 280,
-    "threads": 500,
-    "instagram": 2200,
-    "facebook": 63206,
-    "tiktok": 150,
-    "youtube": 5000,
-    "reddit": 10000,
-    "telegram": 4096,
-    "discord": 2000,
-    "patreon": 10000,
-    "bluesky": 300,
-    "linkedin": 3000,
-    "pinterest": 500,
-}
+# Platform character limits for generated content, from the single source of
+# truth (myUtils/platform_limits.py).
+PLATFORM_CHAR_LIMITS = dict(platform_limits.MESSAGE_MAX_CHARS)
 
 # Platforms excluded from Google Sheet export by default
 SHEET_EXCLUDED_PLATFORMS = {"telegram", "patreon", "discord"}

@@ -113,9 +113,10 @@ class PlatformSizeLimitTests(unittest.TestCase):
         self.assertEqual(media_prep.PLATFORM_MAX_MB["bluesky"], 300)
 
     def test_resolve_picks_strictest_cap(self) -> None:
-        # Bluesky 300 vs Instagram 250 -> Instagram wins.
+        # Bluesky 300 vs Instagram 300 -> 300 (the shared table lowered
+        # Instagram from 250 to its real 300 MB API video cap).
         limit = media_prep.resolve_size_limit_mb(["bluesky", "instagram"])
-        self.assertAlmostEqual(limit, 250 * media_prep.SIZE_HEADROOM)
+        self.assertAlmostEqual(limit, 300 * media_prep.SIZE_HEADROOM)
 
     def test_resolve_single_platform(self) -> None:
         limit = media_prep.resolve_size_limit_mb(["bluesky"])

@@ -61,12 +61,14 @@ class ContentRulesTests(unittest.TestCase):
                 video_url="https://example.com/a.mp4",
             )
 
-    def test_tiktok_draft_and_sheet_row_use_different_limits(self) -> None:
+    def test_tiktok_draft_and_sheet_row_share_the_api_limit(self) -> None:
+        # TikTok's Content Posting API allows 2,200 chars; the old 150-char
+        # sheet limit over-trimmed every imported caption.
         message = 'x' * 500
         draft = content_rules.prepare_platform_draft('tiktok', {'message': message})
         self.assertEqual(len(draft['message']), 500)
         row = content_rules.build_sheet_row(message=draft['message'], platform='tiktok')
-        self.assertEqual(len(row['Message']), 150)
+        self.assertEqual(len(row['Message']), 500)
 
 
 class NormalizeDraftFieldsTests(unittest.TestCase):

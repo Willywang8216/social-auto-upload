@@ -42,6 +42,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
+from myUtils import platform_limits
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.sociamonials.com"
@@ -72,20 +74,23 @@ DEFAULT_ASSET_READY_TIMEOUT = 300.0
 # Networks that only publish with media attached (Sociamonials validation).
 _MEDIA_REQUIRED_NETWORKS = {"in", "tiktok", "yt", "pi"}
 
-# Per-network caps that Sociamonials only surfaces as an opaque 422 at create
-# time. Validate the composed post against them first so the failure names the
-# real reason. X/Twitter standard accounts: 140 s / 280 chars. Bluesky raised
-# video to 10 minutes in Aug 2026 and caps text at 300 graphemes.
+# Per-network caps, sourced from the single platform-limits table so the
+# fallback cannot drift from the direct publishers. Sociamonials only surfaces
+# an over-limit post as an opaque 422 at create time, so validate first.
 NETWORK_MAX_VIDEO_SECONDS: dict[str, float] = {
-    "tw": 140.0,
-    "blsk": 600.0,
-    "thrd": 300.0,
-    "in": 900.0,
-    "tiktok": 3600.0,
+    code: seconds
+    for code, platform in platform_limits.NETWORK_TO_PLATFORM.items()
+    if (seconds := platform_limits.video_max_seconds(platform))
 }
 NETWORK_MAX_MESSAGE_CHARS: dict[str, int] = {
-    "tw": 280,
-    "blsk": 300,
+    code: chars
+    for code, platform in platform_limits.NETWORK_TO_PLATFORM.items()
+    if (chars := platform_limits.message_max_chars(platform))
+}
+NETWORK_MAX_IMAGES: dict[str, int] = {
+    code: count
+    for code, platform in platform_limits.NETWORK_TO_PLATFORM.items()
+    if (count := platform_limits.max_images(platform))
 }
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
@@ -972,6 +977,13 @@ def publish_via_sociamonials(
             if image_refs:
                 warnings.append("both video and image media were present; images were dropped")
         elif image_refs:
+            max_images = NETWORK_MAX_IMAGES.get(network)
+            if max_images and len(image_refs) > max_images:
+                warnings.append(
+                    f"{network} accepts at most {max_images} images; "
+                    f"dropped {len(image_refs) - max_images}"
+                )
+                image_refs = image_refs[:max_images]
             body["image_urls"] = image_refs
 
     if network in _MEDIA_REQUIRED_NETWORKS and not (body.get("video_url") or body.get("image_urls")):

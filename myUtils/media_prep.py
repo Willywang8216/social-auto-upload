@@ -24,6 +24,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from myUtils import platform_limits
+
 # Proven publishing profile.
 TARGET_W = 1080
 TARGET_H = 1920
@@ -44,29 +46,9 @@ FFPROBE = "ffprobe"
 _TARGET_ASPECT = TARGET_W / TARGET_H  # 0.5625 (9:16 vertical)
 
 # Hard single-file media ceilings per platform, in decimal megabytes (10^6
-# bytes) — the unit platforms publish their caps in. See ``size_mb_decimal``
-# for why this must not be MiB.
-#
-#   bluesky     300 MB  app.bsky.embed.video lexicon, maxSize = 300000000
-#   instagram   250 MB  docs/api-rate-limits.md (feed and reels)
-#   twitter     512 MB  docs/api-rate-limits.md; the 140 s duration cap is
-#                       handled by the uploader's auto-split, not here
-#   threads    1024 MB  Meta threads docs (duration capped at 300 s)
-#   tiktok     4096 MB  uploader constant (duration capped at 60 min)
-#   telegram   2000 MB  MTProto user account (SAU sends as the user, not the
-#                       50 MB bot API)
-#   youtube  262144 MB  256 GB, effectively unbounded
-#   facebook   4096 MB  no published figure lives in this repo; generous
-PLATFORM_MAX_MB = {
-    "bluesky": 300,
-    "instagram": 250,
-    "twitter": 512,
-    "threads": 1024,
-    "tiktok": 4096,
-    "telegram": 2000,
-    "youtube": 262144,
-    "facebook": 4096,
-}
+# bytes), from the single source of truth. Keep this as the shrink trigger only;
+# the publishers enforce their own hard caps.
+PLATFORM_MAX_MB: dict[str, int] = dict(platform_limits.MEDIA_MAX_MB)
 
 # Used when a target platform is absent from the table (or the caller passed no
 # platforms at all). Deliberately the most conservative real cap we know.
