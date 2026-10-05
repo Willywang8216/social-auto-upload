@@ -2,8 +2,96 @@
 
 from __future__ import annotations
 
+import ast
+import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
+
+
+# The LLM is asked for a single ``message`` string, but it sometimes answers
+# with the whole draft object instead — a real dict, a JSON/Python-stringified
+# dict, or a "Title: ... / Summary: ... / Description: ..." blob.  Posting any
+# of those verbatim puts Python repr or field labels in front of the audience,
+# so every draft is normalised before the platform rule is applied.
+_LABEL_LINE = re.compile(
+    r"^\s*(?:影片)?(title|summary|description|body|caption|message|"
+    r"標題|摘要|描述|正文|內容|内容)\s*[:：]\s*(.*)$",
+    re.IGNORECASE,
+)
+
+_TITLE_LABELS = {"title", "標題"}
+
+
+def _mapping_from_message(value) -> dict | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if len(text) > 1 and text[0] == "{" and text[-1] == "}":
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                try:
+                    parsed = ast.literal_eval(text)
+                except (ValueError, SyntaxError):
+                    return None
+            if isinstance(parsed, dict):
+                return parsed
+    return None
+
+
+def normalize_draft_fields(draft: dict) -> dict:
+    """Return ``draft`` with a plain-text ``message`` and a separate ``title``.
+
+    Handles the malformed shapes the model can return — a real dict, a
+    JSON/Python-stringified dict, or a "Title: ... / Description: ..." blob —
+    without losing copy: only the field labels are removed.  A normal string
+    draft passes through unchanged.
+    """
+    if not isinstance(draft, dict):
+        return {"message": str(draft or "")}
+    result = dict(draft)
+    title = str(result.get("title") or "").strip()
+
+    mapping = _mapping_from_message(result.get("message"))
+    if mapping is not None:
+        title = title or str(mapping.get("title") or "").strip()
+        body = ""
+        for key in ("description", "summary", "message", "body", "caption", "text"):
+            candidate = mapping.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                body = candidate.strip()
+                break
+        if not body:
+            body = "\n\n".join(
+                str(value).strip()
+                for value in mapping.values()
+                if isinstance(value, str) and value.strip()
+            )
+        result["message"] = f"{title}\n\n{body}".strip() if (title and body) else (body or title)
+        if not result.get("hashtags") and mapping.get("hashtags"):
+            result["hashtags"] = mapping["hashtags"]
+        if not result.get("firstComment") and mapping.get("firstComment"):
+            result["firstComment"] = mapping["firstComment"]
+
+    text = str(result.get("message") or "").strip()
+    if any(_LABEL_LINE.match(line) for line in text.splitlines()):
+        stripped_lines: list[str] = []
+        for line in text.splitlines():
+            match = _LABEL_LINE.match(line)
+            if match:
+                if match.group(1).lower() in _TITLE_LABELS and not title:
+                    title = match.group(2).strip()
+                stripped_lines.append(match.group(2).strip())
+            else:
+                stripped_lines.append(line)
+        text = re.sub(r"\n{3,}", "\n\n", "\n".join(stripped_lines)).strip()
+
+    result["message"] = text
+    if title:
+        result["title"] = title
+    return result
 
 
 DEFAULT_EMOJI = "✨"
@@ -143,7 +231,7 @@ def prepare_platform_draft(
     default_hashtags: list[str] | None = None,
 ) -> dict:
     rule = get_platform_rule(platform)
-    prepared = dict(draft)
+    prepared = normalize_draft_fields(dict(draft))
     message = str(prepared.get("message", "") or "").strip()
     hashtags = normalize_hashtags(
         prepared.get("hashtags") or default_hashtags,

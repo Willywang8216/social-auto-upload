@@ -326,6 +326,70 @@ class PublishCenterSubmitTests(unittest.TestCase):
         data = resp.get_json()["data"]
         self.assertGreaterEqual(len(data["jobs"]), 1)
 
+    def test_submit_overrides_are_normalized_before_queuing(self):
+        """A stringified / label-blob accountDraft must not reach the platform.
+
+        The operator approves copy that the preview already normalised, but the
+        override in the submit body is the client's copy of the draft. If it
+        arrives stringified (the model returned a JSON object as text) or as a
+        "Title: ... / Description: ..." blob, the orchestrator must normalise it
+        at the point of consumption rather than post a dict literal.
+        """
+        profile, account = self._create_profile_and_account()
+        file_record_id = self._insert_file_record()
+        with patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={}), \
+             patch.object(self.sau_backend, "_ensure_file_record_for_path", return_value=file_record_id), \
+             patch.object(self.sau_backend, "_artifact_payloads_for_platform", return_value=[]), \
+             patch.object(self.sau_backend, "_job_to_payload", side_effect=lambda j: {"id": j.id, "platform": j.platform, "totalTargets": 1}):
+            resp = self.client.post("/publish-center/submit", json={
+                "profileIds": [profile.id],
+                "selectedAccountIds": [account.id],
+                "mediaFilePaths": ["SFW test-video.mp4"],
+                "brief": "Test post",
+                "options": {"watermark": False, "intro": False, "outro": False},
+                "schedule": {"publishNow": True},
+                "accountDrafts": {
+                    str(account.id): {
+                        "message": "{'title': 'A title', 'description': 'Real body text'}",
+                        "hashtags": [],
+                        "firstComment": "",
+                    },
+                },
+            })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()["data"]
+        self.assertGreaterEqual(len(data["jobs"]), 1)
+        job_id = data["jobs"][0]["id"]
+
+        from myUtils import jobs as job_runtime
+        job = job_runtime.get_job(job_id, db_path=self.db_path)
+        draft = job.payload.get("draft") or {}
+        message = str(draft.get("message") or "")
+        self.assertNotIn("{'title'", message, "stringified draft leaked to the platform")
+        self.assertNotIn('"title"', message)
+        # The body copy survives; only the field labels are removed.
+        self.assertIn("Real body text", message)
+
+    def test_youtube_is_skipped_for_image_only_media_with_account_name(self):
+        profile, account = self._create_profile_and_account(platform="youtube")
+        resp = self._submit(profile, account, ["SFW still.jpg"])
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()["data"]
+        self.assertEqual(data["jobs"], [])
+        self.assertEqual(data["skipped"][0]["accountName"], account.account_name)
+        self.assertIn("requires video media", data["skipped"][0]["reason"])
+
+    def test_tiktok_photo_draft_is_skipped_before_queueing(self):
+        profile, account = self._create_profile_and_account(platform="tiktok")
+        resp = self._submit(profile, account, ["SFW still.jpg"], options={
+            "watermark": False, "intro": False, "outro": False, "tiktokDirectPost": False,
+        })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()["data"]
+        self.assertEqual(data["jobs"], [])
+        self.assertEqual(data["skipped"][0]["accountName"], account.account_name)
+        self.assertIn("requires Direct Post", data["skipped"][0]["reason"])
+
     def test_single_media_platform_splits_into_multiple_jobs(self):
         """When a single-media platform gets multiple files, it should split into staggered jobs.
 

@@ -88,6 +88,25 @@ def get_oauth_request(state_token: str, *, db_path: Path | None = None) -> Reddi
     return _row_to_request(row) if row else None
 
 
+def claim_oauth_request(state_token: str, *, db_path: Path | None = None) -> RedditOAuthRequest | None:
+    """Atomically claim a ``started`` OAuth request for processing.
+
+    Returns the request only when this caller won the one-shot transition
+    ``started -> processing``; ``None`` for unknown or already-consumed states,
+    so a replayed callback cannot reuse a single-use authorization code.
+    """
+    with _connect(db_path) as conn:
+        cursor = conn.execute(
+            "UPDATE reddit_oauth_requests SET status = 'processing' "
+            "WHERE state_token = ? AND status = 'started'",
+            (state_token,),
+        )
+        conn.commit()
+        if cursor.rowcount != 1:
+            return None
+    return get_oauth_request(state_token, db_path=db_path)
+
+
 def complete_oauth_request(state_token: str, *, status: str, error_text: str | None = None, result: dict | None = None, db_path: Path | None = None) -> RedditOAuthRequest:
     with _connect(db_path) as conn:
         conn.execute(

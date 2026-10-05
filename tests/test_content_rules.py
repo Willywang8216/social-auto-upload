@@ -69,5 +69,66 @@ class ContentRulesTests(unittest.TestCase):
         self.assertEqual(len(row['Message']), 150)
 
 
+class NormalizeDraftFieldsTests(unittest.TestCase):
+    def test_plain_message_is_untouched(self) -> None:
+        draft = content_rules.normalize_draft_fields({"message": "Just a caption"})
+        self.assertEqual(draft["message"], "Just a caption")
+        self.assertNotIn("title", draft)
+
+    def test_labeled_message_is_stripped_of_labels(self) -> None:
+        raw = (
+            "Title: Taipei Stonewall\n\n"
+            "Summary: A short summary\n\n"
+            "Description: The real caption body. #tag"
+        )
+        draft = content_rules.normalize_draft_fields({"message": raw})
+        self.assertEqual(draft["title"], "Taipei Stonewall")
+        self.assertNotIn("Title:", draft["message"])
+        self.assertNotIn("Summary:", draft["message"])
+        self.assertNotIn("Description:", draft["message"])
+        self.assertIn("The real caption body. #tag", draft["message"])
+
+    def test_dict_message_extracts_description(self) -> None:
+        draft = content_rules.normalize_draft_fields(
+            {
+                "message": {
+                    "title": "A title",
+                    "summary": "A summary",
+                    "description": "The body",
+                    "hashtags": ["#one"],
+                    "firstComment": "First!",
+                }
+            }
+        )
+        self.assertEqual(draft["title"], "A title")
+        self.assertIn("The body", draft["message"])
+        self.assertTrue(draft["message"].startswith("A title"))
+        self.assertEqual(draft["hashtags"], ["#one"])
+        self.assertEqual(draft["firstComment"], "First!")
+
+    def test_stringified_dict_message_is_parsed(self) -> None:
+        raw = "{'title': 'A title', 'summary': 'A summary', 'description': 'The body'}"
+        draft = content_rules.normalize_draft_fields({"message": raw})
+        self.assertEqual(draft["title"], "A title")
+        self.assertIn("The body", draft["message"])
+        self.assertNotIn("{'", draft["message"])
+
+    def test_chinese_labeled_message_is_stripped(self) -> None:
+        raw = "標題：台北石牆\n\n摘要：一段摘要\n\n描述：真正的內容。"
+        draft = content_rules.normalize_draft_fields({"message": raw})
+        self.assertEqual(draft["title"], "台北石牆")
+        self.assertNotIn("標題：", draft["message"])
+        self.assertNotIn("摘要：", draft["message"])
+        self.assertNotIn("描述：", draft["message"])
+        self.assertIn("真正的內容。", draft["message"])
+
+    def test_prepare_platform_draft_has_no_field_labels(self) -> None:
+        raw = "Title: Taipei Stonewall\n\nDescription: A clean caption for Facebook."
+        draft = content_rules.prepare_platform_draft("facebook", {"message": raw})
+        self.assertNotIn("Title:", draft["message"])
+        self.assertIn("A clean caption", draft["message"])
+        self.assertEqual(draft["title"], "Taipei Stonewall")
+
+
 if __name__ == "__main__":
     unittest.main()

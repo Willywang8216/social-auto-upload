@@ -36,6 +36,7 @@ from myUtils import media_remote_storage
 from myUtils import media_pipeline
 from myUtils import profiles as profile_registry
 from myUtils import prepared_publishers
+from myUtils import sociamonials_fallback
 from myUtils.job_logging import (
     bind_job_logger,
     close_job_sink,
@@ -232,9 +233,14 @@ class PublishWorker:
         if platform not in self._REFRESHABLE_PLATFORMS:
             return False
 
-        auth_type = str(config.get("twitterAuthType") or account.auth_type or "").strip().lower()
-        if platform == "twitter" and auth_type == "cookie":
-            return False  # cookie-based Twitter is not refreshable via API
+        # A cookie-based account has no refreshable OAuth credential. Compare
+        # the normalized mode so "Cookie"/"API" casing and a platform key that
+        # lives only on the row's ``auth_type`` column both resolve correctly.
+        auth_type = profile_registry.effective_auth_type(
+            config, account.auth_type, platform
+        )
+        if auth_type == "cookie":
+            return False  # cookie-based accounts are not refreshable via API
 
         # Accounts flagged for manual reconnect are waiting on a human — never
         # auto-refresh them. This is what stops a dead credential from being
@@ -339,7 +345,9 @@ class PublishWorker:
                 config = new_config
 
             elif platform == "reddit":
-                if str(config.get("redditAuthType") or "") == "cookie":
+                if profile_registry.effective_auth_type(
+                    config, account.auth_type, "reddit"
+                ) == "cookie":
                     return
                 refreshed = prepared_publishers.refresh_reddit_access_token(config)
                 config.update({
@@ -452,7 +460,9 @@ class PublishWorker:
 
             elif platform == "twitter":
                 refresh_token = str(config.get("refreshToken") or "").strip()
-                if not refresh_token or config.get("twitterAuthType") != "api":
+                if not refresh_token or profile_registry.effective_auth_type(
+                    config, account.auth_type, "twitter"
+                ) != "api":
                     return
                 result = prepared_publishers.refresh_twitter_access_token(config)
                 config.update({
@@ -532,7 +542,8 @@ class PublishWorker:
 
         _logger.warning(
             f"worker self-maintenance: failed to refresh {account.platform} "
-            f"account id={account.id} (attempt {failures}, retry in {backoff}s"
+            f"{account.nickname or account.account_name} (account:{account.id}) "
+            f"(attempt {failures}, retry in {backoff}s"
             f"{', FLAGGED for reconnect' if needs_reconnect else ''}): {exc}"
         )
         if should_alert:
@@ -544,11 +555,12 @@ class PublishWorker:
         """Best-effort operator alert; never raises into the maintenance loop."""
         try:
             from myUtils import ops_alerts
+            account_label = str(account.nickname or account.account_name or "unknown")
             ops_alerts.send_ops_alert(
-                subject=f"[SAU] {account.platform} account #{account.id} needs reconnect",
+                subject=f"[SAU] {account.platform} {account_label} needs reconnect",
                 body=(
-                    f"Account #{account.id} ({account.platform}, "
-                    f"{getattr(account, 'account_name', '?')}) failed automatic token "
+                    f"Account {account_label} (account:{account.id}, {account.platform}) "
+                    f"failed automatic token "
                     f"refresh {failures} times in a row and has been flagged for "
                     f"manual reconnect. Re-authorise it via the Connect button.\n\n"
                     f"Last error: {str(exc)[:500]}"
@@ -646,11 +658,19 @@ class PublishWorker:
     async def _run_target(self, target: jobs.Target) -> None:
         job = jobs.get_job(target.job_id, db_path=self._db_path)
         payload_state = {"payload": dict(job.payload)}
+        account_name = ""
+        try:
+            account = _resolve_structured_account(target.account_ref, db_path=self._db_path)
+            if account is not None:
+                account_name = str(account.nickname or account.account_name or "").strip()
+        except Exception:  # noqa: BLE001 — logging must not block publishing
+            pass
         log = bind_job_logger(
             job_id=target.job_id,
             target_id=target.id,
             platform=job.platform,
             account_ref=target.account_ref,
+            account_name=account_name or None,
             attempt=target.attempts,
         )
         log.info("target claimed; starting execution")
@@ -751,6 +771,15 @@ class PublishWorker:
             self._maybe_close_job_sink(target.job_id)
             return
         if attempts >= self._config.retry.max_attempts:
+            # The retry budget is exhausted. Before declaring the target dead,
+            # hand it to Sociamonials, which already holds OAuth connections for
+            # most of the same brand accounts. This is what turns the recurring
+            # deterministic failures (X media-upload 402 / needs-reconnect,
+            # Bluesky 413) into delivered posts instead of permanent failures.
+            # Opt-in via SAU_SOCIAMONIALS_FALLBACK; see sociamonials_fallback.
+            if await self._try_sociamonials_fallback(target, message, log):
+                self._maybe_close_job_sink(target.job_id)
+                return
             transitioned = jobs.mark_target_failed(
                 target.id, message, db_path=self._db_path
             )
@@ -779,6 +808,79 @@ class PublishWorker:
         # row up again immediately on the next tick.
         await asyncio.sleep(delay)
         jobs.mark_target_retry(target.id, message, db_path=self._db_path)
+
+    async def _try_sociamonials_fallback(
+        self, target: jobs.Target, message: str, log
+    ) -> bool:
+        """Publish an exhausted target through Sociamonials. Best-effort.
+
+        Returns ``True`` only when the fallback actually delivered the post and
+        the target was transitioned to succeeded. Every other outcome — flag
+        off, no mapped profile, media unavailable, API error — returns ``False``
+        so the caller falls through to the normal permanent-failure path. This
+        method must never raise into the worker loop.
+        """
+
+        if not sociamonials_fallback.is_enabled():
+            return False
+
+        try:
+            job = jobs.get_job(target.job_id, db_path=self._db_path)
+        except Exception:  # noqa: BLE001 — a missing job only costs context
+            return False
+        payload = dict(job.payload or {})
+        payload["_db_path"] = str(self._db_path)
+
+        account = _resolve_structured_account(target.account_ref, db_path=self._db_path)
+        if account is None:
+            log.info("sociamonials fallback skipped: account could not be resolved")
+            return False
+
+        profile_settings = None
+        try:
+            if job.profile_id is not None:
+                profile_settings = profile_registry.get_profile(
+                    job.profile_id, db_path=self._db_path
+                ).settings
+        except Exception:  # noqa: BLE001 — settings are optional
+            profile_settings = None
+
+        media_paths = _fallback_media_paths(payload)
+
+        try:
+            result = await asyncio.to_thread(
+                sociamonials_fallback.publish_via_sociamonials,
+                platform=job.platform,
+                account=account,
+                payload=payload,
+                media_paths=media_paths,
+                target_id=target.id,
+                settings=profile_settings,
+            )
+        except sociamonials_fallback.SociamonialsNotConfigured as exc:
+            log.info(f"sociamonials fallback unavailable: {exc}")
+            return False
+        except Exception as exc:  # noqa: BLE001 — never raise into the loop
+            log.warning(
+                f"sociamonials fallback failed; the target will be marked "
+                f"permanently failed. original error: {message} | "
+                f"fallback error: {_scrub_secrets(str(exc))}"
+            )
+            return False
+
+        transitioned = jobs.mark_target_success(target.id, db_path=self._db_path)
+        if transitioned:
+            log.info(
+                f"delivered via Sociamonials fallback (post_id={result.get('post_id')}, "
+                f"network={result.get('network')}, status={result.get('status')}); "
+                f"the direct publish had failed with: {message}"
+            )
+        else:
+            log.info(
+                "sociamonials fallback delivered, but the target was already "
+                "transitioned (cancel race); counters left untouched"
+            )
+        return transitioned
 
     @classmethod
     def _publish_failure_deep_link(cls, job_id: int) -> str:
@@ -836,6 +938,16 @@ class PublishWorker:
             platform = (job.platform if job is not None else "") or "unknown"
             profile_id = job.profile_id if job is not None else None
             account_ref = str(getattr(target_row, "account_ref", "") or "unknown")
+            account_name = ""
+            try:
+                account = _resolve_structured_account(account_ref, db_path=self._db_path)
+                if account is not None:
+                    account_name = str(account.nickname or account.account_name or "").strip()
+            except Exception as lookup_exc:  # noqa: BLE001
+                _logger.debug(
+                    f"publish-failure alert: account label lookup failed for "
+                    f"{account_ref}: {_scrub_secrets(repr(lookup_exc))}"
+                )
             attempts = int(getattr(target_row, "attempts", target.attempts) or 0)
             max_attempts = self._config.retry.max_attempts
             safe_error = _scrub_secrets(error)
@@ -846,7 +958,7 @@ class PublishWorker:
                 "",
                 f"Job: #{target.job_id} ({platform})",
                 f"Target: #{target.id}",
-                f"Account: {account_ref}",
+                f"Account: {account_name} ({account_ref})" if account_name else f"Account: {account_ref}",
                 f"Profile: {profile_id if profile_id is not None else 'n/a'}",
                 f"Attempts: {attempts}/{max_attempts}",
                 f"Error: {safe_error}",
@@ -885,11 +997,36 @@ class PublishWorker:
 # --------------------------- default platform registry ---------------------------
 
 
-def _resolve_structured_account(account_ref: str):
+def _fallback_media_paths(payload: dict) -> list[str]:
+    """Local media paths a fallback publisher can attach to a post.
+
+    Prefers the campaign artifacts' ``local_path``; when one is absent it hands
+    over the artifact's public URL instead, because Sociamonials accepts either
+    a local upload or a direct https file URL. Artifacts whose local file has
+    been offloaded are skipped here — the caller reaches this only after the
+    direct publish already tried and failed to restore them.
+    """
+
+    paths: list[str] = []
+    for artifact in payload.get("artifacts") or []:
+        if not isinstance(artifact, dict):
+            continue
+        if str(artifact.get("artifact_kind") or "") in {"watermarked_image", "watermarked_video"}:
+            continue
+        candidate = str(artifact.get("local_path") or "").strip()
+        if not candidate:
+            candidate = str(artifact.get("public_url") or "").strip()
+        if candidate and candidate not in paths:
+            paths.append(candidate)
+    return paths
+
+
+def _resolve_structured_account(account_ref: str, *, db_path: Path | None = None):
     if not account_ref.startswith("account:"):
         return None
     account_id = int(account_ref.split(":", 1)[1])
-    return profile_registry.get_account(account_id)
+    kwargs = {"db_path": db_path} if db_path is not None else {}
+    return profile_registry.get_account(account_id, **kwargs)
 
 
 def _resolve_account_path(account_ref: str) -> Path:
@@ -1035,10 +1172,49 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
     """
     import sqlite3
 
+    def _generated_record_by_name(path: Path) -> sqlite3.Row | None:
+        """Find one unambiguous generated mapping from older offload records."""
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT storage_key,storage_backend_id,storage_cdn_url,file_path "
+                "FROM file_records WHERE filename=? AND storage_key IS NOT NULL "
+                "AND storage_backend_id IS NOT NULL",
+                (path.name,),
+            ).fetchall()
+        mappings = {(row["storage_key"], row["storage_backend_id"]) for row in rows}
+        return rows[0] if len(mappings) == 1 else None
+
     def _record_for(artifact: dict, path: Path) -> sqlite3.Row | None:
         source_id = artifact.get("source_id") or artifact.get("source_file_record_id")
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
+            raw = str(path).replace("\\\\", "/")
+            # Generated artifacts have their own Drive object and mapping; that
+            # exact artifact record must win over the original source record.
+            for marker in ("/generated/", "generated/"):
+                if marker in raw:
+                    rel = raw.split(marker, 1)[1]
+                    generated_refs = ("generated/" + rel, "/app/generated/" + rel)
+                    for file_ref in generated_refs:
+                        generated_row = conn.execute(
+                            "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path "
+                            "FROM file_records WHERE file_path=?",
+                            (file_ref,),
+                        ).fetchone()
+                        if generated_row:
+                            # The transformed artifact's own Drive row outranks
+                            # the original upload's source_file_record_id.
+                            return generated_row
+                    campaign_row = conn.execute(
+                        "SELECT remote_path AS storage_key, storage_backend_id, public_url AS storage_cdn_url, local_path AS file_path "
+                        "FROM campaign_artifacts WHERE local_path=? AND remote_path IS NOT NULL AND storage_backend_id IS NOT NULL",
+                        (str(path),),
+                    ).fetchone()
+                    if campaign_row:
+                        return campaign_row
+                    # Never substitute original source bytes into a generated target.
+                    return None
             if source_id:
                 row = conn.execute(
                     "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path FROM file_records WHERE id = ?",
@@ -1087,18 +1263,13 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             is_generated_artifact = False
         try:
             row = _record_for(artifact, p)
+            if row is None and is_generated_artifact:
+                row = _generated_record_by_name(p)
         except Exception as exc:
             raise MediaRestoreError(f"Could not find artifact source record for {local_path}: {exc}") from exc
-        if is_generated_artifact:
-            public_url = str(artifact.get("public_url") or "")
-            if not _public_https_url(public_url):
-                raise MediaRestoreError(
-                    f"Generated artifact is missing and has no safe public HTTPS recovery URL: {local_path}"
-                )
-            _download_public_artifact(public_url, p)
-            continue
         try:
-            row = _record_for(artifact, p)
+            if row is None and is_generated_artifact:
+                row = {"storage_key": None, "storage_backend_id": None, "storage_cdn_url": None, "file_path": str(p)}
             if row is None:
                 raise MediaRestoreError(
                     f"Artifact {local_path} is missing locally and has no file record"
@@ -1130,7 +1301,18 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                         f"backend restore failed for {local_path}: {exc!r}"
                     )
 
-            # Try 2: Download via public CDN URL (R2 public bucket)
+            # Try 2: Restore generated artifacts from their registered Drive
+            # mapping first; only then use a validated public HTTPS fallback.
+            if not downloaded and is_generated_artifact:
+                public_url = str(artifact.get("public_url") or "")
+                if _public_https_url(public_url):
+                    try:
+                        _download_public_artifact(public_url, p)
+                        downloaded = True
+                    except Exception as exc:
+                        last_error = exc
+                        _logger.warning(f"generated public URL restore failed for {local_path}: {exc!r}")
+            # Try 3: Download via public CDN URL (R2 public bucket)
             if not downloaded and row["storage_cdn_url"]:
                 try:
                     _download_public_artifact(row["storage_cdn_url"], p)
@@ -1157,6 +1339,10 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                     last_error = exc
 
             if not downloaded:
+                if is_generated_artifact and not _public_https_url(str(artifact.get("public_url") or "")):
+                    raise MediaRestoreError(
+                        f"Generated artifact is missing and has no safe public HTTPS recovery URL: {local_path}"
+                    )
                 raise MediaRestoreError(
                     f"Could not restore artifact {local_path} "
                     f"(file_record={row['file_path']}): {last_error or 'no usable storage source'}"
@@ -1320,6 +1506,27 @@ async def _run_platform_upload(
     raise ValueError(f"Unsupported publish platform: {platform!r}")
 
 
+def _persist_rotated_config(account, updated_config, *, payload: dict | None = None) -> None:
+    """Persist a publisher's rotated OAuth config to the account's own DB.
+
+    A rotated single-use refresh token written to the process-default database
+    instead of the active ``SAU_DB_PATH`` leaves the account stranded: the next
+    run reads the stale token and fails with ``invalid_grant``. The task payload
+    carries ``_db_path`` (injected by ``_run_target``) so the write lands where
+    the account was read from.
+    """
+    if not (isinstance(updated_config, dict) and updated_config):
+        return
+    db_path = None
+    raw = (payload or {}).get("_db_path")
+    if raw:
+        db_path = Path(raw)
+    kwargs = {"db_path": db_path} if db_path is not None else {}
+    profile_registry.update_account(
+        account.id, config=updated_config, auth_type="oauth", **kwargs
+    )
+
+
 async def _publish_prepared_twitter(
     platform: str,
     payload: dict,
@@ -1329,7 +1536,9 @@ async def _publish_prepared_twitter(
     account_file: Path | None,
 ) -> None:
     config = dict(account.config or {}) if account else {}
-    twitter_auth_type = str(config.get("twitterAuthType") or "cookie")
+    twitter_auth_type = profile_registry.effective_auth_type(
+        config, getattr(account, "auth_type", None), "twitter"
+    ) or "cookie"
     artifacts = payload.get("artifacts") or []
     if payload.get("campaignId") and not artifacts:
         raise ValueError("Prepared Twitter campaign has no media artifacts")
@@ -1375,12 +1584,7 @@ async def _publish_prepared_twitter(
             prepared_publishers.publish_twitter_sync, account, payload
         )
         updated_config = result.get('updated_config') if isinstance(result, dict) else None
-        if isinstance(updated_config, dict) and updated_config:
-            profile_registry.update_account(
-                account.id,
-                config=updated_config,
-                auth_type='oauth',
-            )
+        _persist_rotated_config(account, updated_config, payload=payload)
 
 
 async def _publish_prepared_telegram(
@@ -1407,12 +1611,10 @@ async def _publish_prepared_reddit(
     if account is None:
         raise ValueError("Prepared Reddit publish requires a structured account")
     config = dict(account.config or {})
-    # Check config first, then fall back to the account's database auth_type
-    reddit_auth_type = str(
-        config.get("redditAuthType")
-        or getattr(account, "auth_type", None)
-        or "api"
-    )
+    reddit_auth_type = profile_registry.effective_auth_type(
+        config, getattr(account, "auth_type", None), "reddit"
+    ) or "api"
+    config.setdefault("redditAuthType", reddit_auth_type)
     artifacts = payload.get("artifacts") or []
     if artifacts and not any(artifact.get("local_path") or artifact.get("public_url") for artifact in artifacts):
         raise ValueError("Prepared Reddit media artifacts have no usable source")
@@ -1474,12 +1676,7 @@ async def _publish_prepared_tiktok(
         raise ValueError("Prepared TikTok publish requires a structured account")
     result = await asyncio.to_thread(prepared_publishers.publish_tiktok_sync, account, payload)
     updated_config = result.get('updated_config') if isinstance(result, dict) else None
-    if isinstance(updated_config, dict) and updated_config:
-        profile_registry.update_account(
-            account.id,
-            config=updated_config,
-            auth_type='oauth',
-        )
+    _persist_rotated_config(account, updated_config, payload=payload)
 
     # Seed analytics so the video appears in the dashboard immediately.
     # Private-account videos never show up in /v2/video/list/, so without
@@ -1512,36 +1709,18 @@ async def _publish_prepared_tiktok(
         except Exception:
             pass  # non-critical, don't fail the publish
 
-    # Poll TikTok publish status until terminal or timeout.
+    # Poll TikTok publish status until terminal or timeout. A terminal
+    # ``failed`` status MUST raise: returning normally marked the target
+    # succeeded even though TikTok definitively rejected the post.
     access_token = result.get('access_token') if isinstance(result, dict) else None
     if publish_id and access_token:
-        _TIKTOK_TERMINAL = {'publish_complete', 'failed'}
         _TIKTOK_POLL_INTERVAL = 15  # seconds
         _TIKTOK_POLL_ATTEMPTS = 20  # 20 × 15s = 5 min max
-        try:
-            jobs.upsert_tiktok_publish_status(
-                publish_id,
-                job_id=str(target.job_id),
-                account_id=str(account.id),
-                status='processing',
-            )
-            for _ in range(_TIKTOK_POLL_ATTEMPTS):
-                await asyncio.sleep(_TIKTOK_POLL_INTERVAL)
-                try:
-                    status_resp = await asyncio.to_thread(
-                        prepared_publishers.fetch_tiktok_publish_status,
-                        access_token, publish_id,
-                    )
-                except Exception:
-                    continue  # transient network error, keep polling
-                status_data = (status_resp.get('data') or {})
-                status_val = str(status_data.get('status') or 'processing').lower()
-                fail_reason = str(status_data.get('fail_reason') or '').strip() or None
-                post_id = str(
-                    status_data.get('publicaly_available_post_id')
-                    or status_data.get('post_id') or ''
-                ).strip() or None
-                platform_url = str(status_data.get('platform_url') or '').strip() or None
+
+        def _record(status_val, *, fail_reason=None, post_id=None, platform_url=None):
+            # Status bookkeeping is best-effort; it must never mask the
+            # publish outcome.
+            try:
                 jobs.upsert_tiktok_publish_status(
                     publish_id,
                     job_id=str(target.job_id),
@@ -1551,10 +1730,55 @@ async def _publish_prepared_tiktok(
                     post_id=post_id,
                     platform_url=platform_url,
                 )
-                if status_val in _TIKTOK_TERMINAL:
-                    break
-        except Exception:
-            pass  # non-critical, don't fail the publish
+            except Exception:
+                _logger.debug("tiktok status persistence failed", exc_info=True)
+
+        _record('processing')
+        terminal_failure: str | None = None
+        for _ in range(_TIKTOK_POLL_ATTEMPTS):
+            await asyncio.sleep(_TIKTOK_POLL_INTERVAL)
+            try:
+                status_resp = await asyncio.to_thread(
+                    prepared_publishers.fetch_tiktok_publish_status,
+                    access_token, publish_id,
+                )
+            except Exception:
+                continue  # transient network error, keep polling
+            status_data = (status_resp.get('data') or {})
+            status_val = str(status_data.get('status') or 'processing').lower()
+            fail_reason = str(status_data.get('fail_reason') or '').strip() or None
+            post_id = str(
+                status_data.get('publicaly_available_post_id')
+                or status_data.get('post_id') or ''
+            ).strip() or None
+            platform_url = str(status_data.get('platform_url') or '').strip() or None
+            _record(
+                status_val,
+                fail_reason=fail_reason,
+                post_id=post_id,
+                platform_url=platform_url,
+            )
+            if status_val == 'publish_complete':
+                return
+            if status_val == 'failed':
+                terminal_failure = fail_reason or 'TikTok rejected the post'
+                break
+
+        if terminal_failure is not None:
+            # TikTok explicitly rejected the post. Re-sending the identical
+            # payload is not expected to help and risks a duplicate, so this
+            # is terminal — the operator gets the failure alert instead.
+            raise prepared_publishers.PreparedPublishError(
+                f"TikTok publish failed: {terminal_failure}",
+                retryable=False,
+            )
+        # The poll budget ran out before a terminal status. The post may still
+        # be processing, so the outcome is unknown: do NOT report success.
+        raise prepared_publishers.PreparedPublishError(
+            "TikTok publish status did not reach a terminal state within the "
+            "polling window; delivery outcome is unknown",
+            retryable=True,
+        )
 
 
 async def _publish_prepared_facebook(
@@ -1569,12 +1793,7 @@ async def _publish_prepared_facebook(
         raise ValueError("Prepared Facebook publish requires a structured account")
     result = await asyncio.to_thread(prepared_publishers.publish_facebook_sync, account, payload)
     updated_config = result.get('updated_config') if isinstance(result, dict) else None
-    if isinstance(updated_config, dict) and updated_config:
-        profile_registry.update_account(
-            account.id,
-            config=updated_config,
-            auth_type='oauth',
-        )
+    _persist_rotated_config(account, updated_config, payload=payload)
 
 
 async def _publish_prepared_instagram(
@@ -1589,12 +1808,7 @@ async def _publish_prepared_instagram(
         raise ValueError("Prepared Instagram publish requires a structured account")
     result = await asyncio.to_thread(prepared_publishers.publish_instagram_sync, account, payload)
     updated_config = result.get('updated_config') if isinstance(result, dict) else None
-    if isinstance(updated_config, dict) and updated_config:
-        profile_registry.update_account(
-            account.id,
-            config=updated_config,
-            auth_type='oauth',
-        )
+    _persist_rotated_config(account, updated_config, payload=payload)
 
 
 async def _publish_prepared_threads(
@@ -1609,12 +1823,7 @@ async def _publish_prepared_threads(
         raise ValueError("Prepared Threads publish requires a structured account")
     result = await asyncio.to_thread(prepared_publishers.publish_threads_sync, account, payload)
     updated_config = result.get('updated_config') if isinstance(result, dict) else None
-    if isinstance(updated_config, dict) and updated_config:
-        profile_registry.update_account(
-            account.id,
-            config=updated_config,
-            auth_type='oauth',
-        )
+    _persist_rotated_config(account, updated_config, payload=payload)
 
 
 async def _publish_prepared_discord(
@@ -1878,8 +2087,14 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
 
     from myUtils.cookie_storage import decrypted_storage_state
 
-    db_path_str = payload.pop("_db_path", None)
+    db_path_str = payload.get("_db_path")
     db_path = Path(db_path_str) if db_path_str else None
+    # NOTE: ``_db_path`` is intentionally left on ``payload`` for the prepared
+    # (API) campaign path below, so a rotated single-use OAuth token is
+    # persisted back to the same database the account was read from rather than
+    # the process default. ``_run_target`` strips it before persisting the
+    # payload, so it never lands in the job row. Browser uploaders receive
+    # explicit constructor args and never read it.
 
     # Thumbnails offload like any other asset — restore before the uploader
     # opens the path, otherwise a scheduled post fails on a missing cover.

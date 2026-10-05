@@ -56,6 +56,7 @@ YOUTUBE_PLAYLIST_INSERT_URL = (
 YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 FACEBOOK_GRAPH_ROOT = "https://graph.facebook.com/v25.0"
 THREADS_GRAPH_ROOT = "https://graph.threads.net/v1.0"
+THREADS_MAX_TEXT_CHARS = 500
 TIKTOK_API_ROOT = "https://open.tiktokapis.com"
 TIKTOK_CREATOR_INFO_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/creator_info/query/"
 TIKTOK_VIDEO_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/video/init/"
@@ -202,9 +203,22 @@ def _raise_for_status(response) -> None:
         # Collapse whitespace (Meta messages contain newlines) and redact tokens
         # so the access_token in the request URL never leaks into logs/UI.
         detail = _redact_tokens(" ".join(str(detail).split()))
+        # Ordinary client errors are usually permanent input/auth/configuration
+        # failures. Retrying them burns the target's budget and can repeat a
+        # side effect after the provider has already accepted an earlier step.
+        # Keep rate limits, timeouts, and server errors retryable.
+        retryable = not (
+            isinstance(status, int)
+            and 400 <= status < 500
+            and status not in {408, 425, 429}
+        )
         if detail:
-            raise PreparedPublishError(f"HTTP {status}: {detail}") from None
-        raise PreparedPublishError(_redact_tokens(str(exc))) from None
+            raise PreparedPublishError(
+                f"HTTP {status}: {detail}", retryable=retryable
+            ) from None
+        raise PreparedPublishError(
+            _redact_tokens(str(exc)), retryable=retryable
+        ) from None
 
 
     try:
@@ -227,10 +241,16 @@ def _raise_tiktok_error(response) -> None:
     except Exception:  # noqa: BLE001
         code = ""
         message = ""
+    if code == "invalid_params":
+        raise PreparedPublishError(
+            f"TikTok API error (invalid_params): {message or 'The post parameters are invalid'}",
+            retryable=False,
+        )
     if code == "unaudited_client_can_only_post_to_private_accounts":
         raise PreparedPublishError(
             "TikTok app is in development mode — can only post to private accounts. "
-            "Submit your app for review at developers.tiktok.com or set your TikTok account to private for testing."
+            "Submit your app for review at developers.tiktok.com or set your TikTok account to private for testing.",
+            retryable=False,
         )
     if code == "url_ownership_unverified":
         raise PreparedPublishError(
@@ -238,7 +258,10 @@ def _raise_tiktok_error(response) -> None:
             "Using FILE_UPLOAD mode instead."
         )
     if message:
-        raise PreparedPublishError(f"TikTok API error ({code}): {message}")
+        raise PreparedPublishError(
+            f"TikTok API error ({code}): {message}",
+            retryable=code not in {"invalid_params"},
+        )
     response.raise_for_status()
 
 
@@ -548,11 +571,17 @@ def _publish_telegram_to_one(
             raise
         try:
             _raise_for_status(response)
-        except PreparedPublishError:
+        except PreparedPublishError as exc:
             status = int(getattr(response, "status_code", 0) or 0)
             if status >= 500 or status == 0:
                 retry_safe = False
                 completed.add(f"ambiguous:{operation_key}")
+            # Telegram's per-chat validation failures are safe to retry after
+            # the operator fixes the destination; preserve that fan-out
+            # contract even though the shared HTTP helper classifies ordinary
+            # 4xx responses as permanent for API publishers.
+            if 400 <= status < 500 and status != 429 and exc.retryable is False:
+                raise PreparedPublishError(str(exc), details=exc.details, retryable=True) from exc
             raise
         try:
             body = response.json()
@@ -1428,11 +1457,16 @@ def _wait_for_container_status(
     deadline = time.monotonic() + timeout
     last_status = "UNKNOWN"
     last_body: dict[str, Any] = {}
-    while time.monotonic() < deadline:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        # Bound each request so a slow/hung GET cannot push the total wait past
+        # the caller's deadline.
         response = http.get(
             f"{root}/{container_id}",
             params={"fields": field, "access_token": access_token},
-            timeout=30,
+            timeout=min(30.0, max(1.0, remaining)),
         )
         _raise_for_status(response)
         body = _response_payload(response) or {}
@@ -1446,7 +1480,11 @@ def _wait_for_container_status(
             raise PreparedPublishError(
                 f"{platform.title()} container {container_id} failed to process: {detail}"
             )
-        time.sleep(interval)
+        # Never sleep past the deadline; cap the nap to the time remaining.
+        sleep_for = min(interval, max(0.0, deadline - time.monotonic()))
+        if sleep_for <= 0:
+            break
+        time.sleep(sleep_for)
     detail = last_body.get("error_message") or last_status
     raise PreparedPublishError(
         f"{platform.title()} container {container_id} not ready after {int(timeout)}s "
@@ -1617,7 +1655,9 @@ def validate_threads_config_live(config: dict[str, Any], *, session=None) -> dic
 def _maybe_refresh_threads_token(config: dict[str, Any], *, session=None) -> dict[str, Any]:
     """Refresh Threads long-lived token if expired or about to expire."""
     from myUtils import threads_auth as _threads_auth
-    access_token = str(config.get("accessToken") or "").strip()
+    # Resolve through _config_value so an env-backed ``accessTokenEnv`` account
+    # is refreshed too, not silently skipped because the literal key is empty.
+    access_token = str(_config_value(config, "accessToken") or "").strip()
     if not access_token:
         return config
     expires_at = str(config.get("accessTokenExpiresAt") or "").strip()
@@ -1658,6 +1698,17 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
 
     http = _get_session(session)
     message = _payload_message(payload)
+    # Threads caps post text at 500 characters and returns
+    # `HTTP 500: Param text must be at most 500 characters long` when
+    # exceeded. Truncate to the platform limit (mirrors the TikTok caption
+    # truncation) so a long auto-generated caption fails locally before the
+    # API call and the post still goes out.
+    if len(message) > THREADS_MAX_TEXT_CHARS:
+        logger.warning(
+            "Threads text exceeds %d characters; truncating %d -> %d",
+            THREADS_MAX_TEXT_CHARS, len(message), THREADS_MAX_TEXT_CHARS,
+        )
+        message = message[:THREADS_MAX_TEXT_CHARS]
     artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
     if artifacts and not (media["videos"] or media["images"]):
@@ -1776,6 +1827,8 @@ def query_tiktok_creator_info(config: dict[str, Any], *, access_token: str | Non
         timeout=120,
     )
     _raise_for_status(response)
+    # TikTok can return HTTP 200 with a business-level error object.
+    _raise_tiktok_error(response)
     payload = _response_payload(response)
     return payload
 
@@ -1869,10 +1922,21 @@ def _tiktok_file_upload(http, video_path: Path, upload_url: str, chunk_size: int
 
 def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     config = dict(account.config or {})
-    http = _get_session(session)
-    access_token, updated_config = _ensure_tiktok_access_token(config, session=http)
     artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
+    payload_direct_post = payload.get("tiktokDirectPost")
+    if isinstance(payload_direct_post, bool):
+        publish_mode = "direct" if payload_direct_post else "draft"
+    else:
+        publish_mode = str(config.get("publishMode") or "direct").strip().lower()
+    if media["images"] and not media["videos"] and publish_mode != "direct":
+        raise PreparedPublishError(
+            "TikTok photo posts require Direct Post; change the per-post mode "
+            "or remove this photo destination.",
+            retryable=False,
+        )
+    http = _get_session(session)
+    access_token, updated_config = _ensure_tiktok_access_token(config, session=http)
     if artifacts and not (media["videos"] or media["images"]):
         raise PreparedPublishError("TikTok media artifacts were supplied but none is a supported image/video")
     if len(media["videos"]) > 1:
@@ -1888,17 +1952,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     if updated_config is not None:
         updated_config = _apply_tiktok_token_payload(updated_config, {'access_token': access_token}, creator_info)
     message = _payload_message(payload)
-    # Per-publish override has precedence over the account-level default:
-    # the Publish Center exposes an explicit "Direct post (skip draft)"
-    # toggle that, when checked, must reach this point true regardless of
-    # what publishMode the user picked on the account form. This is what
-    # the TikTok app review explicitly asks us to demonstrate alongside
-    # a confirmation modal in the UI.
-    payload_direct_post = payload.get("tiktokDirectPost")
-    if isinstance(payload_direct_post, bool):
-        publish_mode = "direct" if payload_direct_post else "draft"
-    else:
-        publish_mode = str(config.get("publishMode") or "direct").strip().lower()
+    # Per-publish override has precedence over the account-level default.
     post_mode = "DIRECT_POST" if publish_mode == "direct" else "MEDIA_UPLOAD"
     # Per-post TikTok settings from the frontend override account-level config.
     # This is required for TikTok audit compliance: privacy, interactions, and
@@ -1966,6 +2020,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
                 timeout=120,
             )
             if response.status_code == 200:
+                _raise_tiktok_error(response)
                 return {
                     "creator_info": creator_info,
                     "publish": _response_payload(response),
@@ -2072,6 +2127,12 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             }
 
     if media["images"]:
+        if post_mode != "DIRECT_POST":
+            raise PreparedPublishError(
+                "TikTok photo posts require Direct Post; change the per-post mode "
+                "or remove this photo destination.",
+                retryable=False,
+            )
         public_urls = [item.get("public_url") or "" for item in media["images"][:35]]
         if not all(public_urls):
             raise PreparedPublishError("TikTok photo publish requires public image URLs")
@@ -2117,7 +2178,8 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             json=request_body,
             timeout=120,
         )
-        _raise_for_status(response)
+        if response.status_code >= 400:
+            _raise_tiktok_error(response)
         return {
             "creator_info": creator_info,
             "publish": _response_payload(response),
@@ -2221,8 +2283,9 @@ def _reddit_access_token(config: dict[str, Any], *, session=None) -> str:
 # X / Twitter (API v2 with OAuth 1.0a)
 # ---------------------------------------------------------------------------
 
-X_API_ROOT = "https://api.twitter.com"
-X_UPLOAD_URL = "https://upload.twitter.com/1.1/media/upload.json"
+X_API_ROOT = "https://api.x.com"
+X_MEDIA_UPLOAD_URL = f"{X_API_ROOT}/2/media/upload"
+X_MEDIA_INITIALIZE_URL = f"{X_MEDIA_UPLOAD_URL}/initialize"
 X_TWEET_URL = f"{X_API_ROOT}/2/tweets"
 X_ME_URL = f"{X_API_ROOT}/2/users/me"
 
@@ -2297,69 +2360,49 @@ def _x_auth_header(
     return "OAuth " + ", ".join(header_parts)
 
 
-def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access_token: str, access_token_secret: str, session=None, on_oauth2_refresh=None) -> str:
-    """Upload image/video via X's chunked v1.1 media endpoint."""
+def _x_media_upload(*, file_path: str, access_token: str, session=None) -> str:
+    """Upload media via X API v2 using the same OAuth2 account as the tweet."""
     http = _get_session(session)
     source = Path(file_path)
     file_size = source.stat().st_size
     mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
     media_category = "tweet_video" if mime_type.startswith("video/") else "tweet_image"
-    segment_bytes = 4 * 1024 * 1024
-    # INIT
-    auth_header = _x_auth_header(
-        method="POST", url=X_UPLOAD_URL,
-        consumer_key=api_key, token=access_token,
-        consumer_secret=api_key_secret, token_secret=access_token_secret,
-    )
-    init_resp = http.post(
-        X_UPLOAD_URL,
-        headers={"Authorization": auth_header},
-        data={
-            "command": "INIT",
-            "total_bytes": str(file_size),
-            "media_type": mime_type,
-            "media_category": media_category,
-        },
+    auth_headers = {"Authorization": f"Bearer {access_token}"}
+    # The v2 media API uses POST initialize, per-id append/finalize and a v2
+    # status endpoint; the legacy command-style endpoint is OAuth1-only.
+    init = http.post(
+        X_MEDIA_INITIALIZE_URL,
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={"media_type": mime_type, "total_bytes": file_size, "media_category": media_category},
         timeout=120,
     )
-    _raise_for_status(init_resp)
-    media_id = str(init_resp.json().get("media_id_string") or "")
+    _raise_for_status(init)
+    init_data = init.json().get("data") or {}
+    media_id = str(init_data.get("id") or "")
+    if not media_id:
+        raise PreparedPublishError("X media initialize response did not include a media id")
 
-    # APPEND bounded chunks; the browser uploader's 50 MB restriction does not
-    # apply here, but X's chunked endpoint still requires a segment per chunk.
+    segment_bytes = 4 * 1024 * 1024
     with source.open("rb") as fh:
         segment_index = 0
         while chunk := fh.read(segment_bytes):
-            auth_header = _x_auth_header(
-                method="POST", url=X_UPLOAD_URL,
-                consumer_key=api_key, token=access_token,
-                consumer_secret=api_key_secret, token_secret=access_token_secret,
-            )
-            append_resp = http.post(
-                X_UPLOAD_URL,
-                headers={"Authorization": auth_header},
-                data={"command": "APPEND", "media_id": media_id,
-                      "segment_index": str(segment_index)},
+            append = http.post(
+                f"{X_MEDIA_UPLOAD_URL}/{media_id}/append",
+                headers=auth_headers,
+                data={"segment_index": str(segment_index)},
                 files={"media": (source.name, chunk, mime_type)},
                 timeout=600,
             )
-            _raise_for_status(append_resp)
+            _raise_for_status(append)
             segment_index += 1
 
-    # FINALIZE
-    auth_header = _x_auth_header(
-        method="POST", url=X_UPLOAD_URL,
-        consumer_key=api_key, token=access_token,
-        consumer_secret=api_key_secret, token_secret=access_token_secret,
-    )
-    finalize_resp = http.post(
-        X_UPLOAD_URL,
-        headers={"Authorization": auth_header},
-        data={"command": "FINALIZE", "media_id": media_id},
+    finalize = http.post(
+        f"{X_MEDIA_UPLOAD_URL}/{media_id}/finalize",
+        headers=auth_headers,
         timeout=120,
     )
-    _raise_for_status(finalize_resp)
-    processing = finalize_resp.json().get("processing_info") or {}
+    _raise_for_status(finalize)
+    processing = (finalize.json().get("data") or {}).get("processing_info") or {}
     deadline = time.monotonic() + 600
     while processing:
         state = str(processing.get("state") or "").lower()
@@ -2367,35 +2410,57 @@ def _x_media_upload(*, file_path: str, api_key: str, api_key_secret: str, access
             break
         if state == "failed":
             error = processing.get("error") or {}
-            raise PreparedPublishError(
-                f"X media processing failed: {error.get('message') or error}"
-            )
+            raise PreparedPublishError(f"X media processing failed: {error.get('message') or error}")
         delay = max(float(processing.get("check_after_secs") or 2), 1)
         if time.monotonic() + delay >= deadline:
             raise PreparedPublishError("X media processing did not finish within 600 seconds")
         time.sleep(delay)
-        status_params = {"command": "STATUS", "media_id": media_id}
-        status_header = _x_auth_header(
-            method="GET", url=X_UPLOAD_URL,
-            consumer_key=api_key, token=access_token,
-            consumer_secret=api_key_secret, token_secret=access_token_secret,
-            signature_params_extra=status_params,
-        )
-        status_resp = http.get(
-            X_UPLOAD_URL,
-            headers={"Authorization": status_header},
-            params=status_params,
+        status = http.get(
+            X_MEDIA_UPLOAD_URL,
+            headers=auth_headers,
+            params={"command": "STATUS", "media_id": media_id},
             timeout=120,
         )
-        _raise_for_status(status_resp)
-        processing = status_resp.json().get("processing_info") or {}
+        _raise_for_status(status)
+        processing = (status.json().get("data") or {}).get("processing_info") or {}
     return media_id
+
+
+def _twitter_refresh_requires_reconnect(exc: Exception) -> bool:
+    """Return True only when X explicitly rejects the saved OAuth credential."""
+    error_code = str(getattr(exc, "error_code", "") or "").strip().lower()
+    if error_code in {"invalid_grant", "invalid_token", "refresh_token_revoked"}:
+        return True
+    response = getattr(exc, "response", None)
+    if response is None:
+        return False
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        code = str(error.get("code") or error.get("error") or "").strip().lower()
+    else:
+        code = str(error or "").strip().lower()
+    return code in {"invalid_grant", "invalid_token", "refresh_token_revoked"}
+
+
+def _normalized_platform_auth(config: dict[str, Any], platform: str) -> str:
+    """Return canonical auth mode for an API publisher account."""
+    from myUtils.profiles import effective_auth_type
+    return effective_auth_type(config, None, platform)
 
 
 def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None, on_refresh=None) -> dict[str, Any]:
     """Refresh OAuth 2.0 token and immediately persist a rotated refresh token."""
     refresh_token = str(config.get("refreshToken") or "").strip()
-    if not refresh_token or config.get("twitterAuthType") != "api":
+    if config.get("_needsReconnect"):
+        raise PreparedPublishError(
+            "X account requires reconnection; reconnect it before publishing",
+            retryable=False,
+        )
+    if not refresh_token or _normalized_platform_auth(config, "twitter") != "api":
         return config
     expires_at = str(config.get("accessTokenExpiresAt") or "").strip()
     if expires_at:
@@ -2410,15 +2475,19 @@ def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None, on_ref
     try:
         result = refresh_twitter_access_token(config, session=session)
     except Exception as exc:
-        if on_refresh is not None:
+        reconnect_required = _twitter_refresh_requires_reconnect(exc)
+        if reconnect_required and on_refresh is not None:
             failed_config = dict(config)
             failed_config["_needsReconnect"] = True
-            failed_config["_lastMaintenanceError"] = "X OAuth 2.0 refresh failed; reconnect required"
+            failed_config["_lastMaintenanceError"] = "X OAuth 2.0 refresh token was rejected; reconnect required"
             failed_config["_lastMaintenanceAttemptAt"] = __import__("datetime").datetime.now().isoformat(timespec="seconds")
             on_refresh(failed_config)
-        raise PreparedPublishError(
-            "X OAuth 2.0 access token could not be refreshed; reconnect this account before retrying"
-        ) from exc
+        message = (
+            "X OAuth 2.0 refresh token was rejected; reconnect this account"
+            if reconnect_required
+            else "X OAuth 2.0 token refresh failed temporarily; retry later"
+        )
+        raise PreparedPublishError(message, retryable=not reconnect_required) from exc
     updated = dict(config)
     updated["accessToken"] = result["access_token"]
     updated["refreshToken"] = result.get("refresh_token") or refresh_token
@@ -2428,6 +2497,12 @@ def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None, on_ref
         from datetime import datetime, timedelta
         updated["accessTokenExpiresAt"] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec="seconds")
     updated["accessTokenUpdatedAt"] = datetime.now().isoformat(timespec="seconds")
+    for marker in (
+        "_needsReconnect", "_reconnectAlertedAt", "_maintenanceFailures",
+        "_nextMaintenanceAttemptAt", "_lastMaintenanceError",
+        "_lastMaintenanceAttemptAt",
+    ):
+        updated.pop(marker, None)
     if on_refresh is not None:
         on_refresh(updated)
     me = result.get("me") or {}
@@ -2442,6 +2517,40 @@ def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None, on_ref
     return updated
 
 
+def _raise_x_publish_error(exc: Exception, *, stage: str) -> PreparedPublishError:
+    """Attach a safe X request-stage label without retaining request secrets."""
+    status = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status is None and response is not None:
+        status = getattr(response, "status_code", None)
+    error_text = str(exc)
+    if status is None:
+        status_match = re.search(r"\bHTTP\s+(\d{3})\b", error_text, re.IGNORECASE)
+        if status_match:
+            status = int(status_match.group(1))
+    code = str(getattr(exc, "error_code", "") or "").strip()
+    if not code and response is not None:
+        try:
+            body = response.json()
+            errors = body.get("errors") if isinstance(body, dict) else None
+            if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+                candidate = str(errors[0].get("code") or "").strip()
+                code = candidate if candidate.isdigit() else ""
+        except Exception:  # noqa: BLE001
+            pass
+    if not code:
+        code_match = re.search(r"['\\\"]code['\\\"]\s*:\s*['\\\"]?(\d{1,6})", error_text)
+        if code_match:
+            code = code_match.group(1)
+    message = f"X {stage} request failed"
+    if isinstance(status, int):
+        message += f" (HTTP {status})"
+    if code:
+        message += f" code={code}"
+    retryable = not (_twitter_refresh_requires_reconnect(exc) or str(status) == "401")
+    return PreparedPublishError(message, details={"stage": stage, "status": status, "code": code}, retryable=retryable)
+
+
 def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, Any]:
     """Publish a tweet with optional media via the X API v2.
 
@@ -2449,14 +2558,22 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
     persist refreshed tokens back to the database.
     """
     config = dict(account.config or {})
+    config.setdefault("twitterAuthType", getattr(account, "auth_type", ""))
 
     # A rotated refresh token is single-use; persist it immediately so any later
     # media/tweet failure does not strand the account on the already-dead token.
     def _persist_refreshed(updated_config: dict[str, Any]) -> None:
         from myUtils import profiles as profile_registry
         account_id = getattr(account, "id", None)
-        if account_id is not None:
-            profile_registry.update_account(account_id, config=updated_config, auth_type="oauth")
+        if account_id is None:
+            return
+        # Write to the database the account was read from, not the process
+        # default — see myUtils.worker._persist_rotated_config.
+        raw_db_path = (payload or {}).get("_db_path")
+        kwargs = {"db_path": Path(raw_db_path)} if raw_db_path else {}
+        profile_registry.update_account(
+            account_id, config=updated_config, auth_type="oauth", **kwargs
+        )
 
     config = _maybe_refresh_twitter_token(
         config, session=session, on_refresh=_persist_refreshed,
@@ -2511,23 +2628,26 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
 
     upload_items = media["images"] or media["videos"]
 
-    # Upload media first (v1.1 endpoint requires OAuth 1.0a)
+    # Upload media with the account's OAuth2 user token so media and tweet
+    # requests are authenticated as the same profile identity.
     media_ids = []
     if upload_items:
-        api_key, api_key_secret, access_token, access_token_secret = _twitter_oauth1_credentials(config)
-        if not all([api_key, api_key_secret, access_token, access_token_secret]):
+        if not oauth2_token:
             raise PreparedPublishError(
-                "Twitter media upload requires OAuth 1.0a credentials for the posting account "
-                "(oauth1ApiKey, oauth1ApiKeySecret, oauth1AccessToken, oauth1AccessTokenSecret)"
+                "X media upload requires an OAuth2 user token with media.write; reconnect via OAuth2",
+                retryable=False,
+            )
+        if "media.write" not in set(str(config.get("scope") or "").split()):
+            raise PreparedPublishError(
+                "X media upload requires the media.write scope; reconnect the account and grant it",
+                retryable=False,
             )
         for item in upload_items:
             local_path = item.get("local_path")
-            mid = _x_media_upload(
-                file_path=local_path,
-                api_key=api_key, api_key_secret=api_key_secret,
-                access_token=access_token, access_token_secret=access_token_secret,
-                session=http,
-            )
+            try:
+                mid = _x_media_upload(file_path=local_path, access_token=oauth2_token, session=http)
+            except Exception as exc:
+                raise _raise_x_publish_error(exc, stage="media upload (OAuth 2.0)") from exc
             if not mid:
                 raise PreparedPublishError("X media upload returned no media ID")
             media_ids.append(mid)
@@ -2541,13 +2661,16 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
 
     headers = _twitter_auth_headers(config, method="POST", url=X_TWEET_URL)
     headers["Content-Type"] = "application/json"
-    resp = http.post(
-        X_TWEET_URL,
-        headers=headers,
-        data=json.dumps(tweet_data),
-        timeout=120,
-    )
-    _raise_for_status(resp)
+    try:
+        resp = http.post(
+            X_TWEET_URL,
+            headers=headers,
+            data=json.dumps(tweet_data),
+            timeout=120,
+        )
+        _raise_for_status(resp)
+    except Exception as exc:
+        raise _raise_x_publish_error(exc, stage="tweet creation (OAuth 2.0)") from exc
     return {"results": [_response_payload(resp)], "updated_config": config}
 
 
@@ -2647,6 +2770,117 @@ def refresh_twitter_access_token(config: dict[str, Any], *, session=None) -> dic
         "token_type": token_payload.get("token_type", "bearer"),
         "me": user_info,
     }
+
+
+# Content-category post flairs. Subreddits that require a flair (r/NudistMen)
+# publish a fixed set of categories, and the right one is a property of the
+# image, not of the destination. These are the labels the operator named; the
+# ids Reddit uses are per-subreddit GUIDs, so config stores label -> id and the
+# classifier picks the label.
+REDDIT_CONTENT_FLAIRS = ("Selfie", "In Nature", "At Home", "Food & Drink")
+
+# Keyword -> flair label. Ordered most-specific first; the first hit wins. The
+# patterns are deliberately conservative: an unmatched image falls through to
+# "At Home" (the neutral bucket) rather than guessing wrong, because a wrong
+# flair is a moderation problem while the wrong-but-plausible one is not.
+_REDDIT_FLAIR_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Food & Drink", (
+        "food", "drink", "coffee", "tea", "wine", "beer", "cocktail", "cake",
+        "dinner", "breakfast", "lunch", "brunch", "meal", "kitchen", "cook",
+        "eat", "pizza", "dessert", "restaurant", "cafe", "barbecue", "bbq",
+    )),
+    ("In Nature", (
+        "nature", "wood", "forest", "outdoor", "beach", "sea", "ocean",
+        "river", "lake", "mountain", "garden", "park", "field", "trail",
+        "camp", "meadow", "sunset", "sunrise", "hike", "rock", "sand",
+        "verdant", "autumn", "snow", "water", "river", "jungle", "pine",
+    )),
+    ("Selfie", (
+        "selfie", "portrait", "mirror", "gaze", "face", "smile", "mask",
+        "feline", "kitsune", "fox", "masked", "reflection", "pensive",
+        "contemplat",
+    )),
+)
+
+# Used when nothing matches: the least-assertive category, valid everywhere the
+# operator listed it.
+REDDIT_DEFAULT_FLAIR = "At Home"
+
+
+def _reddit_content_flair_label(*sources: Any) -> str:
+    """Choose a content-category flair label from the media/payload text.
+
+    Inspects the topic/brief/title/filename text an operator or the pipeline
+    already attached. Returns one of :data:`REDDIT_CONTENT_FLAIRS`; falls back
+    to :data:`REDDIT_DEFAULT_FLAIR` when nothing matches, and "" when the text
+    is empty so the caller can decide to send no flair at all.
+    """
+    haystack = " ".join(
+        str(value or "").lower() for value in sources if value
+    )
+    if not haystack.strip():
+        return ""
+    for label, keywords in _REDDIT_FLAIR_HINTS:
+        for keyword in keywords:
+            if keyword in haystack:
+                return label
+    return REDDIT_DEFAULT_FLAIR
+
+
+def _reddit_flair_id(payload: dict, config: dict, subreddit: str) -> str:
+    """Resolve the post-flair id for one subreddit, or "" when unset.
+
+    Subreddits that require a flair (r/NudistMen) reject the submit with
+    ``SUBMIT_VALIDATION_FLAIR_REQUIRED`` and flair ids do not transfer between
+    subreddits, so the accepted shapes are:
+
+    * ``{"NudistMen": {"Selfie": "<id>", "In Nature": "<id>"}}`` — a
+      per-subreddit label map, chosen by the image's content;
+    * ``{"NudistMen": "<id>"}`` — one fixed flair for that subreddit;
+    * ``draft.flairId`` / ``config.flairId`` — one flat id applied to every
+      destination (only correct for a single-subreddit publish).
+
+    An unmapped subreddit returns "" so the caller submits without a flair and
+    Reddit's own validation error names the missing field, rather than us
+    guessing a flair the community does not use.
+    """
+    draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else {}
+    for source in (draft, config):
+        mapping = source.get("flairIds")
+        if isinstance(mapping, dict):
+            for key in (subreddit, f"r/{subreddit}", subreddit.lower()):
+                value = mapping.get(key)
+                if value in (None, ""):
+                    continue
+                if isinstance(value, dict):
+                    # Content-category map: pick the label from the media text.
+                    label = _reddit_content_flair_label(
+                        draft.get("topic"),
+                        payload.get("title"),
+                        payload.get("brief"),
+                        draft.get("message"),
+                        payload.get("fileName"),
+                        payload.get("fileRef"),
+                        [a.get("local_path") or a.get("public_url")
+                         for a in (payload.get("artifacts") or [])
+                         if isinstance(a, dict)],
+                    )
+                    chosen = value.get(label) if label else None
+                    if chosen in (None, ""):
+                        # Fall back to the default label, then to any single
+                        # entry so a one-flair subreddit still publishes.
+                        chosen = value.get(REDDIT_DEFAULT_FLAIR)
+                    if chosen in (None, "") and len(value) == 1:
+                        chosen = next(iter(value.values()))
+                    if chosen in (None, ""):
+                        return ""
+                    return str(chosen).strip()
+                return str(value).strip()
+    for source in (draft, config):
+        flat = source.get("flairId")
+        if flat not in (None, ""):
+            return str(flat).strip()
+    return ""
 
 
 def _reddit_upload_image(http, headers: dict[str, str], image: dict[str, str]) -> str:
@@ -2814,6 +3048,15 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
             "resubmit": "false",
             "sendreplies": "true",
         }
+        # Some subreddits (r/NudistMen among them) reject every submit with
+        # SUBMIT_VALIDATION_FLAIR_REQUIRED unless a post flair is attached, and
+        # flair ids are per-subreddit. Accept either a mapping
+        # ``{"<subreddit>": "<flair_id>"}`` or one flat id, and leave an
+        # unmapped subreddit unflaired so the service's own error surfaces
+        # rather than posting under the wrong flair.
+        flair_id = _reddit_flair_id(payload, config, subreddit)
+        if flair_id:
+            data["flair_id"] = flair_id
         if native_url:
             data["kind"] = "image"
             data["url"] = native_url
@@ -2828,7 +3071,20 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
         body = response.json()
         errors = body.get("json", {}).get("errors", [])
         if errors:
-            raise PreparedPublishError(f"Reddit submit failed for r/{subreddit}: {errors}")
+            codes = {
+                str(error[0]).strip()
+                for error in errors
+                if isinstance(error, (list, tuple)) and error
+            }
+            permanent_codes = {
+                "SUBMIT_VALIDATION_FLAIR_REQUIRED",
+                "NO_IMAGES",
+                "SUBREDDIT_NOTALLOWED_BANNED",
+            }
+            raise PreparedPublishError(
+                f"Reddit submit failed for r/{subreddit}: {errors}",
+                retryable=not bool(codes & permanent_codes),
+            )
         # An image submit answers with a websocket_url instead of the post's
         # fullname; read the permalink off it, best effort.
         ws_url = str((body.get("json", {}).get("data") or {}).get("websocket_url") or "")
@@ -2916,11 +3172,19 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
         raise PreparedPublishError("YouTube publish requires channelId")
 
     media = _extract_media(payload)
-    if not media["videos"] or not media["videos"][0].get("local_path"):
-        raise PreparedPublishError("YouTube publish requires a local video artifact")
+    if not media["videos"]:
+        raise PreparedPublishError(
+            "YouTube publishing requires a video artifact; the selected campaign media contains no video.",
+            retryable=False,
+        )
+    if not media["videos"][0].get("local_path"):
+        raise PreparedPublishError("YouTube publish requires a local video artifact", retryable=False)
     video_path = Path(media["videos"][0]["local_path"])
-    if not video_path.exists():
-        raise PreparedPublishError(f"YouTube video artifact not found: {video_path}")
+    if not video_path.is_file() or video_path.stat().st_size <= 0:
+        raise PreparedPublishError(
+            f"YouTube video artifact is missing or empty: {video_path}",
+            retryable=False,
+        )
 
     http = _get_session(session)
     access_token = _google_access_token(config, session=http)
@@ -3533,6 +3797,128 @@ def _bluesky_create_session(http, cfg: dict[str, str]) -> dict[str, str]:
     return {"accessJwt": access_jwt, "did": did, "handle": data.get("handle") or cfg["handle"]}
 
 
+# Bluesky's app.bsky.embed.images blob ceiling. The service advertises a larger
+# limit than it enforces in practice; keep a safety margin so a 413 does not
+# depend on exactly how the PDS rounds. Oversized media is downscaled rather
+# than dropped, because a post with no media is still a failed post.
+BLUESKY_MAX_IMAGE_BYTES = 900_000
+# Videos: Bluesky allows a much larger blob, but the service is still the
+# authority. Re-encode only past this ceiling so ordinary clips are untouched.
+BLUESKY_MAX_VIDEO_BYTES = 90_000_000
+
+
+def _bluesky_shrink_image(local_path: str, *, max_bytes: int = BLUESKY_MAX_IMAGE_BYTES) -> str:
+    """Return a path to an image no larger than ``max_bytes``.
+
+    Re-encodes to JPEG and steps the longest side down until the encoded size
+    fits. Returns the original path unchanged when it already fits, when
+    Pillow is unavailable, or when downscaling cannot get it under the limit —
+    the caller then surfaces the service's own 413 rather than a silent drop.
+    """
+    from pathlib import Path as _Path
+
+    path = _Path(local_path)
+    try:
+        if path.stat().st_size <= max_bytes:
+            return local_path
+    except OSError:
+        return local_path
+
+    try:
+        import io
+        import tempfile
+
+        from PIL import Image
+    except Exception:  # noqa: BLE001 — Pillow is optional
+        return local_path
+
+    try:
+        with Image.open(path) as image:
+            image.load()
+            if image.mode not in ("RGB", "L"):
+                background = Image.new("RGB", image.size, (255, 255, 255))
+                if image.mode in ("RGBA", "LA", "P"):
+                    rgba = image.convert("RGBA")
+                    background.paste(rgba, mask=rgba.split()[-1])
+                else:
+                    background.paste(image.convert("RGB"))
+                working = background
+            else:
+                working = image.convert("RGB")
+
+            longest = max(working.size)
+            for _ in range(8):
+                buffer = io.BytesIO()
+                working.save(buffer, format="JPEG", quality=85, optimize=True)
+                if buffer.tell() <= max_bytes:
+                    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                    tmp.write(buffer.getvalue())
+                    tmp.close()
+                    logger.info(
+                        "bluesky: downscaled image %s (%d -> %d bytes, longest %d)",
+                        path.name, path.stat().st_size, buffer.tell(), longest,
+                    )
+                    return tmp.name
+                longest = int(longest * 0.8)
+                if longest < 320:
+                    break
+                width = max(1, int(working.width * 0.8))
+                height = max(1, int(working.height * 0.8))
+                working = working.resize((width, height), Image.LANCZOS)
+        return local_path
+    except Exception as exc:  # noqa: BLE001 — never let a resize break the post
+        logger.warning("bluesky: image downscale failed for %s: %s", local_path, exc)
+        return local_path
+
+
+def _bluesky_shrink_video(local_path: str, *, max_bytes: int = BLUESKY_MAX_VIDEO_BYTES) -> str:
+    """Return a path to an mp4 no larger than ``max_bytes`` via ffmpeg.
+
+    Best-effort: returns the original path when ffmpeg is unavailable or the
+    re-encode fails, so the caller still sees the service's own error.
+    """
+    from pathlib import Path as _Path
+
+    path = _Path(local_path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return local_path
+    if size <= max_bytes:
+        return local_path
+
+    try:
+        import subprocess
+        import tempfile
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        tmp.close()
+        # Scale the longest side to 720 and re-encode at a conservative bitrate;
+        # faststart so Bluesky can probe it without the whole file.
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(path),
+                "-vf", "scale='min(720,iw)':-2",
+                "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
+                "-c:a", "aac", "-b:a", "96k",
+                "-movflags", "+faststart",
+                tmp.name,
+            ],
+            capture_output=True,
+            timeout=1800,
+            check=True,
+        )
+        if _Path(tmp.name).stat().st_size < size:
+            logger.info(
+                "bluesky: re-encoded video %s (%d -> %d bytes)",
+                path.name, size, _Path(tmp.name).stat().st_size,
+            )
+            return tmp.name
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning("bluesky: video re-encode failed for %s: %s", local_path, exc)
+    return local_path
+
+
 def _bluesky_upload_blob(http, *, jwt: str, service: str, local_path: str, mime: str | None = None) -> dict:
     from pathlib import Path
     content_type = mime or mimetypes.guess_type(local_path)[0] or "application/octet-stream"
@@ -3651,10 +4037,12 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
         # Bluesky allows a single video per post.
         video = video_items[0]
         local_path, tmp_path = _resolve_local(video)
+        shrunk_path = None
         try:
+            shrunk_path = _bluesky_shrink_video(local_path)
             blob = _bluesky_upload_blob(
                 http, jwt=auth["accessJwt"], service=cfg["service"],
-                local_path=local_path, mime="video/mp4",
+                local_path=shrunk_path, mime="video/mp4",
             )
             if not blob:
                 raise PreparedPublishError("Bluesky video upload returned no blob")
@@ -3670,6 +4058,8 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
             record["embed"] = embed
             uploaded_media["videos"] = 1
         finally:
+            if shrunk_path and shrunk_path != local_path:
+                Path(shrunk_path).unlink(missing_ok=True)
             if tmp_path:
                 Path(tmp_path).unlink(missing_ok=True)
     elif image_items:
@@ -3677,13 +4067,17 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
         alt_texts: list[str] = []
         for item in image_items[:4]:
             local_path, tmp_path = _resolve_local(item)
+            shrunk_path = None
             try:
-                blob = _bluesky_upload_blob(http, jwt=auth["accessJwt"], service=cfg["service"], local_path=local_path)
+                shrunk_path = _bluesky_shrink_image(local_path)
+                blob = _bluesky_upload_blob(http, jwt=auth["accessJwt"], service=cfg["service"], local_path=shrunk_path)
                 if not blob:
                     raise PreparedPublishError("Bluesky image upload returned no blob")
                 blobs.append(blob)
                 alt_texts.append(str(item.get("alt_text") or "").strip())
             finally:
+                if shrunk_path and shrunk_path != local_path:
+                    Path(shrunk_path).unlink(missing_ok=True)
                 if tmp_path:
                     Path(tmp_path).unlink(missing_ok=True)
         images = [

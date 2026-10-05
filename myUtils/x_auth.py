@@ -34,7 +34,12 @@ DEFAULT_REDIRECT_URI = "https://socialupload.iamwillywang.com/oauth/twitter/call
 
 
 class TwitterOAuthError(RuntimeError):
-    """Raised when Twitter OAuth cannot complete."""
+    """Raised when Twitter OAuth cannot complete with safe provider details."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, error_code: str = "") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
 
 
 def _get_session(session=None):
@@ -154,6 +159,33 @@ def exchange_code_for_token(
     return payload
 
 
+def _safe_refresh_error(response) -> TwitterOAuthError:
+    """Build a credential-free X refresh error from an HTTP response."""
+    status = getattr(response, "status_code", None)
+    code = ""
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            error = body.get("error")
+            if isinstance(error, dict):
+                code = str(error.get("code") or error.get("error") or "").strip()
+            else:
+                code = str(error or "").strip()
+    except Exception:  # noqa: BLE001
+        pass
+    # Provider descriptions can echo submitted values. Keep only a constrained
+    # code and a generic status in persisted events; never store raw body or URL.
+    allowed_codes = {"invalid_grant", "invalid_client", "invalid_request", "unauthorized_client", "unsupported_grant_type"}
+    safe_code = code.lower() if code.lower() in allowed_codes else ""
+    suffix = f" ({safe_code})" if safe_code else ""
+    safe_status = status if isinstance(status, int) else "unknown"
+    return TwitterOAuthError(
+        f"X OAuth refresh failed: HTTP {safe_status}{suffix}",
+        status_code=status if isinstance(status, int) else None,
+        error_code=safe_code,
+    )
+
+
 def refresh_access_token(
     *,
     refresh_token: str,
@@ -174,16 +206,29 @@ def refresh_access_token(
     if client_secret:
         headers.update(_basic_auth_header(client_id, client_secret))
 
-    response = http.post(
-        X_TOKEN_URL,
-        data=data,
-        headers=headers,
-        timeout=120,
-    )
-    response.raise_for_status()
-    payload = response.json()
+    try:
+        response = http.post(
+            X_TOKEN_URL,
+            data=data,
+            headers=headers,
+            timeout=120,
+        )
+    except Exception as exc:  # noqa: BLE001 — suppress request URLs that may expose form values
+        raise TwitterOAuthError("X OAuth refresh failed due to a transport error") from exc
+    if not getattr(response, "ok", True):
+        raise _safe_refresh_error(response)
+    try:
+        payload = response.json()
+    except Exception as exc:  # noqa: BLE001 — avoid raw response/URL in persisted events
+        raise TwitterOAuthError("X OAuth refresh returned an unreadable response") from exc
     if payload.get("error"):
-        raise TwitterOAuthError(str(payload.get("error_description") or payload["error"]))
+        code = str(payload.get("error") or "").lower()
+        safe_code = code if code in {"invalid_grant", "invalid_client", "invalid_request", "unauthorized_client", "unsupported_grant_type"} else ""
+        raise TwitterOAuthError(
+            f"X OAuth refresh failed{f' ({safe_code})' if safe_code else ''}",
+            status_code=getattr(response, "status_code", None),
+            error_code=safe_code,
+        )
     return payload
 
 

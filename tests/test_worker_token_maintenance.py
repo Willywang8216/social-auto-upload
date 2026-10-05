@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from myUtils import profiles as profile_registry
-from myUtils.worker import PublishWorker
+from myUtils.worker import PublishWorker, _persist_rotated_config
 
 
 def _aware(delta: timedelta) -> str:
@@ -98,6 +98,16 @@ class WorkerStalenessTests(unittest.TestCase):
         acct = _account("twitter", {"twitterAuthType": "cookie"})
         self.assertFalse(self.worker._is_account_stale(acct))
 
+    def test_reconnect_required_twitter_is_not_refreshed(self) -> None:
+        acct = _account("twitter", {
+            "twitterAuthType": "api",
+            "accessToken": "expired",
+            "refreshToken": "present",
+            "accessTokenExpiresAt": _aware(timedelta(minutes=-10)),
+            "_needsReconnect": True,
+        })
+        self.assertFalse(self.worker._is_account_stale(acct))
+
     def test_non_refreshable_platform_never_stale(self) -> None:
         acct = _account("douyin", {"accessToken": "a", "accessTokenExpiresAt": _aware(timedelta(minutes=1))})
         self.assertFalse(self.worker._is_account_stale(acct))
@@ -140,6 +150,23 @@ class BackendEffectiveSkewTests(unittest.TestCase):
             "accessToken": "a", "accessTokenExpiresAt": _aware(timedelta(days=3)),
         })
         self.assertFalse(_is_refreshable_account_stale(reddit, skew_seconds=3600))
+
+        broken_twitter = _account("twitter", {
+            "twitterAuthType": "api", "accessToken": "expired", "refreshToken": "present",
+            "accessTokenExpiresAt": _aware(timedelta(days=-1)), "_needsReconnect": True,
+        })
+        self.assertFalse(_is_refreshable_account_stale(broken_twitter, skew_seconds=3600))
+        recovered_twitter = _account("twitter", {
+            "twitterAuthType": "api", "accessToken": "new", "refreshToken": "rotated",
+            "accessTokenExpiresAt": _aware(timedelta(days=1)),
+        })
+        self.assertFalse(_is_refreshable_account_stale(recovered_twitter, skew_seconds=3600))
+        backed_off_twitter = _account("twitter", {
+            "twitterAuthType": "api", "accessToken": "expired", "refreshToken": "present",
+            "accessTokenExpiresAt": _aware(timedelta(days=-1)),
+            "_nextMaintenanceAttemptAt": _aware(timedelta(minutes=5)),
+        })
+        self.assertFalse(_is_refreshable_account_stale(backed_off_twitter, skew_seconds=3600))
 
 
 @unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
@@ -209,6 +236,40 @@ class MetaLiveSelfCheckTests(unittest.TestCase):
                 cfg = expired_cfg
                 _record_meta_selfcheck_failure(account=acct, config=cfg, db_path=Path('/tmp/none.db'), error_text='boom')
                 self.assertEqual(alerts['n'], 1)
+
+
+class PersistRotatedConfigTests(unittest.TestCase):
+    """A rotated single-use refresh token must land in the account's own DB."""
+
+    def test_uses_payload_db_path(self):
+        from pathlib import Path as _Path
+        account = _account("twitter", {})
+        seen: dict = {}
+        with patch.object(
+            profile_registry, "update_account",
+            side_effect=lambda *a, **k: seen.update(k),
+        ):
+            _persist_rotated_config(
+                account, {"accessToken": "new"}, payload={"_db_path": "/tmp/tenant.db"},
+            )
+        self.assertEqual(seen.get("db_path"), _Path("/tmp/tenant.db"))
+        self.assertEqual(seen.get("config"), {"accessToken": "new"})
+
+    def test_omits_db_path_when_payload_has_none(self):
+        account = _account("twitter", {})
+        seen: dict = {}
+        with patch.object(
+            profile_registry, "update_account",
+            side_effect=lambda *a, **k: seen.update(k),
+        ):
+            _persist_rotated_config(account, {"accessToken": "new"}, payload={})
+        self.assertNotIn("db_path", seen)
+
+    def test_empty_config_is_a_noop(self):
+        account = _account("twitter", {})
+        with patch.object(profile_registry, "update_account") as upd:
+            _persist_rotated_config(account, {}, payload={"_db_path": "/tmp/x.db"})
+        upd.assert_not_called()
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -295,6 +295,47 @@ def platform_supports_sheet_export(platform: str) -> bool:
     return platform in SHEET_EXPORT_PLATFORMS
 
 
+# Auth-mode spellings an operator or the UI may store. Resolved to a canonical
+# "cookie" / "api" so every comparison (refreshability, dispatch, maintenance)
+# agrees. See ``effective_auth_type``.
+_COOKIE_AUTH_MODES = frozenset({"cookie", "cookies", "browser", "storage_state"})
+_API_AUTH_MODES = frozenset({"api", "oauth", "oauth2"})
+
+
+def effective_auth_type(
+    config: dict | None, auth_type: str | None, platform: str | None = None
+) -> str:
+    """Normalize an account's auth mode to ``"cookie"`` or ``"api"``.
+
+    The mode is stored under a platform-specific key (``twitterAuthType`` /
+    ``redditAuthType``) on some rows and only under the generic ``auth_type``
+    column on others, and its casing is whatever the operator typed. Every
+    consumer used to compare the raw value case-sensitively, so ``"API"``
+    skipped refresh and a cookie account with no platform key was treated as
+    refreshable — both produce recurring OAuth failures. Resolve once, here.
+    """
+    if not isinstance(config, dict):
+        config = {}
+    keys: list[str] = []
+    if platform:
+        keys.append(f"{platform}AuthType")
+    keys.extend(("authType", "authMode"))
+    raw = ""
+    for key in keys:
+        value = config.get(key)
+        if value not in (None, ""):
+            raw = str(value)
+            break
+    if not raw:
+        raw = str(auth_type or "")
+    normalized = raw.strip().lower()
+    if normalized in _COOKIE_AUTH_MODES:
+        return "cookie"
+    if normalized in _API_AUTH_MODES:
+        return "api"
+    return normalized
+
+
 def resolve_cookie_path(platform: str, profile_slug: str, account_name: str) -> Path:
     """Filesystem location for a (platform, profile, account) cookie file.
 

@@ -94,7 +94,15 @@ class PublishFailureAlertTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_permanent_failure_alerts_once_with_actionable_fields(self) -> None:
-        job = jobs.enqueue_job(self._spec([("account:5", "f1", None)]), db_path=self.db_path)
+        profile_registry.add_account(
+            self.profile_id,
+            platform="twitter",
+            account_name="handle",
+            nickname="Friendly Account",
+            config={"twitterAuthType": "api"},
+            db_path=self.db_path,
+        )
+        job = jobs.enqueue_job(self._spec([("account:1", "f1", None)]), db_path=self.db_path)
 
         async def executor(platform, payload, target):
             raise RuntimeError("boom")
@@ -122,7 +130,7 @@ class PublishFailureAlertTests(unittest.TestCase):
         for expected in (
             f"Job: #{job.id} (twitter)",
             f"Target: #{target.id}",
-            "Account: account:5",
+            "Account: Friendly Account (account:1)",
             f"Profile: {self.profile_id}",
             "Attempts: 2/2",
             "Error: RuntimeError: boom",
@@ -148,6 +156,34 @@ class PublishFailureAlertTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # Only the permanent transition alerts
     # ------------------------------------------------------------------
+
+    def test_non_retryable_failure_alerts_immediately_with_account_name(self) -> None:
+        profile_registry.add_account(
+            self.profile_id,
+            platform="twitter",
+            account_name="handle",
+            nickname="Friendly Account",
+            auth_type="oauth",
+            config={"twitterAuthType": "api"},
+            db_path=self.db_path,
+        )
+        job = jobs.enqueue_job(self._spec([("account:1", "f1", None)]), db_path=self.db_path)
+        calls = {"n": 0}
+
+        async def executor(platform, payload, target):
+            calls["n"] += 1
+            from myUtils.prepared_publishers import PreparedPublishError
+            raise PreparedPublishError("Reconnect required", retryable=False)
+
+        sent: list[dict] = []
+        with patch.object(ops_alerts_module, "send_ops_alert", side_effect=lambda **kwargs: sent.append(kwargs)):
+            self._drain(executor)
+
+        target = jobs.list_targets(job.id, db_path=self.db_path)[0]
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(target.status, jobs.TARGET_FAILED)
+        self.assertEqual(target.attempts, 1)
+        self.assertIn("Friendly Account (account:1)", sent[0]["body"])
 
     def test_transient_retry_does_not_alert(self) -> None:
         jobs.enqueue_job(self._spec([("account:5", "f1", None)]), db_path=self.db_path)

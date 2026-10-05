@@ -33,6 +33,30 @@ logger = logging.getLogger(__name__)
 BACKENDS_ENV = "SAU_STORAGE_BACKENDS"
 DEFAULT_ORDER = ("share", "do_spaces", "rclone")
 
+# When enabled, an artifact whose public URL serves an HTML page (or an error)
+# instead of the raw file is rejected so the next backend is tried.  The Graph
+# API's "Unable to fetch video file from URL" is exactly this failure, and a
+# page-serving link is never a usable media URL for it.  Off by default so the
+# behaviour is unchanged until an operator asks for the stricter check.
+VERIFY_MEDIA_URL_ENV = "SAU_VERIFY_MEDIA_URL"
+VERIFY_MEDIA_URL_TIMEOUT = 10.0
+
+# Hosts that serve a viewer page rather than the raw bytes.  ``usercontent``
+# (the actual Drive download host) and object-storage/CDN hosts are not here.
+_PAGE_HOSTS = (
+    "drive.google.com",
+    "docs.google.com",
+    "photos.google.com",
+    "www.google.com",
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+)
+_MEDIA_SUFFIXES = (
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
+    ".mp4", ".mov", ".webm", ".m4v",
+)
+
 
 class RemoteStorageError(RuntimeError):
     """Raised when no configured remote storage backend could store the file."""
@@ -42,6 +66,66 @@ def _backend_order() -> list[str]:
     raw = os.environ.get(BACKENDS_ENV, "")
     order = [item.strip().lower() for item in raw.split(",") if item.strip()]
     return order or list(DEFAULT_ORDER)
+
+
+def _verify_media_url_enabled() -> bool:
+    return str(os.environ.get(VERIFY_MEDIA_URL_ENV, "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def is_direct_file_url(url: str | None) -> bool:
+    """Best-effort check that ``url`` is a raw https file URL, not a viewer.
+
+    This is pure string logic (no network), so it is safe to call from any
+    publish path.  It rejects the known page-serving hosts and the Google Drive
+    ``/file/d/`` viewer shape; a direct download host such as
+    ``drive.usercontent.google.com`` and object-storage/CDN URLs pass.
+    """
+    from urllib.parse import urlparse
+
+    raw = str(url or "").strip()
+    if not raw.lower().startswith("https://"):
+        return False
+    parsed = urlparse(raw)
+    host = (parsed.hostname or "").lower()
+    if not host or host in _PAGE_HOSTS:
+        return False
+    if "/file/d/" in parsed.path:
+        return False
+    return True
+
+
+def verify_media_url(url: str, *, session=None, timeout: float = VERIFY_MEDIA_URL_TIMEOUT) -> bool:
+    """HEAD ``url`` and reject only an explicit HTML/error response.
+
+    A network error or a server that refuses HEAD (405/501) fails open: it is
+    not proof the URL is bad, and blocking a good upload is worse than letting
+    the platform retry.  An HTML content type or a 4xx/5xx status fails closed.
+    """
+    if session is None:
+        try:
+            import requests
+
+            session = requests.Session()
+        except Exception:  # noqa: BLE001 - requests is a runtime dep; fail open
+            return True
+    try:
+        response = session.head(url, timeout=timeout, allow_redirects=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("could not verify media url %s with HEAD", url)
+        return True
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status in {405, 501}:
+        return True
+    if status >= 400 or status == 0:
+        return False
+    content_type = str(
+        (getattr(response, "headers", {}) or {}).get("Content-Type") or ""
+    ).lower()
+    if content_type.startswith(("image/", "video/", "application/octet-stream")):
+        return True
+    return not content_type.startswith("text/html")
 
 
 def _do_spaces_configured() -> bool:
@@ -166,6 +250,13 @@ def upload_artifact(
             if not (artifact.public_url or "").lower().startswith("https://"):
                 raise RemoteStorageError(
                     f"backend {name} returned a non-HTTPS url: {artifact.public_url!r}"
+                )
+            if _verify_media_url_enabled() and (
+                not is_direct_file_url(artifact.public_url)
+                or not verify_media_url(artifact.public_url)
+            ):
+                raise RemoteStorageError(
+                    f"backend {name} returned a non-direct media url: {artifact.public_url!r}"
                 )
             if name != _backend_order()[0]:
                 logger.info("media upload used fallback backend %s", name)

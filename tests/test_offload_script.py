@@ -9,6 +9,8 @@ class OffloadScriptTests(unittest.TestCase):
     def test_copy_verification_uses_rclone_check_before_privileged_delete(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            (root / "videoFile" / "nested").mkdir(parents=True)
+            (root / "videoFile" / "nested" / "file.mp4").write_bytes(b"video")
             executable_dir = root / "bin"
             executable_dir.mkdir()
             calls = root / "calls"
@@ -51,12 +53,18 @@ exit 0
                 "TEST_DEST": "drive:sau/videoFile",
                 "TEST_CALLS": str(calls),
             }
-            body = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text().split("purge_verified_sources() {", 1)[1].split("\n}", 1)[0]
+            source = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+            body = source.split("purge_verified_sources() {", 1)[1].split("\n}", 1)[0]
+            escape = source.split("escape_rclone_filter_path() {", 1)[1].split("\n}", 1)[0]
             script = r'''
 EXCLUDES="$TEST_EXCLUDES"
 CONF="$CONF"
 RCLONE_BIN="$RCLONE_BIN"
 RC=("${RCLONE_BIN}" --config "$CONF")
+register_verified_source(){ return 0; }
+escape_rclone_filter_path() {
+''' + escape + r'''
+}
 ts(){ printf 'test'; }
 purge_verified_sources() {
 ''' + body + r'''
@@ -114,12 +122,18 @@ esac
                 "TEST_DEST": "drive:sau/videoFile",
                 "TEST_CALLS": str(calls),
             }
-            body = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text().split("purge_verified_sources() {", 1)[1].split("\n}", 1)[0]
+            source = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+            body = source.split("purge_verified_sources() {", 1)[1].split("\n}", 1)[0]
+            escape = source.split("escape_rclone_filter_path() {", 1)[1].split("\n}", 1)[0]
             script = r'''
 EXCLUDES="$TEST_EXCLUDES"
 CONF="$CONF"
 RCLONE_BIN="$RCLONE_BIN"
 RC=("${RCLONE_BIN}" --config "$CONF")
+register_verified_source(){ return 0; }
+escape_rclone_filter_path() {
+''' + escape + r'''
+}
 ts(){ printf 'test'; }
 purge_verified_sources() {
 ''' + body + r'''
@@ -135,6 +149,9 @@ purge_verified_sources "$TEST_SOURCE" "$TEST_DEST"
         """A single mismatch must not strand every other verified source."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            (root / "videoFile").mkdir()
+            (root / "videoFile" / "good.mp4").write_bytes(b"good")
+            (root / "videoFile" / "bad.mp4").write_bytes(b"bad")
             executable_dir = root / "bin"
             executable_dir.mkdir()
             calls = root / "calls"
@@ -175,12 +192,18 @@ exit 0
                 "TEST_DEST": "drive:sau/videoFile",
                 "TEST_CALLS": str(calls),
             }
-            body = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text().split("purge_verified_sources() {", 1)[1].split("\n}", 1)[0]
+            source = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+            body = source.split("purge_verified_sources() {", 1)[1].split("\n}", 1)[0]
+            escape = source.split("escape_rclone_filter_path() {", 1)[1].split("\n}", 1)[0]
             script = r'''
 EXCLUDES="$TEST_EXCLUDES"
 CONF="$CONF"
 RCLONE_BIN="$RCLONE_BIN"
 RC=("${RCLONE_BIN}" --config "$CONF")
+register_verified_source(){ return 0; }
+escape_rclone_filter_path() {
+''' + escape + r'''
+}
 ts(){ printf 'test'; }
 purge_verified_sources() {
 ''' + body + r'''
@@ -270,6 +293,162 @@ notify "$1" "$2"
             harness, env, calls, _log = self._notify_harness(Path(tmp), tg_env=False)
             subprocess.run(["bash", "-c", harness, "_", "1", "0"], env=env, text=True, capture_output=True)
             self.assertFalse(calls.exists())
+
+    def test_preflight_fails_closed_when_generated_backend_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "db.sqlite"
+            source = root / "source"
+            for dirname in ("videoFile", "uploads", "generated"):
+                (source / dirname).mkdir(parents=True)
+            import sqlite3
+            with sqlite3.connect(db) as conn:
+                conn.execute("CREATE TABLE storage_backends (id INTEGER PRIMARY KEY, provider TEXT, bucket TEXT, endpoint TEXT, enabled INTEGER)")
+                conn.executemany(
+                    "INSERT INTO storage_backends (provider,bucket,endpoint,enabled) VALUES (?,?,?,1)",
+                    [("rclone", "drive", "sau/videoFile"), ("rclone", "drive", "sau/uploads")],
+                )
+            source_text = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+            body = source_text.split("preflight_storage_backends() {", 1)[1].split("\n}", 1)[0]
+            script = 'DB="$TEST_DB"\nDST=drive:sau\nSRC="$TEST_SRC"\npreflight_storage_backends() {\n' + body + '\n}\npreflight_storage_backends\n'
+            result = subprocess.run(["bash", "-c", script], env={**os.environ, "TEST_DB": str(db), "TEST_SRC": str(source)}, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("sau/generated", result.stderr)
+
+    def test_registration_failure_does_not_create_partial_mapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "source"
+            media = src / "generated" / "campaigns" / "clip.mp4"
+            media.parent.mkdir(parents=True)
+            media.write_bytes(b"verified bytes")
+            db = root / "db.sqlite"
+            import sqlite3
+            with sqlite3.connect(db) as conn:
+                conn.execute("CREATE TABLE storage_backends (id INTEGER PRIMARY KEY, provider TEXT, bucket TEXT, endpoint TEXT, enabled INTEGER)")
+                conn.execute("CREATE TABLE file_records (id INTEGER PRIMARY KEY, filename TEXT, file_path TEXT, filesize INTEGER, storage_key TEXT, storage_backend_id INTEGER)")
+                conn.execute("INSERT INTO file_records (filename,file_path,filesize) VALUES (?,?,?)", ("clip.mp4", "generated/campaigns/clip.mp4", media.stat().st_size))
+            source_text = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+            body = source_text.split("register_verified_source() {", 1)[1].split("\n}", 1)[0]
+            script = 'DB="$TEST_DB"\nDST=drive:sau\nregister_verified_source() {\n' + body + '\n}\nregister_verified_source "$TEST_SOURCE_ROOT" campaigns/clip.mp4\n'
+            result = subprocess.run(["bash", "-c", script], env={**os.environ, "TEST_DB": str(db), "TEST_SOURCE_ROOT": str(src / "generated")}, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(media.is_file(), "registration failure must never remove the source")
+            with sqlite3.connect(db) as conn:
+                self.assertEqual(conn.execute("SELECT storage_key,storage_backend_id FROM file_records").fetchone(), (None, None))
+
+    def test_registration_persists_relative_restore_key_for_verified_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "source"
+            media = src / "generated" / "campaigns" / "clip.mp4"
+            media.parent.mkdir(parents=True)
+            media.write_bytes(b"verified bytes")
+            db = root / "db.sqlite"
+            import sqlite3
+            with sqlite3.connect(db) as conn:
+                conn.execute("CREATE TABLE storage_backends (id INTEGER PRIMARY KEY, provider TEXT, bucket TEXT, endpoint TEXT, enabled INTEGER)")
+                conn.execute("INSERT INTO storage_backends VALUES (7,'rclone','drive','sau/generated',1)")
+                conn.execute("CREATE TABLE file_records (id INTEGER PRIMARY KEY, filename TEXT, file_path TEXT, filesize INTEGER, storage_key TEXT, storage_backend_id INTEGER)")
+                conn.execute("INSERT INTO file_records (filename,file_path,filesize) VALUES (?,?,?)", ("clip.mp4", "generated/campaigns/clip.mp4", media.stat().st_size))
+            source_text = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+            body = source_text.split("register_verified_source() {", 1)[1].split("\n}", 1)[0]
+            script = 'DB="$TEST_DB"\nDST=drive:sau\nregister_verified_source() {\n' + body + '\n}\nregister_verified_source "$TEST_SOURCE_ROOT" campaigns/clip.mp4\n'
+            result = subprocess.run(["bash", "-c", script], env={**os.environ, "TEST_DB": str(db), "TEST_SOURCE_ROOT": str(src / "generated")}, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with sqlite3.connect(db) as conn:
+                self.assertEqual(conn.execute("SELECT storage_key,storage_backend_id FROM file_records").fetchone(), ("campaigns/clip.mp4", 7))
+
+    def test_rclone_filter_escape_is_literal_for_glob_characters(self):
+        source = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+        body = source.split("escape_rclone_filter_path() {", 1)[1].split("\n}", 1)[0]
+        script = "escape_rclone_filter_path() {\n" + body + "\n}\nescape_rclone_filter_path \"$1\""
+        result = subprocess.run(
+            ["bash", "-c", script, "_", "campaigns/name*[1]{draft}.mp4"],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), r"campaigns/name\*\[1\]\{draft\}.mp4")
+
+    def test_verified_source_repairs_legacy_filesize_before_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "source"
+            media = src / "videoFile" / "_homealone" / "clip.mp4"
+            media.parent.mkdir(parents=True)
+            media.write_bytes(b"verified media bytes")
+            db = root / "db.sqlite"
+            import sqlite3
+            with sqlite3.connect(db) as conn:
+                conn.execute("CREATE TABLE storage_backends (id INTEGER PRIMARY KEY, provider TEXT, bucket TEXT, endpoint TEXT, enabled INTEGER)")
+                conn.execute("INSERT INTO storage_backends VALUES (7,'rclone','drive','sau/videoFile',1)")
+                conn.execute("CREATE TABLE file_records (id INTEGER PRIMARY KEY, filename TEXT, file_path TEXT, filesize REAL, storage_key TEXT, storage_backend_id INTEGER)")
+                conn.execute("INSERT INTO file_records (filename,file_path,filesize) VALUES (?,?,?)", ("clip.mp4", "_homealone/clip.mp4", 0.25))
+            source_text = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+            body = source_text.split("register_verified_source() {", 1)[1].split("\n}", 1)[0]
+            script = 'DB="$TEST_DB"\nDST=drive:sau\nregister_verified_source() {\n' + body + '\n}\nregister_verified_source "$TEST_SOURCE_ROOT" _homealone/clip.mp4\n'
+            result = subprocess.run(["bash", "-c", script], env={**os.environ, "TEST_DB": str(db), "TEST_SOURCE_ROOT": str(src / "videoFile")}, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with sqlite3.connect(db) as conn:
+                filesize, key, backend = conn.execute("SELECT filesize,storage_key,storage_backend_id FROM file_records").fetchone()
+            self.assertEqual(filesize, media.stat().st_size)
+            self.assertEqual((key, backend), ("_homealone/clip.mp4", 7))
+
+    def test_concurrent_run_skips_when_lock_is_held(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "logs").mkdir()
+            log = root / "logs" / "offload.log"
+            lock_dir = root / "lock-dir"
+            lock_dir.mkdir()
+            lock = lock_dir / "drive-offload.lock"
+            source = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+            body = source.split("acquire_offload_lock() {", 1)[1].split("\n}", 1)[0]
+            harness = '''SRC="$TEST_SRC"\nLOG="$TEST_LOG"\nHOME="$TEST_HOME"\nOFFLOAD_LOCK_DIR="$TEST_LOCK_DIR"\nacquire_offload_lock() {\n''' + body + '''\n}\nacquire_offload_lock\n'''
+            # Hold the same lock from another process; the second acquisition
+            # must return non-zero before touching any offload work.
+            env = {
+                **os.environ,
+                "TEST_SRC": str(root),
+                "TEST_LOG": str(log),
+                "TEST_HOME": str(root),
+                "TEST_LOCK_DIR": str(lock_dir),
+            }
+            holder = subprocess.Popen(
+                ["bash", "-c", 'exec 8>"$TEST_LOCK_DIR/drive-offload.lock"; flock -n 8; sleep 5'],
+                env=env,
+            )
+            try:
+                import time
+                time.sleep(0.1)
+                result = subprocess.run(["bash", "-c", harness], env=env, text=True, capture_output=True)
+            finally:
+                holder.terminate()
+                holder.wait(timeout=2)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("another run holds the lock", log.read_text())
+
+    def test_symlink_lock_path_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "logs").mkdir()
+            lock_dir = root / "lock-dir"
+            lock_dir.mkdir()
+            victim = root / "victim"
+            victim.write_text("must not be truncated")
+            (lock_dir / "drive-offload.lock").symlink_to(victim)
+            source = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+            body = source.split("acquire_offload_lock() {", 1)[1].split("\n}", 1)[0]
+            harness = 'SRC="$TEST_SRC"\nLOG="$TEST_LOG"\nHOME="$TEST_HOME"\nOFFLOAD_LOCK_DIR="$TEST_LOCK_DIR"\nacquire_offload_lock() {\n' + body + '\n}\nacquire_offload_lock\n'
+            result = subprocess.run(
+                ["bash", "-c", harness],
+                env={**os.environ, "TEST_SRC": str(root), "TEST_LOG": str(root / "logs/offload.log"), "TEST_HOME": str(root), "TEST_LOCK_DIR": str(lock_dir)},
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(victim.read_text(), "must not be truncated")
 
     def test_previous_rc_reads_the_second_newest_run(self):
         with tempfile.TemporaryDirectory() as tmp:

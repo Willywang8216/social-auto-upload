@@ -137,8 +137,8 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             "source_file_record_id": 1,
         }]}
 
-        def write_source(_backend, _key, temporary_path):
-            Path(temporary_path).write_bytes(b"source media")
+        def write_source(_backend, _key, _temporary_path):
+            raise OSError("backend object unavailable; use safe public URL fallback")
 
         class Response:
             headers = {}
@@ -163,6 +163,89 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             "https://cdn.example/clip_pub.mp4", timeout=(10, 120),
             stream=True, allow_redirects=False,
         )
+
+    def test_generated_artifact_never_falls_back_to_source_record(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) VALUES (?,?,?,?,?,?,?,?)",
+                ("source-drive", "Source Drive", "rclone", "drive", "", "sau/videoFile", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            conn.execute(
+                "UPDATE file_records SET storage_backend_id=? WHERE id=1",
+                (backend_id,),
+            )
+            conn.execute(
+                "INSERT INTO file_records (filename,filesize,file_path) VALUES (?,?,?)",
+                ("clip_pub.mp4", 14, "generated/campaigns/campaign-4/clip_pub.mp4"),
+            )
+        generated_root = self.root / "generated" / "campaigns"
+        payload = {"artifacts": [{
+            "local_path": str(generated_root / "campaign-4" / "clip_pub.mp4"),
+            "source_file_record_id": 1,
+        }]}
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
+        ), patch.object(
+            worker.media_remote_storage, "download_from_backend",
+            side_effect=AssertionError("unregistered generated record must not use source bytes"),
+        ):
+            with self.assertRaisesRegex(worker.MediaRestoreError, "safe public HTTPS"):
+                worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
+    def test_legacy_generated_artifact_restores_only_from_unique_registered_mapping(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) VALUES (?,?,?,?,?,?,?,?)",
+                ("gdrive-generated", "Generated Drive", "rclone", "drive", "", "sau/generated", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            conn.execute(
+                "INSERT INTO file_records (filename,filesize,file_path,storage_key,storage_backend_id) VALUES (?,?,?,?,?)",
+                ("clip_pub.mp4", 14, "legacy-generated/clip_pub.mp4", "campaigns/campaign-2236/clip_pub.mp4", backend_id),
+            )
+        generated_root = self.root / "generated" / "campaigns"
+        generated_path = generated_root / "campaign-2236" / "clip_pub.mp4"
+        payload = {"artifacts": [{"local_path": str(generated_path), "source_file_record_id": 1}]}
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
+        ), patch.object(
+            worker.media_remote_storage, "download_from_backend",
+            side_effect=lambda _backend, _key, destination: Path(destination).write_bytes(b"restored bytes"),
+        ) as download:
+            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+        self.assertEqual(generated_path.read_bytes(), b"restored bytes")
+        self.assertEqual(download.call_args.args[1], "campaigns/campaign-2236/clip_pub.mp4")
+
+    def test_generated_artifact_prefers_registered_remote_backend(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) VALUES (?,?,?,?,?,?,?,?)",
+                ("gdrive-generated", "Generated Drive", "rclone", "drive", "", "sau/generated", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            cursor = conn.execute(
+                "INSERT INTO file_records (filename,filesize,file_path,storage_key,storage_backend_id) VALUES (?,?,?,?,?)",
+                ("clip_pub.mp4", 14, "generated/campaigns/campaign-4/clip_pub.mp4", "campaigns/campaign-4/clip_pub.mp4", backend_id),
+            )
+            source_id = cursor.lastrowid
+        generated_root = self.root / "generated" / "campaigns"
+        generated_path = generated_root / "campaign-4" / "clip_pub.mp4"
+        payload = {"artifacts": [{
+            "local_path": str(generated_path),
+            "source_file_record_id": source_id,
+        }]}
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
+        ), patch.object(
+            worker.media_remote_storage, "download_from_backend",
+            side_effect=lambda _backend, _key, destination: Path(destination).write_bytes(b"restored bytes"),
+        ) as download, patch(
+            "requests.get", side_effect=AssertionError("Drive mapping should be preferred")
+        ):
+            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+        self.assertEqual(generated_path.read_bytes(), b"restored bytes")
+        self.assertEqual(download.call_args.args[1], "campaigns/campaign-4/clip_pub.mp4")
 
     def test_resolve_local_upload_reference_before_any_remote_download(self) -> None:
         uploads = self.root / "uploads" / "local.mp4"

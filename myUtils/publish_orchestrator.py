@@ -28,6 +28,7 @@ from typing import Callable
 
 from myUtils import campaigns as campaign_store
 from myUtils import content_rating
+from myUtils import content_rules
 from myUtils import jobs as job_runtime
 from myUtils import media_groups as media_group_store
 from myUtils import platform_capabilities
@@ -266,6 +267,11 @@ def submit_publish(
     rating = content_rating.rating_for_media(
         media_file_paths, explicit=(options or {}).get("sfwFlag")
     )
+    media_roles = {_media_role_for_path(path) for path in media_file_paths}
+    has_video = media_group_store.ROLE_VIDEO in media_roles
+    has_image = media_group_store.ROLE_IMAGE in media_roles
+    if not has_video and not has_image:
+        raise ValueError("Selected media contains no supported image or video files")
 
     for profile_id in profile_ids:
         profile = profile_registry.get_profile(int(profile_id), db_path=db_path)
@@ -281,6 +287,30 @@ def submit_publish(
             # request may still be publishable, and the skipped list tells the
             # caller exactly what happened.
             skipped.append({"profileId": profile.id, "reason": "nsfw_no_adult_safe_account"})
+            continue
+
+        compatible_accounts = []
+        for account in accounts:
+            if account.platform == "youtube" and not has_video:
+                skipped.append({
+                    "profileId": profile.id,
+                    "accountId": account.id,
+                    "accountName": account.nickname or account.account_name,
+                    "platform": account.platform,
+                    "reason": "YouTube publishing requires video media; this selection contains no video.",
+                })
+            elif account.platform == "tiktok" and not has_video and not bool((options or {}).get("tiktokDirectPost")):
+                skipped.append({
+                    "profileId": profile.id,
+                    "accountId": account.id,
+                    "accountName": account.nickname or account.account_name,
+                    "platform": account.platform,
+                    "reason": "TikTok photo publishing requires Direct Post; enable it or remove this destination.",
+                })
+            else:
+                compatible_accounts.append(account)
+        accounts = compatible_accounts
+        if not accounts:
             continue
 
         request_data = _request_data_for_options(
@@ -345,7 +375,13 @@ def submit_publish(
             for account in platform_accounts:
                 draft_override = account_drafts.get(str(account.id)) or account_drafts.get(account.id)
                 if isinstance(draft_override, dict) and draft_override.get("message"):
-                    draft = dict(draft_override)
+                    # The override arrives from the client, and a model-backed
+                    # preview can leave the draft as a stringified JSON object or
+                    # a "Title: ... / Description: ..." blob. Normalise here, at
+                    # the one place the override is consumed, so every caller —
+                    # the web UI, the inbox one-click route and MCP — gets the
+                    # same clean copy the preview showed the operator.
+                    draft = content_rules.normalize_draft_fields(dict(draft_override))
                 else:
                     try:
                         # Draft content is account-specific (language, voice,

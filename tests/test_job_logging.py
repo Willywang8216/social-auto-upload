@@ -30,7 +30,7 @@ class JobLoggerTests(unittest.TestCase):
     def test_bind_returns_logger_with_correlation_extras(self) -> None:
         log = job_logging.bind_job_logger(
             job_id=42, target_id=7, platform="douyin",
-            account_ref="acct-1", attempt=2,
+            account_ref="acct-1", account_name="Creator Name", attempt=2,
         )
         captured: list = []
 
@@ -49,6 +49,7 @@ class JobLoggerTests(unittest.TestCase):
         self.assertEqual(extra["target_id"], 7)
         self.assertEqual(extra["platform"], "douyin")
         self.assertEqual(extra["account_ref"], "acct-1")
+        self.assertEqual(extra["account_name"], "Creator Name")
         self.assertEqual(extra["attempt"], 2)
         # Worker records always carry business_name='worker' so they reach
         # the worker.log sink configured by utils.log.
@@ -106,6 +107,7 @@ class JobLoggerTests(unittest.TestCase):
                 "target_id": 3,
                 "platform": "douyin",
                 "account_ref": "acct-1",
+                "account_name": "Creator Name",
                 "attempt": 2,
             },
         }
@@ -116,6 +118,7 @@ class JobLoggerTests(unittest.TestCase):
         self.assertEqual(payload["platform"], "douyin")
         self.assertEqual(payload["msg"], "hello")
         self.assertEqual(payload["level"], "INFO")
+        self.assertEqual(payload["account_name"], "Creator Name")
 
 
 if __name__ == "__main__":

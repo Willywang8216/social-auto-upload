@@ -37,6 +37,49 @@ DB=$SRC/db/database.db
 LOG=$SRC/logs/offload.log
 TGENV=/home/will/mailserver/monitor/.telegram_env
 mkdir -p "$SRC/logs"
+# Cron can overlap when a large transfer runs longer than 30 minutes. Keep the
+# lock in a private, will-owned directory instead of a predictable /tmp path.
+acquire_offload_lock() {
+  local home_cache="$HOME/.cache"
+  local lock_dir="${OFFLOAD_LOCK_DIR:-$home_cache/social-auto-upload-drive-offload}"
+  local lock_file="$lock_dir/drive-offload.lock"
+  if [ -L "$HOME" ] || [ -L "$home_cache" ]; then
+    printf '[%s] refusing symlink home/cache lock parent\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$SRC/logs/offload.log"
+    return 2
+  fi
+  mkdir -p "$home_cache" || return 2
+  if [ ! -d "$home_cache" ] || [ "$(stat -c %u "$home_cache")" != "$(id -u)" ]; then
+    printf '[%s] refusing unsafe cache lock parent: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$home_cache" >> "$SRC/logs/offload.log"
+    return 2
+  fi
+  if [ ! -e "$lock_dir" ] && ! mkdir "$lock_dir" 2>/dev/null; then
+    printf '[%s] could not create offload lock directory: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$lock_dir" >> "$SRC/logs/offload.log"
+    return 2
+  fi
+  if [ -L "$lock_dir" ] || [ ! -d "$lock_dir" ] || [ "$(stat -c %u "$lock_dir")" != "$(id -u)" ]; then
+    printf '[%s] refusing unsafe offload lock directory: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$lock_dir" >> "$SRC/logs/offload.log"
+    return 2
+  fi
+  chmod 700 "$lock_dir" || return 2
+  if [ -L "$lock_file" ]; then
+    printf '[%s] refusing symlink offload lock: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$lock_file" >> "$SRC/logs/offload.log"
+    return 2
+  fi
+  exec 9>>"$lock_file" || return 2
+  if ! flock -n 9; then
+    printf '[%s] offload skipped: another run holds the lock\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$SRC/logs/offload.log"
+    return 1
+  fi
+}
+if acquire_offload_lock; then
+  :
+else
+  lock_rc=$?
+  if [ "$lock_rc" -eq 1 ]; then
+    exit 0
+  fi
+  exit 4
+fi
 # tiny log rotation
 if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 1048576 ]; then
   tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
@@ -45,6 +88,177 @@ RCLONE_BIN=${RCLONE_BIN:-/usr/bin/rclone}
 RC=("$RCLONE_BIN" --config "$CONF")
 ts(){ date -u +%Y-%m-%dT%H:%M:%SZ; }
 rc=0
+
+preflight_storage_backends() {
+  python3 - "$DB" "$DST" "$SRC" <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path, dst, source = sys.argv[1:]
+source = Path(source)
+remote = dst.split(":", 1)[0]
+conn = sqlite3.connect(db_path, timeout=15)
+try:
+    conn.execute("PRAGMA busy_timeout=15000")
+    for root in ("videoFile", "uploads", "generated"):
+        if not (source / root).is_dir():
+            continue
+        backend = conn.execute(
+            "SELECT id FROM storage_backends WHERE provider='rclone' AND bucket=? AND endpoint=? AND enabled=1",
+            (remote, f"sau/{root}"),
+        ).fetchone()
+        if backend is None:
+            print(f"missing enabled rclone backend for {remote}:sau/{root}", file=sys.stderr)
+            raise SystemExit(1)
+finally:
+    conn.close()
+PY
+}
+
+register_local_generated() {
+  python3 - "$DB" "$SRC" <<'PY'
+import sqlite3, sys
+from pathlib import Path
+
+db_path, src = sys.argv[1], Path(sys.argv[2])
+root = src / "generated"
+if not root.is_dir():
+    raise SystemExit(0)
+conn = sqlite3.connect(db_path, timeout=15)
+try:
+    conn.execute("PRAGMA busy_timeout=15000")
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(src).as_posix()
+        exists = conn.execute(
+            "SELECT 1 FROM file_records WHERE file_path IN (?, ?)",
+            (rel, "/app/" + rel),
+        ).fetchone()
+        if exists:
+            continue
+        conn.execute(
+            "INSERT INTO file_records (filename, filesize, file_path) VALUES (?, ?, ?)",
+            (path.name, path.stat().st_size, rel),
+        )
+    conn.commit()
+except Exception:
+    conn.rollback()
+    raise
+finally:
+    conn.close()
+PY
+}
+
+escape_rclone_filter_path() {
+  python3 - "$1" <<'PY'
+import re, sys
+print(re.sub(r"([\\*?\[\]{}])", r"\\\1", sys.argv[1]))
+PY
+}
+
+verify_and_register_unreadable_source() {
+  local source_root="$1"
+  local remote_root="$2"
+  local relative="$3"
+  local source_file="$source_root/$relative"
+  local before after staging escaped size
+  [ -f "$source_file" ] && [ ! -L "$source_file" ] || return 1
+  before=$(sudo -n stat -c '%d:%i:%s:%Y:%a:%u:%g' -- "$source_file") || return 1
+  size=$(sudo -n stat -c '%s' -- "$source_file") || return 1
+  staging=$(mktemp -d "${TMPDIR:-/tmp}/sau-offload-stage.XXXXXX") || return 1
+  mkdir -p "$staging/$(dirname "$relative")" || { rm -rf "$staging"; return 1; }
+  if ! sudo -n cat -- "$source_file" > "$staging/$relative"; then
+    rm -rf "$staging"
+    return 1
+  fi
+  if [ "$(stat -c '%s' -- "$staging/$relative")" != "$size" ]; then
+    rm -rf "$staging"
+    return 1
+  fi
+  escaped=$(escape_rclone_filter_path "$relative")
+  if ! "${RC[@]}" copyto "$staging/$relative" "$remote_root/$relative" --stats-one-line >/dev/null 2>&1 || \
+     ! "${RC[@]}" check "$staging" "$remote_root" --one-way --include "/$escaped" >/dev/null 2>&1; then
+    rm -rf "$staging"
+    return 1
+  fi
+  after=$(sudo -n stat -c '%d:%i:%s:%Y:%a:%u:%g' -- "$source_file") || { rm -rf "$staging"; return 1; }
+  if [ "$before" != "$after" ]; then
+    echo "[$(ts)] source changed during staged copy: $relative"
+    rm -rf "$staging"
+    return 1
+  fi
+  if ! register_verified_source "$source_root" "$relative" "$size"; then
+    rm -rf "$staging"
+    return 1
+  fi
+  if ! sudo -n rm -- "$source_file"; then
+    echo "[$(ts)] could not unlink staged and registered source: $relative"
+    rm -rf "$staging"
+    return 1
+  fi
+  rm -rf "$staging"
+  echo "[$(ts)] staged, verified and offloaded unreadable source: $relative ($size bytes)"
+}
+
+register_verified_source() {
+  local source_root="$1"
+  local relative="$2"
+  local size="${3:-}"
+  if [ -z "$size" ]; then
+    size=$(stat -c%s -- "$source_root/$relative") || return 1
+  fi
+  python3 - "$DB" "$DST" "$source_root" "$relative" "$size" <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path, dst, source_root, relative, size_raw = sys.argv[1:]
+root = Path(source_root).name
+remote = dst.split(":", 1)[0]
+relative = Path(relative).as_posix()
+size = int(size_raw)
+if root not in {"videoFile", "uploads", "generated"}:
+    raise SystemExit("unsupported source root")
+conn = sqlite3.connect(db_path, timeout=15)
+try:
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("BEGIN IMMEDIATE")
+    backend = conn.execute(
+        "SELECT id FROM storage_backends WHERE provider='rclone' AND bucket=? AND endpoint=? AND enabled=1",
+        (remote, f"sau/{root}"),
+    ).fetchone()
+    if backend is None:
+        raise RuntimeError(f"missing backend for {remote}:sau/{root}")
+    if root == "videoFile":
+        candidates = (relative, f"videoFile/{relative}", f"/app/videoFile/{relative}")
+    else:
+        candidates = (f"{root}/{relative}", f"/app/{root}/{relative}")
+    placeholders = ",".join("?" for _ in candidates)
+    records = conn.execute(
+        f"SELECT id, filesize, storage_key, storage_backend_id FROM file_records WHERE file_path IN ({placeholders})",
+        candidates,
+    ).fetchall()
+    if not records:
+        raise RuntimeError(f"no file_records row for {root}/{relative}")
+    for row in records:
+        # rclone check immediately before this transaction proved these bytes
+        # exist remotely at the same size as this local source. Repair stale
+        # legacy filesize values from that verified fact before unlinking.
+        conn.execute(
+            "UPDATE file_records SET filesize=?, storage_key=?, storage_backend_id=? WHERE id=?",
+            (size, relative, backend["id"], row["id"]),
+        )
+    conn.commit()
+except Exception:
+    conn.rollback()
+    raise
+finally:
+    conn.close()
+PY
+}
 
 purge_verified_sources() {
   local source_root="$1"
@@ -60,15 +274,39 @@ purge_verified_sources() {
         continue
         ;;
     esac
-    # rclone check needs DIRECTORIES on both sides: passing the file itself as
-    # the destination aborts with "is a file not a directory", which silently
-    # disabled this whole purge (every rc=1 offload). Compare the two roots
-    # with an include scoped to this one file instead. --one-way because the
-    # only property we need is "the bytes we still hold are safely on Drive".
-    if "${RC[@]}" check "$source_root" "$remote_root" --size-only --one-way \
-         --include "/$relative" >/dev/null 2>&1; then
-      # One un-unlinkable file must not block cleanup of every other one, so
-      # record the failure and keep going.
+    source_file="$source_root/$relative"
+    if [ -L "$source_file" ] || [ ! -f "$source_file" ] || [[ "$(realpath -m -- "$source_file")" != "$(realpath -m -- "$source_root")"/* ]]; then
+      echo "[$(ts)] refusing non-regular or escaping source path: $relative"
+      failed=1
+      continue
+    fi
+    if [ ! -r "$source_file" ]; then
+      if ! verify_and_register_unreadable_source "$source_root" "$remote_root" "$relative"; then
+        echo "[$(ts)] keeping unreadable source after failed staged verification: $relative"
+        failed=1
+      fi
+      continue
+    fi
+    before_stat=$(stat -c '%d:%i:%s:%Y' -- "$source_file") || { failed=1; continue; }
+    # Compare transfer roots so rclone can use content hashes when available.
+    # Escaped includes make filename metacharacters literal; --one-way ignores
+    # unrelated remote files without weakening verification of this source.
+    escaped=$(escape_rclone_filter_path "$relative")
+    if "${RC[@]}" check "$source_root" "$remote_root" --one-way \
+         --include "/$escaped" >/dev/null 2>&1; then
+      after_stat=$(stat -c '%d:%i:%s:%Y' -- "$source_file") || { failed=1; continue; }
+      if [ "$before_stat" != "$after_stat" ]; then
+        echo "[$(ts)] keeping $relative: source changed during remote verification"
+        failed=1
+        continue
+      fi
+      # Persist the exact restore mapping before deletion. If registration or
+      # privileged unlink fails, the verified local source remains available.
+      if ! register_verified_source "$source_root" "$relative"; then
+        echo "[$(ts)] keeping $relative: verified remote copy could not be registered"
+        failed=1
+        continue
+      fi
       sudo -n rm -- "$source_root/$relative" || { echo "[$(ts)] could not unlink verified source: $relative"; failed=1; }
     else
       echo "[$(ts)] keeping $relative: remote copy is missing or differs"
@@ -131,6 +369,40 @@ notify() {
 # the transfer.
 # -i is load-bearing: without it docker exec closes stdin and python reads
 # the heredoc as empty, which would report "0 exclusions" and move everything.
+register_local_generated() {
+  python3 - "$DB" "$SRC" <<'PY'
+import sqlite3, sys
+from pathlib import Path
+
+db_path, src = sys.argv[1], Path(sys.argv[2])
+root = src / "generated"
+if not root.is_dir():
+    raise SystemExit(0)
+conn = sqlite3.connect(db_path, timeout=15)
+try:
+    conn.execute("PRAGMA busy_timeout=15000")
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(src).as_posix()
+        exists = conn.execute(
+            "SELECT 1 FROM file_records WHERE file_path IN (?, ?)",
+            (rel, "/app/" + rel),
+        ).fetchone()
+        if not exists:
+            conn.execute(
+                "INSERT INTO file_records (filename,filesize,file_path) VALUES (?,?,?)",
+                (path.name, path.stat().st_size, rel),
+            )
+    conn.commit()
+except Exception:
+    conn.rollback()
+    raise
+finally:
+    conn.close()
+PY
+}
+
 pending_excludes() {
   docker exec -i social-auto-upload python3 - <<'PY'
 import json
@@ -163,10 +435,10 @@ def emit(rel: str) -> None:
 
 def emit_media_path(local_path: str) -> None:
     """Emit the transfer-root-relative part of an absolute/local media path."""
-    if "/videoFile/" in local_path:
-        emit(local_path.split("/videoFile/", 1)[1])
-    elif "/uploads/" in local_path:
-        emit(local_path.split("/uploads/", 1)[1])
+    for marker in ("/videoFile/", "/uploads/", "/generated/"):
+        if marker in local_path:
+            emit(local_path.split(marker, 1)[1])
+            return
 
 
 def emit_file_ref(ref: str) -> None:
@@ -175,14 +447,12 @@ def emit_file_ref(ref: str) -> None:
     ref = (ref or "").strip()
     if not ref or ref.startswith("campaign_post:"):
         return
-    for marker in ("/videoFile/", "/uploads/"):
+    for marker in ("/videoFile/", "/uploads/", "/generated/"):
         if marker in ref:
             emit(ref.split(marker, 1)[1])
             return
-    if ref.startswith("videoFile/"):
-        emit(ref[len("videoFile/"):])
-    elif ref.startswith("uploads/"):
-        emit(ref[len("uploads/"):])
+    if ref.startswith(("videoFile/", "uploads/", "generated/")):
+        emit(ref.split("/", 1)[1])
     else:
         emit(ref)  # legacy: path relative to the videoFile root
 
@@ -267,134 +537,38 @@ print(f"# excludes={len(seen)}")
 PY
 }
 
-# Remember where the offloaded files went. Runs against the SQLite file the
-# container mounts, and only records a path the remote actually has while the
-# local copy is gone — i.e. exactly the files this run (or an earlier one)
-# successfully moved. Exits non-zero when files are missing locally but could
-# NOT be registered (remote listing failed / storage_backends row absent):
-# a silent skip there would leave moved files unrestorable, so it must page
-# the operator instead.
-register_offloaded() {
-  python3 - "$DB" "$DST" "$CONF" "$SRC" <<'PY'
-import sqlite3
-import subprocess
-import sys
-from pathlib import Path
-
-db_path, dst, conf, src = sys.argv[1:5]
-src = Path(src)
-
-# file_records.file_path -> (offload root, key within that root, local file)
-def locate(file_path: str):
-    if file_path.startswith("uploads/"):
-        return "uploads", file_path[len("uploads/"):], src / "uploads" / file_path[len("uploads/"):]
-    if file_path.startswith("generated/"):
-        return "generated", file_path[len("generated/"):], src / "generated" / file_path[len("generated/"):]
-    if file_path.startswith("videoFile/"):
-        return "videoFile", file_path[len("videoFile/"):], src / "videoFile" / file_path[len("videoFile/"):]
-    return "videoFile", file_path, src / "videoFile" / file_path
-
-
-def remote_index(root: str):
-    """Remote file list for one root, or None when rclone itself failed."""
-    proc = subprocess.run(
-        ["rclone", "--config", conf, "lsf", "-R", "--files-only", f"{dst}/{root}"],
-        capture_output=True, text=True,
-    )
-    if proc.returncode != 0:
-        return None
-    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
-
-
-conn = sqlite3.connect(db_path)
-conn.row_factory = sqlite3.Row
-rows = conn.execute("SELECT id, file_path, storage_key FROM file_records").fetchall()
-
-by_root = {"videoFile": set(), "uploads": set(), "generated": set()}
-for row in rows:
-    root, key, local = locate(row["file_path"] or "")
-    if local.exists() or not key:
-        continue
-    by_root.setdefault(root, set()).add(key)
-
-registered = 0
-unregisterable = 0
-for root, keys in by_root.items():
-    if not keys:
-        continue
-    present = remote_index(root)
-    if not present:
-        print(f"ERROR: remote listing failed for {dst}/{root} "
-              f"while {len(keys)} local file(s) are missing", file=sys.stderr)
-        unregisterable += len(keys)
-        continue
-    backend_row = conn.execute(
-        "SELECT id FROM storage_backends WHERE provider='rclone' AND bucket=? AND endpoint=?",
-        (dst.split(":", 1)[0], f"sau/{root}"),
-    ).fetchone()
-    if backend_row is None:
-        print(f"ERROR: no storage_backends row for {dst.split(':', 1)[0]} "
-              f"sau/{root}; {len(keys)} moved file(s) cannot be registered",
-              file=sys.stderr)
-        unregisterable += len(keys)
-        continue
-    backend_id = backend_row[0]
-    for row in rows:
-        r_root, key, local = locate(row["file_path"] or "")
-        if r_root != root or not key or key not in present or local.exists():
-            continue
-        if row["storage_key"] == key and row["storage_key"] is not None:
-            continue  # already registered by an earlier run
-        conn.execute(
-            "UPDATE file_records SET storage_key=?, storage_backend_id=? WHERE id=?",
-            (key, backend_id, row["id"]),
-        )
-        registered += 1
-conn.commit()
-print(f"registered {registered} offloaded file(s) in file_records")
-if unregisterable:
-    sys.exit(1)
-PY
-}
-
 {
   echo "[$(ts)] offload start"
   EXCLUDES=$(mktemp)
-  if pending_excludes > "$EXCLUDES" && grep -q '^# excludes=' "$EXCLUDES"; then
-          KEEP_COUNT=$(grep -vc '^#' "$EXCLUDES" || true)
+  if ! preflight_storage_backends; then
+    echo "[$(ts)] SKIPPED offload: a required storage backend is not configured"
+    rc=4
+  elif ! register_local_generated; then
+    echo "[$(ts)] SKIPPED offload: could not register generated local artifacts"
+    rc=4
+  elif ! pending_excludes > "$EXCLUDES" || ! grep -q '^# excludes=' "$EXCLUDES"; then
+    echo "[$(ts)] SKIPPED offload: could not build the keep-local exclude list"
+    rc=3
+  else
+    KEEP_COUNT=$(grep -vc '^#' "$EXCLUDES" || true)
     echo "[$(ts)] keeping ${KEEP_COUNT} file(s) local (in-flight / due soon / unrecorded / _library)"
-    for d in videoFile uploads; do
+    for d in videoFile uploads generated; do
       [ -d "$SRC/$d" ] || continue
       source_root="$SRC/$d"
       destination_root="$DST/$d"
-      if [ "$d" = videoFile ]; then
-        rclone_source="$SRC/videoFile"
-        rclone_destination="$DST/videoFile"
-      else
-        rclone_source="$SRC/uploads"
-        rclone_destination="$DST/uploads"
-      fi
-      # copy, never move: this cron runs as `will` but the SAU container writes
-      # videoFile/ as root, so a move aborts with "permission denied" on every
-      # container-written source (which is most of them). Deletion is the
-      # separate, verified step below.
-      if "${RC[@]}" copy "$rclone_source" "$rclone_destination" --min-age 10m --exclude-from "$EXCLUDES" \
+      # Copy, verify and persist restore metadata before purging each root.
+      # Do not skip the per-file verification pass when rclone reports a copy
+      # error: it can still have copied readable siblings, while the purge path
+      # stages root-owned unreadable files individually and fails closed per file.
+      if ! "${RC[@]}" copy "$source_root" "$destination_root" --min-age 10m --exclude-from "$EXCLUDES" \
         --transfers 4 --checkers 8 --stats-one-line -v 2>&1; then
-        if ! purge_verified_sources "$source_root" "$destination_root"; then
-          echo "[$(ts)] could not remove all verified sources under $source_root"
-          rc=1
-        fi
-      else
-        rc=$?
+        echo "[$(ts)] copy reported errors under $source_root; checking each source before any unlink"
+      fi
+      if ! purge_verified_sources "$source_root" "$destination_root"; then
+        echo "[$(ts)] could not remove all verified sources under $source_root"
+        rc=1
       fi
     done
-    if ! register_offloaded 2>&1; then
-      echo "[$(ts)] WARNING: could not register offloaded files in file_records"
-      rc=4
-    fi
-  else
-    echo "[$(ts)] SKIPPED offload: could not build the keep-local exclude list"
-    rc=3
   fi
   rm -f "$EXCLUDES"
   echo "[$(ts)] offload done rc=$rc local videoFile=$(find "$SRC/videoFile" -type f 2>/dev/null | wc -l) uploads=$(find "$SRC/uploads" -type f 2>/dev/null | wc -l)"

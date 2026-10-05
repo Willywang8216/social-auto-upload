@@ -101,6 +101,26 @@ def get_oauth_request(state_token: str, *, db_path: Path | None = None) -> Twitt
     return _row_to_request(row) if row else None
 
 
+def claim_oauth_request(state_token: str, *, db_path: Path | None = None) -> TwitterOAuthRequest | None:
+    """Atomically claim a ``started`` OAuth request for processing.
+
+    Returns the request only when this caller won the one-shot transition
+    ``started -> processing``. Returns ``None`` for an unknown state or one
+    that is already processing/completed/errored, so a replayed callback cannot
+    re-exchange a single-use authorization code.
+    """
+    with _connect(db_path) as conn:
+        cursor = conn.execute(
+            "UPDATE twitter_oauth_requests SET status = 'processing' "
+            "WHERE state_token = ? AND status = 'started'",
+            (state_token,),
+        )
+        conn.commit()
+        if cursor.rowcount != 1:
+            return None
+    return get_oauth_request(state_token, db_path=db_path)
+
+
 def complete_oauth_request(
     state_token: str,
     *,

@@ -152,6 +152,153 @@ class GetFileServingTests(unittest.TestCase):
 
 
 @unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
+class TwitterOAuthReconnectTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import sau_backend
+        import db.createTable as create_table
+        from myUtils import profiles
+
+        self.sau_backend = sau_backend
+        self.profiles = profiles
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base_dir = Path(self._tmp.name)
+        self.db_path = self.base_dir / "db" / "database.db"
+        create_table.bootstrap(self.db_path)
+        self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
+        self._base_dir_patch.start()
+        self._db_path_patch = patch.object(sau_backend, "_current_db_path", return_value=self.db_path)
+        self._db_path_patch.start()
+        from myUtils.security import SecurityPolicy
+        self._orig_policy = sau_backend.app.config["SECURITY_POLICY"]
+        sau_backend.app.config["SECURITY_POLICY"] = SecurityPolicy(
+            tokens=frozenset(), cors_origins=("http://localhost:5173",)
+        )
+        sau_backend.app.config["TESTING"] = True
+        self.client = sau_backend.app.test_client()
+
+        self.profile = profiles.create_profile("Reconnect Test", db_path=self.db_path)
+        self.account = profiles.add_account(
+            self.profile.id,
+            "twitter",
+            "nudeweiwei",
+            auth_type="oauth",
+            config={
+                "twitterAuthType": "api",
+                "accessToken": "old-access-token",
+                "refreshToken": "old-refresh-token",
+                "_needsReconnect": True,
+                "_reconnectAlertedAt": "2026-10-01T00:00:00",
+                "_maintenanceFailures": 4,
+                "_nextMaintenanceAttemptAt": "2026-10-03T12:00:00",
+                "_lastMaintenanceError": "old rejection",
+                "_lastMaintenanceAttemptAt": "2026-10-03T11:50:00",
+            },
+            db_path=self.db_path,
+        )
+        from myUtils import x_review
+        self.state = "test-twitter-oauth-state"
+        x_review.create_oauth_request(
+            state_token=self.state,
+            profile_id=self.profile.id,
+            account_id=self.account.id,
+            account_name=self.account.account_name,
+            redirect_uri="https://socialupload.example.com/oauth/twitter/callback",
+            code_verifier="test-verifier",
+            scopes=["tweet.read", "tweet.write", "users.read", "offline.access"],
+            db_path=self.db_path,
+        )
+
+    def tearDown(self) -> None:
+        self._db_path_patch.stop()
+        self._base_dir_patch.stop()
+        self.sau_backend.app.config["SECURITY_POLICY"] = self._orig_policy
+        self._tmp.cleanup()
+
+    def test_successful_callback_replaces_stale_reconnect_state(self) -> None:
+        from myUtils import x_auth
+        token_payload = {
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token",
+            "expires_in": 1,
+            "token_type": "bearer",
+            "scope": "tweet.read tweet.write users.read offline.access",
+        }
+        identity = {"data": {"id": "x-user-123", "username": "nudeweiwei", "name": "NW X"}}
+        with patch.object(x_auth, "exchange_code_for_token", return_value=token_payload), \
+             patch.object(x_auth, "fetch_user_info", return_value=identity):
+            response = self.client.get(f"/oauth/twitter/callback?state={self.state}&code=ok")
+        self.assertEqual(response.status_code, 200)
+        updated = self.profiles.get_account(self.account.id, db_path=self.db_path)
+        config = updated.config or {}
+        self.assertEqual(config["accessToken"], "new-access-token")
+        self.assertEqual(config["refreshToken"], "new-refresh-token")
+        self.assertEqual(config["twitterUserName"], "nudeweiwei")
+        self.assertEqual(config["twitterAuthType"], "api")
+        for marker in (
+            "_needsReconnect", "_reconnectAlertedAt", "_maintenanceFailures",
+            "_nextMaintenanceAttemptAt", "_lastMaintenanceError",
+            "_lastMaintenanceAttemptAt",
+        ):
+            self.assertNotIn(marker, config)
+        self.assertTrue(self.sau_backend._is_refreshable_account_stale(updated))
+
+    def test_failed_callback_keeps_existing_reconnect_state(self) -> None:
+        from myUtils import x_auth
+        with patch.object(x_auth, "exchange_code_for_token", side_effect=RuntimeError("exchange failed")):
+            response = self.client.get(f"/oauth/twitter/callback?state={self.state}&code=bad")
+        self.assertEqual(response.status_code, 500)
+        current = self.profiles.get_account(self.account.id, db_path=self.db_path)
+        self.assertEqual(current.config["accessToken"], "old-access-token")
+        self.assertTrue(current.config["_needsReconnect"])
+        self.assertEqual(current.config["_maintenanceFailures"], 4)
+
+    def test_callback_requires_refresh_token_when_offline_access_was_requested(self) -> None:
+        from myUtils import x_auth
+        with patch.object(
+            x_auth,
+            "exchange_code_for_token",
+            return_value={"access_token": "new-access", "expires_in": 3600},
+        ), patch.object(
+            x_auth,
+            "fetch_user_info",
+            return_value={"data": {"id": "x-user", "username": "nudeweiwei"}},
+        ):
+            response = self.client.get(f"/oauth/twitter/callback?state={self.state}&code=ok")
+        self.assertEqual(response.status_code, 500)
+        current = self.profiles.get_account(self.account.id, db_path=self.db_path)
+        self.assertEqual(current.config["accessToken"], "old-access-token")
+        self.assertTrue(current.config["_needsReconnect"])
+
+    def test_failed_refresh_is_backed_off_and_records_safe_provider_code(self) -> None:
+        from myUtils.x_auth import TwitterOAuthError
+        failure = TwitterOAuthError(
+            "X OAuth refresh failed: HTTP 400 (invalid_grant)",
+            status_code=400,
+            error_code="invalid_grant",
+        )
+        with patch.object(
+            self.sau_backend.prepared_publishers,
+            "refresh_twitter_access_token",
+            side_effect=failure,
+        ):
+            with self.assertRaises(TwitterOAuthError):
+                self.sau_backend._run_account_token_refresh(
+                    account_id=self.account.id, db_path=self.db_path, mode="auto"
+                )
+        current = self.profiles.get_account(self.account.id, db_path=self.db_path)
+        config = current.config
+        self.assertTrue(config["_needsReconnect"])
+        self.assertEqual(config["_maintenanceFailures"], 5)
+        self.assertTrue(config["_nextMaintenanceAttemptAt"])
+        self.assertNotIn("must-not-be-stored", config["_lastMaintenanceError"])
+        event = self.sau_backend.account_events.list_events(
+            account_id=self.account.id, db_path=self.db_path, limit=1
+        )[0]
+        self.assertEqual(event.metadata["providerErrorCode"], "invalid_grant")
+        self.assertNotIn("must-not-be-stored", event.error_text or "")
+
+
+@unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
 class LegacyDbBootstrapEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
         import sau_backend

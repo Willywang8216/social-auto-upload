@@ -27,6 +27,7 @@ def _clean_env(monkeypatch):
         "DO_SPACES_KEY",
         "DO_SPACES_SECRET",
         "SAU_DEFAULT_RCLONE_REMOTE",
+        "SAU_VERIFY_MEDIA_URL",
     ):
         monkeypatch.delenv(key, raising=False)
     yield
@@ -198,6 +199,74 @@ def test_is_any_backend_configured(monkeypatch):
     monkeypatch.setenv("DO_SPACES_SECRET", "s")
     assert media_remote_storage.is_any_backend_configured() is True
     assert "do_spaces" in media_remote_storage.configured_backends()
+
+
+def test_is_direct_file_url_accepts_cdn_and_rejects_viewers():
+    assert media_remote_storage.is_direct_file_url("https://cdn.example/videos/clip.mp4") is True
+    assert media_remote_storage.is_direct_file_url("https://share.example/d/abc") is True
+    assert media_remote_storage.is_direct_file_url("http://127.0.0.1:5409/getFile?filename=x.mp4") is False
+    assert media_remote_storage.is_direct_file_url("https://drive.google.com/file/d/abc/view") is False
+    assert media_remote_storage.is_direct_file_url("https://localhost/x.mp4") is False
+
+
+class _HeadSession:
+    def __init__(self, response):
+        self._response = response
+        self.calls = []
+
+    def head(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        if isinstance(self._response, Exception):
+            raise self._response
+        return self._response
+
+
+class _HeadResponse:
+    def __init__(self, status_code=200, content_type="video/mp4"):
+        self.status_code = status_code
+        self.headers = {"Content-Type": content_type}
+
+
+def test_verify_media_url_rejects_html_and_errors():
+    assert media_remote_storage.verify_media_url(
+        "https://x/y.mp4", session=_HeadSession(_HeadResponse(content_type="video/mp4"))
+    ) is True
+    assert media_remote_storage.verify_media_url(
+        "https://x/y", session=_HeadSession(_HeadResponse(content_type="text/html; charset=utf-8"))
+    ) is False
+    assert media_remote_storage.verify_media_url(
+        "https://x/y", session=_HeadSession(_HeadResponse(status_code=404))
+    ) is False
+    assert media_remote_storage.verify_media_url(
+        "https://x/y", session=_HeadSession(_HeadResponse(status_code=405))
+    ) is True
+    assert media_remote_storage.verify_media_url(
+        "https://x/y", session=_HeadSession(ConnectionError("dns"))
+    ) is True
+
+
+def test_dispatch_verification_flag_rejects_page_urls(monkeypatch, media_file):
+    monkeypatch.setenv("SAU_STORAGE_BACKENDS", "do_spaces")
+    monkeypatch.setenv("DO_SPACES_BUCKET", "b")
+    monkeypatch.setenv("DO_SPACES_KEY", "k")
+    monkeypatch.setenv("DO_SPACES_SECRET", "s")
+    monkeypatch.setenv("SAU_VERIFY_MEDIA_URL", "1")
+    _fake_spaces_client(monkeypatch, url_prefix="https://drive.google.com/file/d/")
+
+    with pytest.raises(media_remote_storage.RemoteStorageError):
+        media_remote_storage.upload_artifact(media_file, campaign_id=1)
+
+
+def test_dispatch_page_url_allowed_when_verification_off(monkeypatch, media_file):
+    """The stricter check is opt-in; existing behaviour must not change."""
+    monkeypatch.setenv("SAU_STORAGE_BACKENDS", "do_spaces")
+    monkeypatch.setenv("DO_SPACES_BUCKET", "b")
+    monkeypatch.setenv("DO_SPACES_KEY", "k")
+    monkeypatch.setenv("DO_SPACES_SECRET", "s")
+    _fake_spaces_client(monkeypatch, url_prefix="https://share.example/d")
+
+    out = media_remote_storage.upload_artifact(media_file, campaign_id=1)
+    assert out.public_url == "https://share.example/d/campaigns/1/demo.mp4"
 
 
 def test_download_from_backend_dispatches_rclone_rows(monkeypatch, tmp_path):

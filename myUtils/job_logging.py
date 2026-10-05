@@ -56,7 +56,7 @@ def _record_filter_for_job(job_id: int):
 def _format_text(record) -> str:
     extra = record["extra"]
     parts = []
-    for key in ("job_id", "target_id", "platform", "account_ref", "attempt"):
+    for key in ("job_id", "target_id", "platform", "account_ref", "account_name", "attempt"):
         value = extra.get(key)
         if value is not None:
             parts.append(f"{key}={value}")
@@ -76,7 +76,7 @@ def _format_json(record) -> str:
         "msg": record["message"],
     }
     extra = record["extra"]
-    for key in ("job_id", "target_id", "platform", "account_ref", "attempt",
+    for key in ("job_id", "target_id", "platform", "account_ref", "account_name", "attempt",
                 "business_name"):
         value = extra.get(key)
         if value is not None:
@@ -157,6 +157,7 @@ def bind_job_logger(
     target_id: int | None = None,
     platform: str | None = None,
     account_ref: str | None = None,
+    account_name: str | None = None,
     attempt: int | None = None,
 ):
     """Return a Loguru-style logger bound with correlation fields.
@@ -176,6 +177,8 @@ def bind_job_logger(
         extras["platform"] = platform
     if account_ref is not None:
         extras["account_ref"] = account_ref
+    if account_name is not None:
+        extras["account_name"] = account_name
     if attempt is not None:
         extras["attempt"] = attempt
     return worker_logger.bind(**extras)

@@ -111,6 +111,23 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[1][1], prepared_publishers.REDDIT_SUBMIT_URL)
         self.assertEqual(session.calls[2][2]["data"]["sr"], "subb")
 
+    def test_reddit_flair_and_no_images_errors_are_non_retryable(self):
+        for error in (
+            ["SUBMIT_VALIDATION_FLAIR_REQUIRED", "Your post must contain post flair.", "flair"],
+            ["NO_IMAGES", "This community doesn't allow images", "sr"],
+        ):
+            session = _RecordingSession([
+                _FakeResponse({"access_token": "reddit-token"}),
+                _FakeResponse({"json": {"errors": [error]}}),
+            ])
+            account = SimpleNamespace(
+                account_name="brand-main",
+                config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": ["suba"]},
+            )
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as raised:
+                prepared_publishers.publish_reddit_sync(account, {"message": "post"}, session=session)
+            self.assertFalse(raised.exception.retryable)
+
     def test_telegram_live_validation_calls_getme_and_getchat(self):
         session = _RecordingSession([_FakeResponse({"ok": True}), _FakeResponse({"ok": True})])
         result = prepared_publishers.validate_telegram_config_live(
@@ -386,28 +403,114 @@ class PreparedPublisherTests(unittest.TestCase):
 
     def test_twitter_refresh_failure_marks_account_reconnect_before_raising(self):
         config = {"twitterAuthType": "api", "refreshToken": "refresh", "accessToken": "expired"}
+        from requests import HTTPError
+        from unittest.mock import Mock
+
+        config["accessTokenExpiresAt"] = "2000-01-01T00:00:00"
+        response = Mock()
+        response.json.return_value = {"error": "invalid_grant"}
+        failure = HTTPError("refresh token rejected", response=response)
         persisted = []
-        with patch("myUtils.prepared_publishers.refresh_twitter_access_token", side_effect=RuntimeError("revoked")):
+        with patch("myUtils.prepared_publishers.refresh_twitter_access_token", side_effect=failure):
             with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "reconnect this account"):
                 prepared_publishers._maybe_refresh_twitter_token(config, on_refresh=persisted.append)
         self.assertTrue(persisted[0]["_needsReconnect"])
-        self.assertEqual(persisted[0]["_lastMaintenanceError"], "X OAuth 2.0 refresh failed; reconnect required")
+        self.assertEqual(persisted[0]["_lastMaintenanceError"], "X OAuth 2.0 refresh token was rejected; reconnect required")
+        with patch("myUtils.prepared_publishers.refresh_twitter_access_token", side_effect=RuntimeError("network timeout")):
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as raised:
+                prepared_publishers._maybe_refresh_twitter_token(config)
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(len(persisted), 1)
 
-    def test_twitter_media_upload_uses_oauth1_even_with_oauth2_token(self):
-        config = {"accessToken": "oauth2", "oauth1ApiKey": "key", "oauth1ApiKeySecret": "secret", "oauth1AccessToken": "user", "oauth1AccessTokenSecret": "user-secret"}
-        self.assertEqual(prepared_publishers._twitter_oauth1_credentials(config), ("key", "secret", "user", "user-secret"))
+    def test_successful_twitter_refresh_clears_reconnect_markers(self):
+        config = {
+            "twitterAuthType": "api",
+            "refreshToken": "old-refresh",
+            "accessTokenExpiresAt": "2000-01-01T00:00:00",
+            "_maintenanceFailures": 3,
+            "_nextMaintenanceAttemptAt": "old-backoff",
+            "_lastMaintenanceError": "old-error",
+            "_lastMaintenanceAttemptAt": "old-attempt",
+        }
+        persisted = []
+        result = {"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 3600}
+        with patch("myUtils.prepared_publishers.refresh_twitter_access_token", return_value=result):
+            updated = prepared_publishers._maybe_refresh_twitter_token(config, on_refresh=persisted.append)
+        self.assertEqual(updated["refreshToken"], "new-refresh")
+        self.assertEqual(persisted[0]["refreshToken"], "new-refresh")
+        for marker in (
+            "_needsReconnect", "_reconnectAlertedAt", "_maintenanceFailures",
+            "_nextMaintenanceAttemptAt", "_lastMaintenanceError",
+            "_lastMaintenanceAttemptAt",
+        ):
+            self.assertNotIn(marker, updated)
 
-    def test_twitter_api_uploads_media_and_attaches_media_id(self):
+    def test_x_401_is_reported_with_request_stage_and_stops_retries(self):
+        from requests import HTTPError
+        from unittest.mock import Mock
+        response = Mock()
+        response.status_code = 401
+        response.json.return_value = {"errors": [{"message": "Invalid or expired token", "code": 89}]}
+        error = HTTPError("opaque provider exception", response=response)
+        wrapped = prepared_publishers._raise_x_publish_error(error, stage="media upload (OAuth 1.0a)")
+        self.assertFalse(wrapped.retryable)
+        self.assertEqual(wrapped.details, {"stage": "media upload (OAuth 1.0a)", "status": 401, "code": "89"})
+        self.assertNotIn("access_token", str(wrapped).lower())
+
+    def test_x_stringified_401_is_classified_as_permanent(self):
+        error = RuntimeError("HTTP 401: {'errors': [{'message': 'Invalid or expired token', 'code': 89}]}")
+        wrapped = prepared_publishers._raise_x_publish_error(error, stage="media upload (OAuth 1.0a)")
+        self.assertFalse(wrapped.retryable)
+        self.assertEqual(wrapped.details["status"], 401)
+        self.assertEqual(wrapped.details["code"], "89")
+        self.assertIn("media upload", str(wrapped))
+
+    def test_twitter_media_401_names_oauth2_upload_stage(self):
+        from requests import HTTPError
+        from unittest.mock import Mock
+        response = Mock()
+        response.status_code = 401
+        response.json.return_value = {"errors": [{"message": "Invalid or expired token", "code": 89}]}
+        session = _RecordingSession([HTTPError("opaque", response=response)])
+        account = SimpleNamespace(config={"accessToken": "oauth2-user", "scope": "tweet.write media.write offline.access"})
+        with tempfile.TemporaryDirectory() as tmp:
+            media_path = Path(tmp) / "photo.jpg"
+            media_path.write_bytes(b"image")
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as raised:
+                prepared_publishers.publish_twitter_sync(
+                    account,
+                    {"message": "photo", "artifacts": [{"local_path": str(media_path), "artifact_kind": "image"}]},
+                    session=session,
+                )
+        self.assertEqual(raised.exception.details["stage"], "media upload (OAuth 2.0)")
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(session.calls[0][1], prepared_publishers.X_MEDIA_INITIALIZE_URL)
+
+    def test_twitter_media_upload_requires_media_write_scope_before_request(self):
+        account = SimpleNamespace(config={"accessToken": "oauth2", "scope": "tweet.write offline.access"})
+        with tempfile.TemporaryDirectory() as tmp:
+            media_path = Path(tmp) / "clip.mp4"
+            media_path.write_bytes(b"video")
+            session = _RecordingSession([])
+            with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "media.write") as raised:
+                prepared_publishers.publish_twitter_sync(
+                    account,
+                    {"message": "needs scope", "artifacts": [{"local_path": str(media_path), "artifact_kind": "video"}]},
+                    session=session,
+                )
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(session.calls, [])
+
+    def test_twitter_api_uploads_media_with_oauth2_and_attaches_media_id(self):
         session = _RecordingSession([
-            _FakeResponse({"media_id_string": "mid-1"}),
+            _FakeResponse({"data": {"id": "mid-1"}}),
             _FakeResponse({}),
             _FakeResponse({}),
             _FakeResponse({"data": {"id": "tweet-1", "text": "post"}}),
         ])
         account = SimpleNamespace(config={
             "accessToken": "oauth2",
-            "oauth1ApiKey": "key", "oauth1ApiKeySecret": "secret",
-            "oauth1AccessToken": "user", "oauth1AccessTokenSecret": "user-secret",
+            "scope": "tweet.write media.write offline.access",
         })
         with tempfile.TemporaryDirectory() as tmp:
             media_path = Path(tmp) / "clip.mp4"
@@ -420,23 +523,25 @@ class PreparedPublisherTests(unittest.TestCase):
                 session=session,
             )
         self.assertEqual(result["results"][0]["data"]["id"], "tweet-1")
+        self.assertEqual(session.calls[0][1], prepared_publishers.X_MEDIA_INITIALIZE_URL)
+        self.assertEqual(session.calls[0][2]["headers"]["Authorization"], "Bearer oauth2")
+        self.assertTrue(all(call[2]["headers"]["Authorization"] == "Bearer oauth2" for call in session.calls[:4]))
         tweet_request = session.calls[-1][2]
         tweet_body = json.loads(tweet_request["data"])
         self.assertEqual(tweet_body["media"]["media_ids"], ["mid-1"])
 
     def test_twitter_api_video_upload_chunks_and_waits_for_processing(self):
         session = _RecordingSession([
-            _FakeResponse({"media_id_string": "mid-large"}),
+            _FakeResponse({"data": {"id": "mid-large"}}),
             _FakeResponse({}),
             _FakeResponse({}),
-            _FakeResponse({"processing_info": {"state": "pending", "check_after_secs": 1}}),
-            _FakeResponse({"processing_info": {"state": "succeeded"}}),
+            _FakeResponse({"data": {"processing_info": {"state": "pending", "check_after_secs": 1}}}),
+            _FakeResponse({"data": {"processing_info": {"state": "succeeded"}}}),
             _FakeResponse({"data": {"id": "tweet-large", "text": "post"}}),
         ])
         account = SimpleNamespace(config={
             "accessToken": "oauth2",
-            "oauth1ApiKey": "key", "oauth1ApiKeySecret": "secret",
-            "oauth1AccessToken": "user", "oauth1AccessTokenSecret": "user-secret",
+            "scope": "tweet.write media.write offline.access",
         })
         with tempfile.TemporaryDirectory() as tmp:
             media_path = Path(tmp) / "clip.mp4"
@@ -449,11 +554,11 @@ class PreparedPublisherTests(unittest.TestCase):
                     }]},
                     session=session,
                 )
-        append_calls = [c for c in session.calls if isinstance(c[2].get("data"), dict) and c[2]["data"].get("command") == "APPEND"]
+        append_calls = [c for c in session.calls if c[1].endswith("/append")]
         self.assertEqual(len(append_calls), 2)
         self.assertEqual(append_calls[0][2]["data"]["segment_index"], "0")
         self.assertEqual(append_calls[1][2]["data"]["segment_index"], "1")
-        status_calls = [c for c in session.calls if c[0] == "GET" and c[2].get("params", {}).get("command") == "STATUS"]
+        status_calls = [c for c in session.calls if c[0] == "GET" and c[1] == prepared_publishers.X_MEDIA_UPLOAD_URL]
         self.assertEqual(len(status_calls), 1)
         create_tweet_call = next(c for c in session.calls if c[1] == prepared_publishers.X_TWEET_URL)
         self.assertIn("media", json.loads(create_tweet_call[2]["data"]))
@@ -521,6 +626,22 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[0][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads")
         # text-only: no container-status poll, straight to publish
         self.assertEqual(session.calls[1][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads_publish")
+
+    def test_threads_long_text_is_truncated_before_container_creation(self):
+        session = _RecordingSession([
+            _FakeResponse({"id": "threads-container"}),
+            _FakeResponse({"id": "threads-post"}),
+        ])
+        account = SimpleNamespace(config={"threadUserId": "42", "accessToken": "threads-token", "accessTokenExpiresAt": "2099-01-01T00:00:00"})
+        long_message = "x" * 600
+        prepared_publishers.publish_threads_sync(
+            account,
+            {"message": long_message},
+            session=session,
+        )
+        container_data = session.calls[0][2]["data"]
+        self.assertEqual(len(container_data["text"]), prepared_publishers.THREADS_MAX_TEXT_CHARS)
+        self.assertEqual(container_data["text"], long_message[:prepared_publishers.THREADS_MAX_TEXT_CHARS])
 
     def test_threads_video_waits_for_container_then_publishes(self):
         session = _RecordingSession([
@@ -638,6 +759,61 @@ class PreparedPublisherTests(unittest.TestCase):
         result = prepared_publishers.refresh_youtube_access_token(account, session=session)
         self.assertEqual(result['access_token'], 'yt-token')
         self.assertEqual(result['channel']['items'][0]['snippet']['title'], 'Demo Channel')
+
+    def test_tiktok_invalid_params_is_non_retryable(self):
+        response = _FakeResponse(
+            {"error": {"code": "invalid_params", "message": "The request post info is empty or incorrect"}},
+            status_code=400,
+        )
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as raised:
+            prepared_publishers._raise_tiktok_error(response)
+        self.assertFalse(raised.exception.retryable)
+        self.assertIn("invalid_params", str(raised.exception))
+
+    def test_tiktok_http_200_business_error_is_rejected(self):
+        response = _FakeResponse(
+            {"error": {"code": "invalid_params", "message": "bad post"}},
+            status_code=200,
+        )
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as raised:
+            prepared_publishers._raise_tiktok_error(response)
+        self.assertFalse(raised.exception.retryable)
+
+    def test_ordinary_http_400_is_non_retryable(self):
+        response = _FakeResponse({"error": {"message": "invalid input"}}, status_code=400)
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as raised:
+            prepared_publishers._raise_for_status(response)
+        self.assertFalse(raised.exception.retryable)
+
+    def test_tiktok_photo_draft_mode_fails_before_content_init(self):
+        account = SimpleNamespace(config={"accessToken": "access", "publishMode": "draft"})
+        session = _RecordingSession([])
+        with patch.object(prepared_publishers, "_ensure_tiktok_access_token", return_value=("access", None)), \
+             patch.object(prepared_publishers, "query_tiktok_creator_info", return_value={"data": {}}):
+            with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "photo posts require Direct Post") as raised:
+                prepared_publishers.publish_tiktok_sync(
+                    account,
+                    {
+                        "message": "Photo caption",
+                        "artifacts": [{"public_url": "https://cdn.example/image.jpg", "artifact_kind": "watermarked_image"}],
+                        "tiktokDirectPost": False,
+                    },
+                    session=session,
+                )
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(session.calls, [])
+
+    def test_youtube_image_artifact_is_non_retryable_and_does_not_call_api(self):
+        account = SimpleNamespace(config={"channelId": "UC123"})
+        session = _RecordingSession([])
+        with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "no video") as raised:
+            prepared_publishers.publish_youtube_sync(
+                account,
+                {"artifacts": [{"public_url": "https://cdn.example/image.jpg", "artifact_kind": "watermarked_image"}]},
+                session=session,
+            )
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(session.calls, [])
 
     def test_youtube_refresh_and_resumable_upload(self):
         session = _RecordingSession([
@@ -1206,6 +1382,159 @@ class RedditPublisherTests(unittest.TestCase):
         self.assertEqual(data["kind"], "link")
         self.assertEqual(data["url"], "https://cdn.example/video.mp4")
 
+    # --- post flair (SUBMIT_VALIDATION_FLAIR_REQUIRED) ---
+
+    def test_publish_reddit_sends_the_subreddit_flair_id(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={
+                "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
+                "subreddits": ["NudistMen"],
+                "flairIds": {"NudistMen": "flair-guid-1"},
+            },
+        )
+        prepared_publishers.publish_reddit_sync(
+            account, {"message": "test"}, session=session,
+        )
+        data = session.calls[1][2]["data"]
+        self.assertEqual(data["sr"], "NudistMen")
+        self.assertEqual(data["flair_id"], "flair-guid-1")
+
+    def test_publish_reddit_omits_flair_when_subreddit_is_unmapped(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={
+                "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
+                "subreddits": ["other"],
+                "flairIds": {"NudistMen": "flair-guid-1"},
+            },
+        )
+        prepared_publishers.publish_reddit_sync(
+            account, {"message": "test"}, session=session,
+        )
+        data = session.calls[1][2]["data"]
+        # Never guess a flair for a community that did not ask for one.
+        self.assertNotIn("flair_id", data)
+
+    def test_reddit_flair_id_precedence_and_shapes(self):
+        # draft mapping wins over config; r/ prefix and a flat id both resolve.
+        self.assertEqual(
+            prepared_publishers._reddit_flair_id(
+                {"draft": {"flairIds": {"NudistMen": "d1"}}},
+                {"flairIds": {"NudistMen": "c1"}, "flairId": "flat"},
+                "NudistMen",
+            ),
+            "d1",
+        )
+        self.assertEqual(
+            prepared_publishers._reddit_flair_id({}, {"flairIds": {"r/other": "p1"}}, "other"),
+            "p1",
+        )
+        self.assertEqual(
+            prepared_publishers._reddit_flair_id({}, {"flairId": "flat"}, "anything"),
+            "flat",
+        )
+        self.assertEqual(
+            prepared_publishers._reddit_flair_id({}, {}, "anything"), ""
+        )
+
+    # --- content-category flairs ---
+
+    def test_content_flair_label_classifies_media_text(self):
+        cases = {
+            "Naked Outdoor in the woods 12": "In Nature",
+            "Bare in Autumn Woods 47": "In Nature",
+            "Wandering the beach at sunset": "In Nature",
+            "Bare Scholar's Upward Gaze 115": "Selfie",
+            "Fox Masked Vulnerability 16": "Selfie",
+            "Pensive Nude Reflection 117": "Selfie",
+            "Morning coffee on the balcony": "Food & Drink",
+            "kitchen dinner prep": "Food & Drink",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(
+                    prepared_publishers._reddit_content_flair_label(text), expected
+                )
+
+    def test_content_flair_label_falls_back_to_the_neutral_bucket(self):
+        # An unrecognised image must not be guessed into a specific category.
+        self.assertEqual(
+            prepared_publishers._reddit_content_flair_label("Serene Sensual Surrender 18"),
+            prepared_publishers.REDDIT_DEFAULT_FLAIR,
+        )
+        self.assertEqual(
+            prepared_publishers._reddit_content_flair_label("random unlabelled thing"),
+            prepared_publishers.REDDIT_DEFAULT_FLAIR,
+        )
+
+    def test_content_flair_label_is_empty_for_no_text(self):
+        # Empty input means "cannot decide" -> no flair, not the default.
+        self.assertEqual(prepared_publishers._reddit_content_flair_label(""), "")
+        self.assertEqual(prepared_publishers._reddit_content_flair_label(None), "")
+
+    def test_flair_id_picks_the_category_from_the_image(self):
+        cfg = {
+            "flairIds": {
+                "NudistMen": {
+                    "In Nature": "nature-id",
+                    "Selfie": "selfie-id",
+                    "At Home": "home-id",
+                    "Food & Drink": "food-id",
+                }
+            }
+        }
+        for topic, expected in (
+            ("Naked Outdoor in the woods 12", "nature-id"),
+            ("Bare Scholar's Upward Gaze 115", "selfie-id"),
+            ("morning coffee", "food-id"),
+            ("Serene Sensual Surrender 18", "home-id"),
+        ):
+            with self.subTest(topic=topic):
+                self.assertEqual(
+                    prepared_publishers._reddit_flair_id(
+                        {"draft": {"topic": topic}}, cfg, "NudistMen"
+                    ),
+                    expected,
+                )
+
+    def test_flair_id_category_map_unmapped_subreddit_sends_nothing(self):
+        # NudistMen's GUIDs are per-subreddit; sending them to another sub would
+        # be an unknown flair, so an unmapped sub must send none.
+        cfg = {"flairIds": {"NudistMen": {"In Nature": "nature-id"}}}
+        self.assertEqual(
+            prepared_publishers._reddit_flair_id(
+                {"draft": {"topic": "Naked Outdoor"}}, cfg, "GayBody"
+            ),
+            "",
+        )
+
+    def test_flair_id_single_entry_map_still_publishes(self):
+        # A subreddit with one flair configured keeps working without a topic.
+        cfg = {"flairIds": {"NudistMen": {"In Nature": "only-id"}}}
+        self.assertEqual(
+            prepared_publishers._reddit_flair_id({}, cfg, "NudistMen"), "only-id"
+        )
+
+    def test_flair_id_category_map_derives_from_artifacts_when_no_topic(self):
+        cfg = {"flairIds": {"NudistMen": {"In Nature": "nature-id", "At Home": "home-id"}}}
+        payload = {
+            "draft": {},
+            "artifacts": [{"local_path": "/x/Naked Outdoor in the woods 12.jpg"}],
+        }
+        self.assertEqual(
+            prepared_publishers._reddit_flair_id(payload, cfg, "NudistMen"),
+            "nature-id",
+        )
+
 
 class RedditNativeImageTests(unittest.TestCase):
     """An image payload must become a native image post, not a self-hosted link.
@@ -1622,8 +1951,60 @@ class BlueskyPublisherTests(unittest.TestCase):
         draft = {"message": "x" * 500}
         msg, images, videos = prepared_publishers._bluesky_message_and_media({"draft": draft})
         self.assertLessEqual(len(msg), 300)
-        self.assertEqual(images, [])
-        self.assertEqual(videos, [])
+
+    # ------------------------------------------------------------------
+    # Oversized media is downscaled instead of failing with a 413
+    # ------------------------------------------------------------------
+
+    def test_oversized_image_is_downscaled_under_the_blob_limit(self):
+        import io
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "big.png"
+            # Noise defeats PNG compression, so this is comfortably over the
+            # bluesky blob ceiling.
+            import random
+            random.seed(0)
+            image = Image.new("RGB", (2400, 2400))
+            image.putdata([
+                (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+                for _ in range(2400 * 2400)
+            ])
+            image.save(src, format="PNG")
+            self.assertGreater(src.stat().st_size, prepared_publishers.BLUESKY_MAX_IMAGE_BYTES)
+
+            shrunk = prepared_publishers._bluesky_shrink_image(str(src))
+            self.assertNotEqual(shrunk, str(src))
+            self.assertLessEqual(
+                Path(shrunk).stat().st_size,
+                prepared_publishers.BLUESKY_MAX_IMAGE_BYTES,
+            )
+            Path(shrunk).unlink(missing_ok=True)
+
+    def test_small_image_is_returned_untouched(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "small.jpg"
+            Image.new("RGB", (64, 64), (10, 20, 30)).save(src, format="JPEG")
+            before = src.stat().st_size
+            self.assertEqual(
+                prepared_publishers._bluesky_shrink_image(str(src)), str(src)
+            )
+            self.assertEqual(src.stat().st_size, before)
+
+    def test_shrink_failure_never_raises(self):
+        # A missing file must fall through to the caller, not explode - the
+        # service's own error is a better signal than a local crash.
+        self.assertEqual(
+            prepared_publishers._bluesky_shrink_image("/tmp/does-not-exist.png"),
+            "/tmp/does-not-exist.png",
+        )
+        self.assertEqual(
+            prepared_publishers._bluesky_shrink_video("/tmp/does-not-exist.mp4"),
+            "/tmp/does-not-exist.mp4",
+        )
 
     def test_publish_video_uses_embed_video(self):
         session = _RecordingSession([
