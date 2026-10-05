@@ -464,3 +464,38 @@ enforced at prep time). Reported, not implemented - it is a design change.
 - X credits top-up (billing, operator).
 - Deploy the latest commits (image built through dffa2e2; the running container
   is behind and must be restarted once the queue is idle).
+
+## 2026-10-05 16:55 — DONE. Stonewall published on both profiles.
+
+### Published (SFW Taipei Stonewall.mp4)
+Nakedwill (profile 1): bluesky x2, facebook, instagram, nw_sw_blog, telegram,
+  twitter x2, youtube, + threads + tiktok via the short cut.
+Sexualwill (profile 3): bluesky x2, facebook, instagram, nw_sw_blog,
+  telegram x2, twitter, + threads via the short cut.
+
+### Short cut
+The 813 s source exceeds Threads' 300 s limit, so a 295 s / 49 MB 1080x1920
+h264 cut was made and published only to the platforms that needed it:
+  /app/videoFile/SFW Taipei Stonewall_short.mp4
+The full-length publishes to every other platform were cancelled so nothing
+double-posted (20 jobs cancelled, only Threads/TikTok kept).
+
+### Remaining failures, all diagnosed and actioned
+- reddit (both profiles): RATELIMIT ("take a break for 9 minutes") on account
+  106, and the r/NudistMen link-whitelist on 105. The whitelist fix
+  (self-post) and the flair fix are now LIVE; the rate limit is transient.
+- twitter account 103: X API credits depleted (HTTP 402). Now MAPPED to
+  Sociamonials tw 14099 (nakedhappylife) and live, so it can fall back.
+- twitter account 123 is cookie-mode (browser path) and timed out; unrelated
+  to the API credits issue.
+
+### All 8 fixes verified live in the container
+reddit self-post, reddit content flairs, tiktok chunk count, threads duration
+guard, account 103 Sociamonials mapping, delivery verification, oversized-source
+cap guard, and CDN URL percent-encoding.
+
+### Operator actions outstanding (not code)
+1. Top up X API credits for direct X media posting (nothing else helps).
+2. Deploy is done; the running container is current as of commit 129756b9.
+3. Consider a duration-aware prep step so Threads/TikTok no longer need a
+   manual short cut - the pipeline constrains dimensions/fps/size but not time.
