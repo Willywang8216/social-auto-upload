@@ -97,6 +97,61 @@ def normalize_draft_fields(draft: dict) -> dict:
 DEFAULT_EMOJI = "✨"
 DEFAULT_HASHTAG_FILLERS = ["#socialmedia", "#content", "#campaign"]
 
+# Copy that is clearly a machine placeholder rather than real caption text:
+# the publish-center media-group name, the batch importer's generic brief, a
+# bare media filename, or a screenshot label. Publishing these is what put
+# "✨ publish-center-20260921-015359" on a live account.
+_GENERIC_COPY_RE = re.compile(
+    r"publish-center-\d{8}-\d{6}|adult,\s*honest,\s*18\+\s*only|"
+    r"^(?:截圖|screenshot)\s*\d*$",
+    re.IGNORECASE,
+)
+_MEDIA_FILENAME_RE = re.compile(
+    r"^[\w\-. ()]+\.(?:mp4|mov|webm|m4v|jpg|jpeg|png|gif|webp|bmp)$",
+    re.IGNORECASE,
+)
+
+
+def is_usable_copy(text: str | None, *, min_chars: int = 1) -> bool:
+    """True when ``text`` is real caption copy, not a placeholder.
+
+    Used both by the generation fallback and by the pre-publish guard so a
+    media-group name, the generic batch brief, a bare filename or a screenshot
+    label can never reach a platform.
+    """
+    value = str(text or "").strip()
+    if len(value) < min_chars:
+        return False
+    if _GENERIC_COPY_RE.search(value):
+        return False
+    if _MEDIA_FILENAME_RE.match(value):
+        return False
+    return True
+
+
+_CJK_RE = re.compile(r"[\u3400-\u9fff]")
+
+
+def language_tokens(value: str | None) -> list[str]:
+    """Split an account language setting like ``"en,zh-Hant"`` into tokens."""
+    return [tok.strip().lower() for tok in re.split(r"[,+\s]+", value or "") if tok.strip()]
+
+
+def message_matches_language(message: str | None, language: str | None) -> bool:
+    """Heuristic guard that a caption is written in the account's language.
+
+    Chinese-family targets must contain CJK; every other target must not. A
+    bilingual (en + zh) account is satisfied by either script present because
+    the generator emits both; this only catches the gross mismatch the operator
+    saw (Mandarin copy on an English account and vice versa).
+    """
+    tokens = language_tokens(language)
+    if not tokens:
+        return True
+    wants_zh = any(tok.startswith("zh") for tok in tokens)
+    has_cjk = bool(_CJK_RE.search(str(message or "")))
+    return has_cjk if wants_zh else not has_cjk
+
 SHEET_MESSAGE_MAX_CHARS = {
     "facebook": 63206,
     "instagram": 2200,

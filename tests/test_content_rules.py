@@ -130,5 +130,32 @@ class NormalizeDraftFieldsTests(unittest.TestCase):
         self.assertEqual(draft["title"], "Taipei Stonewall")
 
 
+class UsableCopyTests(unittest.TestCase):
+    def test_rejects_placeholders_and_labels(self) -> None:
+        self.assertFalse(content_rules.is_usable_copy("✨ publish-center-20260921-015359"))
+        self.assertFalse(content_rules.is_usable_copy("20260820101216997 — adult, honest, 18+ only."))
+        self.assertFalse(content_rules.is_usable_copy("clip_pub.mp4"))
+        self.assertFalse(content_rules.is_usable_copy("截圖12"))
+        self.assertFalse(content_rules.is_usable_copy(""))
+
+    def test_accepts_real_copy(self) -> None:
+        self.assertTrue(content_rules.is_usable_copy("A quiet morning in the forest."))
+        self.assertTrue(content_rules.is_usable_copy("泥土沾在背上，下巴抬得高高的。"))
+
+
+class MessageLanguageTests(unittest.TestCase):
+    def test_chinese_account_requires_cjk(self) -> None:
+        self.assertTrue(content_rules.message_matches_language("早安，今天也很好", "zh"))
+        self.assertFalse(content_rules.message_matches_language("Good morning", "zh-Hant"))
+
+    def test_english_account_forbids_cjk(self) -> None:
+        self.assertTrue(content_rules.message_matches_language("Good morning", "en"))
+        self.assertFalse(content_rules.message_matches_language("早安", "en"))
+
+    def test_empty_language_allows_anything(self) -> None:
+        self.assertTrue(content_rules.message_matches_language("早安", ""))
+        self.assertTrue(content_rules.message_matches_language("hello", None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3896,13 +3896,24 @@ def _fallback_generated_draft(
             "Account-language content generation requires an available LLM; "
             "refusing to publish source-language fallback copy"
         )
-    headline = str(request_data.get("title") or media_group.name).strip()
-    notes = str(request_data.get("notes", "") or "").strip()
+    # Order by how likely the source is to be real copy. The media-group name
+    # and the batch importer's brief are deliberately NOT candidates: they are
+    # labels, not captions, and publishing them is a visible defect.
     transcript = str(media_context.get("transcriptText", "") or "").strip()
-    snippets = [part for part in (headline, notes, transcript[:500]) if part]
-    message = "\n\n".join(snippets).strip() or media_group.name
+    notes = str(request_data.get("notes", "") or "").strip()
+    title = str(request_data.get("title", "") or "").strip()
+    message = ""
+    for candidate in (transcript, notes, title):
+        if content_rules.is_usable_copy(candidate):
+            message = candidate
+            break
+    if not message:
+        raise RuntimeError(
+            "Cannot generate copy: the LLM is unavailable and there is no "
+            "usable transcript, notes or title to fall back to"
+        )
     return {
-        "message": message,
+        "message": message[:1000],
         "hashtags": request_data.get("hashtags") or [],
         "firstComment": str(request_data.get("firstComment", "") or "").strip(),
     }
@@ -3933,6 +3944,11 @@ def _build_generation_prompt(
         f"Contact details: {request_data.get('contactDetails', '')}",
         f"CTA: {request_data.get('cta', '')}",
     ]
+    if media_context.get("imageLocalPaths"):
+        user_lines.append(
+            "Attached image(s): describe what is actually visible (pose, setting, "
+            "mood) in the copy; do not invent details that are not in the frame."
+        )
     account_context = str(request_data.get("_accountContext") or "").strip()
     if account_context:
         user_lines.append("")
@@ -4011,6 +4027,17 @@ def _generate_platform_draft(
                 kwargs["api_key"] = ai_config["api_key"]
             if ai_config["model"]:
                 kwargs["model"] = ai_config["model"]
+            # Send the actual image(s) so the copy describes what is shown
+            # rather than inventing from the filename. Text-only models that
+            # reject the image parts fall through to the except below and the
+            # copy still generates from the transcript/notes.
+            vision_paths = [
+                str(path)
+                for path in (media_context.get("imageLocalPaths") or [])[:4]
+                if path and Path(str(path)).is_file()
+            ]
+            if vision_paths:
+                kwargs["images"] = vision_paths
             result = llm_client.generate_chat_completion(system_prompt, user_prompt, **kwargs)
             raw_draft = (
                 result.parsed_json
@@ -4027,13 +4054,27 @@ def _generate_platform_draft(
     if not isinstance(raw_draft, dict):
         raw_draft = _fallback_generated_draft(platform, media_group, request_data, media_context)
 
-    return content_rules.prepare_platform_draft(
+    prepared = content_rules.prepare_platform_draft(
         platform,
         raw_draft,
         contact_details=str(request_data.get("contactDetails", "") or "").strip(),
         cta=str(request_data.get("cta", "") or "").strip(),
         default_hashtags=request_data.get("hashtags") or [],
     )
+    message = str(prepared.get("message") or "")
+    if not content_rules.is_usable_copy(message):
+        raise RuntimeError(
+            "Generated copy looks like a placeholder (media-group name, filename "
+            "or generic brief); refusing to queue it"
+        )
+    if account_language and not content_rules.message_matches_language(
+        message, account_language
+    ):
+        raise RuntimeError(
+            f"Generated copy does not match the account language "
+            f"'{account_language}'; refusing to queue it"
+        )
+    return prepared
 
 
 def _account_audience_language(account, profile) -> str:

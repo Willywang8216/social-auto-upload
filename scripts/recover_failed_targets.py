@@ -57,7 +57,8 @@ PERMANENT_ERROR_PATTERNS = re.compile(
     r"no_enabled_accounts|nsfw_no_adult_safe_account|restrict(ed|ion)|"
     r"not allowed|permission denied|forbidden|invalid_grant|"
     r"requires reconnection|reconnect|media\.write|"
-    r"requires a local video|no images|SUBMIT_VALIDATION_LINK_WHITELIST",
+    r"requires a local video|no images|SUBMIT_VALIDATION_LINK_WHITELIST|"
+    r"\[content-guard\]",
     re.IGNORECASE,
 )
 

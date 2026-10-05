@@ -270,6 +270,36 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
             asyncio.run(worker.drain())
         self.assertEqual(executor_calls["n"], 1)
 
+    def test_placeholder_copy_is_refused_before_any_publish(self) -> None:
+        job = jobs.enqueue_job(
+            jobs.JobSpec(
+                platform="bluesky",
+                payload={"draft": {"message": "✨ publish-center-20260921-015359"}},
+                targets=[(f"account:{self.account_id}", "campaign_post:1", None)],
+                profile_id=self.profile_id,
+                idempotency_key="placeholder-guard",
+            ),
+            db_path=self.db_path,
+        )
+        self._job_id = job.id
+
+        async def executor(platform, payload, target):
+            raise AssertionError("the content guard must refuse before publishing")
+
+        config = WorkerConfig(
+            poll_interval=0.001, batch_size=4, max_concurrent=1,
+            retry=RetryPolicy(max_attempts=1, base_backoff_seconds=0.001, max_backoff_seconds=0.01),
+        )
+        worker = PublishWorker(executor, config=config, db_path=self.db_path)
+        with patch.object(
+            sociamonials_fallback, "publish_via_sociamonials"
+        ) as patched:
+            asyncio.run(worker.drain())
+        patched.assert_not_called()
+        self.assertEqual(self._status(), jobs.TARGET_FAILED)
+        targets = jobs.list_targets(self._job_id, db_path=self.db_path)
+        self.assertIn("[content-guard]", targets[0].last_error or "")
+
     def test_refresh_failure_does_not_clobber_a_rotated_token(self) -> None:
         """The failure handler must merge into the latest row, not the snapshot.
 

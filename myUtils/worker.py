@@ -36,6 +36,7 @@ from myUtils import media_remote_storage
 from myUtils import media_pipeline
 from myUtils import profiles as profile_registry
 from myUtils import prepared_publishers
+from myUtils import content_rules
 from myUtils import sociamonials_fallback
 from myUtils.job_logging import (
     bind_job_logger,
@@ -86,6 +87,37 @@ def _x_direct_publish_enabled() -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return not sociamonials_fallback.is_enabled()
+
+
+def _content_guard_error(payload: dict, target: "jobs.Target", db_path: Path) -> str | None:
+    """Return a reason to refuse publishing this target, or ``None``.
+
+    Last-resort guard so a placeholder caption or a caption in the wrong
+    language never reaches a platform, no matter which publisher path runs.
+    """
+    draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else {}
+    if not draft and "message" not in payload:
+        # Not a copy-bearing publish (legacy upload payload or a bare job);
+        # nothing to validate here.
+        return None
+    message = str(draft.get("message") or payload.get("message") or "").strip()
+    if not message:
+        return "empty message"
+    if not content_rules.is_usable_copy(message):
+        return "placeholder/generic copy"
+    language = ""
+    try:
+        account = _resolve_structured_account(target.account_ref, db_path=db_path)
+    except Exception:  # noqa: BLE001 - a missing account is not a content problem
+        account = None
+    if account is not None:
+        config = getattr(account, "config", None) or {}
+        language = str(
+            config.get("audience_language") or config.get("audienceLanguage") or ""
+        ).strip()
+    if language and not content_rules.message_matches_language(message, language):
+        return f"copy does not match account language '{language}'"
+    return None
 
 
 def _scrub_secrets(text: str) -> str:
@@ -716,6 +748,14 @@ class PublishWorker:
                     "_db_path": str(self._db_path),
                     "_telegramDeliveryKey": str(target.id),
                 }
+                guard_error = _content_guard_error(payload, target, self._db_path)
+                if guard_error:
+                    reason = f"[content-guard] {guard_error}"
+                    log.error(f"refusing to publish: {reason}")
+                    if jobs.mark_target_failed(target.id, reason, db_path=self._db_path):
+                        self._alert_publish_failure(target, reason)
+                    self._maybe_close_job_sink(target.job_id)
+                    return
                 if job.platform == "twitter" and not _x_direct_publish_enabled():
                     # X is carried by Sociamonials (its own OAuth connection),
                     # and the direct path is currently guaranteed to fail (out
@@ -934,6 +974,22 @@ class PublishWorker:
                 ).settings
         except Exception:  # noqa: BLE001 — settings are optional
             profile_settings = None
+
+        # Restore any offloaded artifacts before handing them to the fallback.
+        # The direct path normally does this in ``default_executor``, but the
+        # X-skip shortcut in ``_run_target`` never runs the executor, and a
+        # target whose direct path failed may have had only a partial restore.
+        # Without this the fallback dies with "local media missing" even though
+        # the bytes are one rclone call away.
+        try:
+            await asyncio.to_thread(
+                _ensure_artifact_paths_local, payload, db_path=self._db_path
+            )
+        except Exception as exc:  # noqa: BLE001 — a restore miss is not a crash
+            log.info(
+                "sociamonials fallback media restore failed: "
+                f"{_scrub_secrets(str(exc))}"
+            )
 
         media_paths = _fallback_media_paths(payload)
 

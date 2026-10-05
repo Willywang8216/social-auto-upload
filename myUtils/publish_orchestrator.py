@@ -429,12 +429,22 @@ def submit_publish(
                                 "reason": f"language-specific draft generation failed: {exc}",
                             })
                             continue
-                        draft = {
-                            "message": (brief or "").strip()[:280],
-                            "hashtags": [],
-                            "firstComment": "",
-                            "error": str(exc),
-                        }
+                        if content_rules.is_usable_copy(brief):
+                            draft = {
+                                "message": (brief or "").strip(),
+                                "hashtags": [],
+                                "firstComment": "",
+                                "error": str(exc),
+                            }
+                        else:
+                            # No real copy and no usable brief: skip rather than
+                            # publish the media-group name / generic batch brief.
+                            skipped.append({
+                                "profileId": profile_id,
+                                "accountId": account.id,
+                                "reason": f"draft generation failed and no usable brief: {exc}",
+                            })
+                            continue
 
                 if not link_in_first_comment or not supports_first_comment:
                     # If the platform does not support a first-comment
