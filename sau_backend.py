@@ -3371,8 +3371,15 @@ def _shrink_for_publish(
     cap among ``selected_platforms`` (Bluesky 300 MB, Instagram 250 MB, …), so a
     Bluesky-bound clip is shrunk while a YouTube-only one is not size-checked.
     Output lands in the campaign workspace so the original is never touched.
-    Best-effort: any ffmpeg failure falls back to the source path rather than
-    blocking the publish.
+
+    A failed re-encode falls back to the source path only when the source is
+    actually publishable. When the source is over a target platform's hard cap,
+    falling back would hand the platform a file it must reject while recording
+    the campaign as if it had been prepared - that is how a 602 MB / 13.5 min
+    original ended up on the wire (Threads rejected it, and the error surfaced
+    minutes later as an opaque container failure). In that case raise instead,
+    naming the size and the limit, so the target fails immediately with an
+    actionable message.
     """
     try:
         import myUtils.media_prep as media_prep
@@ -3391,7 +3398,35 @@ def _shrink_for_publish(
         logging.getLogger(__name__).warning(
             "Pre-publish media prep failed for %s: %s", source_path, exc,
         )
+    _assert_within_platform_caps(source_path, selected_platforms)
     return source_path
+
+
+def _assert_within_platform_caps(
+    source_path: Path, selected_platforms: set[str] | None
+) -> None:
+    """Raise when the un-shrunk source cannot be published as-is.
+
+    Called only on the shrink-failure path, so a conforming file is unaffected.
+    """
+    if not selected_platforms:
+        return
+    try:
+        import myUtils.media_prep as media_prep
+
+        meta = media_prep.probe(source_path)
+    except Exception:  # noqa: BLE001 — an unprobeable file is not our call
+        return
+    size_mb = media_prep.size_mb_decimal(meta)
+    limit_mb = media_prep.resolve_size_limit_mb(selected_platforms)
+    if limit_mb and size_mb > limit_mb:
+        raise ValueError(
+            f"Pre-publish re-encode did not produce a usable file, and the "
+            f"source is {size_mb:.0f} MB which exceeds the {limit_mb:.0f} MB "
+            f"cap for the selected platforms. Refusing to publish the "
+            f"oversized original; re-run the publish so the re-encode can "
+            f"complete (it is CPU-bound and can take several minutes)."
+        )
 
 
 def _derive_watermark_spec(profile: profile_registry.Profile, data: dict) -> dict:

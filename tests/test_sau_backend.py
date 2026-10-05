@@ -400,3 +400,109 @@ class LegacyDbBootstrapEndpointTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrePublishCapGuardTests(unittest.TestCase):
+    """A failed re-encode must not hand an oversized original to the platform.
+
+    ``_shrink_for_publish`` is best-effort by design, but when it fails (the
+    ffmpeg re-encode is CPU-bound and can be interrupted) returning the source
+    unchanged published a 602 MB / 13.5 min original that Threads must reject -
+    and the campaign recorded it as "prepared", so the failure only surfaced
+    minutes later as an opaque container error. The cap check makes that case
+    fail immediately with a message naming the size and the limit.
+    """
+
+    def _fake_probe(self, size_bytes):
+        import contextlib
+
+        @contextlib.contextmanager
+        def _ctx():
+            import myUtils.media_prep as media_prep
+
+            original = media_prep.probe
+            media_prep.probe = lambda path: {"size": size_bytes, "duration": 813.0}
+            try:
+                yield
+            finally:
+                media_prep.probe = original
+
+        return _ctx()
+
+    def test_raises_when_source_exceeds_the_platform_cap(self):
+        from pathlib import Path
+
+        import sau_backend
+
+        with self._fake_probe(602_285_541):
+            with self.assertRaisesRegex(ValueError, "exceeds the .*cap"):
+                sau_backend._assert_within_platform_caps(
+                    Path("SFW Taipei Stonewall.mp4"), {"bluesky", "threads"}
+                )
+
+    def test_allows_a_conforming_source(self):
+        from pathlib import Path
+
+        import sau_backend
+
+        with self._fake_probe(47_000_000):
+            # Must not raise: 47 MB is under every cap we ship.
+            sau_backend._assert_within_platform_caps(
+                Path("small.mp4"), {"bluesky", "threads", "instagram"}
+            )
+
+    def test_no_platforms_means_no_size_check(self):
+        from pathlib import Path
+
+        import sau_backend
+
+        with self._fake_probe(999_000_000):
+            sau_backend._assert_within_platform_caps(Path("big.mp4"), set())
+
+    def test_unprobeable_file_is_not_blocked(self):
+        from pathlib import Path
+
+        import myUtils.media_prep as media_prep
+        import sau_backend
+
+        def _boom(path):
+            raise RuntimeError("ffprobe unavailable")
+
+        original = media_prep.probe
+        media_prep.probe = _boom
+        try:
+            sau_backend._assert_within_platform_caps(
+                Path("unknown.mp4"), {"bluesky"}
+            )
+        finally:
+            media_prep.probe = original
+
+    def test_shrink_failure_path_invokes_the_cap_guard(self):
+        """The guard must actually run on the shrink-failure path.
+
+        The other tests exercise the helper directly; this one pins the wiring,
+        so removing the call from ``_shrink_for_publish`` fails here.
+        """
+        from pathlib import Path
+
+        import myUtils.media_prep as media_prep
+        import sau_backend
+
+        def _fail_shrink(source, out_dir, platforms=None):
+            raise RuntimeError("ffmpeg failed")
+
+        original_shrink = media_prep.shrink
+        original_available = media_prep._ensure_available
+        original_probe = media_prep.probe
+        media_prep.shrink = _fail_shrink
+        media_prep._ensure_available = lambda: True
+        media_prep.probe = lambda path: {"size": 602_285_541, "duration": 813.0}
+        try:
+            with self.assertRaisesRegex(ValueError, "exceeds the .*cap"):
+                sau_backend._shrink_for_publish(
+                    Path("SFW Taipei Stonewall.mp4"), 2492, {"bluesky", "threads"}
+                )
+        finally:
+            media_prep.shrink = original_shrink
+            media_prep._ensure_available = original_available
+            media_prep.probe = original_probe
