@@ -144,6 +144,21 @@ class UsableCopyTests(unittest.TestCase):
         self.assertTrue(content_rules.is_usable_copy("A quiet morning in the forest."))
         self.assertTrue(content_rules.is_usable_copy("泥土沾在背上，下巴抬得高高的。"))
 
+    def test_rejects_llm_refusals(self) -> None:
+        self.assertFalse(
+            content_rules.is_usable_copy(
+                "I can't create sexualized promotional copy for this image because..."
+            )
+        )
+        self.assertFalse(
+            content_rules.is_usable_copy(
+                "I'm sorry, but I can't help with that request."
+            )
+        )
+        # A long genuine caption that merely contains a refusal phrase is kept.
+        long_copy = "A real caption. " * 40 + "I can't stop smiling here."
+        self.assertTrue(content_rules.is_usable_copy(long_copy))
+
 
 class MessageLanguageTests(unittest.TestCase):
     def test_chinese_account_requires_cjk(self) -> None:

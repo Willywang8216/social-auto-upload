@@ -112,6 +112,13 @@ _MEDIA_FILENAME_RE = re.compile(
     r"^[\w\-. ()]+\.(?:mp4|mov|webm|m4v|jpg|jpeg|png|gif|webp|bmp)$",
     re.IGNORECASE,
 )
+# An LLM safety refusal must never be published as if it were copy.
+_LLM_REFUSAL_RE = re.compile(
+    r"^\s*(?:i can'?t|i cannot|i'?m unable|i am unable|i won'?t|i will not|"
+    r"i'?m sorry,? but|as an ai|i must decline|cannot assist|can'?t assist|"
+    r"sorry,? (?:but )?i)",
+    re.IGNORECASE,
+)
 
 
 def is_usable_copy(text: str | None, *, min_chars: int = 1) -> bool:
@@ -127,6 +134,8 @@ def is_usable_copy(text: str | None, *, min_chars: int = 1) -> bool:
     if _GENERIC_COPY_RE.search(value):
         return False
     if _MEDIA_FILENAME_RE.match(value):
+        return False
+    if _LLM_REFUSAL_RE.match(value) and len(value) < 400:
         return False
     return True
 
