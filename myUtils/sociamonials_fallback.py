@@ -53,6 +53,12 @@ API_KEY_ENV = "SOCIAMONIALS_API_KEY"
 WORKSPACE_ENV = "SOCIAMONIALS_WORKSPACE_ID"
 SECRETS_FILE_ENV = "SOCIAMONIALS_SECRETS_FILE"
 TIMEOUT_ENV = "SAU_SOCIAMONIALS_TIMEOUT"
+DELIVERY_TIMEOUT_ENV = "SAU_SOCIAMONIALS_DELIVERY_TIMEOUT"
+
+# How long to wait for the platform to actually accept a post before calling
+# the fallback done. A video hand-off can take a little while; a failed URL
+# usually reports back quickly. 0 disables the check (accept-only semantics).
+DEFAULT_DELIVERY_TIMEOUT = 60.0
 
 DEFAULT_TIMEOUT = 60.0
 
@@ -88,6 +94,11 @@ SAU_ACCOUNT_TO_SOCIAMONIALS: dict[int, dict[str, Any]] = {
     123: {"network": "tw", "profile_refs": ["13425"], "name": "model_will"},
     124: {"network": "tw", "profile_refs": ["13426"], "name": "nudeweiwei"},
     77: {"network": "tw", "profile_refs": ["14100"], "name": "will_sexual"},
+    # Account 103 (光光) publishes as nakedhappylife on X. Without this entry the
+    # fallback raised "no Sociamonials profile is mapped", so every 103 target
+    # failed outright once the X API credits ran out - even though Sociamonials
+    # already holds a connected, publishable profile for the same handle.
+    103: {"network": "tw", "profile_refs": ["14099"], "name": "nakedhappylife"},
     # Bluesky (EN + ZH are distinct profiles)
     118: {"network": "blsk", "profile_refs": ["1280"], "name": "nakedwill.bsky.social"},
     119: {"network": "blsk", "profile_refs": ["1279"], "name": "nudeweiwei.bsky.social"},
@@ -612,6 +623,15 @@ def _timeout() -> float:
         return DEFAULT_TIMEOUT
 
 
+def _delivery_timeout() -> float:
+    try:
+        return float(
+            os.environ.get(DELIVERY_TIMEOUT_ENV) or DEFAULT_DELIVERY_TIMEOUT
+        )
+    except (TypeError, ValueError):
+        return DEFAULT_DELIVERY_TIMEOUT
+
+
 def _workspace_int(workspace_id: Any) -> int | None:
     try:
         return int(str(workspace_id).strip())
@@ -672,6 +692,7 @@ def publish_via_sociamonials(
     workspace_id: str | None = None,
     timeout: float | None = None,
     verify_media: bool = True,
+    delivery_timeout: float | None = None,
 ) -> dict[str, Any]:
     """Publish one exhausted target through Sociamonials.
 
@@ -784,13 +805,95 @@ def publish_via_sociamonials(
             "sociamonials accepted the post but holds it for approval (post_id=%s)",
             result.get("post_id"),
         )
+
+    # Acceptance is not delivery. Sociamonials returns 200 as soon as the post
+    # is queued and only discovers later that it cannot fetch the media (a
+    # video URL it is refused, an R2 object not yet visible to it) - that has
+    # already marked targets succeeded while nothing reached the platform. When
+    # a post id comes back, poll it briefly and report the real delivery state.
+    post_id = result.get("post_id")
+    effective_delivery_timeout = (
+        float(delivery_timeout)
+        if delivery_timeout is not None
+        else _delivery_timeout()
+    )
+    delivery = (
+        _wait_for_delivery(
+            http, headers, post_id, timeout=effective_delivery_timeout
+        )
+        if post_id and effective_delivery_timeout > 0
+        else {"state": "unknown", "delivered": None, "error": ""}
+    )
+
     return {
         "ok": True,
-        "post_id": result.get("post_id"),
+        "post_id": post_id,
         "status": result.get("status"),
         "requires_approval": requires_approval,
         "warnings": warnings,
         "network": network,
         "profile_refs": list(mapping["profile_refs"]),
+        "delivery_state": delivery.get("state"),
+        "delivered": delivery.get("delivered"),
+        "delivery_error": delivery.get("error"),
         "raw": result,
     }
+
+
+def _wait_for_delivery(
+    http: Any,
+    headers: dict[str, str],
+    post_id: Any,
+    *,
+    timeout: float,
+    interval: float = 5.0,
+) -> dict[str, Any]:
+    """Poll a created post until it is delivered, failed or ``timeout`` elapses.
+
+    Returns ``{"state", "delivered", "error"}``. ``state`` is one of
+    ``delivered``, ``failed``, ``pending`` (still queued when the budget ran
+    out) or ``unknown`` (the status could not be read). Never raises: an
+    unreadable status must not turn a successful submit into a fallback error.
+    """
+    import time as _time
+
+    deadline = _time.monotonic() + max(0.0, float(timeout))
+    last: dict[str, Any] = {"state": "unknown", "delivered": None, "error": ""}
+    while True:
+        try:
+            response = http.get(
+                f"{BASE_URL}/api/v1/posts/{post_id}", headers=headers, timeout=30
+            )
+            if response.status_code != 200:
+                return last
+            body = _json_body(response)
+        except Exception as exc:  # noqa: BLE001 - status is advisory only
+            logger.warning("sociamonials delivery poll failed: %s", exc)
+            return last
+
+        networks = body.get("networks")
+        if isinstance(networks, dict) and networks:
+            for network, detail in networks.items():
+                if not isinstance(detail, dict):
+                    continue
+                status = str(detail.get("delivery_status") or "").strip().lower()
+                delivered = bool(detail.get("delivered"))
+                error = str(detail.get("error") or "").strip()
+                if delivered or status == "delivered":
+                    return {"state": "delivered", "delivered": True, "error": ""}
+                if status in {"failed", "error"} or str(
+                    detail.get("delivery_state") or ""
+                ).strip().lower() == "needs_attention":
+                    return {
+                        "state": "failed",
+                        "delivered": False,
+                        "error": error[:400],
+                    }
+                last = {
+                    "state": "pending",
+                    "delivered": False,
+                    "error": error[:400],
+                }
+        if _time.monotonic() >= deadline:
+            return last
+        _time.sleep(interval)

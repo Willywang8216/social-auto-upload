@@ -267,3 +267,113 @@ class SociamonialsFallbackMissingAccountTests(unittest.TestCase):
 
         targets = jobs.list_targets(job.id, db_path=self.db_path)
         self.assertEqual(targets[0].status, jobs.TARGET_FAILED)
+
+
+class SociamonialsDeliveryVerificationTests(unittest.TestCase):
+    """A post Sociamonials accepts but fails to deliver is NOT a success.
+
+    Submission returns 200 as soon as the post is queued; the platform hand-off
+    happens after. Three real fallbacks were marked succeeded while Sociamonials
+    reported ``delivery_status: failed`` ("Video URL not accessible after
+    retries"), so nothing ever reached X. The worker must record the failure.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "worker.db"
+        create_table.bootstrap(self.db_path)
+        self.profile_id = profile_registry.create_profile(
+            "Delivery", db_path=self.db_path
+        ).id
+        self.account_id = profile_registry.add_account(
+            self.profile_id,
+            platform="twitter",
+            account_name="deliv",
+            auth_type="oauth",
+            config={},
+            db_path=self.db_path,
+        ).id
+        self._env = patch.dict(os.environ, {}, clear=False)
+        self._env.start()
+        os.environ["SAU_SOCIAMONIALS_FALLBACK"] = "1"
+        os.environ["SOCIAMONIALS_API_KEY"] = "sm_agent_test"
+
+    def tearDown(self) -> None:
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def _run(self, result: dict) -> tuple[int, str]:
+        job = jobs.enqueue_job(
+            jobs.JobSpec(
+                platform="twitter",
+                payload={"draft": {"message": "hi"}},
+                targets=[(f"account:{self.account_id}", "campaign_post:1", None)],
+                profile_id=self.profile_id,
+                idempotency_key=f"deliv-{id(result)}",
+            ),
+            db_path=self.db_path,
+        )
+
+        async def executor(platform, payload, target):
+            raise RuntimeError("X media upload failed (HTTP 402)")
+
+        config = WorkerConfig(
+            poll_interval=0.001,
+            batch_size=4,
+            max_concurrent=1,
+            retry=RetryPolicy(
+                max_attempts=1, base_backoff_seconds=0.001, max_backoff_seconds=0.01
+            ),
+        )
+        worker = PublishWorker(executor, config=config, db_path=self.db_path)
+        with patch.object(
+            sociamonials_fallback, "publish_via_sociamonials", return_value=result
+        ):
+            asyncio.run(worker.drain())
+        target = jobs.list_targets(job.id, db_path=self.db_path)[0]
+        return target.status, str(target.last_error or "")
+
+    def test_failed_delivery_is_recorded_as_failed(self):
+        status, error = self._run({
+            "ok": True,
+            "post_id": 10689041,
+            "status": "scheduled",
+            "network": "tw",
+            "delivery_state": "failed",
+            "delivered": False,
+            "delivery_error": "Video URL not accessible after retries",
+            "requires_approval": False,
+            "warnings": [],
+        })
+        self.assertEqual(status, jobs.TARGET_FAILED)
+        self.assertIn("delivery failed", error)
+
+    def test_delivered_post_is_recorded_as_succeeded(self):
+        status, _ = self._run({
+            "ok": True,
+            "post_id": 1,
+            "status": "delivered",
+            "network": "tw",
+            "delivery_state": "delivered",
+            "delivered": True,
+            "delivery_error": "",
+            "requires_approval": False,
+            "warnings": [],
+        })
+        self.assertEqual(status, jobs.TARGET_SUCCEEDED)
+
+    def test_unconfirmed_delivery_is_still_a_success(self):
+        # A still-queued post must not be failed: the platform may deliver it a
+        # few seconds later, and the idempotency key prevents a duplicate.
+        status, _ = self._run({
+            "ok": True,
+            "post_id": 2,
+            "status": "scheduled",
+            "network": "tw",
+            "delivery_state": "pending",
+            "delivered": False,
+            "delivery_error": "",
+            "requires_approval": False,
+            "warnings": [],
+        })
+        self.assertEqual(status, jobs.TARGET_SUCCEEDED)

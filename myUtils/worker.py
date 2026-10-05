@@ -881,11 +881,39 @@ class PublishWorker:
             )
             return False
 
+        delivery_state = str(result.get("delivery_state") or "").strip().lower()
+        if delivery_state == "failed":
+            # Sociamonials accepted the post and then failed to deliver it (its
+            # own platform hand-off could not fetch the media). Treating the
+            # submit as success hid that the post never landed, so record the
+            # failure. The target is still ``running`` here, which is the state
+            # mark_target_failed requires.
+            reason = str(result.get("delivery_error") or "").strip()
+            message = (
+                "Sociamonials accepted the post but delivery failed"
+                + (f": {reason}" if reason else "")
+            )
+            transitioned = jobs.mark_target_failed(
+                target.id, message, db_path=self._db_path
+            )
+            if transitioned:
+                log.error(
+                    f"sociamonials fallback delivered nothing (post_id="
+                    f"{result.get('post_id')}, network={result.get('network')}); "
+                    f"marked failed: {_scrub_secrets(message)}"
+                )
+                self._alert_publish_failure(target, message)
+            return True
+
         transitioned = jobs.mark_target_success(target.id, db_path=self._db_path)
         if transitioned:
+            note = (
+                "" if delivery_state in {"delivered", ""}
+                else f" (delivery {delivery_state or 'unconfirmed'})"
+            )
             log.info(
                 f"delivered via Sociamonials fallback (post_id={result.get('post_id')}, "
-                f"network={result.get('network')}, status={result.get('status')}); "
+                f"network={result.get('network')}, status={result.get('status')}){note}; "
                 f"the direct publish had failed with: {message}"
             )
         else:
