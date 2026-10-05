@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://www.sociamonials.com"
 POSTS_URL = f"{BASE_URL}/api/v1/posts"
 MEDIA_UPLOADS_URL = f"{BASE_URL}/api/v1/media/uploads"
+MEDIA_ASSETS_URL = f"{BASE_URL}/api/v1/media/assets"
 DEFAULT_WORKSPACE_ID = "26985"
 
 ENABLED_ENV = "SAU_SOCIAMONIALS_FALLBACK"
@@ -54,6 +55,7 @@ API_KEY_ENV = "SOCIAMONIALS_API_KEY"
 WORKSPACE_ENV = "SOCIAMONIALS_WORKSPACE_ID"
 SECRETS_FILE_ENV = "SOCIAMONIALS_SECRETS_FILE"
 TIMEOUT_ENV = "SAU_SOCIAMONIALS_TIMEOUT"
+ASSET_READY_TIMEOUT_ENV = "SAU_SOCIAMONIALS_ASSET_READY_TIMEOUT"
 DELIVERY_TIMEOUT_ENV = "SAU_SOCIAMONIALS_DELIVERY_TIMEOUT"
 
 # How long to wait for the platform to actually accept a post before calling
@@ -62,6 +64,10 @@ DELIVERY_TIMEOUT_ENV = "SAU_SOCIAMONIALS_DELIVERY_TIMEOUT"
 DEFAULT_DELIVERY_TIMEOUT = 60.0
 
 DEFAULT_TIMEOUT = 60.0
+# Hosted video is transcoded after the upload completes; attaching it before
+# ``processing_status == "ready"`` is rejected with 422 validation_failed
+# (asset_not_ready). Poll the asset for this long before giving up.
+DEFAULT_ASSET_READY_TIMEOUT = 300.0
 
 # Networks that only publish with media attached (Sociamonials validation).
 _MEDIA_REQUIRED_NETWORKS = {"in", "tiktok", "yt", "pi"}
@@ -465,7 +471,63 @@ def _upload_local_media(
         asset_id = asset.get("asset_id")
     if asset_id is None:
         raise SociamonialsFallbackError("media upload complete returned no asset_id")
+    # A hosted video is transcoded asynchronously; it cannot be attached until
+    # the asset reports ``processing_status == "ready"``. Images are ready at
+    # once, so this is a single cheap GET for them.
+    ready_timeout = _asset_ready_timeout()
+    if ready_timeout > 0:
+        _wait_for_asset_ready(session, headers, asset_id, timeout=ready_timeout)
     return f"asset://{asset_id}"
+
+
+def _wait_for_asset_ready(
+    session: Any,
+    headers: Mapping[str, str],
+    asset_id: Any,
+    *,
+    timeout: float,
+    interval: float = 5.0,
+) -> None:
+    """Poll ``GET /api/v1/media/assets/{id}`` until the asset is attachable.
+
+    Raises :class:`SociamonialsFallbackError` on a failed asset or when the
+    readiness budget runs out, so the caller records a real failure instead of
+    attaching a not-ready asset and getting an opaque 422.
+    """
+    import time as _time
+
+    deadline = _time.monotonic() + max(0.0, float(timeout))
+    last_status = "unknown"
+    while True:
+        try:
+            response = session.get(
+                f"{MEDIA_ASSETS_URL}/{asset_id}", headers=dict(headers), timeout=30
+            )
+        except Exception as exc:  # noqa: BLE001 - a poll failure is not proof of anything
+            logger.warning("sociamonials asset readiness poll failed: %s", exc)
+            return
+        if int(getattr(response, "status_code", 0) or 0) != 200:
+            logger.warning(
+                "sociamonials asset readiness poll HTTP %s for asset %s",
+                getattr(response, "status_code", "?"),
+                asset_id,
+            )
+            return
+        body = _json_body(response)
+        asset = body.get("asset") if isinstance(body.get("asset"), Mapping) else body
+        last_status = str((asset or {}).get("processing_status") or "").strip().lower()
+        if last_status == "ready":
+            return
+        if last_status in {"failed", "error"}:
+            raise SociamonialsFallbackError(
+                f"media asset {asset_id} failed processing (status={last_status})"
+            )
+        if _time.monotonic() >= deadline:
+            raise SociamonialsFallbackError(
+                f"media asset {asset_id} was not ready within {timeout:.0f}s "
+                f"(status={last_status or 'unknown'})"
+            )
+        _time.sleep(interval)
 
 
 def _put_multipart(session: Any, grant: Mapping[str, Any], local_path: Path, *, timeout: float) -> None:
@@ -676,6 +738,15 @@ def _delivery_timeout() -> float:
         return DEFAULT_DELIVERY_TIMEOUT
 
 
+def _asset_ready_timeout() -> float:
+    try:
+        return float(
+            os.environ.get(ASSET_READY_TIMEOUT_ENV) or DEFAULT_ASSET_READY_TIMEOUT
+        )
+    except (TypeError, ValueError):
+        return DEFAULT_ASSET_READY_TIMEOUT
+
+
 def _workspace_int(workspace_id: Any) -> int | None:
     try:
         return int(str(workspace_id).strip())
@@ -703,11 +774,20 @@ def _raise_for_status(response: Any, *, context: str) -> None:
     if status and status < 400:
         return
     body = _json_body(response)
-    detail = (
-        body.get("error", {}).get("code")
-        if isinstance(body.get("error"), Mapping)
-        else body.get("error") or getattr(response, "text", "")
-    )
+    error = body.get("error")
+    if isinstance(error, Mapping):
+        pieces = [str(error.get("code") or error.get("message") or "")]
+        nested = error.get("errors")
+        if isinstance(nested, Mapping):
+            # Validation errors are keyed by the body field that failed
+            # (image_urls, video_url, ...); keep them so a 422 is diagnosable.
+            for field, messages in nested.items():
+                pieces.append(f"{field}={messages}")
+        elif isinstance(nested, list):
+            pieces.extend(str(item) for item in nested[:4])
+        detail = "; ".join(piece for piece in pieces if piece)
+    else:
+        detail = error or getattr(response, "text", "")
     raise SociamonialsFallbackError(f"{context} failed (HTTP {status}): {detail}")
 
 

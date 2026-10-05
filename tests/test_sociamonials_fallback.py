@@ -53,6 +53,9 @@ class FakeSession:
     def head(self, url, **kwargs):
         return self._call("HEAD", url, **kwargs)
 
+    def get(self, url, **kwargs):
+        return self._call("GET", url, **kwargs)
+
     def calls_for(self, method, contains=""):
         return [c for c in self.calls if c[0] == method and contains in c[1]]
 
@@ -98,6 +101,8 @@ def _posts_handler(*, post_result=None, grants=None, upload_etag="etag-1"):
     def handler(method, url, kwargs):
         if method == "HEAD":
             return FakeResponse(200, headers={"Content-Type": "video/mp4"})
+        if method == "GET" and "/media/assets/" in url:
+            return FakeResponse(200, {"asset_id": 77, "processing_status": "ready"})
         if method == "POST" and url.endswith("/media/uploads"):
             name = kwargs["json"].get("filename", "default")
             grant = grants.get(name, grants.get("default"))
@@ -344,6 +349,61 @@ def test_publish_non_x_keeps_link_in_body():
     )
     body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
     assert "https://a.example/1" in body["message"]
+
+
+def test_publish_waits_for_a_video_asset_to_become_ready(tmp_path):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"v" * 64)
+    polls = {"n": 0}
+
+    def handler(method, url, kwargs):
+        if method == "GET" and "/media/assets/" in url:
+            polls["n"] += 1
+            status = "processing" if polls["n"] < 2 else "ready"
+            return FakeResponse(200, {"asset_id": 77, "processing_status": status})
+        if method == "POST" and url.endswith("/media/uploads"):
+            return FakeResponse(200, {"upload_id": 5, "mode": "single", "upload_url": "https://upload.example/put/5"})
+        if method == "PUT":
+            return FakeResponse(200, headers={"ETag": "e"})
+        if method == "POST" and url.endswith("/complete"):
+            return FakeResponse(200, {"asset_id": 77})
+        if method == "POST" and url.endswith("/api/v1/posts"):
+            return FakeResponse(200, {"post_id": 1, "status": "scheduled"})
+        raise AssertionError(f"unexpected {method} {url}")
+
+    session = FakeSession(handler)
+    sm.publish_via_sociamonials(
+        platform="twitter",
+        account=_Account(77),
+        payload={"draft": {"message": "video post"}, "artifacts": [
+            {"local_path": str(video), "metadata": {"role": "video"}}
+        ]},
+        api_key="sm_agent_x",
+        session=session,
+        delivery_timeout=0,
+    )
+    assert polls["n"] >= 2
+    assert session.calls_for("POST", "/api/v1/posts")
+
+
+def test_publish_raises_when_a_video_asset_never_becomes_ready(tmp_path):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"v" * 64)
+
+    def handler(method, url, kwargs):
+        if method == "GET" and "/media/assets/" in url:
+            return FakeResponse(200, {"asset_id": 77, "processing_status": "processing"})
+        if method == "POST" and url.endswith("/media/uploads"):
+            return FakeResponse(200, {"upload_id": 5, "mode": "single", "upload_url": "https://upload.example/put/5"})
+        if method == "PUT":
+            return FakeResponse(200, headers={"ETag": "e"})
+        if method == "POST" and url.endswith("/complete"):
+            return FakeResponse(200, {"asset_id": 77})
+        raise AssertionError(f"unexpected {method} {url}")
+
+    session = FakeSession(handler)
+    with pytest.raises(sm.SociamonialsFallbackError):
+        sm._wait_for_asset_ready(session, {}, 77, timeout=0.01, interval=0.001)
 
 
 def test_publish_uses_direct_video_url_without_uploading():
