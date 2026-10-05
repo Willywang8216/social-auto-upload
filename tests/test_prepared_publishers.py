@@ -664,6 +664,95 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[1][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/tv-container")
         self.assertEqual(session.calls[2][1], f"{prepared_publishers.THREADS_GRAPH_ROOT}/42/threads_publish")
 
+    def test_threads_container_error_message_is_surfaced(self):
+        session = _RecordingSession([
+            _FakeResponse({"id": "tv-container"}),
+            _FakeResponse({"status": "ERROR", "error_message": "The video could not be processed."}),
+        ])
+        account = SimpleNamespace(config={"threadUserId": "42", "accessToken": "threads-token", "accessTokenExpiresAt": "2099-01-01T00:00:00"})
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers.publish_threads_sync(
+                account,
+                {
+                    "message": "Threads video",
+                    "artifacts": [{"public_url": "https://cdn.example/video.mp4", "artifact_kind": "watermarked_video"}],
+                },
+                session=session,
+            )
+        self.assertIn("The video could not be processed.", str(ctx.exception))
+        # Meta only returns error_message when it is explicitly requested.
+        self.assertIn("error_message", session.calls[1][2]["params"]["fields"])
+
+    def test_threads_container_unknown_error_is_actionable(self):
+        session = _RecordingSession([
+            _FakeResponse({"id": "tv-container"}),
+            _FakeResponse({"status": "ERROR", "error_message": "UNKNOWN"}),
+        ])
+        account = SimpleNamespace(config={"threadUserId": "42", "accessToken": "threads-token", "accessTokenExpiresAt": "2099-01-01T00:00:00"})
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers.publish_threads_sync(
+                account,
+                {
+                    "message": "Threads video",
+                    "artifacts": [{"public_url": "https://cdn.example/video.mp4", "artifact_kind": "watermarked_video"}],
+                },
+                session=session,
+            )
+        message = str(ctx.exception)
+        self.assertIn("no diagnostic detail", message)
+        self.assertIn("duration/size limits", message)
+
+    def test_threads_video_over_duration_limit_fails_before_container(self):
+        session = _RecordingSession()
+        account = SimpleNamespace(config={"threadUserId": "42", "accessToken": "threads-token", "accessTokenExpiresAt": "2099-01-01T00:00:00"})
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "long.mp4"
+            video.write_bytes(b"video")
+            with patch.object(prepared_publishers.media_pipeline, "probe_video_duration", return_value=813.0):
+                with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                    prepared_publishers.publish_threads_sync(
+                        account,
+                        {
+                            "message": "Threads video",
+                            "artifacts": [{
+                                "local_path": str(video),
+                                "public_url": "https://cdn.example/video.mp4",
+                                "artifact_kind": "watermarked_video",
+                            }],
+                        },
+                        session=session,
+                    )
+        message = str(ctx.exception)
+        self.assertIn("813", message)
+        self.assertIn("300", message)
+        # Fail fast: no container-create or status API call is made.
+        self.assertEqual(session.calls, [])
+
+    def test_threads_video_over_size_limit_fails_before_container(self):
+        session = _RecordingSession()
+        account = SimpleNamespace(config={"threadUserId": "42", "accessToken": "threads-token", "accessTokenExpiresAt": "2099-01-01T00:00:00"})
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "huge.mp4"
+            video.write_bytes(b"x")
+            os.truncate(video, prepared_publishers.THREADS_MAX_VIDEO_BYTES + 1)
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.publish_threads_sync(
+                    account,
+                    {
+                        "message": "Threads video",
+                        "artifacts": [{
+                            "local_path": str(video),
+                            "public_url": "https://cdn.example/video.mp4",
+                            "artifact_kind": "watermarked_video",
+                        }],
+                    },
+                    session=session,
+                )
+        message = str(ctx.exception)
+        self.assertIn("MB", message)
+        self.assertIn("1024", message)
+        self.assertEqual(session.calls, [])
+
     def test_tiktok_publish_auto_refreshes_stale_token(self):
         session = _RecordingSession([
             _FakeResponse({'access_token': 'fresh-token', 'refresh_token': 'fresh-refresh', 'expires_in': 3600}),
@@ -802,6 +891,64 @@ class PreparedPublisherTests(unittest.TestCase):
                 )
         self.assertFalse(raised.exception.retryable)
         self.assertEqual(session.calls, [])
+
+    def test_tiktok_chunk_plan_floors_the_chunk_count(self):
+        # Regression for job 4518: a 602 MB (602,285,541 byte) source declares
+        # chunk_size=64 MiB. TikTok expects floor(video_size / chunk_size) = 8
+        # chunks; the old ceil() sent 9 and init was rejected with
+        # "invalid_params: The total chunk count is invalid".
+        file_size = 602_285_541
+        chunk_size, total_chunks = prepared_publishers._tiktok_chunk_plan(file_size)
+        self.assertEqual(chunk_size, prepared_publishers.TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE)
+        self.assertEqual(total_chunks, file_size // chunk_size)
+        self.assertEqual(total_chunks, 8)
+        # Declared chunks must never overshoot the file (that is what floor means).
+        self.assertLessEqual(chunk_size * total_chunks, file_size)
+        # The trailing remainder rides along in the final chunk, which TikTok
+        # accepts up to 128 MB.
+        final_chunk = file_size - chunk_size * (total_chunks - 1)
+        self.assertGreater(final_chunk, chunk_size)
+        self.assertLessEqual(final_chunk, 128 * 1024 * 1024)
+
+    def test_tiktok_chunk_plan_forces_multiple_chunks_over_64mb(self):
+        # TikTok: files larger than 64 MB must be uploaded in multiple chunks.
+        max_chunk = prepared_publishers.TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE
+        min_chunk = prepared_publishers.TIKTOK_FILE_UPLOAD_CHUNK_SIZE
+        for file_size in (max_chunk + 1, 100_000_000, 128 * 1024 * 1024 - 1, 4_000_000_000):
+            with self.subTest(file_size=file_size):
+                chunk_size, total_chunks = prepared_publishers._tiktok_chunk_plan(file_size)
+                self.assertGreaterEqual(total_chunks, 2)
+                self.assertEqual(total_chunks, file_size // chunk_size)
+                self.assertGreaterEqual(chunk_size, min_chunk)
+                self.assertLessEqual(chunk_size, max_chunk)
+
+    def test_tiktok_chunk_plan_single_chunk_for_small_and_medium_files(self):
+        for file_size in (1, 4 * 1024 * 1024, 5 * 1024 * 1024, 47 * 1024 * 1024):
+            with self.subTest(file_size=file_size):
+                chunk_size, total_chunks = prepared_publishers._tiktok_chunk_plan(file_size)
+                self.assertEqual(chunk_size, file_size)
+                self.assertEqual(total_chunks, 1)
+
+    def test_tiktok_file_upload_merges_remainder_into_final_chunk(self):
+        # The uploader must send ``total_chunks`` requests with the last one
+        # carrying every remaining byte, matching the count declared to TikTok.
+        session = _RecordingSession([
+            _FakeResponse({}, status_code=201),
+            _FakeResponse({}, status_code=201),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "clip.mp4"
+            video.write_bytes(b"0123456789")  # 10 bytes
+            prepared_publishers._tiktok_file_upload(session, video, "https://upload.example/x", 4, 2)
+        self.assertEqual(len(session.calls), 2)
+        first_headers = session.calls[0][2]["headers"]
+        second_headers = session.calls[1][2]["headers"]
+        self.assertEqual(session.calls[0][2]["data"], b"0123")
+        self.assertEqual(first_headers["Content-Range"], "bytes 0-3/10")
+        self.assertEqual(first_headers["Content-Length"], "4")
+        self.assertEqual(session.calls[1][2]["data"], b"456789")
+        self.assertEqual(second_headers["Content-Range"], "bytes 4-9/10")
+        self.assertEqual(second_headers["Content-Length"], "6")
 
     def test_youtube_image_artifact_is_non_retryable_and_does_not_call_api(self):
         account = SimpleNamespace(config={"channelId": "UC123"})

@@ -57,6 +57,13 @@ YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 FACEBOOK_GRAPH_ROOT = "https://graph.facebook.com/v25.0"
 THREADS_GRAPH_ROOT = "https://graph.threads.net/v1.0"
 THREADS_MAX_TEXT_CHARS = 500
+# Threads video posts are capped at 5 minutes / 1 GB (Instagram Reels, by
+# contrast, allow up to 15 minutes). Overshoot is accepted at container
+# creation and only fails later as an opaque container ``ERROR``, so probe the
+# local artifact and fail fast with an actionable message.
+THREADS_MAX_VIDEO_SECONDS = 300.0
+THREADS_MAX_VIDEO_BYTES = 1024 * 1024 * 1024  # 1 GB
+THREADS_ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v"}
 TIKTOK_API_ROOT = "https://open.tiktokapis.com"
 TIKTOK_CREATOR_INFO_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/creator_info/query/"
 TIKTOK_VIDEO_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/video/init/"
@@ -1453,7 +1460,7 @@ def _wait_for_container_status(
     and only succeeded on a retry - or not at all. A slow container is normal
     here, and waiting costs far less than a dead target.
     """
-    root, field = _container_status_field(platform)
+    root, field, requested_fields = _container_status_field(platform)
     deadline = time.monotonic() + timeout
     last_status = "UNKNOWN"
     last_body: dict[str, Any] = {}
@@ -1465,7 +1472,7 @@ def _wait_for_container_status(
         # the caller's deadline.
         response = http.get(
             f"{root}/{container_id}",
-            params={"fields": field, "access_token": access_token},
+            params={"fields": requested_fields, "access_token": access_token},
             timeout=min(30.0, max(1.0, remaining)),
         )
         _raise_for_status(response)
@@ -1476,7 +1483,20 @@ def _wait_for_container_status(
         if status in ("FINISHED", "PUBLISHED"):
             return
         if status in ("ERROR", "EXPIRED", "FAILED"):
-            detail = body.get("error_message") or body.get("status") or body.get("error") or ""
+            # Meta only returns a field when it is requested, so the poll asks
+            # for ``error_message`` explicitly (see _container_status_field).
+            # Prefer it, then Instagram's human-readable ``status``; ignore the
+            # bare status enum so we never raise "failed to process: ERROR".
+            detail = str(body.get("error_message") or "").strip()
+            if not detail:
+                raw_status = str(body.get("status") or "").strip()
+                if raw_status.upper() not in ("", "ERROR", "EXPIRED", "FAILED", "UNKNOWN"):
+                    detail = raw_status
+            if detail.upper() in ("", "UNKNOWN"):
+                detail = (
+                    f"no diagnostic detail from Meta (container status {status}); "
+                    "check the media against the platform's duration/size limits"
+                )
             raise PreparedPublishError(
                 f"{platform.title()} container {container_id} failed to process: {detail}"
             )
@@ -1492,11 +1512,19 @@ def _wait_for_container_status(
     )
 
 
-def _container_status_field(platform: str) -> tuple[str, str]:
-    """Status endpoint root and status field name for Instagram vs Threads."""
+def _container_status_field(platform: str) -> tuple[str, str, str]:
+    """Status endpoint root, status field name, and fields to request.
+
+    The requested-fields string matters: Meta only returns a field when it is
+    asked for. The previous code requested just the status enum, so Threads'
+    ``error_message`` was never present in the response and a failed container
+    surfaced as a bare "ERROR" or an empty string - swallowing Meta's real
+    reason. Instagram's diagnostic lives in the human-readable ``status``
+    field, so request that alongside ``status_code``.
+    """
     if platform == "instagram":
-        return FACEBOOK_GRAPH_ROOT, "status_code"
-    return THREADS_GRAPH_ROOT, "status"
+        return FACEBOOK_GRAPH_ROOT, "status_code", "status_code,status"
+    return THREADS_GRAPH_ROOT, "status", "status,error_message"
 
 
 def validate_instagram_config_live(config: dict[str, Any], *, session=None) -> dict:
@@ -1635,6 +1663,48 @@ def _threads_create_container(http, user_id: str, access_token: str, data: dict)
     return str(container_id)
 
 
+def _validate_threads_video_artifact(item: dict[str, Any]) -> None:
+    """Fail fast when a Threads video obviously exceeds Meta's limits.
+
+    Threads caps video posts at 5 minutes / 1 GB. Meta accepts a container for
+    an over-limit video and only later flips it to ``ERROR`` with an opaque
+    ``error_message: UNKNOWN``, burning a retry cycle for every attempt. When
+    the artifact has a locally visible path we can probe it up front and raise
+    an actionable error instead. Probing is best-effort: a remote-only artifact
+    or an ffprobe failure must never block a publish that Meta might accept.
+    """
+    local_path = str(item.get("local_path") or "").strip()
+    probe = local_path or str(item.get("public_url") or "")
+    suffix = Path(probe).suffix.lower()
+    if suffix and suffix not in THREADS_ALLOWED_VIDEO_SUFFIXES:
+        raise PreparedPublishError(
+            f"Threads video publish supports MP4/MOV (got {suffix})"
+        )
+    if not local_path:
+        return
+    source = Path(local_path).expanduser()
+    if not source.is_file():
+        return
+    file_size = source.stat().st_size
+    if file_size > THREADS_MAX_VIDEO_BYTES:
+        raise PreparedPublishError(
+            f"Threads video size {file_size / (1024 ** 2):.0f} MB exceeds the "
+            f"{THREADS_MAX_VIDEO_BYTES // (1024 ** 2)} MB limit"
+        )
+    try:
+        duration_seconds = media_pipeline.probe_video_duration(source)
+    except Exception as exc:  # noqa: BLE001 - probing must not block publishing
+        logger.warning("Could not probe Threads video duration for %s: %s", source, exc)
+        return
+    if duration_seconds > THREADS_MAX_VIDEO_SECONDS:
+        raise PreparedPublishError(
+            f"Threads video duration {duration_seconds:.0f}s exceeds the "
+            f"{int(THREADS_MAX_VIDEO_SECONDS)}s limit; re-encode a shorter cut "
+            "before publishing (Instagram Reels allow up to 15 minutes, which is "
+            "why the same file may publish there)"
+        )
+
+
 def validate_threads_config_live(config: dict[str, Any], *, session=None) -> dict:
     user_id = str(config.get("threadUserId") or config.get("userId") or "").strip()
     access_token = str(_config_value(config, "accessToken") or "").strip()
@@ -1722,6 +1792,7 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
         public_url = media["videos"][0].get("public_url") or ""
         if not public_url:
             raise PreparedPublishError("Threads video publish requires a public_url")
+        _validate_threads_video_artifact(media["videos"][0])
         container_id = _threads_create_container(
             http,
             user_id,
@@ -1885,8 +1956,41 @@ TIKTOK_FILE_UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024  # 5 MB minimum per TikTok docs
 TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE = 64 * 1024 * 1024  # 64 MB maximum per TikTok docs
 
 
-def _tiktok_file_upload(http, video_path: Path, upload_url: str, chunk_size: int) -> None:
-    """Upload a video file to TikTok via chunked PUT to the presigned upload_url."""
+def _tiktok_chunk_plan(file_size: int) -> tuple[int, int]:
+    """Return ``(chunk_size, total_chunk_count)`` for a TikTok FILE_UPLOAD.
+
+    TikTok computes ``total_chunk_count = floor(video_size / chunk_size)`` and
+    merges any trailing bytes into the final chunk (which may exceed
+    ``chunk_size``, up to 128 MB). Using ``ceil`` here declares one chunk too
+    many, so the init call is rejected with
+    ``invalid_params: The total chunk count is invalid``. A file of at most
+    64 MB fits in a single chunk; a larger file must use multiple chunks, so the
+    chunk size is capped at half the file size to keep ``total_chunk_count >= 2``.
+    """
+    if file_size <= 0:
+        raise PreparedPublishError(
+            "TikTok FILE_UPLOAD requires a non-empty video", retryable=False
+        )
+    if file_size <= TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE:
+        return file_size, 1
+    chunk_size = min(TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE, file_size // 2)
+    return chunk_size, file_size // chunk_size
+
+
+def _tiktok_file_upload(
+    http,
+    video_path: Path,
+    upload_url: str,
+    chunk_size: int,
+    total_chunks: int,
+) -> None:
+    """Upload a video file to TikTok via chunked PUT to the presigned upload_url.
+
+    The first ``total_chunks - 1`` requests carry exactly ``chunk_size`` bytes;
+    the final request carries every remaining byte. This mirrors TikTok's
+    documented layout, where the trailing remainder is merged into the last
+    chunk rather than sent as its own (sub-5 MB) chunk.
+    """
     import mimetypes
 
     total_size = video_path.stat().st_size
@@ -1894,8 +1998,11 @@ def _tiktok_file_upload(http, video_path: Path, upload_url: str, chunk_size: int
 
     with video_path.open("rb") as fh:
         offset = 0
-        while offset < total_size:
-            chunk = fh.read(chunk_size)
+        for index in range(total_chunks):
+            if index == total_chunks - 1:
+                chunk = fh.read()  # final chunk absorbs the trailing bytes
+            else:
+                chunk = fh.read(chunk_size)
             if not chunk:
                 break
             chunk_len = len(chunk)
@@ -2049,20 +2156,10 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             # FILE_UPLOAD for local files (non-Direct-Post or no public URL)
             video_path = Path(local_path).expanduser().resolve()
             file_size = video_path.stat().st_size
-            # TikTok requires chunk_size between 5MB-64MB, but for small files
-            # we must use file_size as chunk_size with total_chunk_count=1
-            if file_size <= TIKTOK_FILE_UPLOAD_CHUNK_SIZE:
-                # Small file: single chunk, use actual file size
-                chunk_size = file_size
-                total_chunks = 1
-            elif file_size <= TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE:
-                # Medium file: single chunk
-                chunk_size = file_size
-                total_chunks = 1
-            else:
-                # Large file: multiple chunks
-                chunk_size = TIKTOK_FILE_UPLOAD_MAX_CHUNK_SIZE
-                total_chunks = -(-file_size // chunk_size)  # ceil division
+            # TikTok declares chunk_size in [5MB, 64MB] and computes
+            # total_chunk_count = floor(video_size / chunk_size), merging the
+            # trailing remainder into the final chunk (up to 128 MB).
+            chunk_size, total_chunks = _tiktok_chunk_plan(file_size)
             request_body = {
                 "post_info": post_info,
                 "source_info": {
@@ -2089,7 +2186,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             upload_url = resp_data_inner.get("upload_url") or ""
             if not upload_url:
                 raise PreparedPublishError("TikTok FILE_UPLOAD init did not return an upload_url")
-            _tiktok_file_upload(http, video_path, upload_url, chunk_size)
+            _tiktok_file_upload(http, video_path, upload_url, chunk_size, total_chunks)
             return {
                 "creator_info": creator_info,
                 "publish": resp_data,
