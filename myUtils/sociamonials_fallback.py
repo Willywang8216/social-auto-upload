@@ -421,10 +421,15 @@ def _upload_local_media(
     workspace_id: str,
     local_path: Path,
     *,
-    idempotency_key: str | None,
     timeout: float,
 ) -> str:
-    """Three-step upload; returns an ``asset://<id>`` reference."""
+    """Three-step upload; returns an ``asset://<id>`` reference.
+
+    No ``idempotency_key`` is sent: a repeated key with a *completed* multipart
+    upload makes Sociamonials hand back the same closed session, whose part
+    URLs then fail with ``NoSuchUpload``. Duplicate posts are already prevented
+    by the post-level key; re-uploading a file costs only transient storage.
+    """
     kind = _media_kind(str(local_path))
     size_bytes = local_path.stat().st_size
     body: dict[str, Any] = {
@@ -434,8 +439,6 @@ def _upload_local_media(
         "sha256": _sha256(local_path),
         "workspace_registration_id": _workspace_int(workspace_id),
     }
-    if idempotency_key:
-        body["idempotency_key"] = f"{idempotency_key}-media-{local_path.name}"
 
     response = session.post(MEDIA_UPLOADS_URL, json=body, headers=dict(headers), timeout=timeout)
     _raise_for_status(response, context="media upload grant")
@@ -905,7 +908,6 @@ def publish_via_sociamonials(
                     headers,
                     ws,
                     local,
-                    idempotency_key=f"sau-target-{target_id}" if target_id is not None else None,
                     timeout=request_timeout,
                 )
             if reference is None:

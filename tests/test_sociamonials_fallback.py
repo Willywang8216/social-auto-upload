@@ -351,6 +351,26 @@ def test_publish_non_x_keeps_link_in_body():
     assert "https://a.example/1" in body["message"]
 
 
+def test_local_media_upload_sends_no_idempotency_key(tmp_path):
+    """A media-level key makes a completed multipart grant un-reusable."""
+    image = tmp_path / "pic.jpg"
+    image.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
+    session = FakeSession(_posts_handler())
+    sm.publish_via_sociamonials(
+        platform="instagram",
+        account=_Account(72, platform="instagram"),
+        payload={"draft": {"message": "A photo"}, "artifacts": [
+            {"local_path": str(image), "public_url": "", "metadata": {"role": "image"}}
+        ]},
+        target_id=55,
+        api_key="sm_agent_x",
+        session=session,
+        delivery_timeout=0,
+    )
+    grant_body = session.calls_for("POST", "/media/uploads")[0][2]["json"]
+    assert "idempotency_key" not in grant_body
+
+
 def test_publish_waits_for_a_video_asset_to_become_ready(tmp_path):
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"v" * 64)
