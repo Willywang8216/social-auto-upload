@@ -65,6 +65,7 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
             "SAU_PUBLIC_BASE_URL",
             "SAU_SOCIAMONIALS_FALLBACK",
             "SOCIAMONIALS_API_KEY",
+            "SAU_X_DIRECT_PUBLISH",
         ):
             os.environ.pop(key, None)
 
@@ -184,6 +185,90 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
             self._drain(exc_type=_BoomPermanent)
         patched.assert_called_once()
         self.assertEqual(self._status(), jobs.TARGET_SUCCEEDED)
+
+    def test_x_target_goes_straight_to_the_fallback_when_direct_is_disabled(self) -> None:
+        self._enable_fallback()
+        os.environ.pop("SAU_X_DIRECT_PUBLISH", None)
+        twitter_account_id = profile_registry.add_account(
+            self.profile_id,
+            platform="twitter",
+            account_name="x-skip",
+            auth_type="oauth",
+            config={},
+            db_path=self.db_path,
+        ).id
+        job = jobs.enqueue_job(
+            jobs.JobSpec(
+                platform="twitter",
+                payload={"draft": {"message": "hi"}},
+                targets=[(f"account:{twitter_account_id}", "campaign_post:1", None)],
+                profile_id=self.profile_id,
+                idempotency_key=f"x-skip-{twitter_account_id}",
+            ),
+            db_path=self.db_path,
+        )
+        self._job_id = job.id
+        executor_calls = {"n": 0}
+
+        async def executor(platform, payload, target):
+            executor_calls["n"] += 1
+            raise AssertionError("the direct X executor must not run")
+
+        config = WorkerConfig(
+            poll_interval=0.001, batch_size=4, max_concurrent=1,
+            retry=RetryPolicy(max_attempts=2, base_backoff_seconds=0.001, max_backoff_seconds=0.01),
+        )
+        worker = PublishWorker(executor, config=config, db_path=self.db_path)
+        with patch.object(
+            sociamonials_fallback,
+            "publish_via_sociamonials",
+            return_value={"ok": True, "post_id": 9, "status": "scheduled", "network": "tw", "warnings": []},
+        ) as patched:
+            asyncio.run(worker.drain())
+        self.assertEqual(executor_calls["n"], 0)
+        patched.assert_called_once()
+        self.assertEqual(self._status(), jobs.TARGET_SUCCEEDED)
+
+    def test_direct_x_runs_when_explicitly_enabled(self) -> None:
+        self._enable_fallback()
+        os.environ["SAU_X_DIRECT_PUBLISH"] = "1"
+        twitter_account_id = profile_registry.add_account(
+            self.profile_id,
+            platform="twitter",
+            account_name="x-direct",
+            auth_type="oauth",
+            config={},
+            db_path=self.db_path,
+        ).id
+        job = jobs.enqueue_job(
+            jobs.JobSpec(
+                platform="twitter",
+                payload={"draft": {"message": "hi"}},
+                targets=[(f"account:{twitter_account_id}", "campaign_post:1", None)],
+                profile_id=self.profile_id,
+                idempotency_key=f"x-direct-{twitter_account_id}",
+            ),
+            db_path=self.db_path,
+        )
+        self._job_id = job.id
+        executor_calls = {"n": 0}
+
+        async def executor(platform, payload, target):
+            executor_calls["n"] += 1
+            raise _BoomPermanent("nope")
+
+        config = WorkerConfig(
+            poll_interval=0.001, batch_size=4, max_concurrent=1,
+            retry=RetryPolicy(max_attempts=1, base_backoff_seconds=0.001, max_backoff_seconds=0.01),
+        )
+        worker = PublishWorker(executor, config=config, db_path=self.db_path)
+        with patch.object(
+            sociamonials_fallback,
+            "publish_via_sociamonials",
+            return_value={"ok": True, "post_id": 9, "status": "scheduled", "network": "tw", "warnings": []},
+        ):
+            asyncio.run(worker.drain())
+        self.assertEqual(executor_calls["n"], 1)
 
     def test_refresh_failure_does_not_clobber_a_rotated_token(self) -> None:
         """The failure handler must merge into the latest row, not the snapshot.

@@ -66,6 +66,28 @@ _ALERT_REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
+TARGET_EXECUTION_TIMEOUT_SECONDS = float(
+    os.environ.get("SAU_TARGET_TIMEOUT_SECONDS", "1200") or 1200
+)
+
+
+def _x_direct_publish_enabled() -> bool:
+    """Whether the direct X (API/browser) path should run before the fallback.
+
+    The X developer account is out of credits, so direct X media uploads fail
+    deterministically and the cookie/browser path can hang. When the
+    Sociamonials fallback is on and this is unset, skip the direct path and
+    hand X straight to Sociamonials. Set ``SAU_X_DIRECT_PUBLISH=1`` after
+    topping up credits to restore direct-first behaviour.
+    """
+    raw = str(os.environ.get("SAU_X_DIRECT_PUBLISH", "")).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return not sociamonials_fallback.is_enabled()
+
+
 def _scrub_secrets(text: str) -> str:
     """Best-effort mask of credential-like values in free-form alert text."""
 
@@ -694,9 +716,35 @@ class PublishWorker:
                     "_db_path": str(self._db_path),
                     "_telegramDeliveryKey": str(target.id),
                 }
+                if job.platform == "twitter" and not _x_direct_publish_enabled():
+                    # X is carried by Sociamonials (its own OAuth connection),
+                    # and the direct path is currently guaranteed to fail (out
+                    # of API credits) or to hang (cookie browser). Go straight
+                    # to the fallback instead of burning the retry budget.
+                    log.info(
+                        "X direct publish disabled; using Sociamonials fallback"
+                    )
+                    if await self._try_sociamonials_fallback(
+                        target, "X direct publish disabled", log
+                    ):
+                        self._maybe_close_job_sink(target.job_id)
+                        return
+                    message = (
+                        "X direct publish disabled and the Sociamonials fallback "
+                        "failed"
+                    )
+                    if jobs.mark_target_failed(
+                        target.id, message, db_path=self._db_path
+                    ):
+                        log.error(f"target failed: {message}")
+                        self._alert_publish_failure(target, message)
+                    self._maybe_close_job_sink(target.job_id)
+                    return
                 result = self._executor(job.platform, payload, target)
                 if inspect.isawaitable(result):
-                    outcome = await result
+                    outcome = await asyncio.wait_for(
+                        result, timeout=TARGET_EXECUTION_TIMEOUT_SECONDS
+                    )
                 else:
                     outcome = result
                 updated_payload = {
