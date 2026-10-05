@@ -3949,6 +3949,20 @@ def _build_generation_prompt(
             "Attached image(s): describe what is actually visible (pose, setting, "
             "mood) in the copy; do not invent details that are not in the frame."
         )
+    # Humanizer rules apply to every language. They exist because generated
+    # copy reads as AI-written and the operator publishes it as their own voice.
+    user_lines.extend((
+        "",
+        "HUMANIZER RULES (apply in every language): write like a real person, not "
+        "a marketing bot. Use concrete, specific details from the media; vary the "
+        "sentence length; contractions are fine. NEVER use these AI tells: 'delve', "
+        "'in today's fast-paced world', 'unleash', 'elevate', 'embark', 'testament "
+        "to', 'tapestry', 'navigate the landscape', 'game-changer', 'seamlessly', "
+        "'leverage', 'utilize', 'it's not just X, it's Y', 'whether you're a X or a "
+        "Y', 'in conclusion', 'furthermore', 'moreover'. Do not force a neat "
+        "tricolon or a tidy moral. No emoji spam; one or two only if the platform "
+        "rule asks for emoji.",
+    ))
     account_context = str(request_data.get("_accountContext") or "").strip()
     if account_context:
         user_lines.append("")
@@ -3957,6 +3971,16 @@ def _build_generation_prompt(
     language = str(request_data.get("_accountLanguage") or "").strip()
     if language:
         labels = content_generator._parse_languages(language)
+        if any("Chinese" in label for label in labels) or "zh" in language.lower():
+            user_lines.extend((
+                "",
+                "TAIWAN MANDARIN RULES: write Traditional Chinese as used in Taiwan. "
+                "Never output Simplified characters. Use Taiwan vocabulary and "
+                "punctuation: 影片(not 视频), 網路(not 网络), 資訊(not 信息), "
+                "軟體(not 软件), 品質(not 质量), 專案(not 项目), 透過(not 通过), "
+                "鏡頭, 拍照, 感受, 身體. Use full-width punctuation ，。！？、. Do not "
+                "write English sentences inside the Chinese copy.",
+            ))
         if len(labels) == 1:
             user_lines.extend((
                 "",
@@ -3973,7 +3997,11 @@ def _build_generation_prompt(
                 f"{primary} version first, then a standalone --- line, then the complete "
                 f"{' then '.join(secondary)} version. Do not omit either language.",
             ))
-    user_lines.append("Return JSON with keys: message, hashtags, firstComment, contactDetails, cta.")
+    user_lines.append(
+        "Return JSON with keys: message, title, summary, description, altText, "
+        "hashtags, firstComment, contactDetails, cta. Every text field must follow "
+        "the language and humanizer rules above."
+    )
     return system_prompt, "\n".join(user_lines)
 
 

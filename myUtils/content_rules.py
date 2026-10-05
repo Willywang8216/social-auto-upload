@@ -142,6 +142,19 @@ def is_usable_copy(text: str | None, *, min_chars: int = 1) -> bool:
 
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
 
+# Characters whose Simplified form differs from Traditional. A zh-Hant caption
+# must not contain any of them; this catches a model that silently answered in
+# Simplified Chinese. Only unambiguous Simplified-only forms are listed (no
+# shared characters such as 制/占/布/信 that are valid in Traditional too).
+_SIMPLIFIED_ONLY_CHARS = frozenset(
+    "们这来说时对开关门问东车马鸟鱼龙风飞书学习点热爱怀汉语词汇软视频网络质项过认识证无发见觉让边达还进远从众优义乐乡买乱争亏云亚产亩亲亿仅仪价伙会伟传伤伦伪体余侧债倾偿储儿兑兰兴养兽内冈册写军农冲决况冻净凉减凑几凤凭凯击则刚创删别剂剑剥剧劝办务动励劲劳势勋区医华协单卖卢卫却厂厅历厉压厌县參双变叙叠叶号叹吓吕吗吨听启吴呕员呜咏咙响哑唤"
+)
+
+
+def contains_simplified_chinese(text: str | None) -> bool:
+    """True when ``text`` contains a Simplified-only character."""
+    return any(ch in _SIMPLIFIED_ONLY_CHARS for ch in str(text or ""))
+
 
 def language_tokens(value: str | None) -> list[str]:
     """Split an account language setting like ``"en,zh-Hant"`` into tokens."""
@@ -161,7 +174,10 @@ def message_matches_language(message: str | None, language: str | None) -> bool:
         return True
     wants_zh = any(tok.startswith("zh") for tok in tokens)
     has_cjk = bool(_CJK_RE.search(str(message or "")))
-    return has_cjk if wants_zh else not has_cjk
+    if wants_zh:
+        # A Traditional-Chinese target must not receive Simplified characters.
+        return has_cjk and not contains_simplified_chinese(message)
+    return not has_cjk
 
 SHEET_MESSAGE_MAX_CHARS = {
     "facebook": platform_limits.message_max_chars("facebook"),

@@ -165,6 +165,20 @@ class MessageLanguageTests(unittest.TestCase):
         self.assertTrue(content_rules.message_matches_language("早安，今天也很好", "zh"))
         self.assertFalse(content_rules.message_matches_language("Good morning", "zh-Hant"))
 
+    def test_traditional_account_rejects_simplified(self) -> None:
+        self.assertTrue(
+            content_rules.message_matches_language(
+                "這段影片記錄身體的自由與真實。", "zh-Hant"
+            )
+        )
+        self.assertFalse(
+            content_rules.message_matches_language(
+                "这段视频记录身体的自由与真实。", "zh-Hant"
+            )
+        )
+        self.assertTrue(content_rules.contains_simplified_chinese("网络视频质量"))
+        self.assertFalse(content_rules.contains_simplified_chinese("網路影片品質"))
+
     def test_english_account_forbids_cjk(self) -> None:
         self.assertTrue(content_rules.message_matches_language("Good morning", "en"))
         self.assertFalse(content_rules.message_matches_language("早安", "en"))
