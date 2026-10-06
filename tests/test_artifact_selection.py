@@ -37,16 +37,16 @@ def _video(artifact_id: int, **overrides) -> dict:
     return artifact
 
 
-def _part(artifact_id: int, index: int, count: int, cap: int) -> dict:
-    return _video(
-        artifact_id,
-        metadata={
-            "role": "video",
-            "max_duration_seconds": cap,
-            "part_index": index,
-            "part_count": count,
-        },
-    )
+def _part(artifact_id: int, index: int, count: int, cap: int, split_for: list | None = None) -> dict:
+    metadata = {
+        "role": "video",
+        "max_duration_seconds": cap,
+        "part_index": index,
+        "part_count": count,
+    }
+    if split_for is not None:
+        metadata["split_for"] = split_for
+    return _video(artifact_id, metadata=metadata)
 
 
 class SelectVideosForPlatformTests(unittest.TestCase):
@@ -98,6 +98,23 @@ class SelectVideosForPlatformTests(unittest.TestCase):
         self.assertEqual(
             [a["id"] for a in sau_backend._select_videos_for_platform(items, "twitter")],
             [10, 11],
+        )
+
+    def test_platform_only_uses_parts_it_planned(self) -> None:
+        items = [
+            _video(1),
+            _part(10, 1, 3, 300, split_for=["threads"]),
+            _part(11, 2, 3, 300, split_for=["threads"]),
+            _part(12, 3, 3, 300, split_for=["threads"]),
+        ]
+        # YouTube never asked for a split -> it keeps the full video.
+        self.assertEqual(
+            [a["id"] for a in sau_backend._select_videos_for_platform(items, "youtube")], [1]
+        )
+        # Threads asked for it -> it gets its three parts.
+        self.assertEqual(
+            [a["id"] for a in sau_backend._select_videos_for_platform(items, "threads")],
+            [10, 11, 12],
         )
 
 

@@ -331,6 +331,12 @@ class PublishWorker:
         access_token = str(config.get("accessToken") or "").strip()
         if not access_token:
             return True
+        if platform == "twitter":
+            # X access tokens live ~2h. Stored expiries were historically stamped
+            # naive-local, which this helper interprets correctly (and treats an
+            # unknown expiry as stale) so a proactive refresh always fires before
+            # the token lapses.
+            return prepared_publishers._x_access_token_stale(config, skew_seconds=skew)
         expires_at = self._parse_iso_datetime(str(config.get("accessTokenExpiresAt") or ""))
         if expires_at is None:
             # A refreshable token with no recorded expiry: refresh once to set
@@ -376,7 +382,7 @@ class PublishWorker:
         import sqlite3
         config = dict(account.config or {})
         platform = account.platform
-        now = datetime.now(tz=__import__("datetime").timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+        now = datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat(timespec="seconds")
 
         try:
             if platform == "tiktok":
@@ -412,9 +418,9 @@ class PublishWorker:
                 })
                 expires_in = refreshed.get("expires_in")
                 if expires_in:
-                    config["accessTokenExpiresAt"] = (
-                        datetime.now() + timedelta(seconds=int(expires_in))
-                    ).isoformat(timespec="seconds")
+                    config["accessTokenExpiresAt"] = prepared_publishers._token_expiry_from_payload(
+                        {"expires_in": expires_in}, "expires_in"
+                    )
 
             elif platform == "youtube":
                 refreshed = prepared_publishers.refresh_youtube_access_token(config)
@@ -425,9 +431,9 @@ class PublishWorker:
                 })
                 expires_in = refreshed.get("expires_in")
                 if expires_in:
-                    config["accessTokenExpiresAt"] = (
-                        datetime.now() + timedelta(seconds=int(expires_in))
-                    ).isoformat(timespec="seconds")
+                    config["accessTokenExpiresAt"] = prepared_publishers._token_expiry_from_payload(
+                        {"expires_in": expires_in}, "expires_in"
+                    )
 
             elif platform == "threads":
                 access_token = str(config.get("accessToken") or "").strip()
@@ -442,9 +448,9 @@ class PublishWorker:
                 })
                 expires_in = refreshed.get("expires_in")
                 if expires_in:
-                    config["accessTokenExpiresAt"] = (
-                        datetime.now() + timedelta(seconds=int(expires_in))
-                    ).isoformat(timespec="seconds")
+                    config["accessTokenExpiresAt"] = prepared_publishers._token_expiry_from_payload(
+                        {"expires_in": expires_in}, "expires_in"
+                    )
 
             elif platform in {"facebook", "instagram"}:
                 meta_user_token = str(config.get("metaUserAccessToken") or "").strip()
@@ -518,18 +524,31 @@ class PublishWorker:
                     config, account.auth_type, "twitter"
                 ) != "api":
                     return
-                result = prepared_publishers.refresh_twitter_access_token(config)
-                config.update({
-                    "accessToken": result["access_token"],
-                    "refreshToken": result.get("refresh_token") or refresh_token,
-                    "accessTokenUpdatedAt": now,
-                    "lastAutoRefreshAt": now,
-                })
-                expires_in = result.get("expires_in")
-                if expires_in:
-                    config["accessTokenExpiresAt"] = (
-                        datetime.now() + timedelta(seconds=int(expires_in))
-                    ).isoformat(timespec="seconds")
+
+                def _persist_twitter(updated_config: dict) -> None:
+                    profile_registry.update_account(
+                        account.id,
+                        config=updated_config,
+                        auth_type="oauth",
+                        status=1,
+                        db_path=self._db_path,
+                    )
+
+                # Single-flight: the rotated refresh token is persisted inside
+                # the lock before another maintenance pass can read the old one.
+                updated, refreshed = prepared_publishers.refresh_twitter_token_single_flight(
+                    config,
+                    account_id=account.id,
+                    db_path=self._db_path,
+                    persist=_persist_twitter,
+                    extra_fields={"lastAutoRefreshAt": now},
+                    clear_markers=True,
+                )
+                if refreshed:
+                    _logger.info(
+                        f"worker self-maintenance: refreshed twitter account id={account.id}"
+                    )
+                return
 
             else:
                 return  # unknown platform
@@ -588,7 +607,15 @@ class PublishWorker:
             now_dt + timedelta(seconds=backoff)
         ).isoformat(timespec="seconds")
 
-        needs_reconnect = failures >= self._MAINTENANCE_RECONNECT_THRESHOLD
+        credential_rejected = False
+        if account.platform == "twitter":
+            # A rejected X refresh token is terminal: no number of retries can
+            # recover it, so surface "reconnect required" immediately instead of
+            # waiting for the (much larger) failure threshold.
+            credential_rejected = prepared_publishers._twitter_refresh_requires_reconnect(exc)
+        needs_reconnect = (
+            failures >= self._MAINTENANCE_RECONNECT_THRESHOLD or credential_rejected
+        )
         should_alert = needs_reconnect and not merged.get("_reconnectAlertedAt")
         if needs_reconnect:
             merged["_needsReconnect"] = True

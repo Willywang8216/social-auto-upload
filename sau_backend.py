@@ -2236,9 +2236,17 @@ def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
             return False
         return True
 
+    def _planned_for(artifact: dict) -> bool:
+        # Only use parts a platform asked for: a large-cap platform such as
+        # YouTube must not pick up a small-cap platform's finer split.
+        planned = (artifact.get("metadata") or {}).get("split_for")
+        return not planned or platform in planned
+
     parts = [
         a for a in items
-        if (a.get("metadata") or {}).get("part_index") is not None and _fits(a)
+        if (a.get("metadata") or {}).get("part_index") is not None
+        and _fits(a)
+        and _planned_for(a)
     ]
     if parts:
         # Several split plans may exist (X 140s, Threads 300s, a size-only
@@ -2252,7 +2260,11 @@ def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
             chosen,
             key=lambda a: int((a.get("metadata") or {}).get("part_index") or 0),
         )
-    variants = [a for a in items if (a.get("metadata") or {}).get("max_duration_seconds")]
+    variants = [
+        a for a in items
+        if (a.get("metadata") or {}).get("max_duration_seconds")
+        and (a.get("metadata") or {}).get("part_index") is None
+    ]
     fitting = [
         a for a in variants
         if float((a.get("metadata") or {}).get("max_duration_seconds")) <= float(max_seconds)
@@ -2440,7 +2452,7 @@ def _run_account_connection_check(*, account_id: int, db_path: Path):
 def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "manual"):
     account = profile_registry.get_account(account_id, db_path=db_path)
     config = dict(account.config or {})
-    now = datetime.now().isoformat(timespec='seconds')
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat(timespec='seconds')
 
     try:
         if account.platform == profile_registry.PLATFORM_TIKTOK:
@@ -2699,40 +2711,30 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
             twitter_auth_type = str(config.get("twitterAuthType") or account.auth_type or "cookie").strip().lower()
             if twitter_auth_type == "cookie":
                 raise ValueError("Twitter cookie accounts do not support token refresh; use OAuth 2.0 API mode instead")
-            refreshed = prepared_publishers.refresh_twitter_access_token(config)
-            config.update({
-                'accessToken': refreshed['access_token'],
-                'refreshToken': refreshed.get('refresh_token', config.get('refreshToken', '')),
-                'scope': refreshed.get('scope', config.get('scope', '')),
-                'tokenType': refreshed.get('token_type', config.get('tokenType', 'bearer')),
-                'accessTokenUpdatedAt': now,
-                ('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt'): now,
-            })
-            user_data = refreshed.get('me', {}).get('data', {}) if isinstance(refreshed.get('me'), dict) else {}
-            if isinstance(user_data, dict):
-                config['twitterUserId'] = user_data.get('id', config.get('twitterUserId', ''))
-                config['twitterUserName'] = user_data.get('username', config.get('twitterUserName', ''))
-                config['twitterDisplayName'] = user_data.get('name', config.get('twitterDisplayName', ''))
-                if user_data.get('profile_image_url'):
-                    config['avatarUrl'] = str(user_data['profile_image_url'])
-            expires_in = refreshed.get('expires_in')
-            if expires_in:
-                config['accessTokenExpiresAt'] = (
-                    datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
-                ).isoformat(timespec='seconds')
-            for marker in (
-                '_needsReconnect', '_reconnectAlertedAt', '_maintenanceFailures',
-                '_nextMaintenanceAttemptAt', '_lastMaintenanceError',
-                '_lastMaintenanceAttemptAt',
-            ):
-                config.pop(marker, None)
-            updated = profile_registry.update_account(
-                account_id,
-                config=config,
-                auth_type='oauth',
-                status=1,
+
+            def _persist_twitter_refresh(updated_config):
+                profile_registry.update_account(
+                    account_id,
+                    config=updated_config,
+                    auth_type='oauth',
+                    status=1,
+                    db_path=db_path,
+                )
+
+            # Single-flight with the worker/publish paths: re-read under the
+            # lock, skip if another refresher already rotated the token, and
+            # persist the rotated refresh token before releasing the lock.
+            config, _twitter_refreshed = prepared_publishers.refresh_twitter_token_single_flight(
+                config,
+                account_id=account_id,
                 db_path=db_path,
+                persist=_persist_twitter_refresh,
+                extra_fields={
+                    ('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt'): now,
+                },
+                clear_markers=True,
             )
+            updated = profile_registry.get_account(account_id, db_path=db_path)
             summary = f"Twitter refreshed: @{config.get('twitterUserName') or updated.account_name}"
         else:
             raise ValueError('Refresh is implemented only for TikTok, Reddit, YouTube, Threads, Facebook, Instagram, and Twitter')
@@ -3020,6 +3022,11 @@ def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_sec
     )
     if auth_type == "cookie":
         return False
+    if account.platform == profile_registry.PLATFORM_TWITTER:
+        # X access tokens live ~2h; this helper interprets legacy naive-local
+        # expiries correctly and treats an unknown expiry as stale so the
+        # proactive refresh always fires before the token lapses.
+        return prepared_publishers._x_access_token_stale(config, skew_seconds=effective_skew)
     access_token = str(config.get('accessToken') or '').strip()
     if not access_token:
         return True
@@ -3910,16 +3917,19 @@ def _prepare_campaign_media_artifacts(
             except OSError:
                 size_bytes = 0
             # One plan per distinct (seconds, MB) cap pair that the source
-            # exceeds; the selector later picks the largest parts that fit.
-            plans: dict[tuple[float | None, float | None], None] = {}
+            # exceeds, tagging which platforms asked for it so a large-cap
+            # platform (YouTube) never picks a small-cap platform's parts.
+            plans: dict[tuple[float | None, float | None], set[str]] = {}
             for platform_name in selected_platforms:
                 sec = platform_limits.video_max_seconds(platform_name)
                 mb = platform_limits.media_max_mb(platform_name)
                 over_time = bool(sec and duration and duration > float(sec))
                 over_size = bool(mb and size_bytes and size_bytes > float(mb) * 1024 * 1024)
                 if over_time or over_size:
-                    plans.setdefault((float(sec) if sec else None, float(mb) if mb else None), None)
-            for (sec, mb) in sorted(plans, key=lambda pair: (pair[0] or 0, pair[1] or 0)):
+                    plans.setdefault((float(sec) if sec else None, float(mb) if mb else None), set()).add(
+                        str(platform_name)
+                    )
+            for (sec, mb), split_for in sorted(plans.items(), key=lambda item: (item[0][0] or 0, item[0][1] or 0)):
                 try:
                     parts = media_prep.split_to_seconds(
                         publish_path,
@@ -3966,6 +3976,7 @@ def _prepare_campaign_media_artifacts(
                             "max_media_mb": part_mb,
                             "part_index": index,
                             "part_count": len(parts),
+                            "split_for": sorted(split_for),
                         },
                         db_path=db_path,
                     )
@@ -5245,11 +5256,13 @@ def twitter_oauth_callback():
             merged_config['accessToken'] = access_token
         if refresh_token:
             merged_config['refreshToken'] = refresh_token
-        merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
+        merged_config['accessTokenUpdatedAt'] = datetime.now(timezone.utc).replace(microsecond=0).isoformat(timespec='seconds')
         merged_config['tokenType'] = token_payload.get('token_type', 'bearer')
         expires_in = token_payload.get('expires_in')
         if expires_in not in (None, ''):
-            merged_config['accessTokenExpiresAt'] = (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
+            merged_config['accessTokenExpiresAt'] = prepared_publishers._token_expiry_from_payload(
+                {'expires_in': expires_in}, 'expires_in'
+            )
         user_data = user_info.get('data', user_info) if isinstance(user_info, dict) else {}
         if isinstance(user_data, dict):
             merged_config['twitterUserId'] = str(user_data.get('id') or merged_config.get('twitterUserId') or '')

@@ -11,6 +11,7 @@ import mimetypes
 import os
 import re
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -381,6 +382,161 @@ def _token_expiry_from_payload(payload: dict, key: str) -> str:
     except (TypeError, ValueError):
         return ''
     return (_utc_now() + timedelta(seconds=seconds_int)).replace(microsecond=0).isoformat()
+
+
+# --- X (Twitter) OAuth 2.0 token refresh -------------------------------------
+#
+# X rotates (invalidates) the refresh token on every successful refresh, so two
+# concurrent refreshes of the same account leave it holding a dead token: the
+# slower request is rejected, and a stale config write can clobber the winner's
+# freshly rotated token. The backend maintenance thread, the worker's
+# maintenance tick and the publish path can all refresh the same account, so
+# they share one process-wide lock keyed by the account id. The lock is held
+# across the re-read, the network refresh and the persist, which makes the
+# sequence atomic and lets a loser reuse the winner's token instead of burning
+# the old one.
+_TWITTER_REFRESH_LOCKS: dict[str, threading.Lock] = {}
+_TWITTER_REFRESH_LOCKS_GUARD = threading.Lock()
+
+
+def twitter_refresh_lock(account_id: object = None) -> threading.Lock:
+    """Return the process-wide single-flight lock for one X account."""
+    key = str(account_id) if account_id is not None else "__x_default__"
+    with _TWITTER_REFRESH_LOCKS_GUARD:
+        lock = _TWITTER_REFRESH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _TWITTER_REFRESH_LOCKS[key] = lock
+    return lock
+
+
+def _parse_token_expiry(value: str | None) -> datetime | None:
+    """Parse a stored token expiry into an absolute UTC datetime.
+
+    Writers historically stamped tokens with ``datetime.now()`` (naive server
+    local) while readers assumed naive meant UTC, which shifted a 2-hour X token
+    by the server's UTC offset (up to 8h here) and let it expire before the
+    proactive refresh noticed. Treat a naive legacy value as server-local so its
+    absolute instant is recovered; a naive-UTC legacy value is then read as up
+    to one offset earlier, i.e. it only ever looks *staler*, which refreshes
+    early rather than late and is therefore safe.
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        # datetime.astimezone() on a naive value attaches the local timezone.
+        parsed = parsed.astimezone()
+    return parsed.astimezone(timezone.utc)
+
+
+def _x_access_token_stale(config: dict[str, Any], *, skew_seconds: int = 300) -> bool:
+    """True when the X OAuth 2.0 access token is missing, unknown or near expiry."""
+    access_token = str(config.get("accessToken") or "").strip()
+    if not access_token:
+        return True
+    expires_at = _parse_token_expiry(config.get("accessTokenExpiresAt"))
+    if expires_at is None:
+        # No trustworthy expiry: refresh to establish one rather than let a
+        # 2-hour token lapse silently.
+        return True
+    return expires_at <= (_utc_now() + timedelta(seconds=skew_seconds))
+
+
+def _apply_twitter_token_payload(config: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Merge an X token response into ``config`` using one UTC time base."""
+    updated = dict(config)
+    access_token = str(result.get("access_token") or "").strip()
+    if access_token:
+        updated["accessToken"] = access_token
+    refresh_token = str(result.get("refresh_token") or "").strip()
+    if refresh_token:
+        updated["refreshToken"] = refresh_token
+    if result.get("scope"):
+        updated["scope"] = result["scope"]
+    if result.get("token_type"):
+        updated["tokenType"] = result["token_type"]
+    expires_in = result.get("expires_in")
+    if expires_in not in (None, ""):
+        updated["accessTokenExpiresAt"] = _token_expiry_from_payload(
+            {"expires_in": expires_in}, "expires_in"
+        )
+    updated["accessTokenUpdatedAt"] = _utc_now().replace(microsecond=0).isoformat()
+    me = result.get("me") or {}
+    user_data = me.get("data", me) if isinstance(me, dict) else {}
+    if isinstance(user_data, dict):
+        if user_data.get("id"):
+            updated["twitterUserId"] = str(user_data["id"])
+        if user_data.get("username"):
+            updated["twitterUserName"] = str(user_data["username"])
+        if user_data.get("name"):
+            updated["twitterDisplayName"] = str(user_data["name"])
+        if user_data.get("profile_image_url"):
+            updated["avatarUrl"] = str(user_data["profile_image_url"])
+    return updated
+
+
+def _read_account_config(account_id: object, db_path: object = None) -> dict[str, Any] | None:
+    """Read the authoritative account config, or ``None`` when unavailable."""
+    if account_id is None:
+        return None
+    try:
+        from myUtils import profiles as profile_registry
+
+        kwargs = {"db_path": db_path} if db_path else {}
+        account = profile_registry.get_account(int(account_id), **kwargs)
+        return dict(account.config or {})
+    except Exception:  # noqa: BLE001 - fall back to the caller's copy
+        return None
+
+
+def refresh_twitter_token_single_flight(
+    config: dict[str, Any],
+    *,
+    account_id: object = None,
+    db_path: object = None,
+    session=None,
+    skew_seconds: int = 300,
+    persist=None,
+    extra_fields: dict[str, Any] | None = None,
+    clear_markers: bool = False,
+) -> tuple[dict[str, Any], bool]:
+    """Refresh the X token at most once per account, even under concurrency.
+
+    Returns ``(config, refreshed)``. The read-check-refresh-persist sequence
+    runs under :func:`twitter_refresh_lock`, so a caller that loses the race
+    re-reads the winner's rotated token and skips the network call. ``persist``
+    is invoked inside the lock; callers that need their own write semantics
+    pass a callable.
+    """
+    lock = twitter_refresh_lock(account_id)
+    with lock:
+        latest = _read_account_config(account_id, db_path)
+        merged = {**config, **latest} if latest is not None else dict(config)
+        if not _x_access_token_stale(merged, skew_seconds=skew_seconds):
+            return merged, False
+        result = refresh_twitter_access_token(merged, session=session)
+        updated = _apply_twitter_token_payload(merged, result)
+        if clear_markers:
+            for marker in (
+                "_needsReconnect", "_reconnectAlertedAt", "_maintenanceFailures",
+                "_nextMaintenanceAttemptAt", "_lastMaintenanceError",
+                "_lastMaintenanceAttemptAt",
+            ):
+                updated.pop(marker, None)
+        if extra_fields:
+            updated.update(extra_fields)
+        if persist is not None:
+            persist(updated)
+        return updated, True
 
 
 def _apply_tiktok_token_payload(config: dict[str, Any], token_payload: dict, user_info: dict | None = None) -> dict[str, Any]:
@@ -1278,10 +1434,10 @@ def _maybe_refresh_meta_token(config: dict[str, Any], platform: str, *, session=
     updated["metaUserAccessToken"] = refreshed["access_token"]
     expires_in = refreshed.get("expires_in")
     if expires_in not in (None, ""):
-        updated["metaUserAccessTokenExpiresAt"] = (
-            datetime.now() + timedelta(seconds=int(expires_in))
-        ).isoformat(timespec="seconds")
-    updated["accessTokenUpdatedAt"] = datetime.now().isoformat(timespec="seconds")
+        updated["metaUserAccessTokenExpiresAt"] = _token_expiry_from_payload(
+            {"expires_in": expires_in}, "expires_in"
+        )
+    updated["accessTokenUpdatedAt"] = _utc_now().replace(microsecond=0).isoformat()
     return updated
 
 
@@ -1837,9 +1993,10 @@ def _maybe_refresh_threads_token(config: dict[str, Any], *, session=None) -> dic
     updated["accessToken"] = refreshed["access_token"]
     expires_in = refreshed.get("expires_in")
     if expires_in not in (None, ""):
-        from datetime import datetime, timedelta
-        updated["accessTokenExpiresAt"] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec="seconds")
-    updated["accessTokenUpdatedAt"] = datetime.now().isoformat(timespec="seconds")
+        updated["accessTokenExpiresAt"] = _token_expiry_from_payload(
+            {"expires_in": expires_in}, "expires_in"
+        )
+    updated["accessTokenUpdatedAt"] = _utc_now().replace(microsecond=0).isoformat()
     return updated
 
 
@@ -2639,8 +2796,21 @@ def _normalized_platform_auth(config: dict[str, Any], platform: str) -> str:
     return effective_auth_type(config, None, platform)
 
 
-def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None, on_refresh=None) -> dict[str, Any]:
-    """Refresh OAuth 2.0 token and immediately persist a rotated refresh token."""
+def _maybe_refresh_twitter_token(
+    config: dict[str, Any],
+    *,
+    session=None,
+    on_refresh=None,
+    account_id: object = None,
+    db_path: object = None,
+) -> dict[str, Any]:
+    """Refresh OAuth 2.0 token and immediately persist a rotated refresh token.
+
+    Runs the read-check-refresh-persist sequence under the per-account
+    single-flight lock so the single-use refresh token is never burned by a
+    concurrent refresh. ``on_refresh`` receives the freshly rotated config
+    inside the lock (see :func:`refresh_twitter_token_single_flight`).
+    """
     refresh_token = str(config.get("refreshToken") or "").strip()
     if config.get("_needsReconnect"):
         raise PreparedPublishError(
@@ -2649,25 +2819,31 @@ def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None, on_ref
         )
     if not refresh_token or _normalized_platform_auth(config, "twitter") != "api":
         return config
-    expires_at = str(config.get("accessTokenExpiresAt") or "").strip()
-    if expires_at:
-        from datetime import datetime, timedelta, timezone
-        try:
-            exp = datetime.fromisoformat(expires_at)
-            now = datetime.now(timezone.utc) if exp.tzinfo else datetime.now()
-            if now < exp - timedelta(seconds=300):
-                return config  # still valid, plenty of margin
-        except (ValueError, TypeError):
-            pass  # unparseable → try refresh
+    # Fast path: still valid, plenty of margin. The authoritative re-read under
+    # the single-flight lock repeats this check, so a caller that lost a race
+    # never burns the old refresh token.
+    if not _x_access_token_stale(config):
+        return config
     try:
-        result = refresh_twitter_access_token(config, session=session)
+        updated, _refreshed = refresh_twitter_token_single_flight(
+            config,
+            account_id=account_id,
+            db_path=db_path,
+            session=session,
+            persist=on_refresh,
+            clear_markers=True,
+        )
+        return updated
+    except PreparedPublishError:
+        # Includes the shared helper's definitive "reconnect required" signal.
+        raise
     except Exception as exc:
         reconnect_required = _twitter_refresh_requires_reconnect(exc)
         if reconnect_required and on_refresh is not None:
             failed_config = dict(config)
             failed_config["_needsReconnect"] = True
             failed_config["_lastMaintenanceError"] = "X OAuth 2.0 refresh token was rejected; reconnect required"
-            failed_config["_lastMaintenanceAttemptAt"] = __import__("datetime").datetime.now().isoformat(timespec="seconds")
+            failed_config["_lastMaintenanceAttemptAt"] = _utc_now().replace(microsecond=0).isoformat()
             on_refresh(failed_config)
         message = (
             "X OAuth 2.0 refresh token was rejected; reconnect this account"
@@ -2675,33 +2851,6 @@ def _maybe_refresh_twitter_token(config: dict[str, Any], *, session=None, on_ref
             else "X OAuth 2.0 token refresh failed temporarily; retry later"
         )
         raise PreparedPublishError(message, retryable=not reconnect_required) from exc
-    updated = dict(config)
-    updated["accessToken"] = result["access_token"]
-    updated["refreshToken"] = result.get("refresh_token") or refresh_token
-    updated["scope"] = result.get("scope") or config.get("scope", "")
-    expires_in = result.get("expires_in")
-    if expires_in not in (None, ""):
-        from datetime import datetime, timedelta
-        updated["accessTokenExpiresAt"] = (datetime.now() + timedelta(seconds=int(expires_in))).isoformat(timespec="seconds")
-    updated["accessTokenUpdatedAt"] = datetime.now().isoformat(timespec="seconds")
-    for marker in (
-        "_needsReconnect", "_reconnectAlertedAt", "_maintenanceFailures",
-        "_nextMaintenanceAttemptAt", "_lastMaintenanceError",
-        "_lastMaintenanceAttemptAt",
-    ):
-        updated.pop(marker, None)
-    if on_refresh is not None:
-        on_refresh(updated)
-    me = result.get("me") or {}
-    user_data = me.get("data", me) if isinstance(me, dict) else {}
-    if isinstance(user_data, dict):
-        if user_data.get("id"):
-            updated["twitterUserId"] = str(user_data["id"])
-        if user_data.get("username"):
-            updated["twitterUserName"] = str(user_data["username"])
-        if user_data.get("name"):
-            updated["twitterDisplayName"] = str(user_data["name"])
-    return updated
 
 
 def _raise_x_publish_error(exc: Exception, *, stage: str) -> PreparedPublishError:
@@ -2763,7 +2912,11 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
         )
 
     config = _maybe_refresh_twitter_token(
-        config, session=session, on_refresh=_persist_refreshed,
+        config,
+        session=session,
+        on_refresh=_persist_refreshed,
+        account_id=getattr(account, "id", None),
+        db_path=(payload or {}).get("_db_path"),
     )
 
     # Check if we have OAuth 2.0 token (from PKCE flow)
