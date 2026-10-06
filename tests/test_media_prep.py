@@ -250,6 +250,60 @@ class DurationVariantTests(unittest.TestCase):
                     media_prep.trim_to_seconds(src, tmp, 300)
 
 
+class SplitToSecondsTests(unittest.TestCase):
+    """split_to_seconds divides a too-long video into under-the-cap parts."""
+
+    _META = {"width": 1920, "height": 1080, "fps": 30, "duration": 813.0, "has_audio": True}
+
+    def test_returns_source_when_within_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "clip.mp4"
+            src.write_bytes(b"x")
+            with mock.patch.object(media_prep, "probe", return_value=self._META):
+                parts = media_prep.split_to_seconds(src, tmp, 900)
+            self.assertEqual(parts, [src.resolve()])
+
+    def test_splits_into_ceil_parts_named_by_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "clip.mp4"
+            src.write_bytes(b"x")
+            cmds = []
+
+            def fake_run(cmd, **kwargs):
+                cmds.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with mock.patch.object(media_prep, "probe", return_value=self._META), mock.patch.object(
+                media_prep, "_ensure_tool", return_value="ffmpeg"
+            ), mock.patch.object(media_prep, "_run", side_effect=fake_run):
+                parts = media_prep.split_to_seconds(src, tmp, 300)
+
+            self.assertEqual(
+                [p.name for p in parts],
+                [
+                    "clip_part1of3_pub.mp4",
+                    "clip_part2of3_pub.mp4",
+                    "clip_part3of3_pub.mp4",
+                ],
+            )
+            self.assertEqual(len(cmds), 3)
+            for cmd in cmds:
+                self.assertIn("-ss", cmd)
+                self.assertIn("-t", cmd)
+
+    def test_split_raises_when_a_part_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "clip.mp4"
+            src.write_bytes(b"x")
+            with mock.patch.object(media_prep, "probe", return_value=self._META), mock.patch.object(
+                media_prep, "_ensure_tool", return_value="ffmpeg"
+            ), mock.patch.object(
+                media_prep, "_run", return_value=subprocess.CompletedProcess([], 1, "", "boom")
+            ):
+                with self.assertRaises(RuntimeError):
+                    media_prep.split_to_seconds(src, tmp, 300)
+
+
 class CopyPathTests(unittest.TestCase):
     """shrink() copy path needs no ffmpeg (probe is mocked out)."""
 

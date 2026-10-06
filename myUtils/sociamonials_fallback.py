@@ -55,6 +55,12 @@ DEFAULT_WORKSPACE_ID = "26985"
 ENABLED_ENV = "SAU_SOCIAMONIALS_FALLBACK"
 API_KEY_ENV = "SOCIAMONIALS_API_KEY"
 WORKSPACE_ENV = "SOCIAMONIALS_WORKSPACE_ID"
+# The teaching brand lives in a SEPARATE Sociamonials workspace (34293) reached
+# with its own agent key. It is isolated from the adult brands by policy, so it
+# is never merged into the default workspace.
+TEACHING_API_KEY_ENV = "SOCIAMONIALS_TEACHING_API_KEY"
+TEACHING_WORKSPACE_ENV = "SOCIAMONIALS_TEACHING_WORKSPACE_ID"
+DEFAULT_TEACHING_WORKSPACE_ID = "34293"
 SECRETS_FILE_ENV = "SOCIAMONIALS_SECRETS_FILE"
 TIMEOUT_ENV = "SAU_SOCIAMONIALS_TIMEOUT"
 ASSET_READY_TIMEOUT_ENV = "SAU_SOCIAMONIALS_ASSET_READY_TIMEOUT"
@@ -110,7 +116,9 @@ _NON_DIRECT_HOSTS = {
 
 # SAU account id -> Sociamonials destination.  Mirrors the plan map, corrected
 # with the full ``socialupload-groups.json`` profile refs so the EN and ZH
-# Bluesky accounts do not collapse onto one profile.
+# Bluesky accounts do not collapse onto one profile.  ``workspace_id`` /
+# ``api_key_env`` override the global workspace/key for the teaching brand.
+_TEACHING = {"workspace_id": DEFAULT_TEACHING_WORKSPACE_ID, "api_key_env": TEACHING_API_KEY_ENV}
 SAU_ACCOUNT_TO_SOCIAMONIALS: dict[int, dict[str, Any]] = {
     # Facebook
     11: {"network": "fb", "profile_refs": ["19784|175913"], "name": "Nakedwill2"},
@@ -139,6 +147,15 @@ SAU_ACCOUNT_TO_SOCIAMONIALS: dict[int, dict[str, Any]] = {
     109: {"network": "tiktok", "profile_refs": ["3917"], "name": "Nakedwill"},
     # YouTube
     110: {"network": "yt", "profile_refs": ["13223"], "name": "itsnakedwill"},
+    # --- Teaching connector (workspace 34293, its own key).  Isolated from the
+    # adult brands: never mix a teaching profile with nakedwill/sexualwill. ---
+    43: {"network": "in", "profile_refs": ["70076"], "name": "supercool_bd", **_TEACHING},
+    58: {"network": "fb", "profile_refs": ["26317|220114"], "name": "威威教學", **_TEACHING},
+    61: {"network": "thrd", "profile_refs": ["1102"], "name": "supercool_bd", **_TEACHING},
+    100: {"network": "tiktok", "profile_refs": ["5800"], "name": "weiwei_wang0", **_TEACHING},
+    107: {"network": "tw", "profile_refs": ["16087"], "name": "weiwei_wang0", **_TEACHING},
+    108: {"network": "yt", "profile_refs": ["11020"], "name": "威威🌞", **_TEACHING},
+    125: {"network": "blsk", "profile_refs": ["1278"], "name": "iamwillywang.bsky.social", **_TEACHING},
 }
 
 
@@ -187,9 +204,53 @@ def get_workspace_id(env: Mapping[str, str] | None = None) -> str:
     return str(environ.get(WORKSPACE_ENV) or DEFAULT_WORKSPACE_ID).strip()
 
 
+def get_teaching_api_key(env: Mapping[str, str] | None = None) -> str:
+    """The teaching workspace's agent key (separate Sociamonials workspace)."""
+    environ = env if env is not None else os.environ
+    return str(environ.get(TEACHING_API_KEY_ENV) or "").strip()
+
+
+def get_teaching_workspace_id(env: Mapping[str, str] | None = None) -> str:
+    environ = env if env is not None else os.environ
+    return str(environ.get(TEACHING_WORKSPACE_ENV) or DEFAULT_TEACHING_WORKSPACE_ID).strip()
+
+
+def resolve_credentials(
+    mapping: Mapping[str, Any] | None,
+    *,
+    api_key: str | None = None,
+    workspace_id: str | None = None,
+) -> tuple[str, str]:
+    """Resolve the ``(api_key, workspace_id)`` for one mapping.
+
+    Precedence for the key: explicit argument, the mapping's ``api_key_env``
+    (eg. the teaching key), then the global key.  The workspace follows the
+    same order, and a mapping that names the teaching key defaults to the
+    teaching workspace even when the env var is unset.
+    """
+    key = str(api_key or "").strip()
+    env_name = ""
+    if mapping:
+        env_name = str(mapping.get("api_key_env") or "").strip()
+    if not key and env_name:
+        key = str(os.environ.get(env_name) or "").strip()
+    if not key:
+        key = get_api_key()
+
+    ws = str(workspace_id or "").strip()
+    if not ws and mapping:
+        ws = str(mapping.get("workspace_id") or "").strip()
+    if not ws and env_name == TEACHING_API_KEY_ENV:
+        ws = get_teaching_workspace_id()
+    if not ws:
+        ws = get_workspace_id()
+    return key, ws
+
+
 def is_configured(env: Mapping[str, str] | None = None) -> bool:
-    """True when an API key is available (the fallback can reach the API)."""
-    return bool(get_api_key(env))
+    """True when any usable agent key is available."""
+    environ = env if env is not None else os.environ
+    return bool(get_api_key(env) or get_teaching_api_key(environ))
 
 
 def is_enabled(env: Mapping[str, str] | None = None) -> bool:
@@ -241,11 +302,18 @@ def _normalise_entry(entry: Any) -> dict[str, Any] | None:
     refs = [str(ref).strip() for ref in (refs or []) if str(ref).strip()]
     if not refs:
         return None
-    return {
+    workspace_id = str(entry.get("workspace_id") or "").strip()
+    api_key_env = str(entry.get("api_key_env") or "").strip()
+    result = {
         "network": network,
         "profile_refs": refs,
         "name": str(entry.get("name") or "").strip() or None,
     }
+    if workspace_id:
+        result["workspace_id"] = workspace_id
+    if api_key_env:
+        result["api_key_env"] = api_key_env
+    return result
 
 
 def _from_settings(settings: Any, account_id: int | None) -> dict[str, Any] | None:
@@ -891,10 +959,6 @@ def publish_via_sociamonials(
     key, and :class:`SociamonialsFallbackError` for any API/media failure.  The
     caller marks the target succeeded only when this returns.
     """
-    key = (api_key if api_key is not None else get_api_key()).strip()
-    if not key:
-        raise SociamonialsNotConfigured("SOCIAMONIALS_API_KEY is not set")
-
     account_id = _account_value(account, "id", None)
     mapping = resolve_mapping(
         int(account_id) if account_id is not None else None,
@@ -906,6 +970,17 @@ def publish_via_sociamonials(
         raise SociamonialsFallbackError(
             f"no Sociamonials profile is mapped for account {account_id!r} ({platform})"
         )
+    # Resolve the workspace + key AFTER the mapping: the teaching accounts
+    # carry their own workspace_id/api_key_env, so this is where the separate
+    # connector is honoured instead of always using the global workspace.
+    key, ws = resolve_credentials(
+        mapping, api_key=api_key, workspace_id=workspace_id
+    )
+    if not key:
+        raise SociamonialsNotConfigured(
+            "no Sociamonials API key is set (SOCIAMONIALS_API_KEY / "
+            "SOCIAMONIALS_TEACHING_API_KEY)"
+        )
     network = mapping["network"]
     platform_network = _platform_network(platform)
     if platform_network and network != platform_network:
@@ -916,7 +991,6 @@ def publish_via_sociamonials(
     request_timeout = float(timeout if timeout is not None else _timeout())
     http = _get_session(session)
     headers = _headers(key)
-    ws = str(workspace_id or get_workspace_id()).strip()
 
     warnings: list[str] = []
     message, moved_links = compose_message_with_links(payload, network=network)

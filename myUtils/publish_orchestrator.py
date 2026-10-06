@@ -229,6 +229,7 @@ def submit_publish(
     generate_account_draft: Callable,
     ensure_file_record_for_path: Callable,
     artifact_payloads_for_platform: Callable,
+    artifact_part_groups_for_platform: Callable | None = None,
     job_to_payload: Callable,
     now_fn: Callable = datetime.now,
 ) -> SubmitResult:
@@ -460,34 +461,44 @@ def submit_publish(
                         draft["firstComment"] = ""
 
                 if supports_multi_media or len(publishable_files) <= 1:
-                    post = campaign_store.add_campaign_post(
-                        campaign.id,
-                        platform,
-                        account_ids=[account.id],
-                        draft=draft,
-                        status=campaign_store.CAMPAIGN_POST_READY,
-                        db_path=db_path,
-                    )
-                    account_tt_settings = tiktok_post_settings.get(str(account.id)) or tiktok_post_settings.get(account.id)
-                    payload = _build_payload(
-                        campaign, post, draft, artifacts, platform,
-                        artifact_payloads_for_platform,
-                        tiktok_direct_post=tiktok_direct_post,
-                        tiktok_post_settings=account_tt_settings if isinstance(account_tt_settings, dict) else None,
-                    )
-                    targets = [
-                        (
-                            f"account:{account.id}",
-                            f"campaign_post:{post.id}",
-                            _next_free_slot(account.id, base_time, stagger_offset, booked_slots),
+                    # One source video longer than a platform cap becomes
+                    # several part-posts; anything within the cap is a single
+                    # group, identical to before.
+                    if artifact_part_groups_for_platform is not None:
+                        part_groups = artifact_part_groups_for_platform(artifacts, platform)
+                    else:
+                        part_groups = [artifact_payloads_for_platform(artifacts, platform)]
+                    for part_index, part_artifacts in enumerate(part_groups, start=1):
+                        post = campaign_store.add_campaign_post(
+                            campaign.id,
+                            platform,
+                            account_ids=[account.id],
+                            draft=draft,
+                            status=campaign_store.CAMPAIGN_POST_READY,
+                            db_path=db_path,
                         )
-                    ]
-                    stagger_offset += 1
-                    queued_jobs.append(
-                        _enqueue_post(
-                            platform, payload, targets, campaign, post, job_to_payload, db_path
+                        account_tt_settings = tiktok_post_settings.get(str(account.id)) or tiktok_post_settings.get(account.id)
+                        payload = _build_payload(
+                            campaign, post, draft, part_artifacts, platform,
+                            tiktok_direct_post=tiktok_direct_post,
+                            tiktok_post_settings=account_tt_settings if isinstance(account_tt_settings, dict) else None,
                         )
-                    )
+                        if len(part_groups) > 1:
+                            payload["partIndex"] = part_index
+                            payload["partCount"] = len(part_groups)
+                        targets = [
+                            (
+                                f"account:{account.id}",
+                                f"campaign_post:{post.id}",
+                                _next_free_slot(account.id, base_time, stagger_offset, booked_slots),
+                            )
+                        ]
+                        stagger_offset += 1
+                        queued_jobs.append(
+                            _enqueue_post(
+                                platform, payload, targets, campaign, post, job_to_payload, db_path
+                            )
+                        )
                 else:
                     for media_file in publishable_files:
                         single_id = int(media_file["file_record_id"])
@@ -502,8 +513,9 @@ def submit_publish(
                         )
                         account_tt_settings = tiktok_post_settings.get(str(account.id)) or tiktok_post_settings.get(account.id)
                         payload = _build_payload(
-                            campaign, post, draft, artifacts, platform,
-                            artifact_payloads_for_platform,
+                            campaign, post, draft,
+                            artifact_payloads_for_platform(artifacts, platform),
+                            platform,
                             tiktok_direct_post=tiktok_direct_post,
                             tiktok_post_settings=account_tt_settings if isinstance(account_tt_settings, dict) else None,
                         )
@@ -636,7 +648,7 @@ def _next_free_slot(
 
 
 def _build_payload(
-    campaign, post, draft, artifacts, platform, artifact_payloads_for_platform,
+    campaign, post, draft, artifact_payloads, platform,
     *,
     tiktok_direct_post: bool = False,
     tiktok_post_settings: dict | None = None,
@@ -648,7 +660,7 @@ def _build_payload(
         "draft": draft,
         "message": draft.get("message", ""),
         "sheetRow": {},
-        "artifacts": artifact_payloads_for_platform(artifacts, platform),
+        "artifacts": artifact_payloads,
     }
     if platform == "tiktok":
         # publish_tiktok_sync reads payload.tiktokDirectPost first, then

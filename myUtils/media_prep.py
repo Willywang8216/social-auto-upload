@@ -20,6 +20,7 @@ the point of invocation.
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -386,6 +387,87 @@ def trim_to_seconds(
             f"ffmpeg trim failed on {src_path}: {completed.stderr.strip()[-2000:]}"
         )
     return out_path
+
+
+def split_to_seconds(
+    src: str | Path,
+    out_dir: str | Path,
+    max_seconds: float,
+    *,
+    crf: int = CRF_DEFAULT,
+) -> list[Path]:
+    """Split ``src`` into equal parts of at most ``max_seconds`` each.
+
+    Returns ``[src]`` unchanged when it already fits. Otherwise re-encodes
+    ``ceil(duration / max_seconds)`` parts (named ``<stem>_part<i>of<n>_pub.mp4``)
+    so a long video becomes several under-the-cap posts instead of one truncated
+    cut — no footage is dropped, unlike :func:`trim_to_seconds`.
+    """
+    src_path = Path(src).expanduser().resolve()
+    if not src_path.exists():
+        raise FileNotFoundError(f"split source missing: {src_path}")
+    meta = probe(src_path)
+    duration = float(meta.get("duration") or 0.0)
+    cap = float(max_seconds or 0.0)
+    if duration <= 0 or cap <= 0 or duration <= cap:
+        return [src_path]
+
+    count = max(2, int(math.ceil(duration / cap)))
+    part_len = duration / count
+    out_dir_path = Path(out_dir).expanduser().resolve()
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+    filters = build_filters(meta)
+    fps = _format_fps(float(meta.get("fps") or 0))
+
+    parts: list[Path] = []
+    for index in range(count):
+        start = index * part_len
+        out_path = out_dir_path / f"{src_path.stem}_part{index + 1}of{count}_pub.mp4"
+        cmd = [
+            _ensure_tool(FFMPEG),
+            "-y",
+            # -ss before -i is the fast, keyframe-accurate seek; the re-encode
+            # fixes the cut at the exact boundary on the output timeline.
+            "-ss",
+            f"{start:.3f}",
+            "-i",
+            str(src_path),
+            "-t",
+            f"{part_len:.3f}",
+            "-vf",
+            filters,
+            "-r",
+            fps,
+            "-c:v",
+            "libx264",
+            "-crf",
+            str(int(crf)),
+            "-preset",
+            "medium",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-movflags",
+            "+faststart",
+        ]
+        if not meta.get("has_audio"):
+            cmd.append("-an")
+        cmd.append(str(out_path))
+        completed = _run(cmd, capture_output=True, text=True)
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg split part {index + 1}/{count} failed on {src_path}: "
+                f"{completed.stderr.strip()[-2000:]}"
+            )
+        parts.append(out_path)
+    return parts
 
 
 def resize_to_target_if_landscape(src: str | Path, out_dir: str | Path) -> Path:

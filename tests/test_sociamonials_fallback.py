@@ -66,6 +66,8 @@ def _clean_env(monkeypatch):
         sm.ENABLED_ENV,
         sm.API_KEY_ENV,
         sm.WORKSPACE_ENV,
+        sm.TEACHING_API_KEY_ENV,
+        sm.TEACHING_WORKSPACE_ENV,
         sm.SECRETS_FILE_ENV,
         sm.TIMEOUT_ENV,
     ):
@@ -593,3 +595,63 @@ def test_publish_propagates_warnings_and_approval_hold():
     )
     assert result["requires_approval"] is True
     assert "cta_group not found" in result["warnings"]
+
+
+# --- Teaching connector (separate workspace / key) ----------------------- #
+
+
+def test_teaching_accounts_use_the_teaching_workspace():
+    for account_id in (43, 58, 61, 100, 107, 108, 125):
+        mapping = sm.resolve_mapping(account_id)
+        assert mapping is not None, account_id
+        assert mapping["workspace_id"] == sm.DEFAULT_TEACHING_WORKSPACE_ID, account_id
+        assert mapping["api_key_env"] == sm.TEACHING_API_KEY_ENV, account_id
+
+
+def test_adult_accounts_do_not_carry_a_workspace_override():
+    mapping = sm.resolve_mapping(103)
+    assert mapping == {"network": "tw", "profile_refs": ["14099"], "name": "nakedhappylife"}
+    assert "workspace_id" not in mapping
+    assert "api_key_env" not in mapping
+
+
+def test_resolve_credentials_prefers_the_mapping_key_and_workspace(monkeypatch):
+    monkeypatch.setenv(sm.API_KEY_ENV, "main_key")
+    monkeypatch.setenv(sm.TEACHING_API_KEY_ENV, "teach_key")
+    monkeypatch.setenv(sm.TEACHING_WORKSPACE_ENV, "34293")
+    monkeypatch.setenv(sm.WORKSPACE_ENV, "26985")
+    mapping = sm.resolve_mapping(100)
+    key, ws = sm.resolve_credentials(mapping)
+    assert key == "teach_key"
+    assert ws == "34293"
+    # An adult mapping still uses the global key/workspace.
+    key2, ws2 = sm.resolve_credentials(sm.resolve_mapping(103))
+    assert key2 == "main_key"
+    assert ws2 == "26985"
+
+
+def test_publish_uses_the_teaching_workspace(monkeypatch):
+    monkeypatch.setenv(sm.TEACHING_API_KEY_ENV, "teach_key")
+    monkeypatch.setenv(sm.TEACHING_WORKSPACE_ENV, "34293")
+    seen = {}
+
+    def handler(method, url, kwargs):
+        if method == "POST" and url == sm.POSTS_URL:
+            seen["auth"] = (kwargs.get("headers") or {}).get("Authorization")
+            seen["body"] = kwargs.get("json") or {}
+            return FakeResponse(200, {"post_id": 9, "status": "published"})
+        return FakeResponse(200, {"results": [{"status": "published"}]})
+
+    # The media upload must not fire for a text-only teaching post.
+    session = FakeSession(handler)
+    result = sm.publish_via_sociamonials(
+        platform="twitter",
+        account=_Account(107),
+        payload={"draft": {"message": "teaching copy"}},
+        session=session,
+        delivery_timeout=0,
+    )
+    assert result["post_id"] == 9
+    assert seen["auth"] == "Bearer teach_key"
+    assert seen["body"]["workspace_registration_id"] == 34293
+    assert seen["body"]["networks"] == {"tw": {"profile_refs": ["16087"]}}

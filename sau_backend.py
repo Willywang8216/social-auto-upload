@@ -2156,8 +2156,8 @@ def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> lis
     raw_kinds = {"raw_remote_upload", "raw_local"}
     if platform != profile_registry.PLATFORM_TIKTOK:
         # Drop the un-prepared raw artifacts and, for every video source, pick
-        # the duration variant that fits this platform's cap (the full _pub.mp4
-        # when it fits, otherwise the largest trimmed variant under the cap).
+        # the duration-safe cut(s) for this platform: the trimmed/split parts
+        # when they exist, otherwise the full _pub.mp4.
         cleaned = [a for a in artifacts if a.get("artifact_kind") not in raw_kinds]
         videos: dict[object, list[dict]] = {}
         passthrough: list[dict] = []
@@ -2168,8 +2168,10 @@ def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> lis
                 videos.setdefault(source_id, []).append(artifact)
             else:
                 passthrough.append(artifact)
-        selected = [_select_video_for_platform(items, platform) for items in videos.values()]
-        return [*passthrough, *[a for a in selected if a]]
+        selected: list[dict] = []
+        for items in videos.values():
+            selected.extend(_select_videos_for_platform(items, platform))
+        return [*passthrough, *selected]
 
     grouped: dict[tuple[object, object], list[dict]] = {}
     passthrough: list[dict] = []
@@ -2189,32 +2191,68 @@ def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> lis
     return [*passthrough, *selected]
 
 
-def _select_video_for_platform(items: list[dict], platform: str) -> dict | None:
-    """Pick the video artifact whose duration fits ``platform``.
+def _artifact_part_groups_for_platform(artifacts: list[dict], platform: str) -> list[list[dict]]:
+    """Group a platform's artifacts into one list per post.
 
-    Prefers the largest trimmed variant at or under the platform cap, then the
-    full artifact (no ``max_duration_seconds``) when nothing is trimmed.
+    A video too long for the platform is re-encoded into parts; each part is
+    its own post. Everything already inside the cap yields a single group, so a
+    caller that ignores this helper still publishes exactly as before.
+    """
+    selected = _artifact_payloads_for_platform(artifacts, platform)
+    video_items = [a for a in selected if (a.get("metadata") or {}).get("role") == "video"]
+    source_ids = {a.get("source_file_record_id") for a in video_items}
+    if len(video_items) <= 1 or len(source_ids) > 1:
+        return [selected]
+    parts = sorted(
+        (a for a in video_items if (a.get("metadata") or {}).get("part_index") is not None),
+        key=lambda a: int((a.get("metadata") or {}).get("part_index") or 0),
+    )
+    if len(parts) <= 1:
+        return [selected]
+    passthrough = [a for a in selected if (a.get("metadata") or {}).get("role") != "video"]
+    return [passthrough + [part] for part in parts]
+
+
+def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
+    """Pick the video artifact(s) whose duration fits ``platform``.
+
+    Returns every split part when the source was divided (one post each),
+    otherwise the largest trimmed variant under the cap, else the full artifact.
     """
     if not items:
-        return None
+        return []
     max_seconds = platform_limits.video_max_seconds(platform)
     if max_seconds is None:
-        return items[0]
-    variants = [
+        return [items[0]]
+    parts = [
         a for a in items
-        if (a.get("metadata") or {}).get("max_duration_seconds")
+        if (a.get("metadata") or {}).get("part_index") is not None
+        and float((a.get("metadata") or {}).get("max_duration_seconds") or 0) <= float(max_seconds)
     ]
+    if parts:
+        # Several cap-buckets may exist (X 140s and Threads 300s); use the
+        # largest bucket that still fits the platform, never both.
+        best_cap = max(float((a.get("metadata") or {}).get("max_duration_seconds") or 0) for a in parts)
+        chosen = [
+            a for a in parts
+            if float((a.get("metadata") or {}).get("max_duration_seconds") or 0) == best_cap
+        ]
+        return sorted(
+            chosen,
+            key=lambda a: int((a.get("metadata") or {}).get("part_index") or 0),
+        )
+    variants = [a for a in items if (a.get("metadata") or {}).get("max_duration_seconds")]
     fitting = [
         a for a in variants
         if float((a.get("metadata") or {}).get("max_duration_seconds")) <= float(max_seconds)
     ]
     if fitting:
-        return max(
+        return [max(
             fitting,
             key=lambda a: float((a.get("metadata") or {}).get("max_duration_seconds")),
-        )
+        )]
     full = [a for a in items if not (a.get("metadata") or {}).get("max_duration_seconds")]
-    return full[0] if full else items[0]
+    return [full[0] if full else items[0]]
 
 
 def _read_json_body() -> dict:
@@ -3848,9 +3886,9 @@ def _prepare_campaign_media_artifacts(
                     db_path=db_path,
                 )
 
-        # Per-platform duration variants: a platform with a short cap (Threads
-        # 300s, X 140s) needs a trimmed copy while the full _pub.mp4 keeps
-        # serving the longer-cap platforms (IG 900s, YouTube 12h).
+        # A video longer than a platform's cap is split into several <=cap
+        # parts (one post each) so nothing is dropped; platforms without a cap
+        # (IG 900s, YouTube 12h) keep using the full _pub.mp4.
         if _is_video_file(publish_path) and selected_platforms:
             try:
                 duration = float((media_prep.probe(publish_path) or {}).get("duration") or 0)
@@ -3863,42 +3901,50 @@ def _prepare_campaign_media_artifacts(
             })
             for cap in caps:
                 try:
-                    trimmed = media_prep.trim_to_seconds(
+                    parts = media_prep.split_to_seconds(
                         publish_path,
                         media_pipeline.build_campaign_workspace(campaign_id),
                         cap,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logging.getLogger(__name__).warning(
-                        "duration trim to %ss failed for campaign %d: %s",
+                        "duration split at %ss failed for campaign %d: %s",
                         cap, campaign_id, exc,
                     )
                     continue
-                trimmed_remote = None
-                trimmed_public = None
-                if upload_to_remote:
-                    try:
-                        trimmed_remote = media_remote_storage.upload_artifact(
-                            trimmed,
-                            campaign_id=campaign_id,
-                            artifact_subdir="videos",
-                        )
-                        trimmed_public = trimmed_remote.public_url
-                    except Exception as exc:  # noqa: BLE001
-                        logging.getLogger(__name__).warning(
-                            "duration trim remote upload failed for campaign %d: %s",
-                            campaign_id, exc,
-                        )
-                campaign_store.add_campaign_artifact(
-                    campaign_id,
-                    source_file_record_id=media_file["file_record_id"],
-                    artifact_kind="remote_upload" if trimmed_public else "local",
-                    local_path=str(trimmed),
-                    public_url=trimmed_public,
-                    remote_path=getattr(trimmed_remote, "remote_path", None) if trimmed_remote else None,
-                    metadata={"role": media_file["role"], "max_duration_seconds": cap},
-                    db_path=db_path,
-                )
+                if len(parts) <= 1:
+                    continue
+                for index, part in enumerate(parts, start=1):
+                    part_remote = None
+                    part_public = None
+                    if upload_to_remote:
+                        try:
+                            part_remote = media_remote_storage.upload_artifact(
+                                part,
+                                campaign_id=campaign_id,
+                                artifact_subdir="videos",
+                            )
+                            part_public = part_remote.public_url
+                        except Exception as exc:  # noqa: BLE001
+                            logging.getLogger(__name__).warning(
+                                "duration split remote upload failed for campaign %d: %s",
+                                campaign_id, exc,
+                            )
+                    campaign_store.add_campaign_artifact(
+                        campaign_id,
+                        source_file_record_id=media_file["file_record_id"],
+                        artifact_kind="remote_upload" if part_public else "local",
+                        local_path=str(part),
+                        public_url=part_public,
+                        remote_path=getattr(part_remote, "remote_path", None) if part_remote else None,
+                        metadata={
+                            "role": media_file["role"],
+                            "max_duration_seconds": cap,
+                            "part_index": index,
+                            "part_count": len(parts),
+                        },
+                        db_path=db_path,
+                    )
 
         if _is_image_file(publish_path):
             artifacts_context["imageLocalPaths"].append(str(publish_path))
@@ -7631,6 +7677,7 @@ def publish_center_submit():
             generate_account_draft=_generate_account_draft,
             ensure_file_record_for_path=_ensure_file_record_for_path,
             artifact_payloads_for_platform=_artifact_payloads_for_platform,
+            artifact_part_groups_for_platform=_artifact_part_groups_for_platform,
             job_to_payload=_job_to_payload,
         )
     except LookupError as exc:
@@ -11174,6 +11221,7 @@ def inbox_item_publish(item_id):
             generate_account_draft=_generate_account_draft,
             ensure_file_record_for_path=_ensure_file_record_for_path,
             artifact_payloads_for_platform=_artifact_payloads_for_platform,
+            artifact_part_groups_for_platform=_artifact_part_groups_for_platform,
             job_to_payload=_job_to_payload,
         )
         submission_started = bool(result.jobs)
