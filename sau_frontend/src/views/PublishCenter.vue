@@ -581,7 +581,7 @@ const options = reactive({
   intro: true,
   outro: true,
   linkInFirstComment: false,
-  tiktokDirectPost: false,
+  tiktokDirectPost: true,
   screenshots: {
     enabled: false,
     count: 3,
@@ -1614,7 +1614,7 @@ function resetForm() {
   options.intro = true
   options.outro = true
   options.linkInFirstComment = false
-  options.tiktokDirectPost = false
+  options.tiktokDirectPost = true
   options.screenshots.enabled = false
   options.screenshots.count = 3
   options.screenshots.timestampsRaw = ''

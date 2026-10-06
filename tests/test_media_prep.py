@@ -255,6 +255,39 @@ class SplitToSecondsTests(unittest.TestCase):
 
     _META = {"width": 1920, "height": 1080, "fps": 30, "duration": 813.0, "has_audio": True}
 
+    def test_size_overflow_splits_even_when_duration_fits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "clip.mp4"
+            src.write_bytes(b"x")
+            cmds = []
+
+            def fake_run(cmd, **kwargs):
+                cmds.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            meta = {"width": 1920, "height": 1080, "fps": 30, "duration": 100.0, "has_audio": True}
+            with mock.patch.object(media_prep, "probe", return_value=meta), mock.patch.object(
+                media_prep, "_probe_size_bytes", return_value=900 * 1024 * 1024
+            ), mock.patch.object(media_prep, "_ensure_tool", return_value="ffmpeg"), mock.patch.object(
+                media_prep, "_run", side_effect=fake_run
+            ):
+                parts = media_prep.split_to_seconds(src, tmp, 300, max_bytes=300 * 1024 * 1024)
+
+            self.assertEqual(
+                [p.name for p in parts],
+                ["clip_part1of3_pub.mp4", "clip_part2of3_pub.mp4", "clip_part3of3_pub.mp4"],
+            )
+
+    def test_returns_source_when_within_all_caps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "clip.mp4"
+            src.write_bytes(b"x")
+            with mock.patch.object(media_prep, "probe", return_value=self._META), mock.patch.object(
+                media_prep, "_probe_size_bytes", return_value=10 * 1024 * 1024
+            ):
+                parts = media_prep.split_to_seconds(src, tmp, 900, max_bytes=300 * 1024 * 1024)
+            self.assertEqual(parts, [src.resolve()])
+
     def test_returns_source_when_within_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "clip.mp4"

@@ -2224,14 +2224,25 @@ def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
     max_seconds = platform_limits.video_max_seconds(platform)
     if max_seconds is None:
         return [items[0]]
+    max_mb = platform_limits.media_max_mb(platform)
+
+    def _fits(artifact: dict) -> bool:
+        meta = artifact.get("metadata") or {}
+        seconds = meta.get("max_duration_seconds")
+        if seconds is not None and float(seconds) > float(max_seconds):
+            return False
+        mb = meta.get("max_media_mb")
+        if max_mb is not None and mb is not None and float(mb) > float(max_mb):
+            return False
+        return True
+
     parts = [
         a for a in items
-        if (a.get("metadata") or {}).get("part_index") is not None
-        and float((a.get("metadata") or {}).get("max_duration_seconds") or 0) <= float(max_seconds)
+        if (a.get("metadata") or {}).get("part_index") is not None and _fits(a)
     ]
     if parts:
-        # Several cap-buckets may exist (X 140s and Threads 300s); use the
-        # largest bucket that still fits the platform, never both.
+        # Several split plans may exist (X 140s, Threads 300s, a size-only
+        # split); use the largest parts that still fit, never a finer split.
         best_cap = max(float((a.get("metadata") or {}).get("max_duration_seconds") or 0) for a in parts)
         chosen = [
             a for a in parts
@@ -3886,34 +3897,46 @@ def _prepare_campaign_media_artifacts(
                     db_path=db_path,
                 )
 
-        # A video longer than a platform's cap is split into several <=cap
-        # parts (one post each) so nothing is dropped; platforms without a cap
-        # (IG 900s, YouTube 12h) keep using the full _pub.mp4.
+        # A video over a platform's duration OR size cap is split into several
+        # equal parts (one post each) so nothing is dropped; platforms whose
+        # caps it already meets (IG 900s, YouTube 12h) keep the full _pub.mp4.
         if _is_video_file(publish_path) and selected_platforms:
             try:
                 duration = float((media_prep.probe(publish_path) or {}).get("duration") or 0)
             except Exception:  # noqa: BLE001
                 duration = 0.0
-            caps = sorted({
-                int(float(cap))
-                for cap in (platform_limits.video_max_seconds(p) for p in selected_platforms)
-                if cap and duration and duration > float(cap)
-            })
-            for cap in caps:
+            try:
+                size_bytes = int(Path(publish_path).stat().st_size)
+            except OSError:
+                size_bytes = 0
+            # One plan per distinct (seconds, MB) cap pair that the source
+            # exceeds; the selector later picks the largest parts that fit.
+            plans: dict[tuple[float | None, float | None], None] = {}
+            for platform_name in selected_platforms:
+                sec = platform_limits.video_max_seconds(platform_name)
+                mb = platform_limits.media_max_mb(platform_name)
+                over_time = bool(sec and duration and duration > float(sec))
+                over_size = bool(mb and size_bytes and size_bytes > float(mb) * 1024 * 1024)
+                if over_time or over_size:
+                    plans.setdefault((float(sec) if sec else None, float(mb) if mb else None), None)
+            for (sec, mb) in sorted(plans, key=lambda pair: (pair[0] or 0, pair[1] or 0)):
                 try:
                     parts = media_prep.split_to_seconds(
                         publish_path,
                         media_pipeline.build_campaign_workspace(campaign_id),
-                        cap,
+                        sec,
+                        max_bytes=(mb * 1024 * 1024) if mb else None,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logging.getLogger(__name__).warning(
-                        "duration split at %ss failed for campaign %d: %s",
-                        cap, campaign_id, exc,
+                        "media split at seconds=%s mb=%s failed for campaign %d: %s",
+                        sec, mb, campaign_id, exc,
                     )
                     continue
                 if len(parts) <= 1:
                     continue
+                part_seconds = (duration / len(parts)) if duration else None
+                part_mb = (size_bytes / len(parts) / (1024 * 1024)) if size_bytes else None
                 for index, part in enumerate(parts, start=1):
                     part_remote = None
                     part_public = None
@@ -3927,7 +3950,7 @@ def _prepare_campaign_media_artifacts(
                             part_public = part_remote.public_url
                         except Exception as exc:  # noqa: BLE001
                             logging.getLogger(__name__).warning(
-                                "duration split remote upload failed for campaign %d: %s",
+                                "media split remote upload failed for campaign %d: %s",
                                 campaign_id, exc,
                             )
                     campaign_store.add_campaign_artifact(
@@ -3939,7 +3962,8 @@ def _prepare_campaign_media_artifacts(
                         remote_path=getattr(part_remote, "remote_path", None) if part_remote else None,
                         metadata={
                             "role": media_file["role"],
-                            "max_duration_seconds": cap,
+                            "max_duration_seconds": part_seconds,
+                            "max_media_mb": part_mb,
                             "part_index": index,
                             "part_count": len(parts),
                         },

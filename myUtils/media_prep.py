@@ -389,30 +389,39 @@ def trim_to_seconds(
     return out_path
 
 
-def split_to_seconds(
+def _probe_size_bytes(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _split_count(duration: float, size_bytes: int, max_seconds: float | None, max_bytes: float | None) -> int:
+    """How many equal parts are needed to satisfy both caps (>=1)."""
+    count = 1
+    if max_seconds and duration > max_seconds:
+        count = max(count, int(math.ceil(duration / max_seconds)))
+    if max_bytes and size_bytes > max_bytes:
+        count = max(count, int(math.ceil(size_bytes / max_bytes)))
+    return max(1, count)
+
+
+def split_into(
     src: str | Path,
     out_dir: str | Path,
-    max_seconds: float,
+    count: int,
     *,
     crf: int = CRF_DEFAULT,
 ) -> list[Path]:
-    """Split ``src`` into equal parts of at most ``max_seconds`` each.
-
-    Returns ``[src]`` unchanged when it already fits. Otherwise re-encodes
-    ``ceil(duration / max_seconds)`` parts (named ``<stem>_part<i>of<n>_pub.mp4``)
-    so a long video becomes several under-the-cap posts instead of one truncated
-    cut — no footage is dropped, unlike :func:`trim_to_seconds`.
-    """
+    """Re-encode ``src`` into exactly ``count`` equal parts (>=2)."""
     src_path = Path(src).expanduser().resolve()
     if not src_path.exists():
         raise FileNotFoundError(f"split source missing: {src_path}")
+    count = max(2, int(count))
     meta = probe(src_path)
     duration = float(meta.get("duration") or 0.0)
-    cap = float(max_seconds or 0.0)
-    if duration <= 0 or cap <= 0 or duration <= cap:
+    if duration <= 0:
         return [src_path]
-
-    count = max(2, int(math.ceil(duration / cap)))
     part_len = duration / count
     out_dir_path = Path(out_dir).expanduser().resolve()
     out_dir_path.mkdir(parents=True, exist_ok=True)
@@ -426,8 +435,6 @@ def split_to_seconds(
         cmd = [
             _ensure_tool(FFMPEG),
             "-y",
-            # -ss before -i is the fast, keyframe-accurate seek; the re-encode
-            # fixes the cut at the exact boundary on the output timeline.
             "-ss",
             f"{start:.3f}",
             "-i",
@@ -468,6 +475,30 @@ def split_to_seconds(
             )
         parts.append(out_path)
     return parts
+
+
+def split_to_seconds(
+    src: str | Path,
+    out_dir: str | Path,
+    max_seconds: float,
+    *,
+    max_bytes: float | None = None,
+    crf: int = CRF_DEFAULT,
+) -> list[Path]:
+    """Split ``src`` into equal parts that fit ``max_seconds`` and/or ``max_bytes``.
+
+    Returns ``[src]`` unchanged when it already fits. Re-encoding after a split
+    also shrinks the file (smaller frame count + CRF 22), so a size-only
+    overflow is satisfied by the same equal-part division.
+    """
+    src_path = Path(src).expanduser().resolve()
+    if not src_path.exists():
+        raise FileNotFoundError(f"split source missing: {src_path}")
+    duration = float((probe(src_path) or {}).get("duration") or 0.0)
+    count = _split_count(duration, _probe_size_bytes(src_path), max_seconds, max_bytes)
+    if count <= 1:
+        return [src_path]
+    return split_into(src_path, out_dir, count, crf=crf)
 
 
 def resize_to_target_if_landscape(src: str | Path, out_dir: str | Path) -> Path:

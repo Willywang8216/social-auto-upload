@@ -377,7 +377,12 @@ def submit_publish(
             grouped_accounts.setdefault(account.platform, []).append(account)
 
         link_in_first_comment = bool((options or {}).get("linkInFirstComment"))
-        tiktok_direct_post = bool((options or {}).get("tiktokDirectPost"))
+        # Publish publicly by default. The frontend toggle can still request a
+        # draft (inbox) upload, but the historical default of False meant every
+        # TikTok post silently landed in the drafts and was invisible on the
+        # profile. An unreviewed app rejects DIRECT_POST and the universal
+        # Sociamonials fallback then catches it.
+        tiktok_direct_post = bool((options or {}).get("tiktokDirectPost", True))
 
         artifacts = [
             artifact.to_dict()
