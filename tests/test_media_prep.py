@@ -196,6 +196,60 @@ class ToolAvailabilityTests(unittest.TestCase):
             media_prep.should_shrink({"size_mb": 200, "width": 1080, "height": 1920, "fps": 24})
 
 
+class DurationVariantTests(unittest.TestCase):
+    """resolve_duration_limit_seconds + trim_to_seconds command shaping."""
+
+    def test_resolve_duration_limit_picks_strictest_cap(self) -> None:
+        limit = media_prep.resolve_duration_limit_seconds(
+            ["threads", "instagram", "youtube"]
+        )
+        self.assertEqual(limit, 300.0)
+
+    def test_resolve_duration_limit_none_for_unknown_only(self) -> None:
+        self.assertIsNone(media_prep.resolve_duration_limit_seconds([]))
+        self.assertIsNone(media_prep.resolve_duration_limit_seconds(["mystery"]))
+
+    def test_trim_to_seconds_builds_time_capped_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "clip.mp4"
+            src.write_bytes(b"x")
+            captured = {}
+
+            def fake_run(cmd, **kwargs):
+                captured["cmd"] = cmd
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with mock.patch.object(
+                media_prep,
+                "probe",
+                return_value={"width": 1920, "height": 1080, "fps": 30, "duration": 813.0, "has_audio": True},
+            ), mock.patch.object(media_prep, "_ensure_tool", return_value="ffmpeg"), mock.patch.object(
+                media_prep, "_run", side_effect=fake_run
+            ):
+                out = media_prep.trim_to_seconds(src, tmp, 300)
+
+            self.assertEqual(out.name, "clip_pub_300s.mp4")
+            self.assertIn("-t", captured["cmd"])
+            self.assertEqual(captured["cmd"][captured["cmd"].index("-t") + 1], "300")
+            self.assertIn("+faststart", captured["cmd"])
+
+    def test_trim_to_seconds_raises_on_ffmpeg_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "clip.mp4"
+            src.write_bytes(b"x")
+            with mock.patch.object(
+                media_prep,
+                "probe",
+                return_value={"width": 1920, "height": 1080, "fps": 30, "duration": 813.0, "has_audio": True},
+            ), mock.patch.object(media_prep, "_ensure_tool", return_value="ffmpeg"), mock.patch.object(
+                media_prep,
+                "_run",
+                return_value=subprocess.CompletedProcess([], 1, "", "boom"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    media_prep.trim_to_seconds(src, tmp, 300)
+
+
 class CopyPathTests(unittest.TestCase):
     """shrink() copy path needs no ffmpeg (probe is mocked out)."""
 
