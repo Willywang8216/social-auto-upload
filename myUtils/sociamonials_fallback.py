@@ -390,6 +390,17 @@ def _media_kind(path: str) -> str:
     return "video" if guessed.startswith("video/") else "image"
 
 
+def _assert_media_size(network: str, size_bytes: int) -> None:
+    """Refuse media larger than the target network's file cap."""
+    platform = platform_limits.NETWORK_TO_PLATFORM.get(network)
+    max_mb = platform_limits.media_max_mb(platform) if platform else None
+    if max_mb and size_bytes and size_bytes > max_mb * 1_000_000:
+        raise SociamonialsFallbackError(
+            f"{network} media {size_bytes / 1_000_000:.0f} MB exceeds the "
+            f"{max_mb} MB limit"
+        )
+
+
 def _assert_video_duration(network: str, local_path: str | None) -> None:
     """Refuse a video longer than the target network allows.
 
@@ -947,23 +958,31 @@ def publish_via_sociamonials(
         for item in media:
             kind = item["kind"]
             reference: str | None = None
+            local_path = item.get("local_path")
             public_url = item.get("public_url")
-            if public_url and is_direct_media_url(public_url):
+            # Prefer the prepared LOCAL file. The payload's public_url is often
+            # the raw oversized original that just failed the direct publish;
+            # re-attaching it is exactly how the Stonewall IG post got stuck.
+            if local_path:
+                local = Path(str(local_path))
+                if local.exists():
+                    _assert_media_size(network, local.stat().st_size)
+                    reference = _upload_local_media(
+                        http,
+                        headers,
+                        ws,
+                        local,
+                        timeout=request_timeout,
+                    )
+                elif not (public_url and is_direct_media_url(public_url)):
+                    # A declared local artifact that is gone and no usable URL:
+                    # nothing to attach.
+                    raise SociamonialsFallbackError(f"local media missing: {local}")
+            if reference is None and public_url and is_direct_media_url(public_url):
                 if verify_media and not _verify_remote_media(public_url, http, timeout=request_timeout):
                     warnings.append(f"media url could not be verified: {public_url}")
                 else:
                     reference = public_url
-            if reference is None and item.get("local_path"):
-                local = Path(str(item["local_path"]))
-                if not local.exists():
-                    raise SociamonialsFallbackError(f"local media missing: {local}")
-                reference = _upload_local_media(
-                    http,
-                    headers,
-                    ws,
-                    local,
-                    timeout=request_timeout,
-                )
             if reference is None:
                 continue
             if kind == "video":

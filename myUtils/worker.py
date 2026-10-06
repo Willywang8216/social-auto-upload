@@ -861,16 +861,12 @@ class PublishWorker:
             message += f" | details={json.dumps(error_details, ensure_ascii=False, separators=(',', ':'))}"
         attempts = target.attempts  # already incremented when claimed
         if getattr(exc, "retryable", True) is False:
-            # X now rides Sociamonials, and Sociamonials holds its own OAuth
-            # connection independently of the SAU account's credential. A dead
-            # or reconnect-flagged SAU X token (or a missing media.write scope)
-            # is therefore still deliverable, so try the fallback before
-            # declaring the target permanently failed. Other platforms keep the
-            # original rule: a permanent content failure (banned subreddit,
-            # missing media) must never be silently re-routed.
-            if await self._try_sociamonials_fallback(
-                target, message, log, only_platform="twitter"
-            ):
+            # A permanent failure on ANY platform may still be deliverable by
+            # Sociamonials, which holds its own OAuth connections. Let the
+            # fallback decide: an unmapped account or bad media makes it return
+            # False and the target is marked failed exactly as before, so this
+            # is not a silent re-route.
+            if await self._try_sociamonials_fallback(target, message, log):
                 self._maybe_close_job_sink(target.job_id)
                 return
             transitioned = jobs.mark_target_failed(

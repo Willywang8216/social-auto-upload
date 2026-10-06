@@ -3391,6 +3391,45 @@ def _google_access_token(config: dict[str, Any], *, session=None) -> str:
     return str(token)
 
 
+def _verify_youtube_visibility(http, access_token: str, video_id: str, requested: str) -> None:
+    """Confirm the uploaded video really has the requested visibility.
+
+    Only ``public``/``unlisted`` are verified (``private`` is the default and
+    nothing to check). Raises :class:`PreparedPublishError` when YouTube reports
+    a different value, so an API-project lock cannot silently hide the video.
+    """
+    requested = str(requested or "").strip().lower()
+    if requested not in {"public", "unlisted"}:
+        return
+    try:
+        response = http.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"id": video_id, "part": "status"},
+            timeout=60,
+        )
+    except Exception as exc:  # noqa: BLE001 - a read-back failure is not a publish failure
+        logger.warning("YouTube visibility check failed for %s: %s", video_id, exc)
+        return
+    if int(getattr(response, "status_code", 0) or 0) != 200:
+        return
+    try:
+        items = (response.json() or {}).get("items") or []
+    except Exception:  # noqa: BLE001
+        return
+    actual = ""
+    if items and isinstance(items[0], dict):
+        actual = str((items[0].get("status") or {}).get("privacyStatus") or "").lower()
+    if actual and actual != requested:
+        raise PreparedPublishError(
+            f"YouTube uploaded {video_id} as '{actual}' but '{requested}' was requested "
+            "(an unaudited API project is often locked to private; use the browser "
+            "uploader or make the API project audited)",
+            retryable=False,
+        )
+    logger.info("YouTube visibility verified: %s -> %s", video_id, actual or requested)
+
+
 def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
     config = dict(account.config or {})
     channel_id = str(config.get("channelId") or "").strip()
@@ -3531,6 +3570,13 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
         )
     _raise_for_status(upload_response)
     result = upload_response.json()
+    video_id = result.get("id")
+    # "Succeeded" must mean visible at the requested visibility. An unaudited
+    # API project is routinely force-locked to private, which silently hides
+    # the post while the target reports success (the Stonewall video did exactly
+    # this). Verify and fail loudly instead.
+    if video_id:
+        _verify_youtube_visibility(http, access_token, str(video_id), status["privacyStatus"])
 
     # Upload thumbnail if available
     thumbnail_path = _find_thumbnail(media, video_path)

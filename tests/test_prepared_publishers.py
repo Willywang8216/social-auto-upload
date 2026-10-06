@@ -967,6 +967,7 @@ class PreparedPublisherTests(unittest.TestCase):
             _FakeResponse({"access_token": "google-token"}),
             _FakeResponse({}, headers={"Location": "https://upload.example/resumable"}),
             _FakeResponse({"id": "video123"}),
+            _FakeResponse({"items": [{"status": {"privacyStatus": "public"}}]}),
             _FakeResponse({}),
         ])
         account = SimpleNamespace(
@@ -994,7 +995,8 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[0][1], prepared_publishers.GOOGLE_TOKEN_URL)
         self.assertEqual(session.calls[1][1], prepared_publishers.YOUTUBE_RESUMABLE_UPLOAD_URL)
         self.assertEqual(session.calls[2][1], "https://upload.example/resumable")
-        self.assertEqual(session.calls[3][1], prepared_publishers.YOUTUBE_PLAYLIST_INSERT_URL)
+        self.assertEqual(session.calls[3][1], "https://www.googleapis.com/youtube/v3/videos")
+        self.assertEqual(session.calls[4][1], prepared_publishers.YOUTUBE_PLAYLIST_INSERT_URL)
 
     def test_config_value_can_resolve_env_reference(self):
         with patch.dict(os.environ, {"TOKEN_ENV": "abc"}, clear=False):

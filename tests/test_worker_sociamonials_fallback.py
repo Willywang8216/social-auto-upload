@@ -132,14 +132,21 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
         patched.assert_not_called()
         self.assertEqual(self._status(), jobs.TARGET_FAILED)
 
-    def test_non_retryable_failure_never_reaches_the_fallback(self) -> None:
+    def test_non_retryable_failure_attempts_the_fallback(self) -> None:
+        """A permanent failure now reaches the fallback on any platform.
+
+        When the fallback cannot deliver (here: no mapping), the target still
+        ends permanently failed rather than being silently re-routed.
+        """
         self._enable_fallback()
         with patch.object(
-            sociamonials_fallback, "publish_via_sociamonials"
+            sociamonials_fallback,
+            "publish_via_sociamonials",
+            side_effect=sociamonials_fallback.SociamonialsFallbackError("no mapping"),
         ) as patched:
             self._enqueue_failing_target()
             self._drain(exc_type=_BoomPermanent)
-        patched.assert_not_called()
+        patched.assert_called_once()
         self.assertEqual(self._status(), jobs.TARGET_FAILED)
 
     def test_non_retryable_x_failure_falls_back_to_sociamonials(self) -> None:

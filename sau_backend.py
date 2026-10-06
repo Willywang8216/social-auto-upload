@@ -33,7 +33,9 @@ from myUtils import llm_client
 from myUtils import media_copy_check
 from myUtils import media_groups as media_group_store
 from myUtils import media_pipeline
+from myUtils import media_prep
 from myUtils import platform_capabilities
+from myUtils import platform_limits
 from myUtils import profiles as profile_registry
 from myUtils import prepared_publishers
 from myUtils import publish_orchestrator
@@ -2151,8 +2153,23 @@ def _campaign_payload(campaign: campaign_store.Campaign, *, db_path: Path) -> di
 
 
 def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> list[dict]:
+    raw_kinds = {"raw_remote_upload", "raw_local"}
     if platform != profile_registry.PLATFORM_TIKTOK:
-        return [artifact for artifact in artifacts if artifact.get("artifact_kind") not in {"raw_remote_upload", "raw_local"}]
+        # Drop the un-prepared raw artifacts and, for every video source, pick
+        # the duration variant that fits this platform's cap (the full _pub.mp4
+        # when it fits, otherwise the largest trimmed variant under the cap).
+        cleaned = [a for a in artifacts if a.get("artifact_kind") not in raw_kinds]
+        videos: dict[object, list[dict]] = {}
+        passthrough: list[dict] = []
+        for artifact in cleaned:
+            role = (artifact.get("metadata") or {}).get("role")
+            source_id = artifact.get("source_file_record_id")
+            if role == "video" and source_id is not None:
+                videos.setdefault(source_id, []).append(artifact)
+            else:
+                passthrough.append(artifact)
+        selected = [_select_video_for_platform(items, platform) for items in videos.values()]
+        return [*passthrough, *[a for a in selected if a]]
 
     grouped: dict[tuple[object, object], list[dict]] = {}
     passthrough: list[dict] = []
@@ -2170,6 +2187,34 @@ def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> lis
         raw = next((item for item in items if item.get("artifact_kind") in {"raw_remote_upload", "raw_local"}), None)
         selected.append(raw or items[0])
     return [*passthrough, *selected]
+
+
+def _select_video_for_platform(items: list[dict], platform: str) -> dict | None:
+    """Pick the video artifact whose duration fits ``platform``.
+
+    Prefers the largest trimmed variant at or under the platform cap, then the
+    full artifact (no ``max_duration_seconds``) when nothing is trimmed.
+    """
+    if not items:
+        return None
+    max_seconds = platform_limits.video_max_seconds(platform)
+    if max_seconds is None:
+        return items[0]
+    variants = [
+        a for a in items
+        if (a.get("metadata") or {}).get("max_duration_seconds")
+    ]
+    fitting = [
+        a for a in variants
+        if float((a.get("metadata") or {}).get("max_duration_seconds")) <= float(max_seconds)
+    ]
+    if fitting:
+        return max(
+            fitting,
+            key=lambda a: float((a.get("metadata") or {}).get("max_duration_seconds")),
+        )
+    full = [a for a in items if not (a.get("metadata") or {}).get("max_duration_seconds")]
+    return full[0] if full else items[0]
 
 
 def _read_json_body() -> dict:
@@ -3800,6 +3845,58 @@ def _prepare_campaign_media_artifacts(
                     local_path=str(source_path),
                     public_url=raw_public_url,
                     metadata={"role": media_file["role"]},
+                    db_path=db_path,
+                )
+
+        # Per-platform duration variants: a platform with a short cap (Threads
+        # 300s, X 140s) needs a trimmed copy while the full _pub.mp4 keeps
+        # serving the longer-cap platforms (IG 900s, YouTube 12h).
+        if _is_video_file(publish_path) and selected_platforms:
+            try:
+                duration = float((media_prep.probe(publish_path) or {}).get("duration") or 0)
+            except Exception:  # noqa: BLE001
+                duration = 0.0
+            caps = sorted({
+                int(float(cap))
+                for cap in (platform_limits.video_max_seconds(p) for p in selected_platforms)
+                if cap and duration and duration > float(cap)
+            })
+            for cap in caps:
+                try:
+                    trimmed = media_prep.trim_to_seconds(
+                        publish_path,
+                        media_pipeline.build_campaign_workspace(campaign_id),
+                        cap,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logging.getLogger(__name__).warning(
+                        "duration trim to %ss failed for campaign %d: %s",
+                        cap, campaign_id, exc,
+                    )
+                    continue
+                trimmed_remote = None
+                trimmed_public = None
+                if upload_to_remote:
+                    try:
+                        trimmed_remote = media_remote_storage.upload_artifact(
+                            trimmed,
+                            campaign_id=campaign_id,
+                            artifact_subdir="videos",
+                        )
+                        trimmed_public = trimmed_remote.public_url
+                    except Exception as exc:  # noqa: BLE001
+                        logging.getLogger(__name__).warning(
+                            "duration trim remote upload failed for campaign %d: %s",
+                            campaign_id, exc,
+                        )
+                campaign_store.add_campaign_artifact(
+                    campaign_id,
+                    source_file_record_id=media_file["file_record_id"],
+                    artifact_kind="remote_upload" if trimmed_public else "local",
+                    local_path=str(trimmed),
+                    public_url=trimmed_public,
+                    remote_path=getattr(trimmed_remote, "remote_path", None) if trimmed_remote else None,
+                    metadata={"role": media_file["role"], "max_duration_seconds": cap},
                     db_path=db_path,
                 )
 

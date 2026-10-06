@@ -314,6 +314,80 @@ def shrink(
     return out_path
 
 
+def resolve_duration_limit_seconds(platforms=None) -> float | None:
+    """Strictest video-duration cap among ``platforms`` (seconds), or None."""
+    if not platforms:
+        return None
+    caps = [
+        platform_limits.video_max_seconds(str(p).strip().lower())
+        for p in platforms
+    ]
+    caps = [float(c) for c in caps if c]
+    return min(caps) if caps else None
+
+
+def trim_to_seconds(
+    src: str | Path,
+    out_dir: str | Path,
+    max_seconds: float,
+    *,
+    crf: int = CRF_DEFAULT,
+) -> Path:
+    """Re-encode ``src`` to at most ``max_seconds`` as ``<stem>_pub_<sec>s.mp4``.
+
+    Uses the same publishing profile as :func:`shrink` plus a hard ``-t`` cut,
+    so a platform with a short cap (Threads 300 s, X 140 s) gets a valid copy
+    while the full ``_pub.mp4`` still serves platforms with a longer cap.
+    """
+    src_path = Path(src).expanduser().resolve()
+    out_dir_path = Path(out_dir).expanduser().resolve()
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+    seconds = int(max(1, round(float(max_seconds))))
+    out_path = out_dir_path / f"{src_path.stem}_pub_{seconds}s.mp4"
+
+    meta = probe(src_path)
+    filters = build_filters(meta)
+    cmd = [
+        _ensure_tool(FFMPEG),
+        "-y",
+        "-i",
+        str(src_path),
+        "-t",
+        str(seconds),
+        "-vf",
+        filters,
+        "-r",
+        _format_fps(float(meta.get("fps") or 0)),
+        "-c:v",
+        "libx264",
+        "-crf",
+        str(int(crf)),
+        "-preset",
+        "medium",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ac",
+        "2",
+        "-ar",
+        "48000",
+        "-movflags",
+        "+faststart",
+    ]
+    if not meta.get("has_audio"):
+        cmd.append("-an")
+    cmd.append(str(out_path))
+    completed = _run(cmd, capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg trim failed on {src_path}: {completed.stderr.strip()[-2000:]}"
+        )
+    return out_path
+
+
 def resize_to_target_if_landscape(src: str | Path, out_dir: str | Path) -> Path:
     """No-op stub reserved for future landscape reframing work.
 
