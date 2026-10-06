@@ -36,6 +36,20 @@ from utils.log import loguru_logger, worker_logger
 JOB_LOG_DIR = Path(BASE_DIR) / "logs" / "jobs"
 JSON_LOGS = os.environ.get("SAU_JSON_LOGS") == "1"
 
+
+def _job_log_dir() -> Path:
+    """The per-job log directory.
+
+    ``SAU_JOB_LOG_DIR`` overrides the default so tests never write phantom
+    job logs into the real ``logs/jobs/`` directory (and so an operator can
+    relocate them). It is read on every call, not at import, so a test that
+    sets the env after importing this module is still isolated.
+    """
+    override = os.environ.get("SAU_JOB_LOG_DIR")
+    if override:
+        return Path(override)
+    return JOB_LOG_DIR
+
 # loguru handler ids keyed by job_id so we can ``logger.remove(handler_id)``
 # when the job is finalised. Guarded by a lock because the worker can run
 # multiple targets for the same job concurrently and would otherwise race
@@ -117,8 +131,8 @@ def ensure_job_sink(job_id: int) -> int:
         if existing is not None:
             return existing
 
-        JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        sink_path = JOB_LOG_DIR / f"job-{job_id}.log"
+        _job_log_dir().mkdir(parents=True, exist_ok=True)
+        sink_path = _job_log_dir() / f"job-{job_id}.log"
         handler_id = loguru_logger.add(
             _build_file_sink(sink_path),
             filter=_record_filter_for_job(job_id),
@@ -148,7 +162,7 @@ def close_job_sink(job_id: int) -> None:
 
 
 def job_log_path(job_id: int) -> Path:
-    return JOB_LOG_DIR / f"job-{job_id}.log"
+    return _job_log_dir() / f"job-{job_id}.log"
 
 
 def bind_job_logger(
