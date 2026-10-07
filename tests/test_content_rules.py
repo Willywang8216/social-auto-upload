@@ -187,6 +187,33 @@ class MessageLanguageTests(unittest.TestCase):
         self.assertTrue(content_rules.message_matches_language("早安", ""))
         self.assertTrue(content_rules.message_matches_language("hello", None))
 
+    def test_bilingual_account_accepts_either_script(self) -> None:
+        """A mixed language list means ANY of its languages, not the last one.
+
+        The SW Blog account is configured ``en,zh-Hant`` and is meant to take
+        either script. Treating a mixed list as "Chinese wins" rejected perfectly
+        good English copy on it, contradicting this function's own contract.
+        """
+        for language in ("en,zh-Hant", "zh-Hant,en", "en,zh"):
+            with self.subTest(language=language):
+                self.assertTrue(
+                    content_rules.message_matches_language("Good morning", language)
+                )
+                self.assertTrue(
+                    content_rules.message_matches_language("早安", language)
+                )
+
+    def test_bilingual_still_rejects_simplified_chinese(self) -> None:
+        # Rejecting Simplified is about the script, not the language list, so it
+        # must survive the mixed-list fix.
+        self.assertFalse(
+            content_rules.message_matches_language("这是一个安静的早晨", "en,zh-Hant")
+        )
+
+    def test_monolingual_accounts_are_unaffected(self) -> None:
+        self.assertFalse(content_rules.message_matches_language("早安", "en"))
+        self.assertFalse(content_rules.message_matches_language("hello", "zh-Hant"))
+
 
 if __name__ == "__main__":
     unittest.main()

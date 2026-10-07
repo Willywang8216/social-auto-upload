@@ -44,16 +44,55 @@ metadata:
 **Naming is the whole interface:**
 
 ```
-SFW  NW  <anything>.mp4   → ALL Nakedwill platforms
-NSFW NW  <anything>.mp4   → ONLY Nakedwill platforms that allow nudity
-SFW  SW  <anything>.mp4   → ALL Sexualwill platforms
-NSFW SW  <anything>.mp4   → ONLY Sexualwill platforms that allow nudity
-Teaching <anything>.mp4   → Teaching profile
+SFW  NW    <anything>.mp4   → ALL Nakedwill platforms      (profile 1)
+NSFW NW    <anything>.mp4   → ONLY Nakedwill nudity-allowed platforms
+SFW  SW    <anything>.mp4   → ALL Sexualwill platforms      (profile 3)
+NSFW SW    <anything>.mp4   → ONLY Sexualwill nudity-allowed platforms
+SFW  NW+SW <anything>.mp4   → ALL platforms of BOTH profiles
+NSFW NW+SW <anything>.mp4   → ONLY nudity-allowed, on BOTH profiles
+Teaching   <anything>.mp4   → Teaching profile             (profile 4)
 ```
+
+`NW+SW` (either order, `NW+SW` / `SW+NW` / `NW SW`) means **both personas in one
+submission** — `profileIds: [1, 3]`. `submit_publish` already iterates over every
+profile id, so this is one call, not two.
 
 `SFW` = publish **everywhere** (including Instagram/Facebook/Threads/TikTok/YouTube).
 `NSFW` = publish **only** where nudity is allowed. No prefix → the agent asks
 rather than guessing.
+
+### Language is chosen automatically, per account
+
+The content's language decides **which account of that profile** receives it.
+Each account carries an `audience_language`; the app generates and routes by it,
+and a guard refuses mismatched copy. You do not pick the language by hand — but
+you must know the split, because a clip is not published once per profile, it is
+published once per **language-appropriate account**:
+
+**Nakedwill (profile 1) — English accounts**
+facebook · instagram · nw_sw_blog · reddit · tiktok · threads · youtube ·
+twitter `NW X (model_will)` · bluesky `NW Bluesky EN` · telegram `NW TG 本人`
+
+**Nakedwill (profile 1) — Traditional Chinese accounts**
+bluesky `NW Bluesky ZH` · telegram `NW TG 中文` · twitter `NW X (nudeweiwei)`
+
+**Sexualwill (profile 3) — English accounts**
+facebook · instagram · reddit · threads · twitter `sexualwill` ·
+bluesky `SW Bluesky EN` · telegram `SW TG 本人`
+
+**Sexualwill (profile 3) — Traditional Chinese accounts**
+bluesky `SW Bluesky ZH` · telegram `SW TG 中文` · twitter `光光`
+
+**Bilingual (accepts either script)**
+nw_sw_blog `SW Blog` (`en,zh-Hant`)
+
+So an English clip on `SFW NW`: write English copy for the EN accounts and
+Traditional Chinese copy for the three ZH accounts. The English set and the
+Chinese set both go out; they are not alternatives.
+
+**Write the copy in the account's language, then humanize with the matching
+skill** — `humanizer` for English, `humanizer-zh` for 繁中. Simplified Chinese is
+rejected on a `zh-Hant` account, so generate Traditional characters.
 
 **What you get asked about:** the generated copy (step 4) and anything ambiguous
 (a missing prefix, an unclear persona). Everything else runs unattended.
@@ -86,7 +125,12 @@ A filename begins with a routing prefix. It has two independent parts:
 | `NSFW NW` | Nakedwill (profile 1) | **Only** NW platforms that permit nudity |
 | `SFW SW` | Sexualwill (profile 3) | **Every** enabled SW platform |
 | `NSFW SW` | Sexualwill (profile 3) | **Only** SW platforms that permit nudity |
+| `SFW NW+SW` | **both** | Every enabled platform on **both** profiles |
+| `NSFW NW+SW` | **both** | Only nudity-permitting platforms, on **both** profiles |
 | `Teaching` | Teaching (profile 4) | Every enabled Teaching platform |
+
+The two parts are independent: rating (SFW/NSFW) and persona (NW/SW/both).
+`NW+SW` accepts either order and either separator (`NW+SW`, `SW+NW`, `NW SW`).
 
 **SFW is the opposite of what you might assume.** SFW means *publish everywhere*,
 including the platforms that only accept non-explicit media. NSFW means
@@ -94,12 +138,14 @@ including the platforms that only accept non-explicit media. NSFW means
 
 Worked examples:
 
-- `SFW NW beach morning.mp4` → all 13 NW accounts (Instagram, Facebook, Threads,
-  TikTok, YouTube **and** the adult-safe ones).
+- `SFW NW beach morning.mp4` → all NW accounts, **in both languages** (the EN set
+  and the three ZH accounts).
 - `NSFW NW shower scene.mp4` → NW accounts **minus** Instagram, Facebook,
   Threads, TikTok, YouTube.
-- `SFW SW studio.mp4` → all SW accounts.
+- `SFW SW studio.mp4` → all SW accounts, both languages.
 - `NSFW SW explicit tease.mp4` → SW adult-safe accounts only.
+- `SFW NW+SW trip.mp4` → every platform on **both** profiles in one submission
+  (`profileIds: [1, 3]`).
 
 If a filename carries **no** prefix, do not guess: ask the user which profile and
 rating to use, then rename the file so the run is reproducible.

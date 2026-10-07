@@ -168,15 +168,29 @@ def message_matches_language(message: str | None, language: str | None) -> bool:
     bilingual (en + zh) account is satisfied by either script present because
     the generator emits both; this only catches the gross mismatch the operator
     saw (Mandarin copy on an English account and vice versa).
+
+    A mixed list must be checked as *any of* its languages, not as "the first
+    zh token wins". Treating ``en,zh-Hant`` as Chinese-only rejected perfectly
+    good English copy on the bilingual SW Blog account - the opposite of what
+    this function's own contract promises and of what the account is for.
     """
     tokens = language_tokens(language)
     if not tokens:
         return True
+    text = str(message or "")
+    has_cjk = bool(_CJK_RE.search(text))
     wants_zh = any(tok.startswith("zh") for tok in tokens)
-    has_cjk = bool(_CJK_RE.search(str(message or "")))
+    wants_en = any(tok.startswith("en") for tok in tokens)
+
+    # Bilingual (or any mixed) target: either script satisfies it.
+    if wants_zh and wants_en:
+        if has_cjk:
+            # Traditional-Chinese target: reject Simplified characters.
+            return not contains_simplified_chinese(text)
+        return True
     if wants_zh:
         # A Traditional-Chinese target must not receive Simplified characters.
-        return has_cjk and not contains_simplified_chinese(message)
+        return has_cjk and not contains_simplified_chinese(text)
     return not has_cjk
 
 SHEET_MESSAGE_MAX_CHARS = {

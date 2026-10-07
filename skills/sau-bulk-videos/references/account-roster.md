@@ -16,8 +16,43 @@ WHERE a.enabled = 1 ORDER BY a.profile_id, a.platform;"
 |---:|---|---|---|
 | 1 | NW (Nakedwill) | `nw` | `SFW NW` / `NSFW NW` |
 | 3 | SW (Sexualwill) | `sw` | `SFW SW` / `NSFW SW` |
+| 1 + 3 | both personas | — | `SFW NW+SW` / `NSFW NW+SW` |
 | 4 | Teaching | `teaching` | `Teaching` |
 | 10 | Money Systems Lab | `money-systems-lab` | (not covered by this skill) |
+
+`NW+SW` is one submission with `profileIds: [1, 3]` — `submit_publish` iterates
+over every profile id, so there is no need to submit twice.
+
+## Language routing (`audience_language` per account)
+
+Language is a property of the **account**, not the clip. Both profiles publish
+an English clip to their English accounts *and* their Traditional Chinese
+accounts — they are two sets, both receiving the same media with different copy.
+
+### Nakedwill (profile 1)
+
+| language | accounts |
+|---|---|
+| `en` | facebook `Nakedwill` · instagram `NW_IG` · nw_sw_blog `NW Blog` · reddit `Nakedwill Reddit` · tiktok `Nakedwill_TK` · threads `NWthreads` · youtube `Itswill_YT` · twitter `NW X (model_will)` · bluesky `NW Bluesky EN` · telegram `NW TG 本人` |
+| `zh-Hant` | bluesky `NW Bluesky ZH` · telegram `NW TG 中文` · twitter `NW X (nudeweiwei)` |
+
+### Sexualwill (profile 3)
+
+| language | accounts |
+|---|---|
+| `en` | facebook `SW-FB` · instagram `SW_IG` · reddit `Sexualwill Reddit OAuth` · threads `SW_threads` · twitter `sexualwill` · bluesky `SW Bluesky EN` · telegram `SW TG 本人` |
+| `zh-Hant` | bluesky `SW Bluesky ZH` · telegram `SW TG 中文` · twitter `光光` |
+| `en,zh-Hant` | nw_sw_blog `SW Blog` (bilingual — accepts either script) |
+
+### Rules
+
+- Generate copy **in the account's language** before submitting, then humanize
+  with the matching skill: `humanizer` (English), `humanizer-zh` (繁中).
+- **Traditional characters only** on `zh-Hant` accounts; Simplified is rejected.
+- A bilingual account (`en,zh-Hant`) accepts either script.
+- The content guard enforces this, so mismatched copy fails fast with
+  `[content-guard] copy does not match account language`. Read that error as
+  "write this account's language", not as a delivery fault.
 
 ## Platforms that reject nudity
 
@@ -65,11 +100,6 @@ bluesky · facebook · instagram · teaching_blog · threads · tiktok · twitte
 
 ## Language routing
 
-Language follows the **account**, not the file:
-
-- `* Bluesky EN`, `Nakedwill`, `NW_IG`, … → English
-- `* Bluesky ZH`, `SW TG 中文`, … → Traditional Chinese
-
-The content guard refuses copy that does not match an account's configured
-audience language, so generate each language separately and run the matching
-humanizer (`humanizer` for English, `humanizer-zh` for Chinese).
+Covered above in detail; the short version is that language follows the
+**account**, and every clip is published to both the English and Traditional
+Chinese account sets (not one or the other). `SW Blog` is bilingual.
