@@ -604,3 +604,33 @@ Verified in the running container after deploy:
 - The only new-failure class left is the content guard refusing placeholder or
   wrong-language copy, which is the guard working as designed; that is an
   upstream copy-generation issue for specific accounts, not a delivery fault.
+
+## 2026-10-07 (pi-2650) — backlog cleared; failure count now reflects reality
+
+After deploying 559b126 I cleared the remaining stale backlog so the failure
+counts mean something again:
+
+- Cancelled 96 pending targets and 56 open jobs on pre-Oct-01 jobs
+  (June/September campaigns whose media is gone). Backups:
+  db/database.db.before-stale-cancel-*.bak, db/database.db.before-oldjob-cancel-*.bak
+- Pre-Oct-01 jobs are now all settled: 2819 cancelled, 98 failed, 900 succeeded.
+- The ACTIVE queue is now 1242 targets, ALL from Oct 2+ - no stale work left.
+- "Any pending on pre-Oct jobs" = 0.
+
+### Verification window (6 min after deploy)
+- NEW failures on the deployed fix: 1, and it was target 28 on a 2026-05-27 job
+  (already-failed ancient row, now settled).
+- The raw-space URL fix is verified in the running container: 92 of 92 stored
+  URLs with spaces are normalised to valid URIs at runtime.
+
+### How to read the remaining 137 "failed" rows
+They are TERMINAL records of jobs that genuinely cannot publish - ancient
+campaigns whose media was never uploaded to Drive, plus the 7 content-guard
+refusals. They are not retrying and will not regenerate. The number is history,
+not an active fault.
+
+### The only live signal left
+The content guard refusing placeholder / wrong-language copy:
+  "1T - adult, honest, 18+ only."  -> [content-guard] placeholder/generic copy
+That is the guard working as designed. The fix, if wanted, is upstream: make the
+draft generator produce real copy for those accounts, or exclude them.
