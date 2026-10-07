@@ -24,6 +24,55 @@ metadata:
 
 # Batch-publish a folder of videos
 
+## How to use this skill — the 30-second cue
+
+**You:** point at a folder of videos whose names carry a routing prefix.
+
+> "Publish everything in `~/videos/august/`. They're prefixed `SFW NW`, `NSFW SW`, etc."
+
+**The agent:**
+
+1. reads each filename's prefix → decides profile + destinations,
+2. transcribes and summarises each clip,
+3. writes per-account titles/descriptions/captions, then humanizes them
+   (`humanizer` for English, `humanizer-zh` for 繁中),
+4. **shows you the copy** — you approve or edit,
+5. submits, and auto-splits / compresses anything over a platform limit,
+6. schedules across days at sensible local times (never a one-day dump),
+7. reports **published vs failed per platform** with the real error text.
+
+**Naming is the whole interface:**
+
+```
+SFW  NW  <anything>.mp4   → ALL Nakedwill platforms
+NSFW NW  <anything>.mp4   → ONLY Nakedwill platforms that allow nudity
+SFW  SW  <anything>.mp4   → ALL Sexualwill platforms
+NSFW SW  <anything>.mp4   → ONLY Sexualwill platforms that allow nudity
+Teaching <anything>.mp4   → Teaching profile
+```
+
+`SFW` = publish **everywhere** (including Instagram/Facebook/Threads/TikTok/YouTube).
+`NSFW` = publish **only** where nudity is allowed. No prefix → the agent asks
+rather than guessing.
+
+**What you get asked about:** the generated copy (step 4) and anything ambiguous
+(a missing prefix, an unclear persona). Everything else runs unattended.
+
+---
+
+## Contents
+
+- **1.** the prefix rule (read first)
+- **2.** folder workflow: probe → transcribe → summarise
+- **3.** writing + humanizing the copy
+- **3b.** platform limits and what is auto-adjusted
+- **4.** preview → approve → submit
+- **5.** scheduling so it spreads naturally
+- **6.** verifying real delivery
+- **7.** a worked end-to-end example
+
+---
+
 One pass per folder: **identify → transcribe → summarise → write copy → schedule**.
 The rule that matters most is the **filename prefix decides the destinations**.
 
@@ -114,10 +163,11 @@ Then, for each video:
      -d '{"file_path":"<relative path under videoFile/>"}'
    ```
 
-   Duration matters because **Threads caps video at 300 s** and Twitter at 140 s
-   for the API path. If a clip exceeds a destination's limit, either drop that
-   destination for the clip or make a shorter cut — do not let it fail three
-   times first.
+   Duration and size both matter: **Threads caps video at 300 s**, Twitter's API
+   path at 140 s, Instagram at 900 s. The app will split a clip into equal part
+   videos automatically (see **3b**), so you do not normally cut by hand. Feed the
+   destination platforms into the plan and let it work — but do the arithmetic in
+   **3b** first so you can tell the user how many parts each platform will get.
 
 4. **Extract the audio and transcribe it.** `myUtils/media_pipeline.extract_video_audio`
    writes 16 kHz mono WAV; feed that to your transcription tool to get the
@@ -173,6 +223,68 @@ when it did not.
 
 Keep the speaker's actual voice: contractions, uneven sentence length, one
 concrete detail beats three abstractions.
+
+## 3b. Platform limits — and what the app fixes for you
+
+`myUtils/platform_limits.py` is the **single source of truth** (researched
+2026-10-05; sources in `logs/platform-limits-research.md`). Do not recite limits
+from memory — read that module. Sizes are **decimal MB** because that is the unit
+platforms publish their caps in.
+
+| platform | chars | max MB | max seconds | imgs | vids |
+|---|---:|---:|---:|---:|---:|
+| twitter | 280 | 512 | 140 | 4 | 1 |
+| bluesky | 300 | 300 | 600 | 10 | 1 |
+| facebook | 63206 | 4096 | 14460 | 10 | 1 |
+| instagram | 2200 | 300 | 900 | 10 | 1 |
+| threads | 500 | 1024 | 300 | 20 | 1 |
+| tiktok | 2200 | 4096 | 3600 | 35 | 1 |
+| youtube | 5000 | 262144 | 43200 | — | 1 |
+| reddit | 40000 | 1000 | 900 | 20 | 1 |
+| telegram | 4096 | 2000 | none | 10 | 10 |
+| linkedin | 3000 | 5000 | 900 | 20 | 1 |
+| pinterest | 800 | 2048 | 300 | 1 | 1 |
+
+Field-scoped limits that are easy to miss:
+`telegram` media caption **1024** (not 4096) · `youtube` **title 100** and
+**tags 500** · `reddit` **title 300** · `bluesky` **3000 UTF-8 bytes** (300 graphemes).
+
+### What adjusts automatically — do not hand-roll these
+
+| problem | the app already does | where |
+|---|---|---|
+| caption too long | truncates to the platform's cap | `content_rules.trim_to_max_length` |
+| video too long **or** too big | re-encodes into equal **part** videos, one plan per distinct cap pair, tagged so a big-cap platform (YouTube) never gets a small-cap platform's parts | `media_prep.split_to_seconds` via `sau_backend._prepare_campaign_media_artifacts` |
+| file over the size cap | re-encodes to the publishing profile (1080×1920, CRF ~22, ≤30 fps, AAC 128k); refuses to publish the un-shrunk original if the re-encode fails | `media_prep.shrink` / `sau_backend._shrink_for_publish` |
+| image over Bluesky's blob cap | downscales to JPEG, stepping the longest side down, under ~900 KB | `_bluesky_shrink_image` |
+| oversized emoji/fps/sar | normalises fps to ≤30 and sets `sar=1` | `media_prep.build_filters` |
+
+Verified behaviour for a **813 s / 602 MB** clip:
+
+```
+threads -> 3 parts      (300 s cap)
+twitter -> 6 parts      (140 s cap, the strictest)
+youtube -> 1 part       (untouched: 43200 s / 256 GB cap)
+```
+
+So **you normally do not need to cut or compress anything by hand.** Feed the
+clip to the app with the right `selected_platforms` and let it plan. Choose by
+hand only when you want an editorial cut (e.g. a chosen highlight), not because a
+number was exceeded.
+
+The one thing that is *not* automatic is **choosing the destination**: passing the
+wrong platforms either wastes a split (Twitter's 140 s cap makes 6 parts) or
+sends an adult clip somewhere it will be rejected. That is what the prefix rule in
+section 1 is for.
+
+Do the arithmetic before submitting so you can tell the user what will happen:
+
+```bash
+.venv/bin/python -c "
+from myUtils import platform_limits as pl, media_prep as mp
+sec, mb = pl.video_max_seconds('threads'), pl.media_max_mb('threads')
+print(mp._split_count(<duration_s>, <size_bytes>, sec, mb*1024*1024))"
+```
 
 Respect each platform's real limits — the app enforces them and will truncate or
 reject otherwise:
@@ -258,6 +370,53 @@ Per-platform gotchas worth knowing before you report success:
 
 Report **published vs failed per platform** with the error text. Do not describe a
 queued target as published.
+
+## 7. Worked example
+
+Folder:
+
+```
+~/videos/august/
+  SFW  NW  storytime morning coffee.mp4       (48 s,   12 MB)
+  NSFW NW  shower after gym.mp4               (813 s, 602 MB)
+  SFW  SW  studio shoot part 2.mp4            (640 s, 180 MB)
+  Teaching  how to factor quadratics.mp4      (300 s,  40 MB)
+```
+
+What the agent decides, and why:
+
+**`SFW NW storytime morning coffee.mp4`** → profile 1, rating sfw → all NW
+platforms. 48 s / 12 MB is inside every cap, so nothing is split or shrunk.
+
+**`NSFW NW shower after gym.mp4`** → profile 1, rating nsfw → NW minus
+Instagram/Facebook/Threads/TikTok/YouTube. 813 s / 602 MB then gets planned
+**per platform**:
+
+```
+threads  -> 3 parts   (300 s cap)
+twitter  -> 6 parts   (140 s cap)
+bluesky  -> 2 parts   (600 s cap, and 300 MB)
+reddit   -> 1 part    (900 s, but 602 MB is under its 1000 MB cap -> shrink only)
+telegram -> 1 part    (no duration cap; 602 MB under 2000 MB)
+youtube  -> excluded (nsfw)
+```
+
+The big-cap destinations never receive a small-cap destination's parts.
+
+**`SFW SW studio shoot part 2.mp4`** → profile 3, rating sfw → all SW platforms.
+640 s / 180 MB: YouTube and Facebook take it whole; Threads splits it into 3;
+Twitter into 5; Instagram stays 1 part (900 s / 300 MB).
+
+**`Teaching how to factor quadratics.mp4`** → profile 4 → the 7 Teaching
+accounts. 300 s is exactly Threads' cap, so it is left whole.
+
+Then scheduling: rather than 4 clips × N accounts in one evening, the agent
+spreads them over several days, anchored to local 12:00-22:00, with the
+automatic 5-minute per-target stagger so no account posts twice in one slot.
+
+Finally it submits, waits, and reports per platform — distinguishing a real
+delivery from a queued target, and quoting the actual error for anything that
+failed.
 
 ## Reference
 
