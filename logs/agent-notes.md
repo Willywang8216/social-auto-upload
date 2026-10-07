@@ -566,3 +566,41 @@ Cancel the stale backlog so the failure count reflects reality:
     file_records row and no R2 URL cannot ever publish.
 Do NOT resubmit them. Then the only remaining true signal is the content guard,
 which is a copy-generation problem for specific accounts, not a delivery fault.
+
+## 2026-10-07 (pi-2650) — FIXED: stored artifact URLs with raw spaces
+
+Found a genuine, still-live code path behind the remaining failures.
+
+118 queued targets held a `public_url` containing a RAW SPACE, e.g.
+  https://pub-...r2.dev/campaigns/2210/videos/SFW 20260821094430455_pub_pub.mp4
+
+Verified against the live object: the encoded form returns 200 with the correct
+Content-Length; the raw form fails. So this is the true cause of the
+"Unable to fetch video file from URL" (Facebook) and "local media missing"
+(Sociamonials fallback) failures on older campaigns - not a token or network
+problem.
+
+Root cause: the earlier fix percent-encoded URLs at UPLOAD time, but URLs already
+persisted in `campaign_artifacts.public_url` / job payloads are read verbatim, so
+every pre-fix row still carried the invalid URI.
+
+Fix (559b126): `_normalise_artifact_url()` percent-encodes the path at the point
+of use (safe="/%" preserves separators and already-encoded octets, so it is
+idempotent). Applied at the single place the payload is assembled in
+`_run_target`, plus `_fallback_media_paths` and the generated-artifact restore.
+Stored data does not need rewriting; old and new rows now behave identically.
+
+Verified in the running container after deploy:
+  92 stored URLs with raw spaces in the pending queue
+  92 ...now normalised to a valid URI by the worker  (100%)
+
+### State after this pass
+- 2359 unrecoverable stale targets (pre-Oct jobs pointing at localhost URLs or
+  a deleted videos/demo.mp4) were CANCELLED. They could never publish and were
+  regenerating "failed" rows daily, which is what made the system look broken.
+- 1340 targets remain queued; none are the unrecoverable kind.
+- The 82 remaining Sept-21 targets hold proper R2 URLs and are genuinely
+  publishable - left alone deliberately.
+- The only new-failure class left is the content guard refusing placeholder or
+  wrong-language copy, which is the guard working as designed; that is an
+  upstream copy-generation issue for specific accounts, not a delivery fault.
