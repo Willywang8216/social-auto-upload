@@ -499,3 +499,70 @@ cap guard, and CDN URL percent-encoding.
 2. Deploy is done; the running container is current as of commit 129756b9.
 3. Consider a duration-aware prep step so Threads/TikTok no longer need a
    manual short cut - the pipeline constrains dimensions/fps/size but not time.
+
+## 2026-10-07 (pi-2650) — re-triage: "many failed to publish" is mostly STALE RETRY NOISE
+
+Operator reported continuing publish failures. Full re-triage with SQL + live
+reproduction. The headline finding is that the failure COUNTS are misleading.
+
+### Classification of the 55 failures in the last 48 h
+
+    48  STALE jobs (created before 2026-10-06) being re-attempted
+     7  NEW jobs (created 2026-10-06+)
+
+**48 of 55 are not new failures.** They are ancient jobs (artifacts created
+2026-06-20 or 2026-09-20/21) whose targets were resubmitted and re-failed.
+Their media is genuinely gone and they can never succeed. Examples:
+
+  t39/40/41/42/43/44  instagram/threads/tiktok/facebook, campaign 44/45,
+                      artifact created 2026-06-20, points at
+                      /home/will/social-auto-upload/videos/demo.mp4
+  t2068/2069          twitter, artifact created 2026-09-20
+  t2561/2562/3448     twitter, artifacts created 2026-09-21
+  3448                artifact has remote_path=null AND a
+                      http://localhost:5409/getFile?... public_url, so there is
+                      nothing to restore from and the URL is unreachable by any
+                      platform.
+
+These must be CANCELLED, not retried. Retrying them produces fresh "failed"
+rows every day and is what makes the system look broken.
+
+### The 7 genuinely NEW failures are the content guard WORKING
+
+All 7 are `[content-guard]` refusals:
+  5 x "placeholder/generic copy"
+  2 x "copy does not match account language"
+Example refused copy: "1T — adult, honest, 18+ only."
+That is the last-resort guard in worker._content_guard_error doing its job: it
+refuses to publish placeholder or wrong-language captions. This is correct
+behaviour, not a regression - the upstream draft generation produced poor copy
+for those accounts.
+
+### Root causes I verified by live reproduction (not guesswork)
+
+1. `localhost` public URLs: 2027 campaign_artifacts rows still carry
+   `http://localhost:5409/getFile?...`. They are HISTORICAL (newest 2026-09-25);
+   current prep writes proper R2 URLs (newest R2 artifact 2026-10-06). So this
+   is stale data, not a live code path.
+2. "Permission denied: /app/generated" (12 rows): all dated 2026-10-05, i.e.
+   before the container was restarted on the current image. Re-tested live:
+   every affected directory is WRITABLE now and the container runs as root.
+   Transient, already resolved.
+3. Artifact restore DOES work. I reproduced it in the running container:
+     - generated/campaigns/campaign-2176/..._pub_pub.mp4 -> downloaded from
+       Drive OK (via its generated/ file_records row)
+     - generated/campaigns/campaign-2335/..._pub_pub.mp4 -> restored OK via
+       _generated_record_by_name (the record lives under campaign-2501, a
+       re-publish of the same media)
+     - the ONLY unrestorable case is a file with no file_records row at all
+       (e.g. campaign-2334), which is correct: the bytes are not on Drive.
+4. Container is CURRENT: image built 2026-10-06T05:27, includes commit 4eaaa5c
+   (the newest). X-direct-publish gate and split-part tagging are both present.
+
+### Recommendation
+
+Cancel the stale backlog so the failure count reflects reality:
+  - targets whose job was created before 2026-10-06 and whose media has no
+    file_records row and no R2 URL cannot ever publish.
+Do NOT resubmit them. Then the only remaining true signal is the content guard,
+which is a copy-generation problem for specific accounts, not a delivery fault.
