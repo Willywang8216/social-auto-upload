@@ -579,3 +579,60 @@ class SociamonialsDeliveryVerificationTests(unittest.TestCase):
             "warnings": [],
         })
         self.assertEqual(status, jobs.TARGET_SUCCEEDED)
+
+
+class ArtifactUrlNormalisationTests(unittest.TestCase):
+    """Stored artifact URLs must be valid URIs before use.
+
+    Artifact URLs are built from media filenames and were persisted unencoded
+    before the upload-side fix, so rows still carry raw spaces. A raw space is
+    not a valid URI: the R2 object answers 200 for the encoded form and fails
+    for the raw one, and URL-fetching platforms plus the Sociamonials fallback
+    reject it. Normalisation happens at the point of use, so old and new rows
+    behave identically.
+    """
+
+    def test_raw_space_is_percent_encoded(self):
+        from myUtils.worker import _normalise_artifact_url
+
+        url = _normalise_artifact_url(
+            "https://cdn.example/campaigns/2210/videos/SFW 20260821094430455_pub_pub.mp4"
+        )
+        self.assertNotIn(" ", url)
+        self.assertIn("SFW%2020260821094430455_pub_pub.mp4", url)
+
+    def test_already_encoded_url_is_unchanged(self):
+        from myUtils.worker import _normalise_artifact_url
+
+        url = "https://cdn.example/campaigns/1/videos/already%20encoded.mp4"
+        self.assertEqual(_normalise_artifact_url(url), url)
+
+    def test_non_ascii_is_encoded(self):
+        from myUtils.worker import _normalise_artifact_url
+
+        url = _normalise_artifact_url(
+            "https://cdn.example/campaigns/1/videos/\u4e2d\u6587 \u6a94\u540d.mp4"
+        )
+        self.assertNotIn(" ", url)
+        self.assertIn("%E4%B8%AD%E6%96%87", url)
+
+    def test_plain_and_empty_values_pass_through(self):
+        from myUtils.worker import _normalise_artifact_url
+
+        self.assertEqual(_normalise_artifact_url("not-a-url"), "not-a-url")
+        self.assertEqual(_normalise_artifact_url(""), "")
+        self.assertEqual(_normalise_artifact_url(None), "")
+
+    def test_fallback_media_paths_normalises_the_public_url(self):
+        # The fallback hands this value to Sociamonials, which fetches it, so it
+        # must already be a valid URI.
+        from myUtils.worker import _fallback_media_paths
+
+        paths = _fallback_media_paths({
+            "artifacts": [{
+                "artifact_kind": "remote_upload",
+                "public_url": "https://cdn.example/videos/SFW clip_pub.mp4",
+            }],
+        })
+        self.assertEqual(len(paths), 1)
+        self.assertNotIn(" ", paths[0])

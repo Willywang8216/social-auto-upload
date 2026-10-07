@@ -775,6 +775,22 @@ class PublishWorker:
                     "_db_path": str(self._db_path),
                     "_telegramDeliveryKey": str(target.id),
                 }
+                # Stored artifact URLs predate the upload-side percent-encoding
+                # fix, so some rows still carry raw spaces (e.g.
+                # ".../SFW 20260821094430455_pub_pub.mp4"). A raw space is not a
+                # valid URI: URL-fetching platforms and the fallback reject it
+                # while the encoded form serves 200. Normalise once here, at the
+                # single point the payload is assembled, so every platform path
+                # and the fallback see a valid URL regardless of the row's age.
+                if isinstance(payload.get("artifacts"), list):
+                    for artifact in payload["artifacts"]:
+                        if not isinstance(artifact, dict):
+                            continue
+                        url = artifact.get("public_url")
+                        if url:
+                            artifact["public_url"] = _normalise_artifact_url(
+                                str(url)
+                            )
                 guard_error = _content_guard_error(payload, target, self._db_path)
                 if guard_error:
                     reason = f"[content-guard] {guard_error}"
@@ -1194,6 +1210,42 @@ class PublishWorker:
 # --------------------------- default platform registry ---------------------------
 
 
+def _normalise_artifact_url(value: str) -> str:
+    """Percent-encode a stored artifact URL so it stays a valid URI.
+
+    Artifact URLs are built from media filenames and were written to the DB
+    unencoded before the upload-side fix, so rows still carry raw spaces
+    (e.g. ``.../SFW 20260821094430455_pub_pub.mp4``). A raw space is not a valid
+    URI: the R2 object serves 200 for the encoded form and fails for the raw
+    one, and URL-fetching platforms (Facebook, Instagram, Threads, TikTok) plus
+    the Sociamonials fallback reject it outright. Rows are not rewritten here -
+    this only normalises the value at the point of use, so both old and new
+    rows behave the same.
+    """
+    text = str(value or "").strip()
+    if not text or "://" not in text:
+        return text
+    try:
+        from urllib.parse import quote, urlsplit, urlunsplit
+
+        parts = urlsplit(text)
+        if not parts.scheme or not parts.netloc:
+            return text
+        # safe="/%" keeps the separators and any already-encoded octets intact,
+        # so re-encoding an already-encoded URL is a no-op.
+        return urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                quote(parts.path, safe="/%"),
+                quote(parts.query, safe="=&%?/"),
+                parts.fragment,
+            )
+        )
+    except Exception:  # noqa: BLE001 - a malformed URL is returned untouched
+        return text
+
+
 def _fallback_media_paths(payload: dict) -> list[str]:
     """Local media paths a fallback publisher can attach to a post.
 
@@ -1212,7 +1264,9 @@ def _fallback_media_paths(payload: dict) -> list[str]:
             continue
         candidate = str(artifact.get("local_path") or "").strip()
         if not candidate:
-            candidate = str(artifact.get("public_url") or "").strip()
+            candidate = _normalise_artifact_url(
+                str(artifact.get("public_url") or "")
+            )
         if candidate and candidate not in paths:
             paths.append(candidate)
     return paths
@@ -1501,7 +1555,9 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             # Try 2: Restore generated artifacts from their registered Drive
             # mapping first; only then use a validated public HTTPS fallback.
             if not downloaded and is_generated_artifact:
-                public_url = str(artifact.get("public_url") or "")
+                public_url = _normalise_artifact_url(
+                    str(artifact.get("public_url") or "")
+                )
                 if _public_https_url(public_url):
                     try:
                         _download_public_artifact(public_url, p)
