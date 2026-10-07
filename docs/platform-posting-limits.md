@@ -1,12 +1,36 @@
 # 2026 Hard Posting Limits — Every Platform Supported by `social-auto-upload`
 
-> **Human-readable reference:** [`docs/platform-posting-limits.md`](../docs/platform-posting-limits.md). **Enforced single source of truth:** [`myUtils/platform_limits.py`](../myUtils/platform_limits.py). This file is the raw 2026-10-05 research run (source links live below).
+> **Human-readable reference — not the enforcement source.** The repo's enforced single source of truth is [`myUtils/platform_limits.py`](../myUtils/platform_limits.py) (tested by `tests/test_platform_limits.py`); per-number citations live in [`logs/platform-limits-research.md`](../logs/platform-limits-research.md). If this document and the code disagree, **the code and its tests win**. See [Enforced values](#enforced-values-applied-by-myutilsplatform_limitspy) below.
 
 **Researched:** 2026-10-05 · **Method:** live Exa + Tavily searches (no memory), preferring 2026/official sources.
 **Platforms covered:** X/Twitter, Bluesky, Facebook, Instagram, Threads, TikTok, YouTube, Reddit, Telegram, LinkedIn, Pinterest.
 
 > **Read this first.** Most platforms enforce **two different sets of limits**: what the native app/website accepts, and what the public publishing **API** accepts. This repo publishes largely through APIs, so where the two differ both are listed. All file sizes below are **decimal** (1 MB = 1,000,000 bytes, 1 GB = 1,000,000,000 bytes) as the platforms themselves use. Grapheme vs. character counting is called out where it matters.
 > Tiers that raise a limit (X Premium, Telegram Premium, Reddit Premium) are marked.
+
+### How this maps to this repo
+
+`social-auto-upload` publishes through each platform's public API (and, for Douyin / Xiaohongshu / Bilibili, browser automation). [`myUtils/platform_limits.py`](../myUtils/platform_limits.py) is the **enforced single source of truth**: draft generation, media prep and the individual publishers all read from it, and `tests/test_platform_limits.py` locks the values. It encodes **API-only** limits; the master table below is the broader human-readable research view (app/web maxima, byte conversions, restrictions). Where the two differ, the code is what actually runs.
+
+### Enforced values applied by `myUtils/platform_limits.py`
+
+Exact numbers the repo validates against today (`media_max_mb` is decimal MB; `video` is seconds; `—` = no platform cap):
+
+| Platform | message_max_chars | media_max_mb | video (s) | max_images | max_videos |
+|---|---|---|---|---|---|
+| twitter | 280 | 512 | 140 | 4 | 1 |
+| bluesky | 300 (+ 3,000 bytes) | 300 | 600 | 10 | 1 |
+| facebook | 63,206 | 4,096 | 14,460 | 10 | 1 |
+| instagram | 2,200 | 300 | 900 | 10 | 1 |
+| threads | 500 | 1,024 | 300 | 20 | 1 |
+| tiktok | 2,200 (API) | 4,096 | 3,600 | 35 | 1 |
+| youtube | 5,000 (desc; title 100) | 262,144 | 43,200 | — | 1 |
+| reddit | 40,000 (title 300) | 1,000 | 900 | 20 | 1 |
+| telegram | 4,096 (caption 1,024) | 2,000 | — | 10 | 10 |
+| linkedin | 3,000 | 5,000 | 900 | 20 | 1 |
+| pinterest | 800 | 2,048 | 300 | 1 | 1 |
+
+The module deliberately hard-codes API-era figures (e.g. X 512 MB / 140 s) even where a tier or the web app is more generous, so uploads always clear the API's own validation. Regenerate this table from the module if the dicts change.
 
 ---
 
@@ -18,7 +42,7 @@
 | **Bluesky** | **300 graphemes** AND **3,000 UTF-8 bytes** per post. Emoji = 1 grapheme. [7][11] | Image **2 MB** (2,000,000 B) each; video **300 MB** (300,000,000 B). [6][9] | **600 s** (10 min), raised from 3 min on 2026-08-26. [6][7] | **10** (raised 2026) [10] | **1** — cannot mix images & video [11] | Images and video are mutually exclusive. Links count at full visible length. Daily cap **25 videos or 10 GB**. Email verification required for video. [6][11] |
 | **Facebook** | **63,206 chars** post; comments 8,000. [12][14] | Image **30 MB** (30,000,000 B) feed/carousel (link OG image 8 MB); video **4 GB** (4,000,000,000 B) documented, organic up to ~**10 GB** (10,000,000,000 B). [14][15] | **14,460 s** (241 min) Feed documented; **Reels have no length/format cap since June 2025**; Stories ≤120 s ads / 60 s organic. [12][13] | Carousel **2–10**; multi-photo Page post practical ~15; albums up to 1,000 photos. [14][15] | **1** per post (or a photo carousel, never both) [14] | All new videos are Reels. >20% text overlay reduces reach. NSFW/sexual content banned by Community Standards. [12][13][15] |
 | **Instagram** | **2,200 chars** caption; first **125** shown; max **30 hashtags**. [17][18] | Image **8 MB** (8,000,000 B) JPEG via API (app accepts ~30 MB); Reel/feed video **300 MB** (300,000,000 B) API; Story video 100 MB. [16][17] | API Reels **3–900 s** (15 min) accepted; **Reels-tab eligibility 5–90 s** (some accounts 3 min). App camera up to 20 min. [16][17] | Carousel **2–10** via API (up to **20** in app); single image = 1. [17][19] | Carousel items can be videos; single video post = 1. Up to 10 API / 20 app items. [17][19] | Image must be **JPEG** via API. Caption links are not clickable. NSFW/sexual content banned. Aspect 4:5–1.91:1 feed, 9:16 Reels. API 100 posts/24h; carousel = 1. Professional accounts only. [16][17][19] |
-| **Threads** | **500 chars** post (hard); text attachments up to 10,000 chars; max **5 links**. [20][21] | Image **8 MB** (8,000,000 B); video **1 GB** (1,000,000,000 B). [20][21] | **300 s** (5 min). [20][21] | Carousel **2–20** (API/app). [21][22] | Up to 20 in a mixed carousel; single video post = 1. [22] | 500-char cap applies to post/reply. 5 links/post. 250 posts/24h. NSFW banned (Instagram guidelines). 9:16 recommended; 320–1440 px wide. [20][21] |
+| **Threads** | **500 chars** post (hard); text attachments up to 10,000 chars; max **5 links**. [20][21] | Image **8 MB** (8,000,000 B); video **1,024 MB** (1,024,000,000 B) API. [20][21] | **300 s** (5 min). [20][21] | Carousel **2–20** (API/app). [21][22] | Up to 20 in a mixed carousel; single video post = 1. [22] | 500-char cap applies to post/reply. 5 links/post. 250 posts/24h. NSFW banned (Instagram guidelines). 9:16 recommended; 320–1440 px wide. [20][21] |
 | **TikTok** | **4,000 chars** in-app; **2,200 chars** via Content Posting API. Hashtags/@ count. [24] | Video **4 GB** (4,000,000,000 B) via API (mobile 72 MB Android / ~288 MB iOS); image **20 MB** (20,000,000 B) each. [23][26] | API **600 s** (10 min); in-app up to 10 min (some 3/5/10); web uploads up to **3,600 s** (60 min). [23][25] | Photo Mode **1–35** (help says up to 35; carousel ads 2–35). [25][27] | **1** — no mixing; Photo Mode is photos only. [26] | **Media required** (no text-only posts). No image+video mix. NSFW/sexual content banned. 9:16 recommended. 25 API posts/24h. [23][26] |
 | **YouTube** | Title **100 chars**; description **5,000 chars**; tags 500. [30][31] | Video **256 GB** (256,000,000,000 B) **or** 12 h, whichever first; thumbnail **2 MB** (2,000,000 B). [28][30] | **43,200 s** (12 h) verified; **900 s** (15 min) unverified default; **Shorts ≤180 s**. [28][29] | n/a (video platform); 1 thumbnail. Shorts/Community differ. [31] | **1** per upload/call. [30] | Unverified accounts limited to 15 min. Shorts need square/vertical and ≤3 min for the Shorts shelf. NSFW age-restricted/removed. [28][29] |
 | **Reddit** | Title **300 chars**; self-post body **40,000 chars** (Reddit Premium **80,000**); comment 10,000. [32][33] | Image **20 MB** (20,000,000 B) each; GIF 100 MB; video **1 GB** (1,000,000,000 B). [35] | **900 s** (15 min) native video. [35] | Gallery **up to 20** images/GIFs (each caption 180 chars). [34][35] | **1** native video per post. [34] | Subreddit rules can be stricter (video disabled, length caps). NSFW subs restrict comment images; NSFW images not allowed in comments. Title required. [34][35] |
@@ -57,7 +81,7 @@
 
 ### Threads
 - 500-char hard cap on posts and replies; text attachments hold 10,000 chars and don't count. Max 5 links per post. [20][21]
-- Media: images 8 MB (JPEG/PNG, 320–1440 px wide, aspect up to 10:1); video 1 GB / 5 min (MOV/MP4, H.264/HEVC, 23–60 fps). [20][21]
+- Media: images 8 MB (JPEG/PNG, 320–1440 px wide, aspect up to 10:1); video **1,024 MB** / 5 min (MOV/MP4, H.264/HEVC, 23–60 fps). [20][21]
 - Carousel supports **2–20** mixed images/videos and counts as one post. [21][22]
 - 250 posts / 1,000 replies / 100 deletions per 24 h. NSFW follows Instagram's guidelines and is not permitted. [21]
 

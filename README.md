@@ -242,6 +242,26 @@ TikTok 使用 Content Posting API：
 - 支援圖片和影片上傳
 - 自動 token 過期檢測和重新授權提示
 
+## 平台發佈限制（2026）
+
+各平台的內文長度、媒體大小、影片長度與張數上限，會因「App / 網頁」與「公開 API」而不同。實際強制執行以 [`myUtils/platform_limits.py`](./myUtils/platform_limits.py) 為**單一真實來源**（由 `tests/test_platform_limits.py` 鎖定，產文、媒體處理與各 publisher 皆讀取此模組）。完整逐平台備註、位元組換算與來源連結見 [`docs/platform-posting-limits.md`](./docs/platform-posting-limits.md)。
+
+| 平台 | 內文上限 | 單檔圖片 | 影片檔案 | 影片長度 | 圖片/篇 | 影片/篇 |
+| --- | --- | --- | --- | --- | --- | --- |
+| X / Twitter | 280（Premium 25,000） | 5 MB（GIF 15 MB） | 512 MB 免費 / 8 GB API | 140 秒免費 / 20 分 API | 4 | 1 |
+| Bluesky | 300 graphemes / 3,000 bytes | 2 MB | 300 MB | 600 秒 | 10 | 1 |
+| Facebook | 63,206 | 30 MB | 4 GB（有機 ~10 GB） | 241 分（Reels 無上限） | 2–10（輪播） | 1 |
+| Instagram | 2,200 | 8 MB（API） | 300 MB（API） | 900 秒（API） | 2–10 API / 20 App | 混合 |
+| Threads | 500 | 8 MB | 1 GB | 300 秒 | 2–20 | 混合 |
+| TikTok | 4,000 App / **2,200 API** | 20 MB | 4 GB API | 600 秒 App / 3,600 秒 Web | 1–35 | 1 |
+| YouTube | 標題 100 / 說明 5,000 | 縮圖 2 MB | 256 GB 或 12 小時 | 43,200 秒（已驗證） | — | 1 |
+| Reddit | 標題 300 / 內文 40,000 | 20 MB | 1 GB | 900 秒 | 20 | 1 |
+| Telegram | 4,096 文字 / 1,024 說明 | — | 2 GB 免費 / 4 GB Premium | 無硬性 | 10 | 10 |
+| LinkedIn | 3,000 | ~5–10 MB | 5 GB | 900 秒桌機 / 600 秒行動 | 20 | 1 |
+| Pinterest | 標題 100 / 說明 800 | 20 MB | 2 GB | 300 秒（廣告 900 秒） | 20（Idea Pin） | 1 |
+
+> ⚠️ 平台限制會變動，且 Reddit 子版／Facebook 粉專／Telegram 頻道可再加嚴。發佈前請以文件內的官方來源為準。
+
 ## 詳細文件
 
 - [安裝說明](./docs/install.md)
@@ -251,6 +271,7 @@ TikTok 使用 Content Posting API：
 - [Agent Bootstrap Prompt](./docs/agent-bootstrap.md)
 - [API 參考文件](./docs/api-reference.md)
 - [API 速率限制與配額](./docs/api-rate-limits.md)
+- [平台發佈限制（2026）](./docs/platform-posting-limits.md)
 
 ## 交流與支援
 

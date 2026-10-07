@@ -169,3 +169,4 @@ sau skill install
 *   `pyproject.toml` is the primary Python dependency metadata for `uv sync` / `pip install -e .`.
 *   `requirements.txt` remains the Docker / legacy compatibility install path and must stay aligned for backend runtime dependencies.
 *   The `package.json` file in the `sau_frontend` directory lists the frontend dependencies.
+*   Platform posting limits are owned in code by `myUtils/platform_limits.py` (the enforced single source of truth, locked by `tests/test_platform_limits.py`); draft generation, media prep and the publishers all read from it. The human-readable table (with app-vs-API differences and notable restrictions) is in `docs/platform-posting-limits.md`, and the per-number source citations are in `logs/platform-limits-research.md`. Update the module first, then keep both docs in sync.
