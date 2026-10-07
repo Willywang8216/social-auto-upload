@@ -103,3 +103,46 @@ bluesky · facebook · instagram · teaching_blog · threads · tiktok · twitte
 Covered above in detail; the short version is that language follows the
 **account**, and every clip is published to both the English and Traditional
 Chinese account sets (not one or the other). `SW Blog` is bilingual.
+
+## Getting media to the app (verified on this deployment)
+
+The app runs in a container on the Email VPS (`socialupload.iamwillywang.com`,
+port 5409). Media must be readable **by the container**:
+
+| path | mechanism |
+|---|---|
+| `/app/videoFile` | bind mount — container writes are visible on the host |
+| `/app/rclone-cache.conf` | rclone config with the **`GDrive-willywang8216`** remote, read **and write** |
+
+Verify Drive from inside the container, never from the host (the host shell may
+have no rclone config at all, which is expected):
+
+```bash
+docker exec social-auto-upload sh -c \
+  "RCLONE_CONFIG=/app/rclone-cache.conf rclone lsf 'GDrive-willywang8216:sau/'"
+# -> assets/  generated/  uploads/  videoFile/
+```
+
+Preferred route, because Drive is already the archive/offload target
+(`offload_to_drive.sh` → `GDrive-willywang8216:sau`):
+
+```bash
+# 1) local -> Drive archive (survives a re-run; no re-upload)
+rclone copy "<local folder>" "GDrive-willywang8216:sau/videoFile/<batch>/" -P
+
+# 2) Drive -> container (single hop, container's own config)
+docker exec social-auto-upload sh -c \
+  "RCLONE_CONFIG=/app/rclone-cache.conf rclone copy \
+   'GDrive-willywang8216:sau/videoFile/<batch>/' /app/videoFile/<batch>/ -P"
+```
+
+The container prints `Failed to save config ... device or resource busy` on every
+rclone call (read-only bind mount). Harmless — the transfer still runs.
+
+## Transcription
+
+`whisper-1` via the configured LLM pool (`myUtils/llm_client.transcribe_audio`).
+It runs on the **submit** path (`_prepare_campaign_media_artifacts`), not on
+preview — `_build_preview_media_context` returns an empty `transcriptText`. Enable
+in a submit with `options.transcribe: true`; it also runs automatically when an
+LLM is configured and no transcript exists.

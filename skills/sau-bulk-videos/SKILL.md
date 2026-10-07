@@ -102,7 +102,7 @@ rejected on a `zh-Hant` account, so generate Traditional characters.
 ## Contents
 
 - **1.** the prefix rule (read first)
-- **2.** folder workflow: probe → transcribe → summarise
+- **2.** getting the files to the app (Drive route) + transcribing
 - **3.** writing + humanizing the copy
 - **3b.** platform limits and what is auto-adjusted
 - **4.** preview → approve → submit
@@ -114,6 +114,15 @@ rejected on a `zh-Hant` account, so generate Traditional characters.
 
 One pass per folder: **identify → transcribe → summarise → write copy → schedule**.
 The rule that matters most is the **filename prefix decides the destinations**.
+
+## 0. Talk to the app
+
+```bash
+export SAU_API="http://localhost:5409"
+export SAU_TOKEN="$(grep -E '^SAU_API_TOKENS=' .env | cut -d= -f2)"
+# every call needs:  -H "Authorization: Bearer $SAU_TOKEN"
+curl -s "$SAU_API/healthz"        # confirm it is alive before expensive work
+```
 
 ## 1. The prefix rule (read this first)
 
@@ -168,61 +177,86 @@ never leak onto Instagram even if the request asks for it. Do not try to work
 around it, and do not rename a file to `sfw` to widen its reach — that is the
 one thing this skill must never do.
 
-## 2. Work the folder
+## 2. Get the files to the app
 
-Resolve the app once. Everything below talks to the running backend.
+Staged media must be readable by the **container**, which is not the same as being
+readable on the host. Two things are true on this deployment and both save time:
+
+1. `videoFile/` is a bind mount, so anything the container writes there the host
+   sees (and vice versa).
+2. The container mounts an rclone config (`/app/rclone-cache.conf`) that has the
+   **`GDrive-willywang8216`** remote, and it can **read and write** `sau/`.
+   Verified live: `rclone lsf GDrive-willywang8216:sau/` lists `assets/`,
+   `generated/`, `uploads/`, `videoFile/`, and a test write/delete round-tripped.
+
+A host shell on the same box may have **no** rclone config (`~/.config/rclone`
+missing) — that is expected and does **not** mean Drive is unreachable. Always
+test from inside the container:
 
 ```bash
-cd <social-auto-upload repo>
-export SAU_API="http://localhost:5409"
-export SAU_TOKEN="$(grep -E '^SAU_API_TOKENS=' .env | cut -d= -f2)"
-# every call needs:  -H "Authorization: Bearer $SAU_TOKEN"
+docker exec social-auto-upload sh -c \
+  "RCLONE_CONFIG=/app/rclone-cache.conf rclone lsf 'GDrive-willywang8216:sau/'"
 ```
 
-Confirm it is alive before doing anything expensive:
+The harmless `Failed to save config ... device or resource busy` notice appears on
+every container rclone call (a read-only bind mount); it does not affect the
+transfer.
+
+### Choosing a route
+
+| route | when |
+|---|---|
+| **Local → Drive → container** (`rclone copy` to `GDrive-willywang8216:sau/videoFile/<batch>/`, then `rclone copy` into `videoFile/` in the container) | the default. It is also the **archive**, so the source survives and a re-run needs no re-upload. |
+| Local → container directly (`docker cp` / `rclone copyto`) | only when Drive is unavailable and the batch is small. |
+
+Prefer Drive: it is already the offload target
+(`offload_to_drive.sh` → `GDrive-willywang8216:sau`), so bulk media placed in
+`sau/videoFile/<batch>/` matches where the app already restores from, and the
+archive is not duplicated.
 
 ```bash
-curl -s "$SAU_API/healthz"
+# 1) local -> Drive archive
+rclone copy "<local folder>" "GDrive-willywang8216:sau/videoFile/<batch>/" -P
+
+# 2) Drive -> container's videoFile (one hop, inside the container's config)
+docker exec social-auto-upload sh -c \
+  "RCLONE_CONFIG=/app/rclone-cache.conf rclone copy \
+   'GDrive-willywang8216:sau/videoFile/<batch>/' /app/videoFile/<batch>/ -P"
 ```
 
-Then, for each video:
+Do not upload 10 GB into the DB or re-encode locally: the app does its own probe,
+transcribe and prep.
 
-1. **Parse the prefix** and derive `(profile_id, rating)`:
+---
 
-   | prefix | profile_id | rating |
-   |---|---|---|
-   | `SFW NW` | 1 | sfw |
-   | `NSFW NW` | 1 | nsfw |
-   | `SFW SW` | 3 | sfw |
-   | `NSFW SW` | 3 | nsfw |
-   | `Teaching` | 4 | (unset — usually sfw) |
+## 2b. Transcribe → summarise
 
-2. **Get it into the app.** Staged media must live under `videoFile/`; the
-   container writes there and the host sees it through a bind mount. Do not
-   invent other paths.
+**Ask for transcription in the submit call, not the preview** — this trips people
+up:
 
-3. **Probe duration** so you can route long clips correctly:
+- `preview` builds its media context with an **empty `transcriptText`**. It drafts
+  from the filename and `brief` only, so a preview never reflects what is *said*.
+- The real transcription runs in `_prepare_campaign_media_artifacts` on the
+  **submit** path, using `whisper-1` via the configured LLM
+  (`myUtils/llm_client.transcribe_audio`), and it is enabled by
+  `options.transcribe: true` — or **automatically** whenever an LLM is configured
+  and no transcript exists yet.
 
-   ```bash
-   curl -s -X POST "$SAU_API/media/video-info" \
-     -H "Authorization: Bearer $SAU_TOKEN" -H 'Content-Type: application/json' \
-     -d '{"file_path":"<relative path under videoFile/>"}'
-   ```
+So a preview is for *structure and routing*, not final copy. Get the transcript
+yourself when you need the copy approved before submitting:
 
-   Duration and size both matter: **Threads caps video at 300 s**, Twitter's API
-   path at 140 s, Instagram at 900 s. The app will split a clip into equal part
-   videos automatically (see **3b**), so you do not normally cut by hand. Feed the
-   destination platforms into the plan and let it work — but do the arithmetic in
-   **3b** first so you can tell the user how many parts each platform will get.
+```bash
+# extract 16kHz mono WAV, then transcribe via the same model the app uses
+python -c "from myUtils import media_pipeline as m; \
+  m.extract_video_audio('<video>', '/tmp/a.wav')"
+python -c "from myUtils import llm_client as c; \
+  print(c.transcribe_audio('/tmp/a.wav'))"
+```
 
-4. **Extract the audio and transcribe it.** `myUtils/media_pipeline.extract_video_audio`
-   writes 16 kHz mono WAV; feed that to your transcription tool to get the
-   spoken content. If a clip has no speech (music only, silent), say so and
-   build the copy from the visual content and filename instead of inventing a
-   transcript.
+Then summarise the transcript into subject, tone, key moments, and any
+names/places worth surfacing. If a clip has no speech, say so and build the copy
+from the visual content rather than inventing a transcript.
 
-5. **Summarise** the transcript into: subject, tone, key moments, and any
-   names/places/claims worth surfacing. Keep this internal — it feeds the drafts.
 
 ## 3. Write the copy (humanize both languages)
 
