@@ -700,3 +700,40 @@ orphans remain queued. All other 19 failures in the window predate the deploy.
 2. Re-consent **account 108** (YT Willy Dev tutor) if MSL YouTube posts matter.
 3. Top up X API credits to restore direct X media posting (the fallback is
    carrying X meanwhile).
+
+## 2026-10-08 — efficiency fixes shipped, cleanup done
+
+### Fixed and deployed (commit 577f5e1, image f1ea3a55)
+1. **Media-prep throttle** (`myUtils/media_prep.py`). `_run()` is the single choke
+   point for every ffmpeg call, so the gate cannot be bypassed. Cap = half the
+   cores (env `SAU_ENCODE_CONCURRENCY`). Verified under real concurrency: 8
+   simultaneous ffmpeg attempts peaked at **2**. ffprobe is deliberately NOT
+   gated (it decides whether to encode).
+2. **Cross-job duplicate guard** (`myUtils/publish_orchestrator.py`). Skips media
+   an account already has live (pending/retrying/running); keys on the media
+   GROUP; reports in `skipped`; a lookup failure degrades to "not a duplicate".
+   Against the live backlog this would prevent **30 redundant sends** across 22
+   duplicate (account, media) pairs.
+
+### Rejected after checking
+**WAL** — enabled, tested, then reverted. `scripts/backup.sh`,
+`scripts/restore.sh` and `scripts/sau-daily-backup.sh` copy `database.db` as a
+plain file, so under WAL they would back up a stale DB and the loss would only
+appear on restore. The 15 s busy-timeout already covers the overlap.
+
+### Cleanup
+- `db/`: 36 stale safety copies (1.4 GB) -> newest 3 kept, 33 removed.
+  **Verified a fresh off-site copy first**: `backup-apps.sh` runs daily at 02:00
+  and includes `db/database.db`; the Oct 8 tarball is on OneDrive.
+  **db/ 1.4G -> 163M.**
+- Removed one-off `humanize*`/`regen*` scratch logs and `skip-audit.md`.
+  Kept `platform-limits-research.md` (referenced by CLAUDE.md and
+  `myUtils/platform_limits.py`).
+- **Found a rotation gap**: `logs/jobs/job-<id>.log` is one file per job and
+  nothing rotated it (1023 files). Added a logrotate rule (daily, 2M, 7
+  rotations, compressed) to `~/.config/logrotate/mailserver-sau.conf`.
+- `reports/` is 84 KB — left alone; the CSVs are reference inventories.
+
+### Verification
+Tests 1306 passed, 1 skipped. Container healthy on the new image; throttle reads
+2 slots on 4 cores; dedup guard present.
