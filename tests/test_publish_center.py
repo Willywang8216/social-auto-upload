@@ -596,3 +596,114 @@ class RequestDataContactDefaultsTests(unittest.TestCase):
         result = publish_orchestrator._request_data_for_options(brief="b", options={}, profile=profile)
         self.assertEqual(result["contactDetails"], "")
         self.assertEqual(result["cta"], "")
+
+
+class DuplicateQueueGuardTests(unittest.TestCase):
+    """The same media must not be queued twice for one account.
+
+    publish_job_targets is UNIQUE on (job_id, account_ref, file_ref), which stops
+    a duplicate within a job but not the same media arriving again under a new
+    job_id. That gap let one Telegram account accumulate 662 targets for 356
+    distinct files (the same clips queued 4-5 times), pushing its horizon to
+    2027-04. Identity is the media GROUP, and only live states count, so a
+    genuine re-publish after a terminal failure still works.
+    """
+
+    def setUp(self) -> None:
+        import db.createTable as create_table
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "guard.db"
+        create_table.bootstrap(self.db_path)
+        self.profile = profile_registry.create_profile("Guard", db_path=self.db_path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _seed(self, account_ref: str, status: str) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO media_groups (id, name, notes, status)"
+                " VALUES (900, 'g', '', 'ready')"
+            )
+            conn.execute(
+                "INSERT INTO campaigns (id, profile_id, media_group_id, status)"
+                " VALUES (900, ?, 900, 'ready')",
+                (self.profile.id,),
+            )
+            conn.execute(
+                "INSERT INTO campaign_posts (id, campaign_id, platform, account_ids_json)"
+                " VALUES (900, 900, 'telegram', '[]')"
+            )
+            conn.execute(
+                "INSERT INTO publish_jobs (id, idempotency_key, platform, payload_json)"
+                " VALUES (900, 'k900', 'telegram', '{}')"
+            )
+            conn.execute(
+                "INSERT INTO publish_job_targets (job_id, account_ref, file_ref, status)"
+                " VALUES (900, ?, 'campaign_post:900', ?)",
+                (account_ref, status),
+            )
+            conn.commit()
+
+    def test_live_target_blocks_a_second_queue(self):
+        self._seed("account:127", "pending")
+        self.assertTrue(
+            publish_orchestrator._already_queued_for_media(
+                127, 900, db_path=self.db_path
+            )
+        )
+
+    def test_terminal_states_do_not_block_a_republish(self):
+        # Fresh DB per status: the seed reuses fixed ids, so reuse would trip
+        # the media_groups primary key rather than test the guard.
+        import db.createTable as create_table
+
+        for status in ("succeeded", "failed", "cancelled"):
+            with self.subTest(status=status):
+                tmp = tempfile.TemporaryDirectory()
+                try:
+                    db_path = Path(tmp.name) / "guard.db"
+                    create_table.bootstrap(db_path)
+                    self.db_path = db_path
+                    self._seed("account:127", status)
+                    self.assertFalse(
+                        publish_orchestrator._already_queued_for_media(
+                            127, 900, db_path=db_path
+                        )
+                    )
+                finally:
+                    tmp.cleanup()
+
+    def test_a_different_account_is_not_blocked(self):
+        self._seed("account:127", "pending")
+        self.assertFalse(
+            publish_orchestrator._already_queued_for_media(
+                999, 900, db_path=self.db_path
+            )
+        )
+
+    def test_a_lookup_failure_does_not_block_publishing(self):
+        # A missing DB/table must degrade to "not a duplicate", never raise.
+        self.assertFalse(
+            publish_orchestrator._already_queued_for_media(
+                127, 900, db_path=Path(self._tmp.name) / "missing.db"
+            )
+        )
+
+
+class DuplicateQueueGuardWiringTests(unittest.TestCase):
+    """The guard must actually run in submit_publish, not just exist.
+
+    The other tests exercise the helper directly; this pins the call site so
+    removing it from the account loop fails here.
+    """
+
+    def test_account_loop_consults_the_duplicate_guard(self):
+        import inspect
+
+        source = inspect.getsource(publish_orchestrator.submit_publish)
+        self.assertIn("_already_queued_for_media(", source)
+        # And it must be a real guard, not commented out or short-circuited.
+        self.assertNotIn("if False and _already_queued_for_media(", source)
+        self.assertIn("already queued for this account", source)

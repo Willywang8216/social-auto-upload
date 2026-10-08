@@ -470,3 +470,52 @@ class PrePublishHookTests(unittest.TestCase):
 
 def _fake_prep():
     pass
+
+
+class EncodeThrottleTests(unittest.TestCase):
+    """Concurrent ffmpeg encodes must be capped, or they starve each other.
+
+    gunicorn runs --threads 8, so a burst of submissions used to start 8 encodes
+    on a 4-core box; each got ~45% of a core and the requests behind them hit the
+    120 s gunicorn timeout (504). Capping at ~half the cores is faster in
+    wall-clock terms because the encodes stop competing.
+    """
+
+    def test_default_is_half_the_cores_and_at_least_one(self):
+        from myUtils import media_prep
+
+        for cores, expected in ((4, 2), (1, 1), (16, 8)):
+            with self.subTest(cores=cores):
+                with mock.patch.object(media_prep.os, "cpu_count", lambda c=cores: c):
+                    self.assertEqual(media_prep._default_encode_slots(), expected)
+
+    def test_env_override_wins(self):
+        from myUtils import media_prep
+
+        with mock.patch.dict("os.environ", {"SAU_ENCODE_CONCURRENCY": "3"}):
+            self.assertEqual(media_prep._read_slots_env(), 3)
+        with mock.patch.dict("os.environ", {"SAU_ENCODE_CONCURRENCY": "0"}):
+            self.assertGreaterEqual(media_prep._read_slots_env(), 1)  # never zero
+        with mock.patch.dict("os.environ", {"SAU_ENCODE_CONCURRENCY": "junk"}):
+            self.assertGreaterEqual(media_prep._read_slots_env(), 1)  # falls back
+
+    def test_encode_slot_is_a_context_manager(self):
+        from myUtils import media_prep
+
+        with media_prep.encode_slot():
+            pass  # acquires and releases without raising
+
+    def test_only_ffmpeg_is_gated_and_probe_is_not(self):
+        import contextlib
+
+        from myUtils import media_prep
+
+        seen = []
+        with mock.patch.object(
+            media_prep.subprocess, "run", lambda cmd, **kw: seen.append(cmd[0])
+        ), mock.patch.object(
+            media_prep, "encode_slot", lambda: contextlib.nullcontext()
+        ):
+            media_prep._run(["ffprobe", "-v", "error"])
+            media_prep._run(["ffmpeg", "-i", "x"])
+        self.assertEqual(seen, ["ffprobe", "ffmpeg"])

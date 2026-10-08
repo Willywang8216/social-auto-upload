@@ -21,8 +21,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import subprocess
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from myUtils import platform_limits
@@ -43,6 +46,63 @@ PROFILE = {
 
 FFMPEG = "ffmpeg"
 FFPROBE = "ffprobe"
+
+
+# --- Transcode throttle -------------------------------------------------------
+#
+# ffmpeg is CPU-bound and saturates its cores by itself. The Flask app runs
+# ``gunicorn --threads 8``, so a burst of submissions used to start eight encodes
+# at once on a four-core box: each got ~45% of a core and every encode ran about
+# twice as slow as it would alone, while the requests that queued behind them hit
+# the 120 s gunicorn timeout and returned 504.
+#
+# Capping concurrent encodes at roughly half the cores is *faster* in wall-clock
+# terms than running them all (they stop fighting for the same cores) and it is
+# what keeps the request threads free to answer. ``devices``-backed hardware
+# encoders would lift the ceiling further; see reports/efficiency-audit-2026-10-08.md.
+def _default_encode_slots() -> int:
+    try:
+        cores = os.cpu_count() or 2
+    except Exception:  # noqa: BLE001 - cpu_count is not expected to raise
+        cores = 2
+    # Two encodes per core leaves room for the app itself and for the I/O of
+    # neighbouring jobs, while still allowing more parallelism than the single
+    # encode that a strict one-per-core rule would give on a busy box.
+    return max(1, int(cores) // 2)
+
+
+def _read_slots_env() -> int:
+    raw = str(os.environ.get("SAU_ENCODE_CONCURRENCY", "") or "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return _default_encode_slots()
+
+
+_ENCODE_SLOTS = _read_slots_env()
+_encode_gate = threading.BoundedSemaphore(_ENCODE_SLOTS)
+
+
+def encode_concurrency() -> int:
+    """How many ffmpeg encodes may run at once (for logging and diagnostics)."""
+    return _ENCODE_SLOTS
+
+
+@contextmanager
+def encode_slot():
+    """Hold one of the process-wide transcode slots while encoding.
+
+    Every ffmpeg-driven path in this module takes a slot, so the cap applies
+    wherever a transcode is triggered from (submit, worker, CLI). Re-entrant
+    use is not expected: callers acquire around a single encode.
+    """
+    _encode_gate.acquire()
+    try:
+        yield
+    finally:
+        _encode_gate.release()
 
 _TARGET_ASPECT = TARGET_W / TARGET_H  # 0.5625 (9:16 vertical)
 
@@ -104,6 +164,17 @@ def _ensure_tool(tool: str) -> str:
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run a command, taking a transcode slot when it is an encode.
+
+    ``ffprobe`` is cheap and must never wait behind an encode (it is used to
+    decide *whether* to encode), so only actual ffmpeg invocations are gated.
+    This is the single choke point every ffmpeg call in this module goes
+    through, so the throttle cannot be bypassed by a new call site.
+    """
+    exe = str(cmd[0]) if cmd else ""
+    if Path(exe).name.startswith("ffmpeg"):
+        with encode_slot():
+            return subprocess.run(cmd, **kwargs)
     return subprocess.run(cmd, **kwargs)
 
 

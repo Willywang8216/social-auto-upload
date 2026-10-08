@@ -21,6 +21,7 @@ The interesting business logic this module owns is:
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -34,6 +35,8 @@ from myUtils import content_rules
 from myUtils import jobs as job_runtime
 from myUtils import media_groups as media_group_store
 from myUtils import platform_capabilities
+
+_logger = logging.getLogger(__name__)
 from myUtils import profiles as profile_registry
 
 
@@ -50,6 +53,48 @@ MIN_GAP_MINUTES = int(os.environ.get("SAU_PUBLISH_MIN_GAP_MINUTES", "30") or 30)
 MAX_POSTS_PER_ACCOUNT_PER_DAY = int(
     os.environ.get("SAU_PUBLISH_MAX_PER_DAY", "3") or 3
 )
+
+
+def _already_queued_for_media(
+    account_id: int, media_group_id: int, *, db_path: Path
+) -> bool:
+    """True when this account already has a live target for the same media.
+
+    ``publish_job_targets`` is UNIQUE on ``(job_id, account_ref, file_ref)``,
+    which stops a duplicate *within* one job but not the same media arriving
+    again under a new ``job_id``. That gap let the same clip be queued to the
+    same Telegram account 4-5 times, turning 356 distinct files into 662
+    targets and pushing one account's horizon to 2027-04.
+
+    Identity is the media *group*, not the filename: two intentional posts of
+    the same asset would share a group only when they truly are one submission.
+    Terminal states (succeeded/failed/cancelled) do not count, so a genuine
+    re-publish after a failure still works.
+    """
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM publish_job_targets t
+                JOIN campaign_posts cp ON ('campaign_post:' || cp.id) = t.file_ref
+                JOIN campaigns c ON c.id = cp.campaign_id
+                WHERE t.account_ref = ?
+                  AND c.media_group_id = ?
+                  AND t.status IN ('pending', 'retrying', 'running')
+                LIMIT 1
+                """,
+                (f"account:{int(account_id)}", int(media_group_id)),
+            ).fetchone()
+        return row is not None
+    except Exception:  # noqa: BLE001 - a lookup miss must never block a publish
+        _logger.warning(
+            "duplicate-queue check failed for account=%s media_group=%s",
+            account_id,
+            media_group_id,
+            exc_info=True,
+        )
+        return False
 
 
 @dataclass(slots=True)
@@ -394,6 +439,22 @@ def submit_publish(
             supports_multi_media = platform_capabilities.platform_supports_multi_media(platform)
 
             for account in platform_accounts:
+                # Cross-job duplicate guard. The target table is unique on
+                # (job_id, account_ref, file_ref), so the same media re-submitted
+                # under a new job used to queue again - that is how one account
+                # accumulated 662 targets for 356 files. Skip (and report) rather
+                # than silently piling on more scheduled sends.
+                if _already_queued_for_media(
+                    account.id, media_group.id, db_path=db_path
+                ):
+                    skipped.append({
+                        "profileId": profile_id,
+                        "accountId": account.id,
+                        "accountName": account.nickname or account.account_name,
+                        "platform": account.platform,
+                        "reason": "this media is already queued for this account",
+                    })
+                    continue
                 draft_override = account_drafts.get(str(account.id)) or account_drafts.get(account.id)
                 if isinstance(draft_override, dict) and draft_override.get("message"):
                     # The override arrives from the client, and a model-backed

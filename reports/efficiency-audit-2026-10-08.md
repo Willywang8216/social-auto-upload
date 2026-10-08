@@ -130,14 +130,21 @@ A target should be unique per `(account, file)`. There is already a
 whose `(account_id, media_group_id)` already has a pending/queued target. This
 alone removes ~314 needless sends and shortens the horizon by months.
 
-### 4. Enable SQLite WAL (one line)
+### 4. ~~Enable SQLite WAL~~ — REJECTED after checking the backups
 
-```sql
-PRAGMA journal_mode=WAL;
-```
+WAL was enabled, tested, then **deliberately reverted**. `myUtils/jobs.py`
+already documents why, and the check confirms it:
 
-With one gunicorn worker, 8 threads, an in-process worker and a scheduler all
-writing, WAL removes reader/writer lock contention.
+- `scripts/backup.sh`, `scripts/restore.sh` and `scripts/sau-daily-backup.sh`
+  all copy `db/database.db` as a **plain file**.
+- Under WAL, recently committed data lives in `database.db-wal` until a
+  checkpoint, so those scripts would silently back up a **stale** database and
+  the loss would only appear on restore.
+
+The busy-timeout is already raised to 15 s, which covers the read/write overlap
+that WAL would have helped with. Not worth trading a backup-integrity bug for a
+marginal concurrency gain; if WAL is ever wanted, the three scripts must switch
+to `sqlite3 .backup` (or copy the `-wal`/`-shm` side files) in the same change.
 
 ### 5. Hardware encoding — available on the host, blocked by the container
 
