@@ -25,6 +25,7 @@ import html
 import os
 import smtplib
 import ssl
+import sys
 from email.message import EmailMessage
 
 try:  # reuse the app's structured logger when available
@@ -127,7 +128,51 @@ def _telegram_payloads(subject: str, body: str) -> list[tuple[str, str]]:
     return payloads
 
 
+def _is_under_test() -> bool:
+    """Whether this process is a test run, and must never alert a human.
+
+    The suite loads the repo .env, so tests that exercise the failure path can
+    pick up the LIVE bot token and deliver fixtures:
+
+        [SAU] Publish failed: bluesky target #1 (job #1) ... bluesky said no
+
+    Job #1 and accounts like acct-1 / fb-bluesky do not exist in the database -
+    they are literals in the test files. A fixture on the operator's phone is
+    indistinguishable from a production incident, which is the exact alarm
+    fatigue alerting exists to prevent.
+
+    ``tests/conftest.py`` blanks the credentials, but a conftest is only loaded
+    when pytest collects from that directory - a test invoked directly, or a
+    script that imports a test module, misses it. This second guard lives in the
+    sender, so it holds no matter how the code was reached. It keys on pytest's
+    own marker (set whenever pytest is the running process) plus the explicit
+    ``SAU_ALERTS_DISABLED`` switch.
+    """
+    if str(os.environ.get("SAU_ALERTS_DISABLED", "")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return True
+    # SAU_ALERTS_ALLOW_UNDER_TEST lets a test exercise the real transport (with a
+    # mocked HTTP layer) while every other test stays blocked.
+    if str(os.environ.get("SAU_ALERTS_ALLOW_UNDER_TEST", "")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return False
+    return "pytest" in sys.modules or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
 def _send_telegram(subject: str, body: str) -> bool:
+    if _is_under_test():
+        _logger.info(
+            "ops_alerts: running under test; alert not delivered: %s", subject
+        )
+        return False
     token = _env("SAU_ALERT_TELEGRAM_BOT_TOKEN")
     chat = _env("SAU_ALERT_TELEGRAM_CHAT_ID")
     if not token or not chat or requests is None:

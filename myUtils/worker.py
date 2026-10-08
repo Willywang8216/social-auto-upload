@@ -978,6 +978,22 @@ class PublishWorker:
                             artifact["public_url"] = _normalise_artifact_url(
                                 str(url)
                             )
+                    # A URL-fetch platform (Threads, Instagram, Facebook, TikTok)
+                    # needs a public URL, and the payload can be missing one even
+                    # though the campaign has it. Two ways that happened here:
+                    #
+                    #   * the payload was built from a snapshot taken before the
+                    #     remote upload finished, so it carries only the
+                    #     watermarked local copy (public_url: null) while a
+                    #     sibling ``remote_upload`` row for the same source holds
+                    #     the URL - this is what failed Threads job #5626 with
+                    #     "Threads video publish requires a public_url",
+                    #   * an older row predates remote upload entirely.
+                    #
+                    # The campaign artifacts are the authority, so recover a
+                    # missing URL from a sibling of the same source file rather
+                    # than failing a publish whose media is already hosted.
+                    _backfill_artifact_public_urls(payload["artifacts"], self._db_path)
                 guard_error = _content_guard_error(payload, target, self._db_path)
                 if guard_error:
                     reason = f"[content-guard] {guard_error}"
@@ -1395,6 +1411,85 @@ class PublishWorker:
 
 
 # --------------------------- default platform registry ---------------------------
+
+
+def _backfill_artifact_public_urls(artifacts: list, db_path) -> None:
+    """Fill in a missing ``public_url`` from a sibling artifact of the same source.
+
+    A payload can reach the worker with no public URL even though the campaign
+    has one: it was built from a snapshot taken before the remote upload
+    finished, so it carries only the watermarked local copy while a separate
+    ``remote_upload`` row for the same source file holds the URL. That is how
+    Threads job #5626 failed - the campaign held
+
+        watermarked_video  public_url: null
+        remote_upload      public_url: https://...
+
+    but the payload was given only the first, so the publisher raised "Threads
+    video publish requires a public_url" for media that was already hosted.
+
+    The campaign artifacts are the authority. For any artifact still missing a
+    URL, look for another artifact of the same ``source_file_record_id`` that
+    has one, preferring the prepared (watermarked) copy's own upload so the
+    published bytes match what was published elsewhere.
+
+    Mutates ``artifacts`` in place; never raises - a lookup failure must not stop
+    a publish that might otherwise succeed.
+    """
+    missing = [
+        artifact
+        for artifact in artifacts
+        if isinstance(artifact, dict)
+        and not str(artifact.get("public_url") or "").strip()
+    ]
+    if not missing:
+        return
+    campaign_ids = {
+        artifact.get("campaign_id")
+        for artifact in artifacts
+        if isinstance(artifact, dict) and artifact.get("campaign_id") is not None
+    }
+    if not campaign_ids:
+        return
+    try:
+        # ``campaigns`` is imported at module scope as ``campaign_store``.
+        from pathlib import Path as _Path
+
+        from myUtils import campaigns as campaign_store
+
+        resolved_db = db_path if isinstance(db_path, _Path) else _Path(str(db_path))
+        for campaign_id in campaign_ids:
+            try:
+                rows = campaign_store.list_campaign_artifacts(
+                    int(campaign_id), db_path=resolved_db
+                )
+            except Exception:  # noqa: BLE001 - best effort
+                continue
+            by_source: dict[object, list] = {}
+            for row in rows:
+                data = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+                url = str(data.get("public_url") or "").strip()
+                if not url:
+                    continue
+                by_source.setdefault(data.get("source_file_record_id"), []).append(data)
+            for artifact in missing:
+                if artifact.get("campaign_id") != campaign_id:
+                    continue
+                candidates = by_source.get(artifact.get("source_file_record_id")) or []
+                if not candidates:
+                    continue
+                # Prefer a sibling whose artifact_kind matches this one (the
+                # watermarked upload for a watermarked payload), else any.
+                kind = artifact.get("artifact_kind")
+                same_kind = [c for c in candidates if c.get("artifact_kind") == kind]
+                chosen = (same_kind or candidates)[0]
+                artifact["public_url"] = _normalise_artifact_url(
+                    str(chosen["public_url"])
+                )
+                if chosen.get("remote_path"):
+                    artifact.setdefault("remote_path", chosen["remote_path"])
+    except Exception:  # noqa: BLE001 - never block a publish on this recovery
+        return
 
 
 def _normalise_artifact_url(value: str) -> str:

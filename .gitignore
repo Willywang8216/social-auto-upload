@@ -227,3 +227,21 @@ scripts/backfill_to_spaces.py
 
 # Old planning docs
 docs/superpowers/
+
+# --- Credential and run-artefact safety (added 2026-10-09) -------------------
+# `.env` itself was ignored, but its timestamped backups were not, so a
+# `git add -A` swept real secrets into a commit:
+#   .env.bak-*  contained every API key and the Telegram bot token
+#   rclone-cache.conf  contained a live Google Drive OAuth refresh token
+# GitHub's pre-receive hook rejected the push (which is how this was caught).
+# These patterns make that impossible rather than merely unlikely.
+.env.bak-*
+.env.*.bak
+.env.local
+.env.*.local
+*.rclone.conf
+rclone*.conf
+# Runtime logs and JSON dumps are not source.
+logs/
+*.log
+*.log.[0-9]*

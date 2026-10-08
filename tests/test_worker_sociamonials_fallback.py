@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import sqlite3
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -28,6 +29,8 @@ import db.createTable as create_table
 from myUtils import jobs
 from myUtils import profiles as profile_registry
 from myUtils import sociamonials_fallback
+from myUtils import worker
+from myUtils import campaigns as campaign_store
 from myUtils.worker import PublishWorker, RetryPolicy, WorkerConfig
 
 
@@ -636,3 +639,121 @@ class ArtifactUrlNormalisationTests(unittest.TestCase):
         })
         self.assertEqual(len(paths), 1)
         self.assertNotIn(" ", paths[0])
+
+
+class ArtifactPublicUrlBackfillTests(unittest.TestCase):
+    """A payload missing a public_url must recover it from the campaign.
+
+    Threads job #5626 failed with "Threads video publish requires a public_url"
+    for media that WAS hosted: the campaign held
+
+        watermarked_video  public_url: null      <- what the payload carried
+        remote_upload      public_url: https://  <- what it needed
+
+    The payload had been built from a snapshot taken before the remote upload
+    finished. The worker now backfills the URL at publish time so a stale
+    snapshot cannot fail a publish whose media is already hosted.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "backfill.db"
+        create_table.bootstrap(self.db_path)
+        self.profile_id = profile_registry.create_profile(
+            "Backfill", db_path=self.db_path
+        ).id
+        # A campaign references a media group, so the row must exist first.
+        connection = sqlite3.connect(str(self.db_path))
+        try:
+            connection.execute(
+                "INSERT INTO media_groups (id, name, notes, status) "
+                "VALUES (1, 'g', '', 'ready')"
+            )
+            # campaign_artifacts.source_file_record_id is a foreign key.
+            connection.execute(
+                "INSERT INTO file_records (id, filename, filesize, file_path) "
+                "VALUES (1085, 'x.mp4', 1, 'videoFile/x.mp4')"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _campaign_with(self, kinds):
+        campaign = campaign_store.create_campaign(
+            profile_id=self.profile_id,
+            media_group_id=1,
+            db_path=self.db_path,
+        )
+        for kind, url in kinds:
+            campaign_store.add_campaign_artifact(
+                campaign.id,
+                # file_records id 1085 is created in setUp.
+                source_file_record_id=1085,
+                artifact_kind=kind,
+                local_path="/tmp/x.mp4",
+                public_url=url,
+                db_path=self.db_path,
+            )
+        return campaign
+
+    def test_missing_url_is_recovered_from_a_sibling(self):
+        campaign = self._campaign_with([
+            ("watermarked_video", None),
+            ("remote_upload", "https://cdn.example/w.mp4"),
+        ])
+        artifacts = [{
+            "id": 1, "campaign_id": campaign.id, "artifact_kind": "watermarked_video",
+            "source_file_record_id": 1085, "public_url": None,
+        }]
+        worker._backfill_artifact_public_urls(artifacts, self.db_path)
+        self.assertEqual(artifacts[0]["public_url"], "https://cdn.example/w.mp4")
+
+    def test_existing_url_is_not_overwritten(self):
+        campaign = self._campaign_with([
+            ("watermarked_video", "https://cdn.example/keep.mp4"),
+            ("remote_upload", "https://cdn.example/other.mp4"),
+        ])
+        artifacts = [{
+            "id": 1, "campaign_id": campaign.id, "artifact_kind": "watermarked_video",
+            "source_file_record_id": 1085, "public_url": "https://cdn.example/keep.mp4",
+        }]
+        worker._backfill_artifact_public_urls(artifacts, self.db_path)
+        self.assertEqual(artifacts[0]["public_url"], "https://cdn.example/keep.mp4")
+
+    def test_same_kind_sibling_is_preferred(self):
+        campaign = self._campaign_with([
+            ("watermarked_video", "https://cdn.example/watermarked.mp4"),
+            ("remote_upload", "https://cdn.example/raw.mp4"),
+        ])
+        artifacts = [{
+            "id": 1, "campaign_id": campaign.id, "artifact_kind": "watermarked_video",
+            "source_file_record_id": 1085, "public_url": None,
+        }]
+        worker._backfill_artifact_public_urls(artifacts, self.db_path)
+        # The watermarked upload matches the artifact kind, so it wins.
+        self.assertEqual(artifacts[0]["public_url"], "https://cdn.example/watermarked.mp4")
+
+    def test_no_campaign_id_is_a_safe_noop(self):
+        artifacts = [{"id": 1, "artifact_kind": "watermarked_video", "public_url": None}]
+        worker._backfill_artifact_public_urls(artifacts, self.db_path)  # must not raise
+        self.assertIsNone(artifacts[0]["public_url"])
+
+    def test_unknown_campaign_is_a_safe_noop(self):
+        artifacts = [{
+            "id": 1, "campaign_id": 999999, "artifact_kind": "watermarked_video",
+            "source_file_record_id": 1085, "public_url": None,
+        }]
+        worker._backfill_artifact_public_urls(artifacts, self.db_path)  # must not raise
+        self.assertIsNone(artifacts[0]["public_url"])
+
+    def test_bad_db_path_never_raises(self):
+        # A recovery failure must not stop a publish that might otherwise work.
+        artifacts = [{
+            "id": 1, "campaign_id": 1, "artifact_kind": "watermarked_video",
+            "source_file_record_id": 1085, "public_url": None,
+        }]
+        worker._backfill_artifact_public_urls(artifacts, "/nonexistent/dir/db.sqlite")
+        self.assertIsNone(artifacts[0]["public_url"])

@@ -8,6 +8,7 @@ silently omitted on a box that had the second variable set and not the first.
 
 from __future__ import annotations
 
+import sys
 import os
 import unittest
 from unittest.mock import patch
@@ -102,8 +103,11 @@ class TelegramChunkingTests(unittest.TestCase):
                 calls.append(json)
                 return _FakeResponse(200)
 
-        with patch.object(ops_alerts, "requests", FakeRequests):
-            ok = ops_alerts._send_telegram("SUBJ", body)
+        # Deliberately exercise the real transport with a mocked HTTP layer.
+        # The sender otherwise refuses to alert from a test process.
+        with patch.dict(os.environ, {"SAU_ALERTS_ALLOW_UNDER_TEST": "1"}):
+            with patch.object(ops_alerts, "requests", FakeRequests):
+                ok = ops_alerts._send_telegram("SUBJ", body)
         return ok, calls
 
     def test_short_alert_is_one_message(self):
@@ -135,10 +139,63 @@ class TelegramChunkingTests(unittest.TestCase):
             def post(url, json=None, timeout=None):
                 return _FakeResponse(400)
 
-        with patch.object(ops_alerts, "requests", FailingRequests):
-            with self.assertRaises(RuntimeError):
-                ops_alerts._send_telegram("SUBJ", "body")
+        with patch.dict(os.environ, {"SAU_ALERTS_ALLOW_UNDER_TEST": "1"}):
+            with patch.object(ops_alerts, "requests", FailingRequests):
+                with self.assertRaises(RuntimeError):
+                    ops_alerts._send_telegram("SUBJ", "body")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRunNeverAlertsProduction(unittest.TestCase):
+    """A test run must never deliver to the operator's real Telegram.
+
+    The suite loads the repo .env, so a test that exercises the failure path can
+    pick up the live bot token. That is how fixtures like
+
+        [SAU] Publish failed: bluesky target #1 (job #1) ... bluesky said no
+
+    reached the operator's phone - job #1 and account fb-bluesky do not exist in
+    the database, they are literals in the test files. tests/conftest.py blanks
+    the credentials, but a conftest only loads when pytest collects that
+    directory, so the sender carries its own guard as well.
+    """
+
+    def test_pytest_is_detected(self):
+        self.assertIn("pytest", sys.modules)
+        self.assertTrue(ops_alerts._is_under_test())
+
+    def test_explicit_disable_switch(self):
+        with patch.dict(os.environ, {"SAU_ALERTS_DISABLED": "1"}):
+            self.assertTrue(ops_alerts._is_under_test())
+
+    def test_telegram_send_refuses_under_test_even_with_real_credentials(self):
+        # Simulate the exact pre-fix condition: a real-looking token is present.
+        with patch.dict(
+            os.environ,
+            {
+                "SAU_ALERT_TELEGRAM_BOT_TOKEN": "123456:TEST-TOKEN-NOT-REAL",
+                "SAU_ALERT_TELEGRAM_CHAT_ID": "9999999999",
+            },
+        ):
+            sent = []
+            with patch.object(
+                ops_alerts, "requests", create=True
+            ) as fake_requests:
+                fake_requests.post.side_effect = lambda *a, **k: sent.append(a)
+                self.assertFalse(
+                    ops_alerts._send_telegram("subject", "body")
+                )
+            self.assertEqual(sent, [], "must not attempt any HTTP call")
+
+    def test_send_ops_alert_is_false_under_test(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SAU_ALERT_TELEGRAM_BOT_TOKEN": "123456:TEST-TOKEN-NOT-REAL",
+                "SAU_ALERT_TELEGRAM_CHAT_ID": "9999999999",
+            },
+        ):
+            self.assertFalse(ops_alerts.send_ops_alert(subject="s", body="b"))
