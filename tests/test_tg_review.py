@@ -180,7 +180,7 @@ class NotifyPostsTest(TgReviewFixture):
 
         with patch.dict("os.environ", {
             "SAU_TG_REVIEW_BOT_TOKEN": "token",
-            "SAU_TG_REVIEW_CHAT_ID": "8633483147",
+            "SAU_TG_REVIEW_CHAT_ID": "9999999999",
         }), patch.object(tg_review, "_send_media",
                          side_effect=lambda chat, m, cap, url=None: (sent_media.append({"cap": cap, "media": m})
                                                                      or {"message_id": 777})), \
