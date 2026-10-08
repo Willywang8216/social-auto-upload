@@ -2536,3 +2536,83 @@ class UntaggedSplitFallbackTests(unittest.TestCase):
         # Instagram cap 900 s: the ~300 s source fits, so keep the full video.
         selected = sau_backend._select_videos_for_platform(artifacts, "instagram")
         self.assertEqual([a["id"] for a in selected], [1])
+
+
+class BlueskyDurationToleranceTests(unittest.TestCase):
+    """A clip authored as exactly the cap must not be rejected.
+
+    Container muxing adds sub-millisecond noise, so a 600 s clip probes as
+    600.0000004. A bare ``>`` rejected it with the absurd message "600.0s exceeds
+    the 600s limit by 0.0s". The guard now allows a 0.5 s tolerance - far below
+    any real platform tolerance, far above the noise.
+    """
+
+    def test_tolerance_boundary(self):
+        from myUtils import platform_limits as pl
+
+        cap = pl.video_max_seconds("bluesky")
+        self.assertEqual(cap, 600.0)
+        # Accepted: at, marginally over, and within tolerance.
+        for value in (599.9, 600.0, 600.0000004, 600.4, 600.5):
+            with self.subTest(seconds=value):
+                self.assertFalse(value > cap + 0.5)
+        # Rejected: genuinely over.
+        for value in (600.6, 601.2, 900.0):
+            with self.subTest(seconds=value):
+                self.assertTrue(value > cap + 0.5)
+
+    def test_guard_message_reports_the_real_overage(self):
+        import inspect
+
+        from myUtils import prepared_publishers
+
+        source = inspect.getsource(prepared_publishers.publish_bluesky_sync)
+        self.assertIn("limit by {over_by:.1f}s", source)
+        # And the comparison must carry the tolerance.
+        self.assertIn("BLUESKY_MAX_VIDEO_SECONDS + 0.5", source)
+
+
+class RedditNoSelfPostsTests(unittest.TestCase):
+    """A subreddit that bans text posts must fail with a clear reason.
+
+    r/gaybrosgonemild answers a self post with NO_SELFS ("This community doesn't
+    allow text posts"). Previously the publisher emitted the self post anyway and
+    surfaced Reddit's raw error; now it names the subreddit and the remedy.
+    """
+
+    def test_bans_self_posts_matches_with_and_without_prefix(self):
+        for key in ("gaybrosgonemild", "r/gaybrosgonemild", "GayBrosGoneMild"):
+            with self.subTest(key=key):
+                self.assertTrue(
+                    prepared_publishers._reddit_bans_self_posts(
+                        {}, {"noSelfPostSubreddits": [key]}, "gaybrosgonemild"
+                    )
+                )
+        self.assertFalse(
+            prepared_publishers._reddit_bans_self_posts({}, {}, "anything")
+        )
+
+    def test_self_post_to_a_no_selfs_sub_raises_with_the_subreddit_named(self):
+        account = SimpleNamespace(
+            account_name="test",
+            config={
+                "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
+                "subreddits": ["gaybrosgonemild"],
+                "noSelfPostSubreddits": ["gaybrosgonemild"],
+            },
+        )
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers.publish_reddit_sync(
+                account,
+                {"message": "body", "artifacts": [
+                    # A video artifact with a local file but no public_url: the
+                    # exact shape that fell through to a self post.
+                    {"artifact_kind": "remote_upload",
+                     "local_path": "/tmp/does-not-matter.mp4", "public_url": ""},
+                ]},
+                session=_RecordingSession([
+                    _FakeResponse({"access_token": "token"}),
+                ]),
+            )
+        self.assertIn("gaybrosgonemild", str(ctx.exception))
+        self.assertIn("self posts", str(ctx.exception))

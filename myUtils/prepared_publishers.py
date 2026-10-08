@@ -3195,6 +3195,29 @@ def _reddit_prefers_self_post(payload: dict, config: dict, subreddit: str) -> bo
     return False
 
 
+def _reddit_bans_self_posts(payload: dict, config: dict, subreddit: str) -> bool:
+    """Whether this subreddit rejects text/self posts (Reddit's ``NO_SELFS``).
+
+    Some communities allow only link or media posts. Sending them a self post
+    fails with ``NO_SELFS`` - observed on r/gaybrosgonemild. Knowing this lets the
+    publisher raise an actionable error instead of submitting a body the
+    subreddit cannot accept and having the platform explain it.
+
+    Accepts ``draft.noSelfPostSubreddits`` / ``config.noSelfPostSubreddits`` -
+    names, with or without the ``r/`` prefix, case-insensitive.
+    """
+    draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else {}
+    for source in (draft, config):
+        names = source.get("noSelfPostSubreddits")
+        if isinstance(names, str):
+            names = [part.strip() for part in names.split(",") if part.strip()]
+        if isinstance(names, list):
+            lowered = {str(name).strip().lower().lstrip("r/") for name in names}
+            if subreddit.strip().lower().lstrip("r/") in lowered:
+                return True
+    return False
+
+
 def _reddit_flair_id(payload: dict, config: dict, subreddit: str) -> str:
     """Resolve the post-flair id for one subreddit, or "" when unset.
 
@@ -3441,6 +3464,20 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
         # self post with the URL in the body instead, which the same rules allow.
         # Configure per subreddit, or globally, via account config.
         prefer_self_post = _reddit_prefers_self_post(payload, config, subreddit)
+        wants_self_post = not native_url and not (
+            public_url and not (prefer_self_post or force_self_post)
+        )
+        if wants_self_post and _reddit_bans_self_posts(payload, config, subreddit):
+            # A subreddit that allows only link/media posts would reject this
+            # with NO_SELFS. Failing here names the reason and the subreddit
+            # instead of emitting a body Reddit refuses and reporting its error.
+            raise PreparedPublishError(
+                f"r/{subreddit} does not allow text/self posts, and this video has "
+                "no public URL to submit as a link. Set a public storage backend "
+                "so the video gets a URL, or remove r/"
+                f"{subreddit} from the account's subreddits.",
+                retryable=False,
+            )
         if native_url:
             data["kind"] = "image"
             data["url"] = native_url
@@ -4491,10 +4528,14 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
                 duration = media_pipeline.probe_video_duration(local_path)
             except Exception:  # noqa: BLE001 - a probe failure is not a rejection
                 duration = None
-            # ``>`` (not ``>=``) so a video of exactly 600 s is accepted: that
-            # matches Bluesky's documented 600 s cap, which rejects only clips
-            # strictly longer than 10 minutes.
-            if duration and duration > BLUESKY_MAX_VIDEO_SECONDS:
+            # ``>`` with a small tolerance, not a bare comparison: container
+            # muxing (and ffmpeg's own timebase) routinely adds a few
+            # milliseconds, so a clip authored as exactly 600 s probes as
+            # 600.0000004. Rejecting that prints the absurd "600.0s exceeds the
+            # 600s limit by 0.0s" and fails a publish that is within the cap.
+            # 0.5 s is far below any real platform tolerance and far above the
+            # sub-millisecond noise, so a genuinely over-length clip still fails.
+            if duration and duration > BLUESKY_MAX_VIDEO_SECONDS + 0.5:
                 over_by = duration - BLUESKY_MAX_VIDEO_SECONDS
                 raise PreparedPublishError(
                     f"Bluesky video duration {duration:.1f}s exceeds the "
