@@ -2460,7 +2460,9 @@ class RedditLinkArtifactSelectionTests(unittest.TestCase):
             account_name="test",
             config={
                 "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
-                "subreddits": ["GayBody"],
+                # A synthetic subreddit: r/GayBody is marked banned in the
+                # registry, so it would be refused before the link logic ran.
+                "subreddits": ["test"],
             },
         )
         prepared_publishers.publish_reddit_sync(
@@ -2593,12 +2595,15 @@ class RedditNoSelfPostsTests(unittest.TestCase):
         )
 
     def test_self_post_to_a_no_selfs_sub_raises_with_the_subreddit_named(self):
+        # Use a synthetic subreddit so ONLY the no-self-posts rule is exercised.
+        # r/gaybrosgonemild trips the monetised-brand rule first (it bans both),
+        # which is correct but does not isolate the behaviour under test.
         account = SimpleNamespace(
             account_name="test",
             config={
                 "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
-                "subreddits": ["gaybrosgonemild"],
-                "noSelfPostSubreddits": ["gaybrosgonemild"],
+                "subreddits": ["test"],
+                "noSelfPostSubreddits": ["test"],
             },
         )
         with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
@@ -2614,5 +2619,82 @@ class RedditNoSelfPostsTests(unittest.TestCase):
                     _FakeResponse({"access_token": "token"}),
                 ]),
             )
-        self.assertIn("gaybrosgonemild", str(ctx.exception))
+        self.assertIn("test", str(ctx.exception))
         self.assertIn("self posts", str(ctx.exception))
+
+
+class SubredditStrictGuardTests(unittest.TestCase):
+    """A subreddit the platform has banned us from must not be attempted.
+
+    r/GayBros and r/GayBody answered every submit with
+    SUBREDDIT_NOTALLOWED_BANNED. Each attempt spent a retry and risked a further
+    strike, so the publisher now refuses such a subreddit locally, before any
+    network call. SAU_SUBREDDIT_STRICT=0 relaxes only the *unknown-name* check.
+    """
+
+    def test_known_banned_subreddit_is_refused_locally(self):
+        account = SimpleNamespace(
+            account_name="test",
+            config={
+                "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
+                "subreddits": ["GayBody"],
+            },
+        )
+        session = _RecordingSession([_FakeResponse({"access_token": "token"})])
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers.publish_reddit_sync(
+                account,
+                {"message": "body", "artifacts": [
+                    {"artifact_kind": "remote_upload",
+                     "local_path": "/tmp/x.mp4", "public_url": "https://cdn/x.mp4"},
+                ]},
+                session=session,
+            )
+        self.assertIn("banned", str(ctx.exception).lower())
+        # Crucially: no submit was attempted.
+        self.assertEqual(len(session.calls), 1)  # only the token exchange
+
+    def test_unknown_subreddit_refused_when_strict(self):
+        account = SimpleNamespace(
+            account_name="test",
+            config={
+                "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
+                "subreddits": ["aSubNobodyChecked"],
+            },
+        )
+        with patch.dict(os.environ, {"SAU_SUBREDDIT_STRICT": "1"}):
+            with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                prepared_publishers.publish_reddit_sync(
+                    account,
+                    {"message": "body", "artifacts": [
+                        {"artifact_kind": "remote_upload",
+                         "local_path": "/tmp/x.mp4", "public_url": "https://cdn/x.mp4"},
+                    ]},
+                    session=_RecordingSession([_FakeResponse({"access_token": "token"})]),
+                )
+        self.assertIn("no verified requirement profile", str(ctx.exception))
+
+    def test_unknown_subreddit_allowed_when_not_strict(self):
+        # The escape hatch must let an unverified name through to the submit.
+        account = SimpleNamespace(
+            account_name="test",
+            config={
+                "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
+                "subreddits": ["aSubNobodyChecked"],
+            },
+        )
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        with patch.dict(os.environ, {"SAU_SUBREDDIT_STRICT": "0"}):
+            prepared_publishers.publish_reddit_sync(
+                account,
+                {"message": "body", "artifacts": [
+                    {"artifact_kind": "remote_upload",
+                     "local_path": "/tmp/x.mp4", "public_url": "https://cdn/x.mp4"},
+                ]},
+                session=session,
+            )
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(session.calls[1][2]["data"]["sr"], "aSubNobodyChecked")

@@ -3170,6 +3170,31 @@ def _reddit_content_flair_label(*sources: Any) -> str:
     return REDDIT_DEFAULT_FLAIR
 
 
+def _reddit_content_kind(media: dict) -> str:
+    """Classify the media for a subreddit-fit decision.
+
+    Falls back to the account's own labelling when present (the ingest pipeline
+    records ``sfw``/``nsfw`` in the filename), because a video cannot be
+    re-inspected here. Defaults to ``SUGGESTIVE`` rather than ``SFW`` - assuming
+    a video is safe would send adult media to a subreddit that forbids it, and
+    getting that wrong risks a ban rather than a rejection.
+    """
+    from myUtils import subreddits as _subreddits
+
+    blob = " ".join(
+        str(item.get("local_path") or item.get("public_url") or "")
+        for group in ("videos", "images")
+        for item in (media.get(group) or [])
+    ).lower()
+    if "_nsfw" in blob or "explicit" in blob:
+        return _subreddits.EXPLICIT
+    if "_sfw" in blob:
+        return _subreddits.NUDITY if "nude" in blob or "naked" in blob else _subreddits.SFW
+    if "naked" in blob or "nude" in blob:
+        return _subreddits.NUDITY
+    return _subreddits.SUGGESTIVE
+
+
 def _reddit_prefers_self_post(payload: dict, config: dict, subreddit: str) -> bool:
     """Whether this subreddit must receive a self post instead of a link post.
 
@@ -3433,6 +3458,45 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
     elif artifacts:
         raise PreparedPublishError("Reddit media artifacts were supplied but none is a supported image/video")
     title = _message_title(payload)
+    # Refuse subreddits the platform will reject before submitting to them.
+    # Every avoidable failure so far (SUBREDDIT_NOTALLOWED_BANNED on r/GayBros and
+    # r/GayBody, NO_SELFS on r/gaybrosgonemild, a link post to r/NudistMen's
+    # whitelist) was knowable in advance from the subreddit's own rules. Checking
+    # locally keeps a doomed submit from spending a retry and provoking the
+    # RATELIMIT that followed the repeat attempts.
+    from myUtils import subreddits as _subreddits
+
+    registry = _subreddits.get_registry()
+    monetised = bool(config.get("monetised") or config.get("adultBrand") or True)
+    # Publishing to a subreddit nobody has verified is how the r/GayBros and
+    # r/gaybrosgonemild bans happened, so unknown subreddits are refused by
+    # default. SAU_SUBREDDIT_STRICT=0 relaxes only that part - the rules for
+    # *known* subreddits (bans, self-promotion, submission mode) always apply.
+    strict = str(os.environ.get("SAU_SUBREDDIT_STRICT", "1")).strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+    blocked: list[str] = []
+    for subreddit in list(subreddits):
+        reason = registry.denial_reason(
+            subreddit,
+            content_kind=_reddit_content_kind(media),
+            monetised=monetised,
+            title=title,
+            require_known=strict,
+        )
+        if reason:
+            blocked.append(f"r/{subreddit}: {reason}")
+            subreddits.remove(subreddit)
+    if not subreddits:
+        raise PreparedPublishError(
+            "No subreddit on this account can accept this content: "
+            + " | ".join(blocked),
+            retryable=False,
+        )
     results = []
     for subreddit in subreddits:
         native_url = ""

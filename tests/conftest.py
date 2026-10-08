@@ -66,3 +66,11 @@ for _alert_key in (
     "SAU_TG_REVIEW_CHAT_ID",
 ):
     os.environ[_alert_key] = ""
+
+# The publisher refuses subreddits nobody has verified, because publishing to an
+# unchecked subreddit is how this deployment was banned from r/GayBros and
+# r/GayBody. Tests use synthetic names (r/test), which that guard would reject,
+# so relax *only* the unknown-name check here. The rules for known subreddits
+# (bans, self-promotion, submission mode, title format) stay enforced, and the
+# tests that cover the guard itself set SAU_SUBREDDIT_STRICT=1 explicitly.
+os.environ["SAU_SUBREDDIT_STRICT"] = "0"
