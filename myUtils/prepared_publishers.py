@@ -3387,12 +3387,26 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
     # a clean title and body, and what the target subs' rules target.
     public_url = ""
     image = None
+    # A native image upload needs the file locally; when it is missing we fall
+    # back to a self post (never a link post to our own storage, which is the
+    # promotion signal the native path exists to avoid).
+    force_self_post = False
     if media["videos"]:
+        # A video with no public URL is still publishable: Reddit accepts it as
+        # a self post whose body carries the message (and the URL when one is
+        # present). Link-whitelisted subs route through _reddit_prefers_self_post
+        # below; every other sub takes the link branch only when a URL actually
+        # exists. Raising here defeated both paths and refused valid posts.
         public_url = media["videos"][0].get("public_url") or ""
-        if not public_url:
-            raise PreparedPublishError("Reddit video artifacts require a public URL; refusing to fall back to a self post")
     elif media["images"]:
         image = media["images"][0]
+        if not (image.get("local_path") or ""):
+            # No local copy to ingest into Reddit's media host. A self post
+            # carrying the image's public URL is still valid, so fall back to
+            # that instead of refusing the publish outright.
+            public_url = str(image.get("public_url") or "")
+            image = None
+            force_self_post = True
     elif artifacts:
         raise PreparedPublishError("Reddit media artifacts were supplied but none is a supported image/video")
     title = _message_title(payload)
@@ -3400,14 +3414,9 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
     for subreddit in subreddits:
         native_url = ""
         if image is not None:
-            if not (image.get("local_path") or ""):
-                raise PreparedPublishError(
-                    "Reddit image posts need the file on local disk so it can be "
-                    "uploaded to Reddit; refusing to fall back to a link post "
-                    "pointing at our own storage"
-                )
             # One lease per subreddit: the asset is consumed by the submit that
-            # references it. Raises rather than degrading to a link post.
+            # references it. A local file is guaranteed here (an image without
+            # one fell back to a self post above).
             native_url = _reddit_upload_image(http, headers, image)
         data = {
             "api_type": "json",
@@ -3435,16 +3444,16 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
         if native_url:
             data["kind"] = "image"
             data["url"] = native_url
-        elif public_url and not prefer_self_post:
+        elif public_url and not (prefer_self_post or force_self_post):
             data["kind"] = "link"
             data["url"] = public_url
         else:
             data["kind"] = "self"
-            data["text"] = (
-                f"{message}\n\n{public_url}"
-                if public_url and prefer_self_post
-                else message
-            )
+            # Carry the URL in the body when we have one. The self branch is
+            # only reached with a URL when the subreddit prefers self posts, so
+            # this keeps the link instead of silently dropping it; without a URL
+            # the message alone is a valid post.
+            data["text"] = f"{message}\n\n{public_url}" if public_url else message
         response = http.post(REDDIT_SUBMIT_URL, headers=headers, data=data, timeout=120)
         _raise_for_status(response)
         body = response.json()
@@ -4482,10 +4491,15 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
                 duration = media_pipeline.probe_video_duration(local_path)
             except Exception:  # noqa: BLE001 - a probe failure is not a rejection
                 duration = None
+            # ``>`` (not ``>=``) so a video of exactly 600 s is accepted: that
+            # matches Bluesky's documented 600 s cap, which rejects only clips
+            # strictly longer than 10 minutes.
             if duration and duration > BLUESKY_MAX_VIDEO_SECONDS:
+                over_by = duration - BLUESKY_MAX_VIDEO_SECONDS
                 raise PreparedPublishError(
-                    f"Bluesky video duration {duration:.0f}s exceeds the "
-                    f"{int(BLUESKY_MAX_VIDEO_SECONDS)}s limit; re-encode a shorter cut"
+                    f"Bluesky video duration {duration:.1f}s exceeds the "
+                    f"{BLUESKY_MAX_VIDEO_SECONDS:.0f}s limit by {over_by:.1f}s; "
+                    "re-encode or split a shorter cut"
                 )
             shrunk_path = _bluesky_shrink_video(local_path)
             blob = _bluesky_upload_blob(

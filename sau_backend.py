@@ -2217,8 +2217,11 @@ def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
         return [items[0]]
     max_mb = platform_limits.media_max_mb(platform)
 
+    def _meta(artifact: dict) -> dict:
+        return artifact.get("metadata") or {}
+
     def _fits(artifact: dict) -> bool:
-        meta = artifact.get("metadata") or {}
+        meta = _meta(artifact)
         seconds = meta.get("max_duration_seconds")
         if seconds is not None and float(seconds) > float(max_seconds):
             return False
@@ -2228,29 +2231,56 @@ def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
         return True
 
     def _planned_for(artifact: dict) -> bool:
-        # Only use parts a platform asked for: a large-cap platform such as
-        # YouTube must not pick up a small-cap platform's finer split.
-        planned = (artifact.get("metadata") or {}).get("split_for")
+        # A platform only picks up a split it asked for by default: a large-cap
+        # platform such as YouTube must not grab a small-cap platform's finer
+        # split. The untagged fallback below is the deliberate exception.
+        planned = _meta(artifact).get("split_for")
         return not planned or platform in planned
 
-    parts = [
-        a for a in items
-        if (a.get("metadata") or {}).get("part_index") is not None
-        and _fits(a)
-        and _planned_for(a)
-    ]
-    if parts:
+    def _largest_fitting_parts(candidates: list[dict]) -> list[dict]:
         # Several split plans may exist (X 140s, Threads 300s, a size-only
         # split); use the largest parts that still fit, never a finer split.
-        best_cap = max(float((a.get("metadata") or {}).get("max_duration_seconds") or 0) for a in parts)
+        best_cap = max(float(_meta(a).get("max_duration_seconds") or 0) for a in candidates)
         chosen = [
-            a for a in parts
-            if float((a.get("metadata") or {}).get("max_duration_seconds") or 0) == best_cap
+            a for a in candidates
+            if float(_meta(a).get("max_duration_seconds") or 0) == best_cap
         ]
         return sorted(
             chosen,
-            key=lambda a: int((a.get("metadata") or {}).get("part_index") or 0),
+            key=lambda a: int(_meta(a).get("part_index") or 0),
         )
+
+    part_artifacts = [a for a in items if _meta(a).get("part_index") is not None]
+    parts = [a for a in part_artifacts if _fits(a) and _planned_for(a)]
+    if parts:
+        return _largest_fitting_parts(parts)
+
+    # Untagged fallback. A platform can be missing from ``split_for`` (it was
+    # added after prep, or the prep-time probe read the source at/below its cap)
+    # while the full artifact later turns out to be over it. The full artifact
+    # carries no duration in its metadata, so ``_fits`` cannot reject it and the
+    # publisher's own guard is left to fail on the oversized file. Recover the
+    # source duration/size the split was built from (part value x part count)
+    # and, when it exceeds this platform's cap, use the fitting untagged parts
+    # instead of the full artifact. Gated on the inferred source so a large-cap
+    # platform still keeps the full video.
+    untagged = [a for a in part_artifacts if _fits(a) and not _planned_for(a)]
+    if untagged:
+        inferred_seconds = max(
+            float(_meta(a).get("max_duration_seconds") or 0)
+            * int(_meta(a).get("part_count") or 0)
+            for a in untagged
+        )
+        inferred_mb = max(
+            float(_meta(a).get("max_media_mb") or 0)
+            * int(_meta(a).get("part_count") or 0)
+            for a in untagged
+        )
+        over_time = bool(max_seconds and inferred_seconds and inferred_seconds > float(max_seconds))
+        over_size = bool(max_mb and inferred_mb and inferred_mb > float(max_mb))
+        if over_time or over_size:
+            return _largest_fitting_parts(untagged)
+
     variants = [
         a for a in items
         if (a.get("metadata") or {}).get("max_duration_seconds")
@@ -2266,7 +2296,15 @@ def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
             key=lambda a: float((a.get("metadata") or {}).get("max_duration_seconds")),
         )]
     full = [a for a in items if not (a.get("metadata") or {}).get("max_duration_seconds")]
-    return [full[0] if full else items[0]]
+    if not full:
+        return [items[0]]
+    # Several artifacts can describe the same full file: the watermarked_video
+    # row plus the ``local`` row that carries the served /getFile URL. They
+    # share a local_path, so _extract_media would merge them - but only one
+    # survives this selection. Prefer the one with a public_url so a
+    # link-capable platform (Reddit) posts a link instead of silently
+    # degrading to a text-only self post when a URL was available.
+    return [next((a for a in full if a.get("public_url")), full[0])]
 
 
 def _read_json_body() -> dict:

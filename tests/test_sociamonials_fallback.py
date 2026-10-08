@@ -70,6 +70,7 @@ def _clean_env(monkeypatch):
         sm.TEACHING_WORKSPACE_ENV,
         sm.SECRETS_FILE_ENV,
         sm.TIMEOUT_ENV,
+        sm.REUSE_ASSETS_ENV,
     ):
         monkeypatch.delenv(key, raising=False)
     # Never let a test read the developer's real ~/.claude/secrets.json.
@@ -85,7 +86,7 @@ class _Account:
         self.account_name = f"acct-{account_id}"
 
 
-def _posts_handler(*, post_result=None, grants=None, upload_etag="etag-1"):
+def _posts_handler(*, post_result=None, grants=None, upload_etag="etag-1", assets=None):
     """Handler serving the media upload flow and the post create."""
     grants = grants or {
         "default": {
@@ -99,10 +100,13 @@ def _posts_handler(*, post_result=None, grants=None, upload_etag="etag-1"):
         "status": "published",
         "requires_approval": False,
     }
+    assets = list(assets or [])
 
     def handler(method, url, kwargs):
         if method == "HEAD":
             return FakeResponse(200, headers={"Content-Type": "video/mp4"})
+        if method == "GET" and url.rstrip("/").endswith("/media/assets"):
+            return FakeResponse(200, {"assets": assets, "total": len(assets)})
         if method == "GET" and "/media/assets/" in url:
             return FakeResponse(200, {"asset_id": 77, "processing_status": "ready"})
         if method == "POST" and url.endswith("/media/uploads"):
@@ -516,6 +520,219 @@ def test_publish_uploads_local_image(tmp_path):
     assert complete, "the upload must be completed"
     body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
     assert body["image_urls"] == ["asset://77"]
+
+
+def test_publish_reuses_an_identical_library_asset(tmp_path):
+    """A file already in the library must not be uploaded a second time."""
+    image = tmp_path / "pic.jpg"
+    image.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
+    existing = {
+        "asset_id": 555,
+        "filename": "pic.jpg",
+        "size_bytes": image.stat().st_size,
+        "media_type": "image",
+        "processing_status": "ready",
+        "created_at": "2026-10-05 12:00:00",
+    }
+    session = FakeSession(_posts_handler(assets=[existing]))
+    result = sm.publish_via_sociamonials(
+        platform="instagram",
+        account=_Account(72, platform="instagram"),
+        payload={
+            "draft": {"message": "A photo"},
+            "artifacts": [
+                {"local_path": str(image), "public_url": "", "metadata": {"role": "image"}}
+            ],
+        },
+        target_id=55,
+        api_key="sm_agent_x",
+        session=session,
+        delivery_timeout=0,
+    )
+    assert result["ok"] is True
+    assert not session.calls_for("POST", "/media/uploads"), "must not re-upload"
+    body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
+    assert body["image_urls"] == ["asset://555"]
+
+
+def test_publish_reuses_an_identical_video_asset(tmp_path):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"v" * 64)
+    existing = {
+        "asset_id": 556,
+        "filename": "clip.mp4",
+        "size_bytes": video.stat().st_size,
+        "media_type": "video",
+        "processing_status": "ready",
+        "created_at": "2026-10-05 12:00:00",
+    }
+    session = FakeSession(_posts_handler(assets=[existing]))
+    sm.publish_via_sociamonials(
+        platform="twitter",
+        account=_Account(77),
+        payload={
+            "draft": {"message": "video post"},
+            "artifacts": [
+                {"local_path": str(video), "public_url": "", "metadata": {"role": "video"}}
+            ],
+        },
+        api_key="sm_agent_x",
+        session=session,
+        delivery_timeout=0,
+    )
+    assert not session.calls_for("POST", "/media/uploads")
+    body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
+    assert body["video_url"] == "asset://556"
+
+
+def test_publish_uploads_when_the_match_size_differs(tmp_path):
+    """Same filename but a different size is a different file: upload it."""
+    image = tmp_path / "pic.jpg"
+    image.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
+    existing = {
+        "asset_id": 555,
+        "filename": "pic.jpg",
+        "size_bytes": image.stat().st_size + 1,
+        "media_type": "image",
+        "processing_status": "ready",
+    }
+    session = FakeSession(_posts_handler(assets=[existing]))
+    sm.publish_via_sociamonials(
+        platform="instagram",
+        account=_Account(72, platform="instagram"),
+        payload={
+            "draft": {"message": "A photo"},
+            "artifacts": [
+                {"local_path": str(image), "public_url": "", "metadata": {"role": "image"}}
+            ],
+        },
+        target_id=55,
+        api_key="sm_agent_x",
+        session=session,
+        delivery_timeout=0,
+    )
+    assert session.calls_for("POST", "/media/uploads")
+
+
+def test_publish_uploads_when_library_listing_is_not_entitled(tmp_path, monkeypatch):
+    """A plan without library browsing must still be able to publish."""
+    monkeypatch.setenv(sm.REUSE_ASSETS_ENV, "1")
+    image = tmp_path / "pic.jpg"
+    image.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
+
+    def handler(method, url, kwargs):
+        if method == "GET" and url.rstrip("/").endswith("/media/assets"):
+            return FakeResponse(403, {"error": {"code": "asset_access_not_enabled"}})
+        if method == "GET" and "/media/assets/" in url:
+            return FakeResponse(200, {"asset_id": 77, "processing_status": "ready"})
+        if method == "POST" and url.endswith("/media/uploads"):
+            return FakeResponse(
+                200,
+                {"upload_id": 5, "mode": "single", "upload_url": "https://upload.example/put/5"},
+            )
+        if method == "PUT":
+            return FakeResponse(200, headers={"ETag": "e"})
+        if method == "POST" and url.endswith("/complete"):
+            return FakeResponse(200, {"asset_id": 77})
+        if method == "POST" and url.endswith("/api/v1/posts"):
+            return FakeResponse(200, {"post_id": 1, "status": "published"})
+        raise AssertionError(f"unexpected {method} {url}")
+
+    session = FakeSession(handler)
+    sm.publish_via_sociamonials(
+        platform="instagram",
+        account=_Account(72, platform="instagram"),
+        payload={
+            "draft": {"message": "A photo"},
+            "artifacts": [
+                {"local_path": str(image), "public_url": "", "metadata": {"role": "image"}}
+            ],
+        },
+        target_id=55,
+        api_key="sm_agent_x",
+        session=session,
+        delivery_timeout=0,
+    )
+    assert session.calls_for("POST", "/media/uploads")
+
+
+def test_publish_can_disable_reuse(tmp_path, monkeypatch):
+    monkeypatch.setenv(sm.REUSE_ASSETS_ENV, "0")
+    image = tmp_path / "pic.jpg"
+    image.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
+    existing = {
+        "asset_id": 555,
+        "filename": "pic.jpg",
+        "size_bytes": image.stat().st_size,
+        "media_type": "image",
+        "processing_status": "ready",
+    }
+    session = FakeSession(_posts_handler(assets=[existing]))
+    sm.publish_via_sociamonials(
+        platform="instagram",
+        account=_Account(72, platform="instagram"),
+        payload={
+            "draft": {"message": "A photo"},
+            "artifacts": [
+                {"local_path": str(image), "public_url": "", "metadata": {"role": "image"}}
+            ],
+        },
+        target_id=55,
+        api_key="sm_agent_x",
+        session=session,
+        delivery_timeout=0,
+    )
+    assert session.calls_for("POST", "/media/uploads")
+
+
+def test_select_reusable_asset_requires_exact_name_size_and_kind():
+    assets = [
+        {"asset_id": 1, "filename": "a.mp4", "size_bytes": 10, "media_type": "video"},
+        {"asset_id": 2, "filename": "a.mp4", "size_bytes": 11, "media_type": "video"},
+        {"asset_id": 3, "filename": "a.mp4", "size_bytes": 10, "media_type": "image"},
+        {"asset_id": 4, "filename": "b.mp4", "size_bytes": 10, "media_type": "video"},
+    ]
+    # asset 1 is the only exact name/size/kind match.
+    assert sm.select_reusable_asset(
+        assets, filename="a.mp4", size_bytes=10, kind="video"
+    )["asset_id"] == 1
+    # asset 3 is the wrong kind, 2 the wrong size, 4 the wrong name: nothing.
+    assert sm.select_reusable_asset(
+        [assets[1], assets[2], assets[3]], filename="a.mp4", size_bytes=10, kind="video"
+    ) is None
+
+
+def test_select_reusable_asset_prefers_starred_then_oldest_and_skips_unready():
+    assets = [
+        {"asset_id": 10, "filename": "a.mp4", "size_bytes": 10, "media_type": "video",
+         "processing_status": "ready", "created_at": "2026-10-05 01:00:00"},
+        {"asset_id": 11, "filename": "a.mp4", "size_bytes": 10, "media_type": "video",
+         "processing_status": "ready", "created_at": "2026-10-04 01:00:00"},
+        {"asset_id": 12, "filename": "a.mp4", "size_bytes": 10, "media_type": "video",
+         "processing_status": "ready", "created_at": "2026-10-06 01:00:00", "starred": True},
+        {"asset_id": 13, "filename": "a.mp4", "size_bytes": 10, "media_type": "video",
+         "processing_status": "processing", "created_at": "2026-10-01 01:00:00"},
+    ]
+    chosen = sm.select_reusable_asset(
+        assets, filename="a.mp4", size_bytes=10, kind="video"
+    )
+    assert chosen["asset_id"] == 12  # starred wins
+    # With no starred copy, the oldest ready upload is chosen.
+    chosen = sm.select_reusable_asset(
+        assets[:2], filename="a.mp4", size_bytes=10, kind="video"
+    )
+    assert chosen["asset_id"] == 11
+
+
+def test_select_reusable_asset_respects_exclude_ids():
+    assets = [
+        {"asset_id": 1, "filename": "a.mp4", "size_bytes": 10, "media_type": "video"},
+        {"asset_id": 2, "filename": "a.mp4", "size_bytes": 10, "media_type": "video"},
+    ]
+    chosen = sm.select_reusable_asset(
+        assets, filename="a.mp4", size_bytes=10, kind="video", exclude_ids={1}
+    )
+    assert chosen["asset_id"] == 2
 
 
 def test_publish_multipart_upload_keeps_etags(tmp_path):

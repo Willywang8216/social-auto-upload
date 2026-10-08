@@ -1413,9 +1413,10 @@ class RedditPublisherTests(unittest.TestCase):
         self.assertIn("r/test", str(ctx.exception))
         self.assertIn("NO_TEXT", str(ctx.exception))
 
-    def test_publish_reddit_rejects_video_without_public_url_instead_of_self_post(self):
+    def test_publish_reddit_video_without_public_url_falls_back_to_self_post(self):
         session = _RecordingSession([
             _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
         ])
         account = SimpleNamespace(
             account_name="test",
@@ -1424,13 +1425,75 @@ class RedditPublisherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             video = Path(tmp) / "clip.mp4"
             video.write_bytes(b"video")
-            with self.assertRaisesRegex(prepared_publishers.PreparedPublishError, "public URL"):
-                prepared_publishers.publish_reddit_sync(
-                    account,
-                    {"message": "Video post", "artifacts": [{"local_path": str(video), "artifact_kind": "video"}]},
-                    session=session,
-                )
-        self.assertEqual(len(session.calls), 1)
+            prepared_publishers.publish_reddit_sync(
+                account,
+                {"message": "Video post", "artifacts": [{"local_path": str(video), "artifact_kind": "video"}]},
+                session=session,
+            )
+        # No URL -> a self post carrying the message, not a refusal.
+        data = session.calls[1][2]["data"]
+        self.assertEqual(data["kind"], "self")
+        self.assertEqual(data["text"], "Video post")
+        self.assertNotIn("url", data)
+
+    def test_publish_reddit_video_without_public_url_self_post_keeps_no_link(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={
+                "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
+                "subreddits": ["NudistMen", "somewhere"],
+                "selfPostSubreddits": ["NudistMen"],
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "clip.mp4"
+            video.write_bytes(b"video")
+            prepared_publishers.publish_reddit_sync(
+                account,
+                {"message": "Video post", "artifacts": [{"local_path": str(video), "artifact_kind": "video"}]},
+                session=session,
+            )
+        nudist = session.calls[1][2]["data"]
+        other = session.calls[2][2]["data"]
+        # Both subreddits fall through to a self post when there is no URL; a
+        # missing URL never swallows the post.
+        self.assertEqual(nudist["kind"], "self")
+        self.assertEqual(nudist["text"], "Video post")
+        self.assertEqual(other["kind"], "self")
+        self.assertEqual(other["text"], "Video post")
+
+    def test_publish_reddit_image_without_local_file_falls_back_to_self_post(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={
+                "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
+                "subreddits": ["test"],
+            },
+        )
+        prepared_publishers.publish_reddit_sync(
+            account,
+            {
+                "message": "Image post",
+                "artifacts": [{"public_url": "https://cdn.example/photo.jpg", "artifact_kind": "remote_upload"}],
+            },
+            session=session,
+        )
+        data = session.calls[1][2]["data"]
+        # No local copy to ingest, so it is a self post with the URL in the
+        # body instead of the old hard refusal - and explicitly NOT a link
+        # post pointing at our own storage.
+        self.assertEqual(data["kind"], "self")
+        self.assertIn("https://cdn.example/photo.jpg", data["text"])
+        self.assertNotIn("url", data)
 
     def test_publish_reddit_uses_self_post_when_no_media(self):
         session = _RecordingSession([
@@ -1803,25 +1866,30 @@ class RedditNativeImageTests(unittest.TestCase):
             )
         self.assertEqual(session.calls[3][2]["data"]["url"], "https://s3.example/rte_images/a+b c")
 
-    def test_image_without_a_local_file_is_refused_not_link_posted(self):
-        session = _RecordingSession([_FakeResponse({"access_token": "token"})])
-        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
-            prepared_publishers.publish_reddit_sync(
-                self._account(),
-                {
-                    "message": "hello",
-                    "artifacts": [
-                        {
-                            "public_url": "https://cdn.example/x.jpg",
-                            "artifact_kind": "watermarked_image",
-                        }
-                    ],
-                },
-                session=session,
-            )
-        self.assertIn("local disk", str(ctx.exception))
-        # Only the token call happened; nothing was submitted.
-        self.assertEqual(len(session.calls), 1)
+    def test_image_without_a_local_file_falls_back_to_self_post(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        prepared_publishers.publish_reddit_sync(
+            self._account(),
+            {
+                "message": "hello",
+                "artifacts": [
+                    {
+                        "public_url": "https://cdn.example/x.jpg",
+                        "artifact_kind": "watermarked_image",
+                    }
+                ],
+            },
+            session=session,
+        )
+        submit = session.calls[1][2]["data"]
+        # No native upload possible -> a self post, never a link post to our
+        # own storage (which the native path exists to avoid).
+        self.assertEqual(submit["kind"], "self")
+        self.assertIn("https://cdn.example/x.jpg", submit["text"])
+        self.assertNotIn("url", submit)
 
     def test_missing_upload_location_raises(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2188,6 +2256,57 @@ class BlueskyPublisherTests(unittest.TestCase):
         self.assertEqual(record["embed"]["video"]["ref"]["$link"], "bafv1")
         self.assertEqual(results[0]["videos"], 1)
 
+    def test_publish_video_over_duration_limit_reports_the_real_overage(self):
+        session = _RecordingSession([
+            _FakeResponse({"accessJwt": "jwt1", "did": "did:plc:abc", "handle": "h"}),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            vid = Path(tmp) / "clip.mp4"
+            vid.write_bytes(b"mp4")
+            account = SimpleNamespace(config={"handle": "h", "appPassword": "p"})
+            with patch.object(
+                prepared_publishers.media_pipeline,
+                "probe_video_duration",
+                return_value=601.2,
+            ):
+                with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+                    prepared_publishers.publish_bluesky_sync(
+                        account,
+                        {"message": "long clip", "artifacts": [{"local_path": str(vid), "artifact_kind": "watermarked_video"}]},
+                        session=session,
+                    )
+        message = str(ctx.exception)
+        # The real duration and the size of the overrun, not a rounded "600s".
+        self.assertIn("601.2s", message)
+        self.assertIn("600s limit", message)
+        self.assertIn("by 1.2s", message)
+        self.assertIn("re-encode or split", message)
+
+    def test_publish_video_of_exactly_the_limit_is_accepted(self):
+        # The guard uses ``>``, and Bluesky allows a video of exactly 600 s.
+        session = _RecordingSession([
+            _FakeResponse({"accessJwt": "jwt1", "did": "did:plc:abc", "handle": "h"}),
+            _FakeResponse({"blob": {"$type": "blob", "ref": {"$link": "bafv1"}, "mimeType": "video/mp4", "size": 3}}),
+            _FakeResponse({"uri": "at://did:plc:abc/app.bsky.feed.post/v1", "cid": "cidv"}),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            vid = Path(tmp) / "clip.mp4"
+            vid.write_bytes(b"mp4")
+            account = SimpleNamespace(config={"handle": "h", "appPassword": "p"})
+            with patch.object(
+                prepared_publishers.media_pipeline,
+                "probe_video_duration",
+                return_value=600.0,
+            ):
+                results = prepared_publishers.publish_bluesky_sync(
+                    account,
+                    {"message": "exactly ten minutes", "artifacts": [{"local_path": str(vid), "artifact_kind": "watermarked_video"}]},
+                    session=session,
+                )
+        # createSession, uploadBlob(video/mp4), createRecord
+        self.assertEqual(len(session.calls), 3)
+        self.assertEqual(results[0]["videos"], 1)
+
     def test_validate_creates_session(self):
         session = _RecordingSession([
             _FakeResponse({"accessJwt": "j", "did": "did:plc:x", "handle": "nw.bsky.social"}),
@@ -2284,3 +2403,136 @@ class RedditSelfPostForWhitelistedSubsTests(unittest.TestCase):
                 "NudistMen",
             )
         )
+
+
+class RedditLinkArtifactSelectionTests(unittest.TestCase):
+    """The served public URL must survive per-platform video-artifact selection.
+
+    A watermarked video is stored twice: a ``watermarked_video`` row and a
+    ``local`` row that carries the served ``/getFile`` URL, both pointing at the
+    same file. The publisher can only link-post when the selected artifact has
+    the URL, so selection must prefer the URL-carrying sibling.
+    """
+
+    def _artifacts(self):
+        shared = "/tmp/generated/campaign/video_pub.mp4"
+        return [
+            {
+                "id": 1,
+                "source_file_record_id": 7,
+                "artifact_kind": "watermarked_video",
+                "local_path": shared,
+                "public_url": None,
+                "metadata": {"role": "video"},
+            },
+            {
+                "id": 2,
+                "source_file_record_id": 7,
+                "artifact_kind": "local",
+                "local_path": shared,
+                "public_url": "https://cdn.example/video.mp4",
+                "metadata": {"role": "video"},
+            },
+        ]
+
+    def test_select_videos_prefers_the_url_carrying_full_artifact(self):
+        import sau_backend
+
+        selected = sau_backend._select_videos_for_platform(self._artifacts(), "reddit")
+        self.assertEqual([a["id"] for a in selected], [2])
+
+    def test_reddit_payload_keeps_the_served_url(self):
+        import sau_backend
+
+        selected = sau_backend._artifact_payloads_for_platform(self._artifacts(), "reddit")
+        self.assertEqual([a["id"] for a in selected], [2])
+        self.assertEqual(selected[0]["public_url"], "https://cdn.example/video.mp4")
+
+    def test_reddit_link_post_uses_the_selected_url(self):
+        import sau_backend
+
+        selected = sau_backend._artifact_payloads_for_platform(self._artifacts(), "reddit")
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={
+                "clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh",
+                "subreddits": ["GayBody"],
+            },
+        )
+        prepared_publishers.publish_reddit_sync(
+            account,
+            {"message": "body", "artifacts": selected},
+            session=session,
+        )
+        data = session.calls[1][2]["data"]
+        self.assertEqual(data["kind"], "link")
+        self.assertEqual(data["url"], "https://cdn.example/video.mp4")
+
+
+class UntaggedSplitFallbackTests(unittest.TestCase):
+    """A platform can use another platform's split when it is over the cap too.
+
+    Campaign 2517's source was ~600.003 s and split into 5x120 s parts tagged
+    ``split_for: ["twitter"]``. Bluesky was not tagged, so it was handed the
+    full 600.003 s artifact and the publisher's 600 s guard rejected it. The
+    split is usable by Bluesky because the source exceeds Bluesky's cap and the
+    120 s parts fit; a large-cap platform that fits the source must still get
+    the full video, not the finer split.
+    """
+
+    def _part(self, artifact_id: int, index: int, count: int, part_seconds: float, split_for):
+        return {
+            "id": artifact_id,
+            "source_file_record_id": 7,
+            "artifact_kind": "local",
+            "local_path": f"/tmp/part{artifact_id}.mp4",
+            "public_url": None,
+            "metadata": {
+                "role": "video",
+                "max_duration_seconds": part_seconds,
+                "part_index": index,
+                "part_count": count,
+                "split_for": split_for,
+            },
+        }
+
+    def _full(self, artifact_id: int = 1):
+        return {
+            "id": artifact_id,
+            "source_file_record_id": 7,
+            "artifact_kind": "watermarked_video",
+            "local_path": "/tmp/full.mp4",
+            "public_url": None,
+            "metadata": {"role": "video"},
+        }
+
+    def test_untagged_parts_used_when_source_is_over_the_platform_cap(self):
+        import sau_backend
+
+        artifacts = [self._full(), *[self._part(10 + i, i, 5, 120.0006, ["twitter"]) for i in range(1, 6)]]
+        # Bluesky cap 600 s, inferred source 120.0006 * 5 = 600.003 s.
+        selected = sau_backend._select_videos_for_platform(artifacts, "bluesky")
+        self.assertEqual([a["id"] for a in selected], [11, 12, 13, 14, 15])
+        # And the grouping makes one post per part.
+        groups = sau_backend._artifact_part_groups_for_platform(artifacts, "bluesky")
+        self.assertEqual(len(groups), 5)
+
+    def test_large_cap_platform_still_gets_the_full_video(self):
+        import sau_backend
+
+        artifacts = [self._full(), *[self._part(10 + i, i, 5, 120.0006, ["twitter"]) for i in range(1, 6)]]
+        # YouTube cap 43200 s: the ~600 s source fits, so keep the full video.
+        selected = sau_backend._select_videos_for_platform(artifacts, "youtube")
+        self.assertEqual([a["id"] for a in selected], [1])
+
+    def test_untagged_parts_not_used_when_source_fits_the_platform(self):
+        import sau_backend
+
+        artifacts = [self._full(), *[self._part(20 + i, i, 3, 100.0, ["threads"]) for i in range(1, 4)]]
+        # Instagram cap 900 s: the ~300 s source fits, so keep the full video.
+        selected = sau_backend._select_videos_for_platform(artifacts, "instagram")
+        self.assertEqual([a["id"] for a in selected], [1])

@@ -65,6 +65,12 @@ SECRETS_FILE_ENV = "SOCIAMONIALS_SECRETS_FILE"
 TIMEOUT_ENV = "SAU_SOCIAMONIALS_TIMEOUT"
 ASSET_READY_TIMEOUT_ENV = "SAU_SOCIAMONIALS_ASSET_READY_TIMEOUT"
 DELIVERY_TIMEOUT_ENV = "SAU_SOCIAMONIALS_DELIVERY_TIMEOUT"
+# Reuse an identical file already in the workspace library instead of
+# re-uploading it. This is the fix for the storage_quota_exceeded wall: a
+# retried target used to upload the same video again for every attempt (the
+# post idempotency key is per target, not per file), and the duplicates filled
+# the quota. Default on; set to 0 to force the old upload-every-time path.
+REUSE_ASSETS_ENV = "SAU_SOCIAMONIALS_REUSE_ASSETS"
 
 # How long to wait for the platform to actually accept a post before calling
 # the fallback done. A video hand-off can take a little while; a failed URL
@@ -542,6 +548,175 @@ def _guess_mime(local_path: Path, kind: str) -> str:
     return "video/mp4" if kind == "video" else "image/jpeg"
 
 
+def _asset_id(asset: Mapping[str, Any] | None) -> int | None:
+    if not isinstance(asset, Mapping):
+        return None
+    try:
+        return int(asset.get("asset_id"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _reuse_assets_enabled() -> bool:
+    """Whether to look for an existing library asset before uploading.
+
+    Defaults on. Set ``SAU_SOCIAMONIALS_REUSE_ASSETS=0`` to force the old
+    upload-every-time behaviour, for example if the workspace's plan does not
+    include library browsing and the extra GET is not wanted.
+    """
+    raw = os.environ.get(REUSE_ASSETS_ENV)
+    return True if raw is None else _truthy(raw)
+
+
+def _asset_preference(asset: Mapping[str, Any]) -> tuple[int, str, int]:
+    """Sort key picking the copy of a file to reuse: starred, then oldest."""
+    return (
+        0 if asset.get("starred") else 1,
+        str(asset.get("created_at") or asset.get("created") or ""),
+        _asset_id(asset) or 0,
+    )
+
+
+def select_reusable_asset(
+    assets: Sequence[Mapping[str, Any]] | None,
+    *,
+    filename: str,
+    size_bytes: int,
+    kind: str,
+    exclude_ids: set[int] | None = None,
+) -> Mapping[str, Any] | None:
+    """Pick an existing identical library asset to reuse, or ``None``.
+
+    An asset is reusable only when the filename matches exactly, the byte size
+    matches exactly, the media kind agrees and the asset is ready. That is the
+    same ``(filename, size_bytes)`` identity the de-duplication utility uses, so
+    a genuine different file that merely shares a name is never collapsed onto
+    another. Preference is starred first, then the oldest upload, then the
+    lowest asset id, so repeated retries converge on one stable asset.
+    """
+    target = str(filename or "").strip()
+    try:
+        target_size = int(size_bytes)
+    except (TypeError, ValueError):
+        return None
+    if not target or target_size <= 0:
+        return None
+    best: Mapping[str, Any] | None = None
+    for asset in assets or []:
+        if not isinstance(asset, Mapping):
+            continue
+        if str(asset.get("filename") or "").strip() != target:
+            continue
+        try:
+            asset_size = int(asset.get("size_bytes"))
+        except (TypeError, ValueError):
+            continue
+        if asset_size != target_size:
+            continue
+        media_type = str(asset.get("media_type") or "").strip().lower()
+        if kind and media_type and media_type != kind:
+            continue
+        status = str(asset.get("processing_status") or "ready").strip().lower()
+        if status not in {"", "ready"}:
+            continue
+        asset_id = _asset_id(asset)
+        if asset_id is None or (exclude_ids and asset_id in exclude_ids):
+            continue
+        if best is None or _asset_preference(asset) < _asset_preference(best):
+            best = asset
+    return best
+
+
+def _lookup_reusable_asset(
+    session: Any,
+    headers: Mapping[str, str],
+    workspace_id: str,
+    *,
+    filename: str,
+    size_bytes: int,
+    kind: str,
+    timeout: float,
+) -> Mapping[str, Any] | None:
+    """Ask the workspace library for a file matching ``filename``/size.
+
+    Never raises: a plan without library browsing answers
+    ``asset_access_not_enabled`` and a lookup is only an optimisation, so any
+    failure falls through to the ordinary upload instead of failing a publish.
+    """
+    if not _reuse_assets_enabled():
+        return None
+    params: dict[str, Any] = {"search": filename, "limit": 200}
+    workspace = _workspace_int(workspace_id)
+    if workspace is not None:
+        params["workspace_registration_id"] = workspace
+    try:
+        response = session.get(
+            MEDIA_ASSETS_URL, headers=dict(headers), params=params, timeout=timeout
+        )
+    except Exception as exc:  # noqa: BLE001 - lookup is an optimisation
+        logger.warning("sociamonials media reuse lookup failed: %s", exc)
+        return None
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status >= 400 or status == 0:
+        logger.info(
+            "sociamonials media reuse lookup HTTP %s; uploading instead", status
+        )
+        return None
+    body = _json_body(response)
+    rows = body.get("assets")
+    if not isinstance(rows, list):
+        rows = []
+    return select_reusable_asset(
+        rows, filename=filename, size_bytes=size_bytes, kind=kind
+    )
+
+
+def _resolve_local_media(
+    session: Any,
+    headers: Mapping[str, str],
+    workspace_id: str,
+    local_path: Path,
+    *,
+    timeout: float,
+) -> str:
+    """Return an ``asset://<id>`` for ``local_path``, reusing when possible.
+
+    This is the single place the reuse-vs-upload decision is made, so the
+    upload path cannot silently regress into re-uploading a file already in
+    the library. Both branches log which one happened.
+    """
+    kind = _media_kind(str(local_path))
+    size_bytes = local_path.stat().st_size
+    reusable = _lookup_reusable_asset(
+        session,
+        headers,
+        workspace_id,
+        filename=local_path.name,
+        size_bytes=size_bytes,
+        kind=kind,
+        timeout=timeout,
+    )
+    reused_id = _asset_id(reusable)
+    if reused_id is not None:
+        logger.info(
+            "sociamonials media reused asset://%s for %s (%.1f MB)",
+            reused_id,
+            local_path.name,
+            size_bytes / 1_000_000,
+        )
+        return f"asset://{reused_id}"
+    reference = _upload_local_media(
+        session, headers, workspace_id, local_path, timeout=timeout
+    )
+    logger.info(
+        "sociamonials media uploaded %s as %s (%.1f MB)",
+        local_path.name,
+        reference,
+        size_bytes / 1_000_000,
+    )
+    return reference
+
+
 def _upload_local_media(
     session: Any,
     headers: Mapping[str, str],
@@ -555,7 +730,12 @@ def _upload_local_media(
     No ``idempotency_key`` is sent: a repeated key with a *completed* multipart
     upload makes Sociamonials hand back the same closed session, whose part
     URLs then fail with ``NoSuchUpload``. Duplicate posts are already prevented
-    by the post-level key; re-uploading a file costs only transient storage.
+    by the post-level key. Callers should reach this through
+    :func:`_resolve_local_media`, which reuses an identical library asset first;
+    that reuse, not a per-file upload key, is what stops the library refilling
+    with the same file. The docs list ``idempotency_key`` only on the create and
+    import calls, not on the upload-grant call, so there is nothing to replay
+    against here.
     """
     kind = _media_kind(str(local_path))
     size_bytes = local_path.stat().st_size
@@ -1041,7 +1221,7 @@ def publish_via_sociamonials(
                 local = Path(str(local_path))
                 if local.exists():
                     _assert_media_size(network, local.stat().st_size)
-                    reference = _upload_local_media(
+                    reference = _resolve_local_media(
                         http,
                         headers,
                         ws,

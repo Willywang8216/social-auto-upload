@@ -1449,8 +1449,10 @@ def _fallback_media_paths(payload: dict) -> list[str]:
             continue
         if str(artifact.get("artifact_kind") or "") in {"watermarked_image", "watermarked_video"}:
             continue
-        candidate = str(artifact.get("local_path") or "").strip()
-        if not candidate:
+        raw_local_path = str(artifact.get("local_path") or "").strip()
+        if raw_local_path:
+            candidate = str(_resolve_media_path(raw_local_path))
+        else:
             candidate = _normalise_artifact_url(
                 str(artifact.get("public_url") or "")
             )
@@ -1467,6 +1469,54 @@ def _resolve_structured_account(account_ref: str, *, db_path: Path | None = None
     return profile_registry.get_account(account_id, **kwargs)
 
 
+# Host-side repo roots that may appear in stored media paths. The app runs in
+# a container where the repo is mounted at ``BASE_DIR`` (``/app``), but rows
+# created by host-side tooling or an earlier deploy carry the host absolute
+# prefix (``/home/will/social-auto-upload/...``). Both shapes live in the DB.
+# Configurable so a repo move or a second host needs no code change; the test
+# suite runs on the host, where the default prefix equals ``BASE_DIR`` and the
+# mapping is an identity.
+_HOST_BASE_DIRS_ENV = "SAU_HOST_BASE_DIRS"
+_DEFAULT_HOST_BASE_DIRS = ("/home/will/social-auto-upload",)
+
+
+def _host_base_dirs() -> tuple[Path, ...]:
+    raw = os.environ.get(_HOST_BASE_DIRS_ENV, "")
+    roots = [part.strip() for part in raw.split(",") if part.strip()]
+    if not roots:
+        roots = list(_DEFAULT_HOST_BASE_DIRS)
+    return tuple(Path(root) for root in roots)
+
+
+def _resolve_media_path(value: str | Path) -> Path:
+    """Map a stored media path onto a path this process can actually use.
+
+    This is the single canonical normaliser for every stored path the worker
+    turns into a real filesystem path. Rows written by host-side tooling (or
+    an earlier deploy) carry the host repo prefix while the worker runs in a
+    container that mounts the same directories under ``BASE_DIR``. Rewrite
+    only a known host prefix onto ``BASE_DIR``; a path already using a
+    container prefix, a relative path (``videoFile/_batch1/x.mp4``), and any
+    unrelated absolute path are returned untouched.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return Path(text)
+    candidate = Path(text)
+    if not candidate.is_absolute():
+        return candidate
+    base_dir = Path(BASE_DIR)
+    for host_root in _host_base_dirs():
+        if candidate == host_root:
+            return base_dir
+        try:
+            relative = candidate.relative_to(host_root)
+        except ValueError:
+            continue
+        return base_dir / relative
+    return candidate
+
+
 def _resolve_account_path(account_ref: str) -> Path:
     """Map an ``account_ref`` to a concrete cookie file path.
 
@@ -1476,9 +1526,9 @@ def _resolve_account_path(account_ref: str) -> Path:
 
     structured = _resolve_structured_account(account_ref)
     if structured is not None:
-        return Path(structured.cookie_path)
+        return _resolve_media_path(structured.cookie_path)
 
-    candidate = Path(account_ref)
+    candidate = _resolve_media_path(account_ref)
     if candidate.is_absolute() and candidate.exists():
         return candidate
     legacy = Path(BASE_DIR) / "cookiesFile" / account_ref
@@ -1511,17 +1561,21 @@ class MediaRestoreError(RuntimeError):
 
 
 def _resolve_file_path(file_ref: str, *, db_path: Path | None = None) -> Path:
-    candidate = Path(file_ref)
-    if candidate.is_absolute() and candidate.is_file():
-        return candidate
+    # A stored file_ref may carry the host repo prefix (rows written by
+    # host-side tooling). Map it onto this process's BASE_DIR before any
+    # filesystem check or remote restore.
+    resolved = _resolve_media_path(file_ref)
+    text = str(resolved)
+    if resolved.is_absolute() and resolved.is_file():
+        return resolved
 
-    if file_ref.startswith("uploads/"):
-        local_path = Path(BASE_DIR) / file_ref
-        storage_ref = file_ref
+    if text.startswith("uploads/"):
+        local_path = Path(BASE_DIR) / text
+        storage_ref = text
     else:
-        relative = file_ref.removeprefix("videoFile/")
+        relative = text.removeprefix("videoFile/")
         local_path = Path(BASE_DIR) / "videoFile" / relative
-        storage_ref = file_ref
+        storage_ref = text
     if local_path.is_file():
         return local_path
     if db_path is not None:
@@ -1534,12 +1588,20 @@ def _resolve_file_path(file_ref: str, *, db_path: Path | None = None) -> Path:
 def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
     """Look up file_ref in file_records. If stored remotely, download to local."""
     import sqlite3
+    # The ref may be repo-relative ("clip.mp4", "videoFile/x", "uploads/x") or
+    # an absolute container/host path. file_records.file_path is always
+    # repo-relative, so derive the lookup refs from whichever shape arrives.
+    text = str(file_ref or "").strip()
+    if text.startswith("uploads/"):
+        lookup_refs = (text,)
+    else:
+        relative = text
+        for marker in ("/videoFile/", "videoFile/"):
+            if marker in relative:
+                relative = relative.split(marker, 1)[1]
+                break
+        lookup_refs = (relative, "videoFile/" + relative)
     try:
-        if file_ref.startswith("uploads/"):
-            lookup_refs = (file_ref,)
-        else:
-            relative = file_ref.removeprefix("videoFile/")
-            lookup_refs = (file_ref, relative)
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             row = None
@@ -1563,10 +1625,10 @@ def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
         # BASE_DIR/uploads, everything else in BASE_DIR/videoFile — the same
         # roots offload_to_drive.sh moves and the storage_backends endpoint
         # points at.
-        if file_ref.startswith("uploads/"):
-            local_path = Path(BASE_DIR) / file_ref
+        if text.startswith("uploads/"):
+            local_path = Path(BASE_DIR) / text
         else:
-            local_path = Path(BASE_DIR) / "videoFile" / file_ref.removeprefix("videoFile/")
+            local_path = Path(BASE_DIR) / "videoFile" / lookup_refs[0]
         if local_path.is_file():
             return local_path
         _download_atomically(
@@ -1596,7 +1658,7 @@ def _prepared_artifact_local_paths(payload: dict) -> list[Path]:
         if not local_path or local_path in seen:
             continue
         seen.add(local_path)
-        paths.append(Path(local_path))
+        paths.append(_resolve_media_path(local_path))
     return paths
 
 
@@ -1623,7 +1685,7 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
         mappings = {(row["storage_key"], row["storage_backend_id"]) for row in rows}
         return rows[0] if len(mappings) == 1 else None
 
-    def _record_for(artifact: dict, path: Path) -> sqlite3.Row | None:
+    def _record_for(artifact: dict, path: Path, *, stored: str | None = None) -> sqlite3.Row | None:
         source_id = artifact.get("source_id") or artifact.get("source_file_record_id")
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -1633,7 +1695,13 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             for marker in ("/generated/", "generated/"):
                 if marker in raw:
                     rel = raw.split(marker, 1)[1]
-                    generated_refs = ("generated/" + rel, "/app/generated/" + rel)
+                    # Derive the absolute form from BASE_DIR rather than
+                    # hardcoding the container path, so the lookup works on
+                    # both the host and inside the container.
+                    base_generated = str(Path(BASE_DIR) / "generated") + "/"
+                    generated_refs = ["generated/" + rel]
+                    if base_generated + rel not in generated_refs:
+                        generated_refs.append(base_generated + rel)
                     for file_ref in generated_refs:
                         generated_row = conn.execute(
                             "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path "
@@ -1644,11 +1712,21 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                             # The transformed artifact's own Drive row outranks
                             # the original upload's source_file_record_id.
                             return generated_row
-                    campaign_row = conn.execute(
-                        "SELECT remote_path AS storage_key, storage_backend_id, public_url AS storage_cdn_url, local_path AS file_path "
-                        "FROM campaign_artifacts WHERE local_path=? AND remote_path IS NOT NULL AND storage_backend_id IS NOT NULL",
-                        (str(path),),
-                    ).fetchone()
+                    # The stored row may carry the host prefix while ``path``
+                    # is already normalised onto BASE_DIR, so try both shapes
+                    # for the exact-match lookup.
+                    campaign_refs = [str(path)]
+                    if stored and str(stored) not in campaign_refs:
+                        campaign_refs.append(str(stored))
+                    campaign_row = None
+                    for campaign_ref in campaign_refs:
+                        campaign_row = conn.execute(
+                            "SELECT remote_path AS storage_key, storage_backend_id, public_url AS storage_cdn_url, local_path AS file_path "
+                            "FROM campaign_artifacts WHERE local_path=? AND remote_path IS NOT NULL AND storage_backend_id IS NOT NULL",
+                            (campaign_ref,),
+                        ).fetchone()
+                        if campaign_row:
+                            break
                     if campaign_row:
                         return campaign_row
                     # Never substitute original source bytes into a generated target.
@@ -1688,10 +1766,15 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
         return None
 
     for artifact in payload.get("artifacts", []) or []:
-        local_path = artifact.get("local_path")
+        local_path = str(artifact.get("local_path") or "")
         if not local_path:
             continue
-        p = Path(local_path)
+        # Rows written by host-side tooling carry a host absolute prefix that
+        # does not exist inside the container. Map it onto BASE_DIR before any
+        # filesystem or record lookup: writing to the raw host path (e.g.
+        # ``/home/will``) otherwise fails as EACCES on an ancestor that does
+        # not exist, which reads like a permissions bug rather than a path bug.
+        p = _resolve_media_path(local_path)
         if p.exists():
             continue
         generated_root = media_pipeline.GENERATED_MEDIA_ROOT.resolve()
@@ -1700,7 +1783,7 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
         except (OSError, ValueError):
             is_generated_artifact = False
         try:
-            row = _record_for(artifact, p)
+            row = _record_for(artifact, p, stored=local_path)
             if row is None and is_generated_artifact:
                 row = _generated_record_by_name(p)
         except Exception as exc:
@@ -1790,6 +1873,19 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
 
         except MediaRestoreError:
             raise
+        except PermissionError as exc:
+            # EACCES on a path that does not exist is a path-resolution
+            # failure, not a permissions problem: the stored path points
+            # somewhere this process cannot use, typically an unmapped host
+            # prefix. Say so instead of leaking the raw errno, which is what
+            # made the host-prefix bug read as "Permission denied: /home/will".
+            _logger.exception(f"artifact restore failed for {local_path}")
+            raise MediaRestoreError(
+                f"Could not restore artifact {local_path!r}: after normalisation "
+                f"it resolves to {p}, which could not be found and could not be "
+                f"created ({exc}). The stored path may use a host prefix that "
+                f"does not map onto BASE_DIR ({BASE_DIR})."
+            ) from exc
         except Exception as exc:
             _logger.exception(f"artifact restore failed for {local_path}")
             raise MediaRestoreError(f"Artifact restore failed for {local_path}: {exc}") from exc
@@ -2496,7 +2592,7 @@ def _restore_optional_thumbnail(payload: dict, *, db_path: Path) -> None:
     thumbnail_ref = str(payload.get("thumbnail") or "")
     if not thumbnail_ref:
         return
-    thumb = Path(thumbnail_ref)
+    thumb = _resolve_media_path(thumbnail_ref)
     if not thumb.is_absolute():
         thumb = Path(BASE_DIR) / thumbnail_ref
     if thumb.exists():

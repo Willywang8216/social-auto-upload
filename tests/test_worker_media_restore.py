@@ -257,6 +257,119 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             resolved = worker._resolve_file_path("uploads/local.mp4", db_path=self.db_path)
         self.assertEqual(resolved, uploads)
 
+    # --- canonical stored-path normaliser ---------------------------------
+
+    def test_resolve_media_path_rewrites_host_prefix_to_base_dir(self) -> None:
+        """A host absolute prefix maps onto this process's BASE_DIR.
+
+        This is the live bug: the artifact row stored
+        ``/home/will/social-auto-upload/videoFile/...`` while the worker ran in
+        a container where the repo is mounted at ``/app``. Writing the raw host
+        path surfaced as ``Permission denied: '/home/will'``.
+        """
+        container_root = self.root / "app"
+        with patch.object(worker, "BASE_DIR", container_root):
+            resolved = worker._resolve_media_path(
+                "/home/will/social-auto-upload/videoFile/_inbox_cache/demo.mp4"
+            )
+        self.assertEqual(
+            resolved,
+            container_root / "videoFile" / "_inbox_cache" / "demo.mp4",
+        )
+
+    def test_resolve_media_path_leaves_container_prefix_untouched(self) -> None:
+        with patch.object(worker, "BASE_DIR", self.root):
+            self.assertEqual(
+                worker._resolve_media_path("/app/videoFile/x.mp4"),
+                Path("/app/videoFile/x.mp4"),
+            )
+
+    def test_resolve_media_path_leaves_relative_path_untouched(self) -> None:
+        with patch.object(worker, "BASE_DIR", self.root):
+            self.assertEqual(
+                worker._resolve_media_path("videoFile/_batch1/x.mp4"),
+                Path("videoFile/_batch1/x.mp4"),
+            )
+
+    def test_resolve_media_path_leaves_unrelated_absolute_path_untouched(self) -> None:
+        with patch.object(worker, "BASE_DIR", self.root):
+            self.assertEqual(
+                worker._resolve_media_path("/tmp/x.mp4"), Path("/tmp/x.mp4")
+            )
+
+    def test_host_prefixed_artifact_restores_under_base_dir(self) -> None:
+        """End-to-end: a host-prefixed local_path is written under BASE_DIR.
+
+        The stored row names the host path, but the restore must land on the
+        container-equivalent path this process can actually use.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO file_records (filename, filesize, file_path, storage_key) VALUES (?, ?, ?, ?)",
+                ("demo.mp4", 1.0, "videoFile/_inbox_cache/demo.mp4", "_inbox_cache/demo.mp4"),
+            )
+            conn.execute(
+                "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("test-drive", "Test Drive", "rclone", "drive", "auto", "sau/videoFile", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            conn.execute(
+                "UPDATE file_records SET storage_backend_id=? WHERE file_path='videoFile/_inbox_cache/demo.mp4'",
+                (backend_id,),
+            )
+
+        container_root = self.root / "app"
+        payload = {"artifacts": [{
+            "local_path": "/home/will/social-auto-upload/videoFile/_inbox_cache/demo.mp4",
+        }]}
+
+        def write_media(_backend, _key, temporary_path):
+            Path(temporary_path).write_bytes(b"restored via host map")
+
+        with patch.object(worker, "BASE_DIR", container_root), patch.object(
+            worker.media_remote_storage, "download_from_backend", side_effect=write_media
+        ):
+            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
+        self.assertEqual(
+            (container_root / "videoFile" / "_inbox_cache" / "demo.mp4").read_bytes(),
+            b"restored via host map",
+        )
+
+    def test_missing_artifact_after_normalisation_raises_clear_message(self) -> None:
+        payload = {"artifacts": [{
+            "local_path": "/home/will/social-auto-upload/videoFile/_inbox_cache/gone.mp4",
+        }]}
+        with patch.object(worker, "BASE_DIR", self.root / "app"):
+            with self.assertRaisesRegex(worker.MediaRestoreError, "no file record"):
+                worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
+    def test_permission_error_on_missing_path_is_reported_as_path_problem(self) -> None:
+        """EACCES while preparing a missing path is a path-resolution failure.
+
+        Before normalisation this leaked as a bare ``Permission denied`` on an
+        ancestor (``/home/will``), which reads like a permissions bug. With a
+        record present the restore proceeds to create the destination parent;
+        an unmappable destination must fail with the resolved-path message.
+        """
+        payload = {"artifacts": [{
+            "local_path": "/home/will/social-auto-upload/videoFile/other/x.mp4",
+            "source_file_record_id": 1,
+        }]}
+        real_mkdir = Path.mkdir
+
+        def deny_mkdir(self_path, *args, **kwargs):
+            if self_path.name == "other":
+                raise PermissionError(13, "Permission denied", str(self_path))
+            return real_mkdir(self_path, *args, **kwargs)
+
+        with patch.object(worker, "BASE_DIR", self.root / "app"), patch(
+            "pathlib.Path.mkdir", deny_mkdir
+        ):
+            with self.assertRaisesRegex(worker.MediaRestoreError, "after normalisation"):
+                worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
     def test_generated_artifact_rejects_private_redirect_target(self) -> None:
         destination = self.root / "generated" / "campaigns" / "campaign-5" / "clip.mp4"
 
