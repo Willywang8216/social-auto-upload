@@ -170,3 +170,44 @@ sau skill install
 *   `requirements.txt` remains the Docker / legacy compatibility install path and must stay aligned for backend runtime dependencies.
 *   The `package.json` file in the `sau_frontend` directory lists the frontend dependencies.
 *   Platform posting limits are owned in code by `myUtils/platform_limits.py` (the enforced single source of truth, locked by `tests/test_platform_limits.py`); draft generation, media prep and the publishers all read from it. The human-readable table (with app-vs-API differences and notable restrictions) is in `docs/platform-posting-limits.md`, and the per-number source citations are in `logs/platform-limits-research.md`. Update the module first, then keep both docs in sync.
+
+## Agent sessions (default hygiene)
+
+Subagents and parallel sessions must not accumulate. **Ending finished sessions is
+a default action, not something to be asked for** — do it as part of finishing the
+work.
+
+### Before ending a session, confirm it is safe
+
+1. **No uncommitted work.** `git status --short` must show no modified source
+   files. If a session's work is uncommitted, commit or report it first — killing
+   the session loses it.
+2. **Nothing is being written.** Check for files modified in the last ~15 minutes:
+   ```bash
+   find . -maxdepth 2 -newermt "-15 minutes" -type f \
+     \( -name "*.py" -o -name "*.md" \) \
+     -not -path "./.venv/*" -not -path "./.claude/*"
+   ```
+3. **Its task is settled.** `agent-manager task list` should show it `done`. A
+   task still held by a finished session is a stale lock — ask that session to
+   release it, or claim it yourself if it is genuinely complete.
+4. **Its leases are released.** `agent-manager reservations` must not name it. If
+   it does, message the session to release, or `release-files` once it is gone.
+
+### Ending them
+
+```bash
+agent-manager sessions --json          # list; note ids and which are `self`
+agent-manager archive <id>             # files it out of the active list
+agent-manager kill <id>                # stops the process
+```
+
+Archive **then** kill — archiving alone leaves the process running. Never kill
+your own `self: true` session.
+
+### Reporting
+
+When a cleanup pass runs, state how many sessions were ended and confirm each was
+safe (work committed, tasks done, leases released). Do not silently leave orphans:
+a session still running with no task and no recent activity is exactly what this
+rule exists to prevent.
