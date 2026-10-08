@@ -519,3 +519,66 @@ class EncodeThrottleTests(unittest.TestCase):
             media_prep._run(["ffprobe", "-v", "error"])
             media_prep._run(["ffmpeg", "-i", "x"])
         self.assertEqual(seen, ["ffprobe", "ffmpeg"])
+
+
+class EncodeThrottleCoverageTests(unittest.TestCase):
+    """Every ffmpeg encode path must go through the shared throttle.
+
+    The throttle is only as good as its coverage. It was first added to
+    media_prep alone, and a live check then found FIVE concurrent ffmpeg
+    processes on a four-core box while encode_concurrency() reported 2 - because
+    the watermark path (media_pipeline / watermark_service) and the Bluesky
+    downscale (prepared_publishers) drive ffmpeg themselves.
+    """
+
+    def test_media_pipeline_gates_ffmpeg_but_not_probe(self):
+        import contextlib
+        import inspect
+
+        from myUtils import media_pipeline, media_prep
+
+        seen = []
+        gated = []
+
+        @contextlib.contextmanager
+        def _spy_gate():
+            gated.append(True)
+            yield
+
+        with mock.patch.object(
+            media_pipeline.subprocess, "run", lambda cmd, **kw: seen.append(cmd[0])
+        ), mock.patch.object(media_prep, "encode_slot", _spy_gate):
+            media_pipeline.run_subprocess(["ffprobe", "-v", "error"])
+            media_pipeline.run_subprocess(["ffmpeg", "-i", "x"])
+        self.assertEqual(seen, ["ffprobe", "ffmpeg"])
+        # The encode took a slot; the probe did not.
+        self.assertEqual(len(gated), 1)
+        # And the gate must be the shared one, not a fresh semaphore.
+        self.assertIn("media_prep.encode_slot", inspect.getsource(media_pipeline.run_subprocess))
+
+    def test_watermark_service_routes_encodes_through_the_gate(self):
+        import inspect
+
+        from myUtils import watermark_service
+
+        source = inspect.getsource(watermark_service)
+        self.assertIn("_run_ffmpeg", source)
+        self.assertIn("media_prep.encode_slot", source)
+        # Any remaining direct subprocess.run must be the gate helper itself or
+        # an ffprobe (which is deliberately ungated: it decides whether to encode).
+        lines = source.splitlines()
+        for index, line in enumerate(lines):
+            if "subprocess.run(" in line and "_run_ffmpeg" not in line:
+                window = "\n".join(lines[max(0, index - 8):index + 9])
+                self.assertTrue(
+                    "cmd, **kwargs" in line or "FFPROBE_COMMAND" in window,
+                    f"ungated ffmpeg call at line {index + 1}: {line.strip()}",
+                )
+
+    def test_prepared_publishers_gates_the_bluesky_reencode(self):
+        import inspect
+
+        from myUtils import prepared_publishers
+
+        source = inspect.getsource(prepared_publishers._bluesky_shrink_video)
+        self.assertIn("encode_slot", source)

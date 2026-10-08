@@ -9,7 +9,7 @@ import random
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Sequence
 
 from utils.conf_defaults import BASE_DIR
@@ -78,6 +78,23 @@ class VideoWatermarkPlan:
 
 
 def run_subprocess(command: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run a media command, taking a transcode slot when it is an encode.
+
+    Watermarking (`apply_video_watermark`) drives ffmpeg through here, not
+    through ``media_prep._run``. Without this the throttle missed every
+    watermarked encode: measured five concurrent ffmpeg processes on a four-core
+    box while ``media_prep.encode_concurrency()`` reported 2, so the cap was
+    being applied to only part of the work.
+
+    ``ffprobe`` is cheap and is skipped, so a probe never waits behind an
+    encode. Every actual ffmpeg invocation is gated.
+    """
+    from myUtils import media_prep
+
+    exe = PurePath(str(command[0])).name if command else ""
+    if exe.startswith("ffmpeg"):
+        with media_prep.encode_slot():
+            return subprocess.run(command, check=True, **kwargs)
     return subprocess.run(command, check=True, **kwargs)
 
 

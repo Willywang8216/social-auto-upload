@@ -4327,20 +4327,26 @@ def _bluesky_shrink_video(local_path: str, *, max_bytes: int = BLUESKY_MAX_VIDEO
         tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
         tmp.close()
         # Scale the longest side to 720 and re-encode at a conservative bitrate;
-        # faststart so Bluesky can probe it without the whole file.
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", str(path),
-                "-vf", "scale='min(720,iw)':-2",
-                "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
-                "-c:a", "aac", "-b:a", "96k",
-                "-movflags", "+faststart",
-                tmp.name,
-            ],
-            capture_output=True,
-            timeout=1800,
-            check=True,
-        )
+        # faststart so Bluesky can probe it without the whole file. Gated on the
+        # shared transcode throttle: this is a full re-encode on the publish
+        # path, so without it a batch of oversized clips could start more encodes
+        # than the box has cores.
+        from myUtils import media_prep as _media_prep
+
+        with _media_prep.encode_slot():
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", str(path),
+                    "-vf", "scale='min(720,iw)':-2",
+                    "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
+                    "-c:a", "aac", "-b:a", "96k",
+                    "-movflags", "+faststart",
+                    tmp.name,
+                ],
+                capture_output=True,
+                timeout=1800,
+                check=True,
+            )
         if _Path(tmp.name).stat().st_size < size:
             logger.info(
                 "bluesky: re-encoded video %s (%d -> %d bytes)",

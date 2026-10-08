@@ -33,6 +33,19 @@ FFMPEG_COMMAND = "ffmpeg"
 FFPROBE_COMMAND = "ffprobe"
 
 
+def _run_ffmpeg(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run an ffmpeg watermark encode under the shared transcode throttle.
+
+    Watermarking is a full re-encode and runs from the submit path, so without
+    the gate a burst of submissions could start more encodes than the box has
+    cores - the exact oversubscription the throttle exists to prevent.
+    """
+    from myUtils import media_prep
+
+    with media_prep.encode_slot():
+        return subprocess.run(cmd, **kwargs)
+
+
 @dataclass(slots=True)
 class WatermarkConfig:
     id: int
@@ -598,7 +611,7 @@ def apply_video_watermark(
             "-movflags", "+faststart",
             str(output),
         ])
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        _run_ffmpeg(cmd, check=True, capture_output=True, text=True)
         return output
     elif has_text:
         vf = text_vf
@@ -615,7 +628,7 @@ def apply_video_watermark(
         str(output),
     ])
 
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    _run_ffmpeg(cmd, check=True, capture_output=True, text=True)
     return output
 
 
@@ -644,7 +657,7 @@ def generate_thumbnail(
     output = Path(output_path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    subprocess.run(
+    _run_ffmpeg(
         [
             FFMPEG_COMMAND, "-y",
             "-ss", str(max(0.0, timestamp)),
@@ -667,7 +680,7 @@ def extract_audio(
     output = Path(output_path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    subprocess.run(
+    _run_ffmpeg(
         [
             FFMPEG_COMMAND, "-y",
             "-i", str(source),
