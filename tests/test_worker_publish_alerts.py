@@ -344,3 +344,54 @@ class PublishFailureAlertTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class PrepLeaseConfigTests(unittest.TestCase):
+    """Prep lease must be tunable and must not hang a crashed prep for hours.
+
+    A container restart mid-prep left five campaigns in `preparing` for 32+
+    minutes because the lease defaulted to 120 min - four times the ~30 min
+    worst-case prep - so the stale sweep would not release them. 45 min is ~1.5x
+    headroom. The env override exists so a slower host can raise it without a
+    rebuild; an explicit argument must still win.
+    """
+
+    def test_default_lease_is_roughly_1_5x_the_worst_case_prep(self):
+        from myUtils.worker import WorkerConfig
+
+        self.assertEqual(WorkerConfig().prep_lease_minutes, 45)
+
+    def test_env_override_is_honoured(self):
+        from unittest.mock import patch
+
+        from myUtils.worker import WorkerConfig
+
+        with patch.dict(os.environ, {"SAU_PREP_LEASE_MINUTES": "20"}):
+            self.assertEqual(WorkerConfig().prep_lease_minutes, 20)
+        with patch.dict(os.environ, {"SAU_PREP_CONCURRENT": "2"}):
+            pass  # unrelated key must not matter
+
+    def test_explicit_argument_beats_the_env(self):
+        from unittest.mock import patch
+
+        from myUtils.worker import WorkerConfig
+
+        with patch.dict(os.environ, {"SAU_PREP_LEASE_MINUTES": "20"}):
+            self.assertEqual(
+                WorkerConfig(prep_lease_minutes=99).prep_lease_minutes, 99
+            )
+
+    def test_invalid_env_value_falls_back_instead_of_raising(self):
+        from unittest.mock import patch
+
+        from myUtils.worker import WorkerConfig
+
+        with patch.dict(os.environ, {"SAU_PREP_LEASE_MINUTES": "not-a-number"}):
+            self.assertEqual(WorkerConfig().prep_lease_minutes, 45)
+
+    def test_constructing_the_config_does_not_recurse(self):
+        # A previous version built a default WorkerConfig inside __post_init__,
+        # which recursed until RecursionError.
+        from myUtils.worker import WorkerConfig
+
+        WorkerConfig()

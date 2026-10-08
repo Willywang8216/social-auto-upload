@@ -170,11 +170,39 @@ class WorkerConfig:
     # concurrently (ffmpeg is heavy, so default 1), and the stale-lease window.
     prep_batch_size: int = 1
     prep_max_concurrent: int = 1
-    prep_lease_minutes: int = 120
+    # How long a claimed prep may hold its lease before the sweep treats it as
+    # abandoned. This must exceed the slowest real prep but stay small enough
+    # that a crash costs minutes, not hours: a 602 MB source re-encodes in ~15
+    # min and the worst case (transcode + split + remote upload) is ~30 min, so
+    # 45 min is ~1.5x headroom. The previous 120 min meant a container restart
+    # mid-prep stranded the campaign in `preparing` for two hours, which is how
+    # five campaigns sat unfinished (they had all been claimed, then killed by a
+    # restart, and the sweep was still waiting).
+    # Override with SAU_PREP_LEASE_MINUTES when a host is slower.
+    prep_lease_minutes: int = 45
 
     def __post_init__(self) -> None:
         if self.retry is None:
             self.retry = RetryPolicy()
+        # Env overrides so an operator can tune prep without a rebuild. Read here
+        # rather than as field defaults so an environment value is always
+        # honoured. An explicit constructor argument still wins: compare against
+        # the class defaults (never construct another WorkerConfig - that
+        # recurses into this method).
+        for name, env, fallback in (
+            ("prep_max_concurrent", "SAU_PREP_MAX_CONCURRENT", 1),
+            ("prep_batch_size", "SAU_PREP_BATCH_SIZE", 1),
+            ("prep_lease_minutes", "SAU_PREP_LEASE_MINUTES", 45),
+        ):
+            raw = str(os.environ.get(env, "") or "").strip()
+            if not raw or getattr(self, name) != fallback:
+                continue
+            try:
+                setattr(self, name, max(1, int(raw)))
+            except ValueError:
+                _logger.warning(
+                    f"worker config: ignoring invalid {env}={raw!r}"
+                )
 
 
 class PublishWorker:
