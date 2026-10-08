@@ -737,3 +737,63 @@ appear on restore. The 15 s busy-timeout already covers the overlap.
 ### Verification
 Tests 1306 passed, 1 skipped. Container healthy on the new image; throttle reads
 2 slots on 4 cores; dedup guard present.
+
+## 2026-10-08 (later) — throttle coverage fixed, 504 cause corrected, agents cleaned
+
+### The throttle was only covering part of the work (fixed: 46ddb50, deployed)
+
+First version gated `media_prep` only. A live check then found **8 concurrent
+ffmpeg on 4 cores** while `encode_concurrency()` reported 2, because three other
+paths drive ffmpeg themselves:
+`media_pipeline.run_subprocess` (every watermark encode),
+`watermark_service` (watermark/thumbnail/audio extracts), and
+`prepared_publishers._bluesky_shrink_video`. All now take the same
+`media_prep.encode_slot()`. ffprobe stays ungated everywhere.
+
+Impact measured before/after on the live box:
+
+| | before | after |
+|---|---|---|
+| active encodes | 8 (uncapped) | **2** (the cap) |
+| container | **unhealthy** | healthy |
+| GET /healthz | **timing out** | 200 in ~6 ms |
+| load average | 42 | **18 and falling** |
+
+All 8 gunicorn threads had been blocked inside ffmpeg at once; with the gate only
+the capped pair runs and the request threads stay free.
+
+### The 504 is OpenResty, not gunicorn (correcting the earlier audit)
+
+- `--threads 8` selects gthread, which does **not** enforce `--timeout` on
+  in-flight requests.
+- The SAU vhosts set `proxy_pass` but **no `proxy_read_timeout`**, so nginx's
+  **60 s** default applied. The live error log confirms it, including a
+  `GET /healthz` timeout (threads fully consumed), and the ~65-75 s retry cadence
+  matches 60 s, not gunicorn's 120 s.
+- Applied `proxy_read_timeout 1800s; proxy_send_timeout 1800s;` to all three SAU
+  vhosts on the OpenResty host (backups `<conf>.bak-timeouts`, `nginx -t` clean,
+  reloaded). Cloudflare still caps ~100 s (524), so a genuinely long submit needs
+  the async design.
+
+### New failure mode found: container restarts orphan in-flight encodes
+
+Restarting while encodes run leaves them reparented to the containerd shim,
+still consuming CPU, invisible to `docker exec` (different PID namespace) and
+unaffected by the gate (their worker is dead). Observed 4, then 1, after two
+restarts. Effective concurrency is briefly higher than the cap. Drain before
+restarting, or expect a short spike.
+
+### Hardware encode is impossible here
+
+The VPS GPU is `Red Hat Virtio 1.0 GPU` - a paravirtualised display device with
+no encode engine; `h264_vaapi` fails `Device creation failed: -5` even with
+/dev/dri mounted, and there is no NVIDIA device. Encoders are software-only, so
+the throttle and more/faster CPU are the only levers.
+
+### Agents
+`timeout-fix` delivered a genuinely valuable analysis (the OpenResty finding +
+the async verdict) and is archived. `encode-bench` was stopped: it kept running
+CPU benchmarks while the production backlog was draining, which both confounded
+its own numbers and worsened the load, and it ignored a stop request. Lesson for
+next time: do not run a CPU benchmark on the box that serves production without
+checking load first.
