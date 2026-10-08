@@ -797,7 +797,17 @@ class PublishWorker:
         if self._stale_sweep_counter >= self._STALE_SWEEP_TICK_INTERVAL:
             self._stale_sweep_counter = 0
             try:
+                # Recover targets abandoned by a dead/restarted worker. The
+                # executor enforces its own TARGET_EXECUTION_TIMEOUT_SECONDS
+                # (20 min default), so a row still `running` well past that is
+                # definitionally orphaned - the previous 120 min ceiling meant a
+                # restart left rows stuck for two hours before anything looked
+                # at them. Sweep at 1.5x the executor timeout so a legitimately
+                # slow publish is never cut off.
                 requeued = jobs.requeue_stale_running(
+                    older_than_minutes=max(
+                        1, int(TARGET_EXECUTION_TIMEOUT_SECONDS // 60 * 1.5)
+                    ),
                     max_attempts=self._config.retry.max_attempts,
                     db_path=self._db_path,
                 )
