@@ -634,3 +634,69 @@ The content guard refusing placeholder / wrong-language copy:
   "1T - adult, honest, 18+ only."  -> [content-guard] placeholder/generic copy
 That is the guard working as designed. The fix, if wanted, is upstream: make the
 draft generator produce real copy for those accounts, or exclude them.
+
+## 2026-10-08 — full health audit (operator: "check everything carefully")
+
+Systematic end-to-end check. Everything below was verified live, not assumed.
+
+### Container / queue / scheduler — HEALTHY
+- container `Up 12 hours (healthy)`, `/healthz` -> ok
+- queue: 1241 pending, 999 succeeded, 137 failed (all terminal), 2811 cancelled
+- **0 targets due-but-unclaimed**; 0 pending on pre-Oct jobs
+- publish scheduler alive (`SAU_PUBLISH_SCHEDULER_INTERVAL_SECONDS=60`) and it
+  has fired 3049 claims; **23 publishes succeeded in the last 24h**, spread
+  across every hour (00:8, 05:15, 12:15, 13:34, 22:10 ...). No bunching.
+- next due target: 2026-10-08T12:35Z; nothing due before that (correct)
+
+### Tokens — 7/7 live checks OK
+`POST /accounts/batch/check-connections` on 13 accounts: **7 ok, 6 "error"** —
+but 5 of the 6 are "Connection check is implemented only for
+Facebook/Instagram/Threads/Telegram/Discord/Twitter", i.e. an unimplemented
+check, not a fault (youtube 110, reddit 105/106, tiktok 109/100).
+
+Verified genuinely OK: twitter 77/103/107, facebook 11/64, instagram 72/75.
+Tokens auto-refreshed by the maintenance loop at 05:01 today.
+
+**Only 2 accounts are genuinely dead** and both need operator OAuth re-consent:
+- **124** NW X (nudeweiwei): refresh token rejected, `_needsReconnect`,
+  expired 2026-10-05.
+- **108** YT Willy Dev tutor (Money System Lab): `invalid_grant`, expired
+  2026-07-16. Has NO pending targets, so nothing is blocked.
+
+Both have a working Sociamonials fallback mapping, so X keeps publishing.
+
+### Storage — round-trip verified
+Uploaded a probe to DO Spaces from inside the container, fetched it over the
+public R2 URL (HTTP 200, correct body), deleted it. **URL came back correctly
+percent-encoded** (the earlier raw-space bug stays fixed). Backends enabled:
+do_spaces + 3 gdrive rclone mappings.
+
+### Sociamonials fallback — genuinely delivering
+Checked the REAL post ids from the worker log (10704901, 10704922, 10705000,
+10701118, 10701155): every one reports `delivered=True, status=delivered` for
+the tw network. The delivery-verification fix is working; a queued-but-failed
+post would now be reported honestly.
+
+Note: short ids like post_id=1/2/9/77 are TEST-SUITE artefacts writing into the
+same log, not real posts (the API returns "Unknown post" for them). Do not read
+those as deliveries.
+
+### Alerts — working; the failure message is misleading
+`send_ops_alert` prints "no channel configured" whenever ALL channels fail,
+including a transient network error. That is why the log looked like alerts were
+unconfigured. Tested live: a probe alert **delivered successfully**.
+(Worth rewording later; not a fault.)
+
+### Failures — 1 since the last deploy
+Only target 28 (tiktok) failed after 2026-10-07T13:55: that artifact is an
+unrecoverable orphan (no file on disk, no file_record) from an old job. 0
+orphans remain queued. All other 19 failures in the window predate the deploy.
+
+### Tests
+1297 passed, 1 skipped.
+
+### Operator action required (only these)
+1. Re-consent **account 124** (NW X nudeweiwei) via Connect.
+2. Re-consent **account 108** (YT Willy Dev tutor) if MSL YouTube posts matter.
+3. Top up X API credits to restore direct X media posting (the fallback is
+   carrying X meanwhile).
