@@ -8,6 +8,15 @@ services:
     image: ghcr.io/willywang8216/social-auto-upload:latest
     pull_policy: always
     container_name: social-auto-upload
+    # Run as the host operator's uid/gid (default 1000). The image sets no USER,
+    # so Docker defaulted to root and every bind-mounted dir the app writes
+    # (generated/, videoFile/, data/) came out root-owned. The host user (will,
+    # uid 1000) — including the host-run test suite and the scripts/ and agent
+    # tooling — then could not write into generated/campaigns/<id>, failing
+    # media prep with PermissionError and killing loguru's sink (ValueError:
+    # I/O operation on closed file). Matching the host uid makes both sides
+    # write the same files. Override for a host whose operator is not 1000.
+    user: "${SAU_UID:-1000}:${SAU_GID:-1000}"
     restart: always
     # The image's Dockerfile bakes in `--timeout 120`, but a 602 MB source
     # re-encodes in ~900 s and media prep runs inline in the submit request,
@@ -89,6 +98,11 @@ services:
       - .env
     environment:
       # Non-secret overrides only. All secrets come from .env
+      # A non-root uid has no passwd entry inside the image, so HOME would
+      # otherwise stay at the inaccessible /root. Point cache lookups at a
+      # world-writable path (rclone/fontconfig/playwright all honour these).
+      - HOME=/tmp
+      - XDG_CACHE_HOME=/tmp/.cache
       - SAU_ACCOUNT_MAINTENANCE_INTERVAL_SECONDS=600
       - SAU_ACCOUNT_MAINTENANCE_EXPIRING_WITHIN_SECONDS=3600
       - BROWSERLESS_URL=http://browserless:3000

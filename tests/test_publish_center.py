@@ -822,3 +822,172 @@ class DuplicateQueueGuardWiringTests(unittest.TestCase):
         # And it must be a real guard, not commented out or short-circuited.
         self.assertNotIn("if False and _already_queued_for_media(", source)
         self.assertIn("already queued for this account", source)
+
+
+class DuplicateGuardSameFileDifferentGroupTests(unittest.TestCase):
+    """A retried submit builds a NEW media group around the SAME files.
+
+    The guard originally keyed only on media_group_id, so a resubmit never
+    matched and queued again. That is how a retrying client produced 103
+    duplicate pending jobs, and how file_record 1142 ended up in 6 media groups.
+    Identity must also consider the underlying file records.
+    """
+
+    def setUp(self) -> None:
+        import db.createTable as create_table
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "dup.db"
+        create_table.bootstrap(self.db_path)
+        self.profile = profile_registry.create_profile("Dup", db_path=self.db_path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _seed_group(self, gid: int, post_id: int, job_id: int, account_ref: str, status: str) -> None:
+        """One media group -> campaign -> post -> job -> target chain."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO file_records (id, filename, file_path) VALUES (701, 'clip.mp4', 'clip.mp4')"
+            )
+            conn.execute(
+                "INSERT INTO media_groups (id, name, notes, status) VALUES (?, 'g', '', 'ready')",
+                (gid,),
+            )
+            conn.execute(
+                "INSERT INTO media_group_items (media_group_id, file_record_id, role, sort_order)"
+                " VALUES (?, 701, 'video', 0)",
+                (gid,),
+            )
+            conn.execute(
+                "INSERT INTO campaigns (id, profile_id, media_group_id, status) VALUES (?, ?, ?, 'publishing')",
+                (gid, self.profile.id, gid),
+            )
+            conn.execute(
+                "INSERT INTO campaign_posts (id, campaign_id, platform, account_ids_json)"
+                " VALUES (?, ?, 'telegram', '[]')",
+                (post_id, gid),
+            )
+            conn.execute(
+                "INSERT INTO publish_jobs (id, idempotency_key, platform, payload_json)"
+                " VALUES (?, ?, 'telegram', '{}')",
+                (job_id, f"k{job_id}"),
+            )
+            conn.execute(
+                "INSERT INTO publish_job_targets (job_id, account_ref, file_ref, status)"
+                " VALUES (?, ?, ?, ?)",
+                (job_id, account_ref, f"campaign_post:{post_id}", status),
+            )
+            conn.commit()
+
+    def test_same_file_in_a_new_media_group_is_still_a_duplicate(self):
+        # Group 810 queued for account 127.
+        self._seed_group(810, 810, 810, "account:127", "pending")
+        # A RETRY: same file_record 701, but a brand-new group 811 and campaign.
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO media_groups (id, name, notes, status) VALUES (811, 'g2', '', 'ready')"
+            )
+            conn.execute(
+                "INSERT INTO media_group_items (media_group_id, file_record_id, role, sort_order)"
+                " VALUES (811, 701, 'video', 0)"
+            )
+            conn.commit()
+        self.assertTrue(
+            publish_orchestrator._already_queued_for_media(
+                127, 811, db_path=self.db_path
+            ),
+            "the SAME file re-submitted under a new media group must be caught",
+        )
+
+    def test_a_genuinely_different_file_is_not_blocked(self):
+        self._seed_group(820, 820, 820, "account:127", "pending")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO file_records (id, filename, file_path) VALUES (702, 'other.mp4', 'other.mp4')"
+            )
+            conn.execute(
+                "INSERT INTO media_groups (id, name, notes, status) VALUES (821, 'g3', '', 'ready')"
+            )
+            conn.execute(
+                "INSERT INTO media_group_items (media_group_id, file_record_id, role, sort_order)"
+                " VALUES (821, 702, 'video', 0)"
+            )
+            conn.commit()
+        self.assertFalse(
+            publish_orchestrator._already_queued_for_media(
+                127, 821, db_path=self.db_path
+            )
+        )
+
+    def test_same_file_on_a_different_account_is_allowed(self):
+        self._seed_group(830, 830, 830, "account:127", "pending")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO media_groups (id, name, notes, status) VALUES (831, 'g4', '', 'ready')"
+            )
+            conn.execute(
+                "INSERT INTO media_group_items (media_group_id, file_record_id, role, sort_order)"
+                " VALUES (831, 701, 'video', 0)"
+            )
+            conn.commit()
+        self.assertFalse(
+            publish_orchestrator._already_queued_for_media(
+                999, 831, db_path=self.db_path
+            )
+        )
+
+    def test_sharing_one_file_with_a_different_set_is_not_blocked(self):
+        # Queued group 840 holds only file 701.
+        self._seed_group(840, 840, 840, "account:127", "pending")
+        # A genuinely new submission reuses 701 but also adds 702. The file SET
+        # differs, so "shares any one file" must not treat it as a retry.
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO file_records (id, filename, file_path) VALUES (702, 'b.mp4', 'b.mp4')"
+            )
+            conn.execute(
+                "INSERT INTO media_groups (id, name, notes, status) VALUES (841, 'g5', '', 'ready')"
+            )
+            conn.executemany(
+                "INSERT INTO media_group_items (media_group_id, file_record_id, role, sort_order)"
+                " VALUES (841, ?, 'video', ?)",
+                [(701, 0), (702, 1)],
+            )
+            conn.commit()
+        self.assertFalse(
+            publish_orchestrator._already_queued_for_media(
+                127, 841, db_path=self.db_path
+            ),
+            "a different file set must not be blocked just for sharing one file",
+        )
+
+    def test_same_set_in_a_different_order_is_still_a_duplicate(self):
+        # Queued group 850 holds {701, 702}.
+        self._seed_group(850, 850, 850, "account:127", "pending")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO file_records (id, filename, file_path) VALUES (702, 'b.mp4', 'b.mp4')"
+            )
+            conn.execute(
+                "INSERT INTO media_group_items (media_group_id, file_record_id, role, sort_order)"
+                " VALUES (850, 702, 'video', 1)"
+            )
+            conn.commit()
+        # A retry group carries the same files in the opposite order.
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO media_groups (id, name, notes, status) VALUES (851, 'g6', '', 'ready')"
+            )
+            conn.executemany(
+                "INSERT INTO media_group_items (media_group_id, file_record_id, role, sort_order)"
+                " VALUES (851, ?, 'video', ?)",
+                [(702, 0), (701, 1)],
+            )
+            conn.commit()
+        self.assertTrue(
+            publish_orchestrator._already_queued_for_media(
+                127, 851, db_path=self.db_path
+            ),
+            "the same file set in any order must be treated as a duplicate",
+        )

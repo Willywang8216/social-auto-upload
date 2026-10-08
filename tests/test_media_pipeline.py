@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -185,6 +186,38 @@ class WatermarkFontTests(unittest.TestCase):
             )
             self.assertEqual(result, output)
             self.assertTrue(output.exists())
+
+
+class GeneratedMediaRootIsolationTests(unittest.TestCase):
+    """The suite must never write into the shared ``<repo>/generated`` tree.
+
+    ``tests/conftest.py`` forces ``SAU_GENERATED_MEDIA_ROOT`` to a temp dir
+    before ``media_pipeline`` is imported. The real root is a bind mount the
+    (root) production container writes to, so on the host it is frequently
+    root-owned and unwritable by the test user; relying on it made campaign
+    media-prep tests fail with ``PermissionError`` and killed loguru's sink.
+    """
+
+    def test_root_is_redirected_to_a_writable_temp_dir(self) -> None:
+        env_root = os.environ.get("SAU_GENERATED_MEDIA_ROOT")
+        self.assertIsNotNone(env_root)
+        self.assertEqual(str(media_pipeline.GENERATED_MEDIA_ROOT), env_root)
+        repo_default = Path(media_pipeline.BASE_DIR) / "generated" / "campaigns"
+        self.assertNotEqual(media_pipeline.GENERATED_MEDIA_ROOT, repo_default)
+        self.assertTrue(
+            Path(media_pipeline.GENERATED_MEDIA_ROOT)
+            .resolve()
+            .is_relative_to(Path(tempfile.gettempdir()).resolve())
+        )
+
+    def test_build_campaign_workspace_writes_under_the_temp_root(self) -> None:
+        workspace = media_pipeline.build_campaign_workspace(987654321)
+        self.addCleanup(shutil.rmtree, workspace, True)
+        self.assertTrue(workspace.is_dir())
+        self.assertEqual(workspace.parent, media_pipeline.GENERATED_MEDIA_ROOT)
+        probe = workspace / "probe.txt"
+        probe.write_text("ok", encoding="utf-8")
+        self.assertEqual(probe.read_text(encoding="utf-8"), "ok")
 
 
 if __name__ == "__main__":

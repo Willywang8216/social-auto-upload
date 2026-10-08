@@ -66,25 +66,72 @@ def _already_queued_for_media(
     same Telegram account 4-5 times, turning 356 distinct files into 662
     targets and pushing one account's horizon to 2027-04.
 
-    Identity is the media *group*, not the filename: two intentional posts of
-    the same asset would share a group only when they truly are one submission.
-    Terminal states (succeeded/failed/cancelled) do not count, so a genuine
-    re-publish after a failure still works.
+    Identity is matched on **two** keys:
+
+    1. the media *group* - an exact resubmit of one submission;
+    2. the underlying **file-record set** - because a retried submit builds a
+       NEW media group around the SAME files, so a group-only check never
+       matched. That blind spot is measurable: file_record 1142 appeared in 6
+       distinct media groups and produced 103 duplicate pending jobs for one
+       media+platform. A retrying client (the 499 loop) is exactly how that
+       happened.
+
+    The file match is a *set* comparison, not "shares any one file". Sharing a
+    single asset is common and legitimate (a multi-media post that reuses one
+    clip, or a single-media split of a larger group), so requiring the whole
+    group's file set to be identical is what distinguishes a retry from a
+    genuine new submission. Two intentional posts of the same asset are still
+    allowed when they use different accounts, and terminal states
+    (succeeded/failed/cancelled) do not count, so a genuine re-publish after a
+    failure still works.
     """
     try:
         with sqlite3.connect(db_path) as conn:
             row = conn.execute(
                 """
+                WITH candidate AS (
+                    SELECT DISTINCT file_record_id
+                    FROM media_group_items
+                    WHERE media_group_id = :media_group_id
+                )
                 SELECT 1
                 FROM publish_job_targets t
                 JOIN campaign_posts cp ON ('campaign_post:' || cp.id) = t.file_ref
                 JOIN campaigns c ON c.id = cp.campaign_id
-                WHERE t.account_ref = ?
-                  AND c.media_group_id = ?
+                WHERE t.account_ref = :account_ref
                   AND t.status IN ('pending', 'retrying', 'running')
+                  AND (
+                        -- (1) exact resubmit of the same submission
+                        c.media_group_id = :media_group_id
+                        -- (2) a retry, which rebuilds the group around the
+                        -- same files: require the *whole* file-record set to
+                        -- match (both directions), never just one shared file.
+                        OR (
+                            EXISTS (SELECT 1 FROM candidate)
+                            AND NOT EXISTS (
+                                SELECT 1 FROM candidate cand
+                                WHERE NOT EXISTS (
+                                    SELECT 1 FROM media_group_items queued_item
+                                    WHERE queued_item.media_group_id = c.media_group_id
+                                      AND queued_item.file_record_id = cand.file_record_id
+                                )
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1 FROM media_group_items queued_item
+                                WHERE queued_item.media_group_id = c.media_group_id
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM candidate cand
+                                      WHERE cand.file_record_id = queued_item.file_record_id
+                                  )
+                            )
+                        )
+                  )
                 LIMIT 1
                 """,
-                (f"account:{int(account_id)}", int(media_group_id)),
+                {
+                    "account_ref": f"account:{int(account_id)}",
+                    "media_group_id": int(media_group_id),
+                },
             ).fetchone()
         return row is not None
     except Exception:  # noqa: BLE001 - a lookup miss must never block a publish
