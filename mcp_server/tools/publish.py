@@ -53,8 +53,10 @@ def register(mcp: FastMCP) -> None:
         tiktok_post_settings: dict[str, dict[str, Any]] | None = None,
         db_path: str | None = None,
     ) -> dict[str, Any]:
+        from myUtils import campaign_prep
         from sau_backend import (
             _artifact_payloads_for_platform,
+            _async_prep_enabled,
             _ensure_file_record_for_path,
             _generate_account_draft,
             _job_to_payload,
@@ -62,7 +64,7 @@ def register(mcp: FastMCP) -> None:
         )
 
         try:
-            result = publish_orchestrator.submit_publish(
+            common = dict(
                 profile_ids=[int(p) for p in profile_ids],
                 selected_account_ids=[int(v) for v in selected_account_ids]
                 if selected_account_ids
@@ -74,14 +76,28 @@ def register(mcp: FastMCP) -> None:
                 account_drafts=account_drafts or {},
                 tiktok_post_settings=tiktok_post_settings or {},
                 db_path=resolve_db_path(db_path),
-                prepare_artifacts=_prepare_campaign_media_artifacts,
-                generate_account_draft=_generate_account_draft,
-                ensure_file_record_for_path=_ensure_file_record_for_path,
-                artifact_payloads_for_platform=_artifact_payloads_for_platform,
-                job_to_payload=_job_to_payload,
             )
+            if _async_prep_enabled():
+                # Same opt-in async contract as POST /publish-center/submit:
+                # campaign(s) created in ``preparing`` with no jobs yet.
+                result = campaign_prep.submit_publish_async(
+                    **common,
+                    ensure_file_record_for_path=_ensure_file_record_for_path,
+                )
+                status = "preparing"
+            else:
+                result = publish_orchestrator.submit_publish(
+                    **common,
+                    prepare_artifacts=_prepare_campaign_media_artifacts,
+                    generate_account_draft=_generate_account_draft,
+                    ensure_file_record_for_path=_ensure_file_record_for_path,
+                    artifact_payloads_for_platform=_artifact_payloads_for_platform,
+                    job_to_payload=_job_to_payload,
+                )
+                status = "queued" if result.jobs else "needs_review"
             return {
                 "campaignIds": result.campaign_ids,
+                "status": status,
                 "jobs": result.jobs,
                 "skipped": result.skipped,
             }

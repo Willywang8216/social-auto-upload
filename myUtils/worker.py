@@ -25,6 +25,7 @@ import json
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +33,8 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from utils.conf_defaults import BASE_DIR
 from myUtils import jobs
+from myUtils import campaign_prep
+from myUtils import campaigns as campaign_store
 from myUtils import media_remote_storage
 from myUtils import media_pipeline
 from myUtils import profiles as profile_registry
@@ -139,6 +142,11 @@ class Executor(Protocol):
         ...
 
 
+# A prep runner takes a claimed campaign + db path and returns the enqueue
+# result (or raises). It may be sync (ffmpeg is blocking) or async.
+PrepRunnerCallable = Callable[["campaign_store.Campaign", Path], Any]
+
+
 @dataclass(slots=True)
 class RetryPolicy:
     max_attempts: int = 3
@@ -158,6 +166,11 @@ class WorkerConfig:
     batch_size: int = 4
     max_concurrent: int = MAX_CONCURRENT_BROWSERS
     retry: RetryPolicy = None  # type: ignore[assignment]
+    # Async prep queue: how many campaigns to claim per tick, how many may run
+    # concurrently (ffmpeg is heavy, so default 1), and the stale-lease window.
+    prep_batch_size: int = 1
+    prep_max_concurrent: int = 1
+    prep_lease_minutes: int = 120
 
     def __post_init__(self) -> None:
         if self.retry is None:
@@ -207,6 +220,7 @@ class PublishWorker:
         *,
         config: WorkerConfig | None = None,
         db_path: Path | None = None,
+        prep_runner: PrepRunnerCallable | None = None,
     ) -> None:
         self._executor = executor
         self._config = config or WorkerConfig()
@@ -214,9 +228,16 @@ class PublishWorker:
         self._concurrency = AccountConcurrency(self._config.max_concurrent)
         self._stop = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
+        self._prep_tasks: set[asyncio.Task] = set()
         self._maintenance_counter: int = 0
         self._stale_sweep_counter: int = 0
+        self._prep_sweep_counter: int = 0
         self._maintenance_task: asyncio.Task | None = None
+        self._prep_runner = prep_runner
+        # Stable identity for the lifetime of this worker; recorded in the
+        # campaign's ``_prepLease`` so a terminal transition can verify it
+        # still owns the claim.
+        self._prep_owner = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
     def stop(self) -> None:
         self._stop.set()
@@ -234,7 +255,7 @@ class PublishWorker:
 
         while not self._stop.is_set():
             await self._tick()
-            if not self._tasks and not self._has_pending():
+            if not self._tasks and not self._prep_tasks and not self._has_pending():
                 await self._finish_maintenance()
                 return
             await asyncio.sleep(self._config.poll_interval)
@@ -259,17 +280,34 @@ class PublishWorker:
 
     async def _finish_shutdown(self) -> None:
         await self._finish_maintenance()
-        while self._tasks:
-            await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
-            done = {task for task in self._tasks if task.done()}
-            self._tasks.difference_update(done)
+        while self._tasks or self._prep_tasks:
+            pending = tuple(self._tasks | self._prep_tasks)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            self._tasks.difference_update(
+                {task for task in self._tasks if task.done()}
+            )
+            self._prep_tasks.difference_update(
+                {task for task in self._prep_tasks if task.done()}
+            )
 
 
     def _has_pending(self) -> bool:
         # Only targets that are due *now* count. A target scheduled for later
         # must not keep drain() spinning; the backend's publish scheduler
         # re-triggers a drain once it becomes claimable.
-        return jobs.has_claimable_targets(db_path=self._db_path)
+        if jobs.has_claimable_targets(db_path=self._db_path):
+            return True
+        # A campaign waiting for prep is also pending work; without this a
+        # --once drain would exit before preparing it. Only *claimable* ones
+        # count, so a campaign leased by another live worker cannot spin this
+        # drain forever.
+        if self._prep_runner is not None:
+            return campaign_store.has_claimable_preparing_campaigns(
+                stale_after_minutes=self._config.prep_lease_minutes,
+                db_path=self._db_path,
+            )
+        return False
 
     # -------------------------------------------------------------------------
     # Self-maintenance — OAuth token refresh for structured accounts
@@ -704,6 +742,15 @@ class PublishWorker:
             if exc is not None:
                 _logger.error(f"worker task crashed: {exc!r}")
 
+        # Reap finished prep tasks the same way. ``_run_campaign_prep`` owns its
+        # own campaign transition, so here we only surface a crash.
+        done_preps = {task for task in self._prep_tasks if task.done()}
+        for task in done_preps:
+            self._prep_tasks.discard(task)
+            exc = task.exception()
+            if exc is not None:
+                _logger.error(f"campaign prep task crashed: {exc!r}")
+
         # Self-maintenance: scan and refresh stale OAuth accounts on a slow cadence
         # (~every _MAINTENANCE_TICK_INTERVAL ticks = 5 min at 1s poll interval).
         self._maintenance_counter += 1
@@ -733,6 +780,11 @@ class PublishWorker:
             except Exception:
                 _logger.exception("stale-running sweep failed")
 
+        # Prep queue: claim campaigns still in ``preparing`` and run their
+        # artifact prep + draft/enqueue off the request path.
+        if self._prep_runner is not None:
+            await self._prep_tick()
+
         in_flight = self._concurrency.in_flight_accounts()
         slots_free = self._config.max_concurrent - len(self._tasks)
         if slots_free <= 0:
@@ -746,6 +798,103 @@ class PublishWorker:
         for target in claimed:
             task = asyncio.create_task(self._run_target(target))
             self._tasks.add(task)
+
+    async def _prep_tick(self) -> None:
+        """Claim and prepare campaigns left in ``preparing``.
+
+        Kept separate from target claiming: prep is ffmpeg/LLM-heavy, so it is
+        bounded by its own ``prep_max_concurrent`` rather than the browser
+        concurrency budget. The stale-lease sweep runs on the same cadence as
+        the target sweep and is what stops a crashed prep from hanging forever.
+        """
+        self._prep_sweep_counter += 1
+        if self._prep_sweep_counter >= self._STALE_SWEEP_TICK_INTERVAL:
+            self._prep_sweep_counter = 0
+            try:
+                recovered = campaign_store.requeue_stale_preparing(
+                    older_than_minutes=self._config.prep_lease_minutes,
+                    max_attempts=self._config.retry.max_attempts,
+                    db_path=self._db_path,
+                )
+                if recovered:
+                    _logger.warning(
+                        f"worker recovered {recovered} stale preparing campaign(s)"
+                    )
+            except Exception:
+                _logger.exception("stale-preparing sweep failed")
+
+        free = self._config.prep_max_concurrent - len(self._prep_tasks)
+        if free <= 0:
+            return
+        for _ in range(min(self._config.prep_batch_size, free)):
+            campaign = campaign_store.claim_next_preparing_campaign(
+                owner=self._prep_owner,
+                stale_after_minutes=self._config.prep_lease_minutes,
+                db_path=self._db_path,
+            )
+            if campaign is None:
+                break
+            self._prep_tasks.add(
+                asyncio.create_task(self._run_campaign_prep(campaign))
+            )
+
+    async def _run_campaign_prep(
+        self, campaign: "campaign_store.Campaign"
+    ) -> None:
+        """Run one claimed campaign's prep + finalize, then record the outcome."""
+        _logger.info(
+            f"campaign {campaign.id} claimed for prep (owner={self._prep_owner})"
+        )
+        try:
+            # ffmpeg is blocking; keep it off the event loop. A runner may also
+            # be an async callable, in which case to_thread returns the
+            # coroutine and we await it here.
+            result = await asyncio.to_thread(
+                self._prep_runner, campaign, self._db_path
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            result = result or {}
+            jobs = result.get("jobs") or []
+            now = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(
+                timespec="seconds"
+            )
+            transitioned = campaign_store.finish_campaign_prep(
+                campaign.id,
+                owner=self._prep_owner,
+                status=(
+                    campaign_store.CAMPAIGN_PUBLISHING
+                    if jobs
+                    else campaign_store.CAMPAIGN_NEEDS_REVIEW
+                ),
+                prepared_at=now,
+                published_at=now if jobs else None,
+                last_error=None if jobs else "No publishable posts queued",
+                db_path=self._db_path,
+            )
+            if transitioned:
+                _logger.info(
+                    f"campaign {campaign.id} prepared: {len(jobs)} job(s) queued"
+                )
+            else:
+                _logger.warning(
+                    f"campaign {campaign.id} prep finished but its lease was "
+                    "lost to another worker; result discarded"
+                )
+        except Exception as exc:  # noqa: BLE001
+            _logger.exception(f"campaign {campaign.id} prep failed")
+            try:
+                campaign_store.finish_campaign_prep(
+                    campaign.id,
+                    owner=self._prep_owner,
+                    status=campaign_store.CAMPAIGN_NEEDS_REVIEW,
+                    last_error=f"prep failed: {exc}",
+                    db_path=self._db_path,
+                )
+            except Exception:
+                _logger.exception(
+                    f"campaign {campaign.id} could not record its prep failure"
+                )
 
     async def _run_target(self, target: jobs.Target) -> None:
         job = jobs.get_job(target.job_id, db_path=self._db_path)
@@ -2405,13 +2554,24 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
 
 def run_worker_drain(executor: Executor | None = None,
                      *, config: WorkerConfig | None = None,
-                     db_path: Path | None = None) -> None:
-    """Block-until-empty helper used by the synchronous Flask path."""
+                     db_path: Path | None = None,
+                     prep_runner: PrepRunnerCallable | bool | None = None) -> None:
+    """Block-until-empty helper used by the synchronous Flask path.
 
+    Prep is enabled by default: this drain is the off-request worker that takes
+    over campaigns left in ``preparing``. Pass ``prep_runner=False`` to disable
+    it and only drain already-queued publish targets.
+    """
+
+    if prep_runner is None:
+        prep_runner = campaign_prep.make_default_prep_runner()
+    elif prep_runner is False:
+        prep_runner = None
     worker = PublishWorker(
         executor or default_executor,
         config=config,
         db_path=db_path,
+        prep_runner=prep_runner,
     )
     asyncio.run(worker.drain())
 
@@ -2535,7 +2695,12 @@ def _cli(argv: list[str] | None = None) -> int:
         max_concurrent=args.max_concurrent,
         retry=RetryPolicy(max_attempts=args.max_attempts),
     )
-    worker = PublishWorker(default_executor, config=config, db_path=args.db_path)
+    worker = PublishWorker(
+        default_executor,
+        config=config,
+        db_path=args.db_path,
+        prep_runner=campaign_prep.make_default_prep_runner(),
+    )
 
     mode = "once" if args.once else "forever"
     _logger.info(

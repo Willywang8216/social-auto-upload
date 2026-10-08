@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import importlib.util
+import os
 import sqlite3
 import sys
 import tempfile
@@ -550,6 +551,120 @@ class PublishCenterSubmitTests(unittest.TestCase):
             options={"watermark": False, "intro": False, "outro": False, "sfwFlag": "sfw"},
         )
         self.assertEqual(resp.get_json()["data"]["jobs"], [])
+
+    # --- Async prep switch (SAU_ASYNC_PREP) ---
+
+    def _submit_async_payload(self, profile, account, filename="SFW async.mp4"):
+        return {
+            "profileIds": [profile.id],
+            "selectedAccountIds": [account.id],
+            "mediaFilePaths": [filename],
+            "brief": "async post",
+            "options": {"watermark": False, "intro": False, "outro": False},
+            "schedule": {"publishNow": True},
+            "accountDrafts": {},
+        }
+
+    def test_async_prep_off_keeps_the_synchronous_submit(self):
+        profile, account = self._create_profile_and_account()
+        file_record_id = self._insert_file_record()
+        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "0"}), \
+             patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={}), \
+             patch.object(self.sau_backend, "_generate_account_draft", return_value={
+                 "message": "sync post", "hashtags": [], "firstComment": "",
+             }), \
+             patch.object(self.sau_backend, "_ensure_file_record_for_path", return_value=file_record_id), \
+             patch.object(self.sau_backend, "_artifact_payloads_for_platform", return_value=[]), \
+             patch.object(self.sau_backend, "_job_to_payload", side_effect=lambda j: {"id": j.id, "platform": j.platform, "totalTargets": 1}), \
+             patch.object(self.sau_backend, "_start_worker_drain_thread") as drain, \
+             patch.object(self.sau_backend.campaign_prep, "submit_publish_async") as async_submit:
+            resp = self.client.post("/publish-center/submit", json={
+                "profileIds": [profile.id],
+                "selectedAccountIds": [account.id],
+                "mediaFilePaths": ["test-video.mp4"],
+                "brief": "sync post",
+                "options": {"watermark": False, "intro": False, "outro": False},
+                "schedule": {"publishNow": True},
+                "accountDrafts": {},
+            })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()["data"]
+        self.assertGreaterEqual(len(data["jobs"]), 1)
+        # The synchronous response shape is unchanged: no async ``status`` key.
+        self.assertNotIn("status", data)
+        async_submit.assert_not_called()
+        drain.assert_called_once()
+
+    def test_async_prep_on_returns_preparing_without_running_prep(self):
+        profile, account = self._create_profile_and_account()
+        file_record_id = self._insert_file_record()
+        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "1"}), \
+             patch.object(self.sau_backend, "_ensure_file_record_for_path", return_value=file_record_id), \
+             patch.object(self.sau_backend, "_prepare_campaign_media_artifacts") as prep, \
+             patch.object(self.sau_backend, "_generate_account_draft") as draft, \
+             patch.object(self.sau_backend, "_start_worker_drain_thread") as drain, \
+             patch.object(self.sau_backend, "_notify_tg_review") as tg:
+            resp = self.client.post(
+                "/publish-center/submit",
+                json=self._submit_async_payload(profile, account),
+            )
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        data = resp.get_json()["data"]
+        self.assertEqual(data["status"], "preparing")
+        self.assertEqual(data["jobs"], [])
+        self.assertEqual(len(data["campaignIds"]), 1)
+        # Neither the heavy prep nor draft generation may run in the request.
+        prep.assert_not_called()
+        draft.assert_not_called()
+        # Telegram cards are deferred to the worker once jobs exist.
+        tg.assert_not_called()
+        drain.assert_called_once()
+
+        from myUtils import campaigns as campaign_store
+
+        campaign = campaign_store.get_campaign(
+            data["campaignIds"][0], db_path=self.db_path
+        )
+        self.assertEqual(campaign.status, campaign_store.CAMPAIGN_PREPARING)
+        request = campaign_store.get_prep_request(campaign)
+        self.assertIsNotNone(request)
+        self.assertEqual(request["brief"], "async post")
+        self.assertEqual(request["schedule"], {"publishNow": True})
+
+    def test_async_prep_on_starts_drain_with_empty_jobs(self):
+        # Regression: the old ``if result.jobs`` guard skipped the drain when
+        # async prep returned a campaign with no jobs, so prep never started.
+        profile, account = self._create_profile_and_account()
+        file_record_id = self._insert_file_record()
+        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "1"}), \
+             patch.object(self.sau_backend, "_ensure_file_record_for_path", return_value=file_record_id), \
+             patch.object(self.sau_backend, "_start_worker_drain_thread") as drain:
+            resp = self.client.post(
+                "/publish-center/submit",
+                json=self._submit_async_payload(profile, account),
+            )
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["data"]["jobs"], [])
+        drain.assert_called_once()
+
+
+class AsyncPrepSwitchTests(unittest.TestCase):
+    def test_switch_parses_truthy_values_only(self):
+        import sau_backend
+
+        for value in ("1", "true", "TRUE", "yes", "YES", "on", "On"):
+            with self.subTest(value=value), patch.dict(os.environ, {"SAU_ASYNC_PREP": value}):
+                self.assertTrue(sau_backend._async_prep_enabled())
+        for value in ("", "0", "false", "no", "off", "maybe"):
+            with self.subTest(value=value), patch.dict(os.environ, {"SAU_ASYNC_PREP": value}):
+                self.assertFalse(sau_backend._async_prep_enabled())
+
+    def test_switch_defaults_off_when_unset(self):
+        import sau_backend
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SAU_ASYNC_PREP", None)
+            self.assertFalse(sau_backend._async_prep_enabled())
 
 
 if __name__ == "__main__":

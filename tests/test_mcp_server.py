@@ -346,6 +346,50 @@ class PublishToolTests(_McpTestCase):
         )
         self.assertEqual(out["error"], "not_found")
 
+    def test_publish_submit_status_is_preparing_under_async(self) -> None:
+        # Parity with POST /publish-center/submit: the MCP result carries the
+        # async state so a client can tell "preparing" from "nothing queued".
+        from unittest.mock import patch
+
+        from myUtils import publish_orchestrator
+
+        profile, _ = self._seed()
+        fake_result = publish_orchestrator.SubmitResult(
+            campaign_ids=[42], jobs=[], skipped=[]
+        )
+        with patch("sau_backend._async_prep_enabled", return_value=True), \
+                patch("sau_backend.campaign_prep.submit_publish_async", return_value=fake_result):
+            out = self._call(
+                tool="publish_submit",
+                profile_ids=[profile["id"]],
+                media_file_paths=["x.mp4"],
+                brief="hi",
+                db_path=str(self.db_path),
+            )
+        self.assertEqual(out["status"], "preparing")
+        self.assertEqual(out["campaignIds"], [42])
+        self.assertEqual(out["jobs"], [])
+
+    def test_publish_submit_status_is_queued_on_sync_path(self) -> None:
+        from unittest.mock import patch
+
+        from myUtils import publish_orchestrator
+
+        profile, _ = self._seed()
+        fake_result = publish_orchestrator.SubmitResult(
+            campaign_ids=[1], jobs=[{"id": 1}], skipped=[]
+        )
+        with patch("sau_backend._async_prep_enabled", return_value=False), \
+                patch("myUtils.publish_orchestrator.submit_publish", return_value=fake_result):
+            out = self._call(
+                tool="publish_submit",
+                profile_ids=[profile["id"]],
+                media_file_paths=["x.mp4"],
+                brief="hi",
+                db_path=str(self.db_path),
+            )
+        self.assertEqual(out["status"], "queued")
+
     def test_publish_preview_returns_profiles_envelope(self) -> None:
         profile, _ = self._seed()
         out = self._call(

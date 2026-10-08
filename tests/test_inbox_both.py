@@ -9,6 +9,7 @@ real DB or start jobs.
 from __future__ import annotations
 
 import importlib.util
+import os
 import unittest
 from unittest.mock import patch
 
@@ -146,6 +147,150 @@ class InboxPublishRouteTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.get_json()["code"], 404)
         app.config["SECURITY_POLICY"] = original_policy
+
+    def test_publish_endpoint_starts_drain_when_campaign_has_no_jobs(self):
+        # Regression for async prep: the old ``if result.jobs`` guard skipped
+        # the drain when a campaign was created with no jobs yet, so prep was
+        # never picked up. ``campaignIds`` must also arm the drain.
+        from sau_backend import app
+
+        def fake_submit_publish(**_kwargs):
+            return SimpleNamespace(campaign_ids=[10], jobs=[])
+
+        with patch("sau_backend.publish_orchestrator.submit_publish", side_effect=fake_submit_publish):
+            client = app.test_client()
+            from myUtils.security import SecurityPolicy
+            original_policy = app.config["SECURITY_POLICY"]
+            app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
+            with patch("myUtils.inbox_ops.list_items") as listed, \
+                    patch("sau_backend._start_worker_drain_thread") as drained, \
+                    patch("myUtils.inbox_drive.remote_path_for_item", return_value="both/video/sfw-demo.mp4"), \
+                    patch("myUtils.inbox_drive.stage_remote_media", return_value="_inbox_cache/demo.mp4"):
+                listed.return_value = {"ready": [dict(BOTH_ITEM)], "pending": [], "quarantined": []}
+                resp = client.post("/api/inbox/items/item-both-1/publish", json={})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["data"]["jobs"], [])
+        self.assertEqual(resp.get_json()["data"]["campaignIds"], [10])
+        drained.assert_called_once()
+        app.config["SECURITY_POLICY"] = original_policy
+
+    def test_publish_endpoint_async_prep_returns_preparing(self):
+        from sau_backend import app
+
+        def fake_async_submit(**_kwargs):
+            return SimpleNamespace(campaign_ids=[7], jobs=[], skipped=[])
+
+        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "1"}), \
+                patch("sau_backend.campaign_prep.submit_publish_async", side_effect=fake_async_submit), \
+                patch("sau_backend.publish_orchestrator.submit_publish") as sync_submit:
+            client = app.test_client()
+            from myUtils.security import SecurityPolicy
+            original_policy = app.config["SECURITY_POLICY"]
+            app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
+            with patch("myUtils.inbox_ops.list_items") as listed, \
+                    patch("sau_backend._start_worker_drain_thread") as drained, \
+                    patch("myUtils.inbox_drive.remote_path_for_item", return_value="both/video/sfw-demo.mp4"), \
+                    patch("myUtils.inbox_drive.stage_remote_media", return_value="_inbox_cache/demo.mp4"):
+                listed.return_value = {"ready": [dict(BOTH_ITEM)], "pending": [], "quarantined": []}
+                resp = client.post("/api/inbox/items/item-both-1/publish", json={})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        data = resp.get_json()["data"]
+        self.assertEqual(data["status"], "preparing")
+        self.assertEqual(data["jobs"], [])
+        self.assertEqual(data["campaignIds"], [7])
+        sync_submit.assert_not_called()
+        drained.assert_called_once()
+        app.config["SECURITY_POLICY"] = original_policy
+
+
+@unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
+class InboxPublishStagingCleanupTest(unittest.TestCase):
+    """The staged Drive source must survive an async submit.
+
+    Once prep is asynchronous ``submit_publish`` returns ``jobs=[]`` while the
+    campaign is still ``preparing``. The cleanup must key on "was a campaign
+    created?", never on "were jobs returned?", otherwise the only local copy
+    is deleted before prep ever reads it (silent data loss).
+    """
+
+    def _post_publish(self, *, submit_result=None, submit_side_effect=None):
+        import tempfile
+        from pathlib import Path
+
+        from sau_backend import app
+        import sau_backend
+
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        staged_rel = "_inbox_cache/demo.mp4"
+        staged_abs = Path(tmpdir.name) / "videoFile" / staged_rel
+        staged_abs.parent.mkdir(parents=True, exist_ok=True)
+        staged_abs.write_bytes(b"staged-media")
+
+        submit_kwargs = (
+            {"side_effect": submit_side_effect}
+            if submit_side_effect is not None
+            else {"return_value": submit_result}
+        )
+
+        client = app.test_client()
+        from myUtils.security import SecurityPolicy
+        original_policy = app.config["SECURITY_POLICY"]
+        app.config["SECURITY_POLICY"] = SecurityPolicy(
+            tokens=frozenset(), cors_origins=("http://localhost:5173",)
+        )
+        try:
+            with patch.object(sau_backend, "BASE_DIR", tmpdir.name), \
+                    patch("sau_backend.publish_orchestrator.submit_publish", **submit_kwargs), \
+                    patch("myUtils.inbox_ops.list_items") as listed, \
+                    patch("sau_backend._start_worker_drain_thread"), \
+                    patch("sau_backend._notify_tg_review"), \
+                    patch("myUtils.inbox_drive.remote_path_for_item",
+                          return_value="both/video/sfw-demo.mp4"), \
+                    patch("myUtils.inbox_drive.stage_remote_media",
+                          return_value=staged_rel):
+                listed.return_value = {
+                    "ready": [dict(BOTH_ITEM)], "pending": [], "quarantined": []
+                }
+                resp = client.post("/api/inbox/items/item-both-1/publish", json={})
+        finally:
+            app.config["SECURITY_POLICY"] = original_policy
+        return resp, staged_abs
+
+    def test_async_submit_with_campaign_but_no_jobs_keeps_staged_file(self):
+        resp, staged_abs = self._post_publish(
+            submit_result=SimpleNamespace(campaign_ids=[42], jobs=[])
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["data"]["campaignIds"], [42])
+        self.assertEqual(resp.get_json()["data"]["jobs"], [])
+        self.assertTrue(
+            staged_abs.exists(),
+            "async submit (campaign created, jobs still empty) must not delete "
+            "the staged source",
+        )
+
+    def test_failed_submit_without_campaign_discards_staged_file(self):
+        resp, staged_abs = self._post_publish(
+            submit_result=SimpleNamespace(campaign_ids=[], jobs=[], skipped=[])
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertFalse(
+            staged_abs.exists(),
+            "a submission that created no campaign genuinely failed -> discard",
+        )
+
+    def test_lookup_error_after_orchestrator_invoked_keeps_staged_file(self):
+        def boom(**_kwargs):
+            raise LookupError("profile 3 not found")
+
+        resp, staged_abs = self._post_publish(submit_side_effect=boom)
+        self.assertEqual(resp.status_code, 404)
+        self.assertTrue(
+            staged_abs.exists(),
+            "a failure mid-orchestration may leave a campaign referencing the "
+            "staged source, so it must not be deleted",
+        )
 
 
 from types import SimpleNamespace  # noqa: E402

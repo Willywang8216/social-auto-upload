@@ -6,7 +6,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
@@ -27,6 +27,19 @@ CAMPAIGN_POST_READY = "ready"
 CAMPAIGN_POST_QUEUED = "queued"
 CAMPAIGN_POST_PUBLISHED = "published"
 CAMPAIGN_POST_FAILED = "failed"
+
+# Async prep-queue bookkeeping. It lives inside ``campaigns.metadata_json`` so
+# no schema migration is required: the submit payload is stored under
+# ``prepRequest`` and the worker's in-flight lease under ``_prepLease`` (the
+# attempt counter is ``_prepAttempts``). See ``logs/async-prep-queue-notes.md``.
+PREP_REQUEST_KEY = "prepRequest"
+PREP_LEASE_KEY = "_prepLease"
+PREP_ATTEMPTS_KEY = "_prepAttempts"
+
+# A prep may legitimately run for many minutes (ffmpeg). The lease window is
+# deliberately generous so it never fires on a slow-but-alive prep; it only
+# recovers a worker that died mid-run. Mirrors jobs.requeue_stale_running.
+DEFAULT_PREP_LEASE_MINUTES = 120
 
 _UNSET = object()
 
@@ -364,6 +377,268 @@ def update_campaign(
         )
         conn.commit()
     return get_campaign(campaign_id, db_path=db_path)
+
+
+def _parse_metadata(raw: str | None) -> dict:
+    """Best-effort decode of a campaign's ``metadata_json`` column."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _lease_is_live(metadata: dict, *, cutoff: str) -> bool:
+    lease = metadata.get(PREP_LEASE_KEY)
+    if not isinstance(lease, dict):
+        return False
+    claimed_at = str(lease.get("claimedAt") or "")
+    return bool(claimed_at) and claimed_at >= cutoff
+
+
+def get_prep_request(campaign: Campaign) -> dict | None:
+    """The persisted submit payload for a campaign, or ``None`` for legacy rows."""
+    request = (campaign.metadata or {}).get(PREP_REQUEST_KEY)
+    return request if isinstance(request, dict) else None
+
+
+def has_preparing_campaigns(*, db_path: Path | None = None) -> bool:
+    """Cheap existence check for any ``preparing`` campaign (leased or not)."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM campaigns WHERE status = ? LIMIT 1",
+            (CAMPAIGN_PREPARING,),
+        ).fetchone()
+    return row is not None
+
+
+def has_claimable_preparing_campaigns(
+    *,
+    stale_after_minutes: int = DEFAULT_PREP_LEASE_MINUTES,
+    db_path: Path | None = None,
+) -> bool:
+    """True when at least one ``preparing`` campaign is free to claim.
+
+    Unlike :func:`has_preparing_campaigns`, a campaign currently leased by a
+    live worker does not count. The worker's drain loop uses this so it does
+    not spin forever waiting on a campaign another worker is already running
+    (which would never become claimable from this process).
+    """
+    now_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    cutoff = (now_dt - timedelta(minutes=int(stale_after_minutes))).isoformat(
+        timespec="seconds"
+    )
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT metadata_json FROM campaigns WHERE status = ?",
+            (CAMPAIGN_PREPARING,),
+        ).fetchall()
+    for row in rows:
+        metadata = _parse_metadata(row["metadata_json"] or "{}")
+        if not _lease_is_live(metadata, cutoff=cutoff):
+            return True
+    return False
+
+
+def claim_next_preparing_campaign(
+    *,
+    owner: str,
+    stale_after_minutes: int = DEFAULT_PREP_LEASE_MINUTES,
+    db_path: Path | None = None,
+) -> Campaign | None:
+    """Atomically claim a ``preparing`` campaign for async prep.
+
+    The claim is a compare-and-swap on the campaign's ``metadata_json``: the
+    row is only taken when its status is still ``preparing`` and its metadata
+    is byte-for-byte what this caller observed. Two workers racing the same
+    campaign therefore cannot both win - the loser's UPDATE matches zero rows.
+
+    A campaign whose existing lease is older than ``stale_after_minutes`` is
+    reclaimable, so a crashed predecessor never strands the row (see
+    :func:`requeue_stale_preparing` for the explicit sweep). The claim records
+    ``_prepLease.owner`` / ``_prepLease.claimedAt`` and bumps ``_prepAttempts``.
+    """
+    now_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    now = now_dt.isoformat(timespec="seconds")
+    cutoff = (now_dt - timedelta(minutes=int(stale_after_minutes))).isoformat(
+        timespec="seconds"
+    )
+    claimed_id: int | None = None
+
+    with _connect(db_path) as conn:
+        conn.isolation_level = None  # explicit transaction
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = conn.execute(
+                "SELECT * FROM campaigns WHERE status = ? ORDER BY id",
+                (CAMPAIGN_PREPARING,),
+            ).fetchall()
+            for row in rows:
+                raw = row["metadata_json"] or "{}"
+                metadata = _parse_metadata(raw)
+                if _lease_is_live(metadata, cutoff=cutoff):
+                    continue  # a live worker holds it
+                attempts = int(metadata.get(PREP_ATTEMPTS_KEY) or 0) + 1
+                next_metadata = dict(metadata)
+                next_metadata[PREP_LEASE_KEY] = {"owner": owner, "claimedAt": now}
+                next_metadata[PREP_ATTEMPTS_KEY] = attempts
+                cursor = conn.execute(
+                    """
+                    UPDATE campaigns
+                    SET metadata_json = ?
+                    WHERE id = ? AND status = ? AND metadata_json = ?
+                    """,
+                    (
+                        json.dumps(next_metadata, ensure_ascii=False),
+                        row["id"],
+                        CAMPAIGN_PREPARING,
+                        raw,
+                    ),
+                )
+                if cursor.rowcount == 1:
+                    claimed_id = row["id"]
+                    break
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    if claimed_id is None:
+        return None
+    return get_campaign(claimed_id, db_path=db_path)
+
+
+def requeue_stale_preparing(
+    *,
+    older_than_minutes: int = DEFAULT_PREP_LEASE_MINUTES,
+    max_attempts: int = 3,
+    db_path: Path | None = None,
+) -> int:
+    """Recover campaigns abandoned mid-prep by a dead worker.
+
+    Mirrors :func:`myUtils.jobs.requeue_stale_running`. A campaign still
+    ``preparing`` with a lease older than the cutoff is either released for
+    another attempt or, once ``_prepAttempts`` reaches ``max_attempts``, moved
+    to ``needs_review`` with an explanatory ``last_error`` so it cannot loop
+    forever. Returns the number of rows moved.
+    """
+    now_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    cutoff = (now_dt - timedelta(minutes=int(older_than_minutes))).isoformat(
+        timespec="seconds"
+    )
+    moved = 0
+
+    with _connect(db_path) as conn:
+        conn.isolation_level = None  # explicit transaction
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = conn.execute(
+                "SELECT * FROM campaigns WHERE status = ? ORDER BY id",
+                (CAMPAIGN_PREPARING,),
+            ).fetchall()
+            for row in rows:
+                raw = row["metadata_json"] or "{}"
+                metadata = _parse_metadata(raw)
+                lease = metadata.get(PREP_LEASE_KEY)
+                if not isinstance(lease, dict):
+                    continue
+                claimed_at = str(lease.get("claimedAt") or "")
+                if claimed_at and claimed_at >= cutoff:
+                    continue  # still live
+                attempts = int(metadata.get(PREP_ATTEMPTS_KEY) or 0)
+                next_metadata = dict(metadata)
+                next_metadata.pop(PREP_LEASE_KEY, None)
+                if attempts >= int(max_attempts):
+                    cursor = conn.execute(
+                        """
+                        UPDATE campaigns
+                        SET status = ?, metadata_json = ?, last_error = ?
+                        WHERE id = ? AND status = ? AND metadata_json = ?
+                        """,
+                        (
+                            CAMPAIGN_NEEDS_REVIEW,
+                            json.dumps(next_metadata, ensure_ascii=False),
+                            f"prep lease expired after {attempts} attempt(s); "
+                            "worker died mid-prep",
+                            row["id"],
+                            CAMPAIGN_PREPARING,
+                            raw,
+                        ),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        UPDATE campaigns
+                        SET metadata_json = ?
+                        WHERE id = ? AND status = ? AND metadata_json = ?
+                        """,
+                        (
+                            json.dumps(next_metadata, ensure_ascii=False),
+                            row["id"],
+                            CAMPAIGN_PREPARING,
+                            raw,
+                        ),
+                    )
+                if cursor.rowcount == 1:
+                    moved += 1
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return moved
+
+
+def finish_campaign_prep(
+    campaign_id: int,
+    *,
+    owner: str,
+    status: str,
+    prepared_at: str | None | object = _UNSET,
+    published_at: str | None | object = _UNSET,
+    last_error: str | None | object = _UNSET,
+    db_path: Path | None = None,
+) -> bool:
+    """Lease-guarded terminal transition for a claimed prep.
+
+    Returns ``True`` only when this caller still owns the lease and the CAS
+    succeeds. ``False`` means another worker reclaimed the campaign (typically
+    after this one stalled past the lease window); the caller must discard its
+    result rather than clobber the new owner's state.
+    """
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM campaigns WHERE id = ?", (campaign_id,)
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"Campaign not found: id={campaign_id}")
+        raw = row["metadata_json"] or "{}"
+        metadata = _parse_metadata(raw)
+        lease = metadata.get(PREP_LEASE_KEY)
+        if not isinstance(lease, dict) or str(lease.get("owner") or "") != str(owner):
+            return False
+        next_metadata = dict(metadata)
+        next_metadata.pop(PREP_LEASE_KEY, None)
+        sets = ["status = ?", "metadata_json = ?"]
+        params: list[object] = [status, json.dumps(next_metadata, ensure_ascii=False)]
+        if prepared_at is not _UNSET:
+            sets.append("prepared_at = ?")
+            params.append(prepared_at)
+        if published_at is not _UNSET:
+            sets.append("published_at = ?")
+            params.append(published_at)
+        if last_error is not _UNSET:
+            sets.append("last_error = ?")
+            params.append(last_error)
+        params.extend((campaign_id, CAMPAIGN_PREPARING, raw))
+        cursor = conn.execute(
+            f"UPDATE campaigns SET {', '.join(sets)} "
+            "WHERE id = ? AND status = ? AND metadata_json = ?",
+            params,
+        )
+        conn.commit()
+        return cursor.rowcount == 1
 
 
 def delete_campaign(

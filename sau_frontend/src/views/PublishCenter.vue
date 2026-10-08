@@ -1523,12 +1523,21 @@ async function submitAfterTiktokReview() {
       tiktokPostSettings: buildTiktokPostSettingsPayload(),
     })
     const data = response?.data || {}
+    // Async prep returns before any job exists: a non-empty ``campaignIds``
+    // with ``status: 'preparing'`` means the submission is live, not empty.
+    // Rendering that as the old "no jobs produced" warning would tell the
+    // operator nothing happened when prep is actually running.
+    const isPreparing = data.status === 'preparing' || (!data.jobs?.length && (data.campaignIds?.length || 0) > 0)
     submitResult.value = {
-      type: data.jobs?.length ? 'success' : 'warning',
+      type: data.jobs?.length ? 'success' : (isPreparing ? 'info' : 'warning'),
       message: data.jobs?.length
         ? `已排入 ${data.jobs.length} 個發佈工作`
-        : '送出成功，但未產生任何工作',
+        : (isPreparing
+            ? '已排入準備佇列，媒體準備完成後會自動建立發佈工作'
+            : '送出成功，但未產生任何工作'),
       jobs: data.jobs,
+      campaignIds: data.campaignIds,
+      status: data.status,
       skipped: data.skipped,
     }
     // Start TikTok status polling if there are TikTok jobs
