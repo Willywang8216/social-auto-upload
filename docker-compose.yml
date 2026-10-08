@@ -9,6 +9,24 @@ services:
     pull_policy: always
     container_name: social-auto-upload
     restart: always
+    # The image's Dockerfile bakes in `--timeout 120`, but a 602 MB source
+    # re-encodes in ~900 s and media prep runs inline in the submit request,
+    # so any large synchronous submit was guaranteed to 504 at 120 s while the
+    # transcode later completed (campaigns existed but the operator saw a 504).
+    # Override here (compose pulls the prebuilt image, so the Dockerfile CMD is
+    # not rebuilt by a normal deploy) with a ceiling above the worst-case
+    # encode. Keep the rest identical to the image CMD.
+    command:
+      - gunicorn
+      - wsgi:app
+      - --workers
+      - "1"
+      - --threads
+      - "8"
+      - --timeout
+      - "1800"
+      - --bind
+      - 0.0.0.0:5409
     # Docker's default json-file driver never rotates, and `docker logs` already
     # hangs on this box trying to read the result. Cap it so container output
     # can't quietly eat the disk; anything worth reading goes to ./logs, which

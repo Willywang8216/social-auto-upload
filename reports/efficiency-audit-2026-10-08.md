@@ -221,3 +221,68 @@ QuickSync. Option (a) is already shipped; (b)/(c) are infrastructure decisions.
 
 Keeping the throttle's default of half the cores remains correct: with no
 hardware encoder, oversubscribing the CPU is pure loss.
+
+## UPDATE 2: throttle verified working; found the real 504 cause (OpenResty)
+
+### The throttle now works, and the load is falling
+
+After deploying 46ddb50 (which gated the watermark/downscale paths the first
+version missed), the live box shows exactly what the design intends:
+
+```
+actively-encoding ffmpeg (CPU > 5%):  2   <- the cap
+container:                           Up (healthy)
+GET /healthz:                        200 in 0.006-0.03 s
+load average:                        42 -> 24 and falling
+```
+
+All 8 gunicorn threads were previously blocked inside ffmpeg at once (measured:
+8 encodes, container unhealthy, `/healthz` timing out). With the gate in place
+only the capped pair runs and the request threads stay free.
+
+### A leaked-encode failure mode worth knowing
+
+Restarting the container while encodes are in flight **orphans them**: the
+worker's children survive reparented to the containerd shim and keep burning
+CPU. Observed 4 and then 1 such process after two restarts, each still
+advancing `TIME`. They are not visible to `docker exec` (different PID
+namespace) and clear only when finished or when the shim goes away.
+
+So: a container restart under load silently *raises* effective concurrency for a
+while. The gate cannot help there, because the orphan belongs to a dead worker.
+Worth draining before a restart, or accepting a brief spike.
+
+### The 504 cause is NOT gunicorn - it is OpenResty, then Cloudflare
+
+Verified independently against the live host, and it changes the fix:
+
+- `gunicorn --threads 8` selects the **gthread** worker, which does **not**
+  enforce `--timeout` on in-flight requests (the arbiter only murders a worker
+  whose heartbeat goes stale, and gthread keeps beating). So the baked-in
+  `--timeout 120` was never what killed these requests.
+- The vhost `.../conf.d/socialupload.iamwillywang.com.conf` sets `proxy_pass` and
+  `client_max_body_size` but **no `proxy_read_timeout`**, so nginx's **60 s**
+  default applies. The real error log confirms it:
+
+```
+[error] upstream timed out (110: Connection timed out) while reading response
+        header from upstream ... request: "POST /publish-center/submit"
+[error] ... request: "GET /healthz"      <- threads fully consumed
+```
+
+  and the 504 cadence (~65-75 s) matches nginx's 60 s, not gunicorn's 120 s.
+- Cloudflare sits in front and caps at ~100 s (error 524), so raising the origin
+  timeouts alone converts a 504 into a 524 past that point.
+
+**Applied:** `proxy_read_timeout 1800s; proxy_send_timeout 1800s;` added to all
+three SAU vhosts (`socialupload.iamwillywang.com`, `up.iamwillywang.com`,
+`socialupload.willywangdata.com`), `nginx -t` clean, reloaded. Backups at
+`<conf>.bak-timeouts`. This removes the premature cut-off; a submit that
+genuinely takes >100 s still needs the async design to avoid Cloudflare's 524.
+
+**Verdict on async prep:** a proper analysis (logs/timeout-fix-notes.md) found it
+is NOT small - it spans a held module, the worker, the API contract, a new
+migration for the persisted submit payload, the Telegram review flow and a data
+loss risk (`/inbox` deletes staged media when `result.jobs` is empty, which under
+async is the normal state while `preparing`). Handed back as a design, not
+implemented blind.
