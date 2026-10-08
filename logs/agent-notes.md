@@ -797,3 +797,58 @@ CPU benchmarks while the production backlog was draining, which both confounded
 its own numbers and worsened the load, and it ignored a stop request. Lesson for
 next time: do not run a CPU benchmark on the box that serves production without
 checking load first.
+
+## 2026-10-08 (async prep) — implemented, deployed OFF by default
+
+Four parallel agents delivered the async-prep change. Commit b72bd2b, deployed.
+**SAU_ASYNC_PREP is unset in the container, so live behaviour is unchanged** -
+the whole feature is inert until the operator flips it.
+
+### What it fixes
+`POST /publish-center/submit` ran the ~900 s ffmpeg prep inside the request.
+Cloudflare caps at ~100 s (524) and nginx was cutting at 60 s, so a large clip
+died at the edge even though the work completed. Prep is now queueable for the
+worker.
+
+### Pieces (all verified live in the container)
+- `myUtils/campaign_media_prep.py` - Flask-free extraction of
+  `_prepare_campaign_media_artifacts`; the single `request.host_url` use became an
+  explicit `public_base_url` parameter. `sau_backend` keeps a thin wrapper, so the
+  request path is untouched. (The extractor avoided a filename collision with the
+  queue module rather than overwriting it - the two agents coordinated.)
+- `myUtils/campaign_prep.py` - `submit_publish_async()` + `run_campaign_prep()` /
+  `finalize_campaign()`.
+- `myUtils/campaigns.py` - `claim_next_preparing_campaign()` claims atomically
+  (`BEGIN IMMEDIATE` + compare-and-swap on `metadata_json`), plus
+  `finish_campaign_prep()` and `requeue_stale_preparing()`. **No migration** - the
+  submit payload fits in the existing `metadata_json`.
+- `myUtils/worker.py` - `_prep_tick()` with its own concurrency budget, separate
+  from the browser slot, plus stale-lease recovery so a crashed prep can't strand
+  a campaign in `preparing`.
+
+### The data-loss bug that had to be fixed first
+`inbox_item_publish` deleted its staged Drive source when the submit returned no
+jobs. Under async that is the NORMAL state while `preparing`, so the only local
+copy would have been destroyed before prep read it. Now keyed on
+`result.campaign_ids`, and the exception handlers no longer delete once
+`submit_publish` has been invoked (a partial failure can leave a campaign
+referencing the staged file).
+
+### Consumer fixes the audit demanded
+- Drain thread started only `if result.jobs` - under async that is empty, so prep
+  would never have been kicked. Now fires when campaigns exist.
+- `_notify_tg_review` builds one card per job, so async could only ever produce
+  zero cards and the operator would lose the approve/edit gate. Moved to run in
+  the worker after prep produces the real job rows (the card reads job payloads
+  back from the DB, so it cannot be built earlier).
+- `PublishCenter.vue` showed a warning for empty jobs; now shows "preparing" when
+  campaignIds exist. Frontend builds clean.
+- MCP `publish_submit` returns `status` for parity.
+
+### Verification
+1341 passed, 1 skipped (from 1309). Default-OFF path pinned by
+`test_async_prep_off_keeps_the_synchronous_submit`. Container healthy, healthz 2 ms.
+
+### To enable when ready
+`SAU_ASYNC_PREP=1` in .env, then recreate. Worth draining first and watching one
+batch, since this is the first time the worker owns prep.
