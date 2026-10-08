@@ -19,7 +19,7 @@ allowed-tools:
   - AskUserQuestion
 metadata:
   owner: social-auto-upload
-  trigger: publish these videos, process this folder, batch upload, bulk videos, SFW NW, NSFW NW, SFW SW, NSFW SW, Teaching
+  trigger: publish these videos, process this folder, batch upload, bulk videos, SFW NW, NSFW NW, SFW SW, NSFW SW, Teaching, pub date, publish on a date, urgent news
 ---
 
 # Batch-publish a folder of videos
@@ -161,6 +161,31 @@ The two parts are independent: rating (SFW/NSFW) and persona (NW/SW/both).
 **SFW is the opposite of what you might assume.** SFW means *publish everywhere*,
 including the platforms that only accept non-explicit media. NSFW means
 *publish only where nudity is allowed* — it is a **restriction**, not a broadening.
+
+### Optional publish-date token
+
+A third, optional token pins (or prioritises) the publish date. Put it anywhere
+after the persona prefix, case-insensitive; rating and persona are still read
+first.
+
+| token | meaning |
+|---|---|
+| `pub YYYYMMDD` | pin to that calendar date, e.g. `pub 20261008` |
+| `pub today` | publish today — time-sensitive / news |
+| `urgent` or `news` | same as `pub today` |
+
+```
+SFW  NW  pub 20261008  halloween special.mp4   → all NW platforms, on 2026-10-08
+SFW  NW  halloween special pub 20261008.mp4    → same
+NSFW SW  urgent breaking news.mp4              → SW adult-safe, today
+```
+
+A pinned date is an **anchor**: the scheduler must not move it to another day.
+`pub today` / `urgent` / `news` is an anchor at *now* — publish in the next
+preferred window today, or immediately if every window today has passed.
+Everything without a date token is **flexible** and is placed to keep the cadence
+even. A malformed token (`pub 2026-10-08`, `pub tomorrow`) means stop and ask —
+never guess a date.
 
 Worked examples:
 
@@ -462,20 +487,80 @@ For a NSFW file, pass **only the adult-safe account ids** in
 `selectedAccountIds`. The server would strip the rest anyway; being explicit keeps
 the intent legible and avoids a confusing `skipped` list.
 
-## 5. Schedule it well — do not bunch
+## 5. Schedule it well — read the calendar, then optimise
 
-The goal is a natural cadence, not a dump.
+The goal is a natural, non-spammy cadence with no dead stretches. **Never plan a
+batch in isolation**: fetch what is already scheduled first, place the new posts
+into the gaps, and rebalance so nothing is squeezed and no account goes silent.
 
-- **Spread across days, not hours.** For more than a couple of posts, distribute
-  them over several days rather than squeezing them into one window.
-- **Respect the audience's clock.** The operator's audience is Taipei-based;
-  schedule in the local evening/afternoon rather than at 3am.
-- **One post per account per slot.** The orchestrator already staggers targets
-  **5 minutes apart** (`STAGGER_MINUTES`), so set `startAt` to the intended first
-  slot and let it fan out from there.
-- **Vary the slot times** between days so the feed does not look automated.
-- **Never schedule in the past.** A target whose time has passed runs immediately;
-  that is how a backlog turns into a flood.
+### The date token decides what is fixed
+
+- **Anchor** — a file with `pub YYYYMMDD` (that date) or `pub today` / `urgent` /
+  `news` (today). Anchors are immovable **by date**; only the time-of-day may be
+  nudged into a preferred window. `pub today` takes today's next window.
+- **Flexible** — everything else. Flexible posts may move later **or earlier**
+  (within the horizon) to avoid crowding and to fill long gaps.
+
+### Policy (what "optimised" means)
+
+| rule | value | why |
+|---|---|---|
+| min gap, same account | **30 min** | no two posts from one account together |
+| max posts, same account per day | **3** | avoid a spam pattern |
+| max days without a post, per account | **4** | do not go silent |
+| horizon | **30 days** | never schedule beyond it |
+| never in the past | — | a past target fires immediately |
+| never move an anchor's date | — | holiday / news copy must land on its day |
+
+The optimal time-of-day is each platform's preferred UTC window:
+
+| platform | preferred UTC hours |
+|---|---|
+| twitter | 13, 14, 23, 0 |
+| bluesky | 13, 22, 23, 0 |
+| facebook / instagram / threads | 12, 13, 23, 0 |
+| tiktok | 13, 14, 23, 0 |
+| youtube | 14, 15, 16 |
+| reddit | 13, 14, 22 |
+| telegram | 12, 13, 22 |
+| linkedin | 13, 14, 15 |
+| pinterest | 12, 13, 14 |
+| nw_sw_blog / teaching_blog | 13 |
+
+Taipei is UTC+8, so `12:00–14:00 UTC` = `20:00–22:00` Taipei.
+
+### Procedure
+
+1. **Parse** every filename: rating, persona, and the optional date token.
+2. **Read the current schedule** and group it by account:
+   - MCP: `jobs_calendar(status="pending,retrying", limit=2000)`
+   - HTTP: `GET $SAU_API/jobs/calendar?status=pending,retrying&limit=2000`
+     (`accountRef`, `platform`, `scheduleAt`, `targetId`).
+3. **Place the anchors first** — one per file, at the preferred window on its
+   date (`pub today` = today's next window). If two anchors collide on one
+   account/window, step one 30 min later; keep the date if the platform has
+   another window that day.
+4. **Place the flexible posts** at the earliest preferred slot that is `>= now`,
+   at least 30 min from that account's previous post, and does not push the
+   account past 3 posts that day. Do not stack a batch onto one day.
+5. **Close the gaps** — for each account, when a run of `> 4` days has no post
+   and flexible posts remain, pull the next flexible post earlier into the middle
+   of that gap (still within the 30 min / 3-per-day rules). Repeat until no long
+   gap remains or nothing can move.
+6. **Apply**:
+   - Existing targets: MCP `jobs_target_reschedule(targetId, scheduleAt=...)`, or
+     `POST $SAU_API/jobs/targets/<id>/reschedule` with `{"scheduleAt":"<ISO>"}`.
+   - New files: submit with `schedule.startAt` = the assigned slot; the
+     orchestrator staggers each account's fan-out 5 min apart, so set `startAt`
+     to the group's first slot and let it fan out.
+7. **Show the plan** (file/account → date-time) before applying, then report
+   `moved N`, `anchors kept M`, `longest gap K days`.
+
+On the **deploy host** the preferred-window + anti-spam half of this policy is
+scripted in `scripts/optimize_schedule.py` (dry run / `--apply`). It moves
+existing pending targets but does not know about new files or `pub` anchors, so
+place the anchors yourself and run it to spread the rest. From a client use the
+MCP/HTTP calls above — the script needs the local checkout and `.venv`.
 
 A reasonable default for a mid-size batch: 2–3 posts per account per day, spread
 across 4–10 days, anchored to local 12:00–22:00.
@@ -543,6 +628,12 @@ Twitter into 5; Instagram stays 1 part (900 s / 300 MB).
 
 **`Teaching how to factor quadratics.mp4`** → profile 4 → the 7 Teaching
 accounts. 300 s is exactly Threads' cap, so it is left whole.
+
+If one of those files had been `SFW NW pub 20261008 halloween.mp4`, that clip is
+an **anchor**: it stays on 2026-10-08 (at the NW preferred window) and the other
+three flexible clips shift around it — earlier or later — so no account exceeds
+3 posts/day, no two posts land inside 30 min, and no account is silent for more
+than 4 days.
 
 Then scheduling: rather than 4 clips × N accounts in one evening, the agent
 spreads them over several days, anchored to local 12:00-22:00, with the
