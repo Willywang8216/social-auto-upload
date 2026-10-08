@@ -2413,12 +2413,26 @@ def _run_account_connection_check(*, account_id: int, db_path: Path):
             result = prepared_publishers.validate_telegram_config_live(config)
             config['telegramBotName'] = result.get('bot', {}).get('result', {}).get('username', config.get('telegramBotName', ''))
             chats = result.get('chats') or []
-            titles = [
-                (chat.get('result', {}) or {}).get('title')
-                or (chat.get('result', {}) or {}).get('username')
-                or chat.get('chatId')
-                for chat in chats
-            ]
+            # Two response shapes reach here. The bot API returns one
+            # ``{"chatId": ..., "result": {...}}`` object per chat, but MTProto
+            # (a user account, which all four of this deployment's Telegram
+            # accounts are) returns a plain list of chat-id strings. Calling
+            # ``.get`` on a string raised "'str' object has no attribute 'get'",
+            # so every MTProto Telegram account reported an error from the
+            # connection check while publishing worked fine.
+            titles = []
+            for chat in chats:
+                if isinstance(chat, str):
+                    titles.append(chat)
+                    continue
+                if not isinstance(chat, dict):
+                    continue
+                payload = chat.get('result') or {}
+                titles.append(
+                    payload.get('title')
+                    or payload.get('username')
+                    or chat.get('chatId')
+                )
             titles = [title for title in titles if title]
             if titles:
                 config['telegramChatTitles'] = titles

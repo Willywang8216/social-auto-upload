@@ -44,3 +44,25 @@ os.environ["SAU_GENERATED_MEDIA_ROOT"] = _TEST_GENERATED_MEDIA_ROOT
 # `SAU_ASYNC_PREP` themselves via `patch.dict(os.environ, ...)`, so they are
 # unaffected, and no ambient value can leak in again.
 os.environ["SAU_ASYNC_PREP"] = "0"
+
+# Stop the suite reaching the operator's real Telegram. Tests deliberately
+# exercise the failure path, and several patch nothing, so the alert sender read
+# the live bot token from .env and delivered them:
+#
+#   [SAU] Publish failed: bluesky target #1 (job #1) ... RuntimeError: bluesky said no
+#
+# Job #1 and accounts like acct-1 / fb-bluesky never existed in the database (the
+# real rows start at a much higher id) - they are fixtures. Receiving them on a
+# phone is indistinguishable from a production incident, which is exactly the
+# alarm fatigue this is meant to prevent.
+#
+# Blanking the credentials makes _send_telegram a no-op, so no ambient value can
+# leak. Tests that assert alerting behaviour patch send_ops_alert / the channel
+# itself, and are unaffected.
+for _alert_key in (
+    "SAU_ALERT_TELEGRAM_BOT_TOKEN",
+    "SAU_ALERT_TELEGRAM_CHAT_ID",
+    "SAU_TG_REVIEW_BOT_TOKEN",
+    "SAU_TG_REVIEW_CHAT_ID",
+):
+    os.environ[_alert_key] = ""

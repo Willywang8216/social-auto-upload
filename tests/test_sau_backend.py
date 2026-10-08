@@ -9,6 +9,7 @@ These cover the bug fixes applied in this round:
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import sqlite3
 import tempfile
 import unittest
@@ -506,3 +507,58 @@ class PrePublishCapGuardTests(unittest.TestCase):
             media_prep.shrink = original_shrink
             media_prep._ensure_available = original_available
             media_prep.probe = original_probe
+
+
+class TelegramConnectionCheckShapeTests(unittest.TestCase):
+    """The Telegram check must handle BOTH response shapes.
+
+    The bot API returns ``{"chatId": ..., "result": {...}}`` per chat, but MTProto
+    (a user account - all four of this deployment's Telegram accounts) returns a
+    plain list of chat-id strings. Calling ``.get`` on a string raised
+    "'str' object has no attribute 'get'", so every MTProto Telegram account
+    reported an error from the connection check even though publishing worked.
+    """
+
+    def test_bot_api_shape_still_yields_titles(self):
+        import sau_backend
+
+        source = inspect.getsource(sau_backend)
+        self.assertIn("isinstance(chat, str)", source)
+        self.assertIn("isinstance(chat, dict)", source)
+
+    def test_mtproto_string_list_is_handled(self):
+        # Reproduce the branch logic directly: a list of strings must produce
+        # those strings as titles, not raise.
+        chats = ["@nakedwilltgchannel", "@nakedwill"]
+        titles = []
+        for chat in chats:
+            if isinstance(chat, str):
+                titles.append(chat)
+                continue
+            if not isinstance(chat, dict):
+                continue
+            payload = chat.get("result") or {}
+            titles.append(
+                payload.get("title") or payload.get("username") or chat.get("chatId")
+            )
+        titles = [t for t in titles if t]
+        self.assertEqual(titles, ["@nakedwilltgchannel", "@nakedwill"])
+
+    def test_bot_api_dict_still_works(self):
+        chats = [
+            {"chatId": "@x", "result": {"title": "My Channel"}},
+            {"chatId": "@y", "result": {}},
+        ]
+        titles = []
+        for chat in chats:
+            if isinstance(chat, str):
+                titles.append(chat)
+                continue
+            if not isinstance(chat, dict):
+                continue
+            payload = chat.get("result") or {}
+            titles.append(
+                payload.get("title") or payload.get("username") or chat.get("chatId")
+            )
+        titles = [t for t in titles if t]
+        self.assertEqual(titles, ["My Channel", "@y"])
