@@ -852,3 +852,52 @@ referencing the staged file).
 ### To enable when ready
 `SAU_ASYNC_PREP=1` in .env, then recreate. Worth draining first and watching one
 batch, since this is the first time the worker owns prep.
+
+## 2026-10-08 (final) — the failure notices, and four real bugs fixed
+
+Operator reported a run of Telegram failure notices. Investigated end to end.
+
+### What the notices were (not new failures)
+1. Every `publish-failure alert` line in `logs/worker.log` today was a **test
+   fixture writing into the production log** (`job=1 target=1`,
+   `RuntimeError('alert transport down')` from tests/test_worker_publish_alerts.py).
+   The last real alert attempt was 2026-10-07 21:15 and it failed on a transient
+   connection reset. The channel works: a probe returned `delivered: True`.
+2. The real symptom behind them was a **retry loop**: a batch runner on the
+   operator's Windows box called `POST /publish-center/submit` every ~2 min and
+   got **499** every time, because the request ran the ~900 s prep synchronously
+   (measured: a submit that should fail instantly still hung the full 120 s).
+
+### Bugs fixed
+1. **Async prep enabled** (`SAU_ASYNC_PREP=1`). Submit went from **120 s+ (timed
+   out)** to **0.055 s**, returning `{campaignIds, status:"preparing", jobs:[]}`.
+   Verified end to end: campaign 2577 went preparing -> publishing and enqueued
+   real jobs. This removes the 499 -> retry loop at its source.
+2. **Duplicate-guard blind spot.** The guard keyed on media_group_id, but a retry
+   builds a NEW group around the SAME files. Now it also matches on the **same set
+   of file_record_ids** (set equality both ways, not "shares any file" - the first
+   attempt over-blocked legitimate submits). Real data proved it: file_record 1142
+   sat in 6 groups and the guard now catches it.
+3. **Root-owned runtime dirs.** The image set no USER and compose had no `user:`,
+   so `generated/`, `videoFile/`, `data/` were root-owned; the host (uid 1000) could
+   not write, failing prep with PermissionError and killing loguru's sink. Compose
+   now pins `user: "${SAU_UID:-1000}:${SAU_GID:-1000}"`; verified both sides write
+   as uid 1000.
+4. **Two recovery windows were 4-6x too generous.** Prep lease was 120 min (real
+   worst case ~30) and the abandoned-target sweep was a flat 120 min (the executor
+   timeout is 20). Five campaigns sat in `preparing` for 32+ min and three targets
+   sat `running` for 35-49 min after restarts. Now 45 min and 1.5x the executor
+   timeout (30 min), both env-tunable.
+
+### Queue recovery (via the API only, backups taken)
+- **354 duplicate extras cancelled** (telegram 308, twitter 44, others 2).
+- **28 genuinely unpublished targets resubmitted** (the 05:49-06:05 cancellations).
+- **3 orphaned `running` rows** with missing media cancelled at job level (the
+  target-level cancel rejects `running`, which is why the sweep exists).
+- Final: **0 duplicate groups, 0 running, 1316 pending**.
+
+Also fixed: enabling async leaked into the test suite through `.env`, so the
+sync-contract tests started taking the async branch. conftest now pins
+`SAU_ASYNC_PREP=0`; the async tests set it themselves.
+
+Tests 1353 passed, 1 skipped. All four agents ended, 0 reservations.
