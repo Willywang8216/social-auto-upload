@@ -186,3 +186,38 @@ still meets platform limits (size/duration) rather than assuming parity.
   duplicate; dedupe first, then re-measure.
 - Do not migrate to Postgres for throughput. 43 MB and no lock contention.
 - Do not port to Go/Rust. The bottleneck is not the language.
+
+## UPDATE: hardware encode is IMPOSSIBLE on this host (tested 2026-10-08)
+
+The earlier "add /dev/dri passthrough, worth 3-5x" recommendation was tested and
+**does not work**. Do not add the device; it cannot help.
+
+Evidence, gathered on the production VPS:
+
+```
+# device nodes exist, so the naive check looks promising
+crw-rw---- root video  226,  0 /dev/dri/card0
+crw-rw---- root render 226,128 /dev/dri/renderD128
+getent group render -> render:x:110    (group exists)
+
+# but with the device passed into the app image:
+docker run --rm --device /dev/dri:/dev/dri <image> sh -c \
+  "ffmpeg -vaapi_device /dev/dri/renderD128 -f lavfi -i testsrc=d=2 \
+   -vf format=nv12,hwupload -c:v h264_vaapi -f null -"
+-> Device creation failed: -5. Input/output error
+```
+
+Root cause: `lspci` reports the GPU as **`Red Hat, Inc. Virtio 1.0 GPU`** - a
+paravirtualised *display* device with **no video encode engine**. It has no
+usable VAAPI driver in the image either (the DRI directory is empty), so
+`init_hw_device vaapi` fails before any encode starts. `h264_nvenc` was already
+ruled out (no NVIDIA device).
+
+**Conclusion:** on this host the ffmpeg encoders are software-only.
+`libx264`/`libx265` are what run, and the only ways to speed them up are
+(a) fewer concurrent encodes so each gets full cores - done, the throttle - (b)
+more/faster CPU cores, or (c) a different host with a real GPU or a CPU with
+QuickSync. Option (a) is already shipped; (b)/(c) are infrastructure decisions.
+
+Keeping the throttle's default of half the cores remains correct: with no
+hardware encoder, oversubscribing the CPU is pure loss.
