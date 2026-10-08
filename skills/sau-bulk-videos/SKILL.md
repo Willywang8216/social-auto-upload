@@ -117,12 +117,29 @@ The rule that matters most is the **filename prefix decides the destinations**.
 
 ## 0. Talk to the app
 
+The app is a **deployed service**, not a local process. A client machine only
+needs network access to the domain plus the token from the synced `.env` — no
+Docker, no WSL, no Python env, no copy of the SAU code.
+
 ```bash
-export SAU_API="http://localhost:5409"
-export SAU_TOKEN="$(grep -E '^SAU_API_TOKENS=' .env | cut -d= -f2)"
+# Locate the synced .env (override with SAU_ENV=/path/to/.env if needed)
+SAU_ENV="${SAU_ENV:-}"
+if [ -z "$SAU_ENV" ]; then
+  for c in ./.env "$HOME/social-auto-upload/.env" \
+           "${OneDrive:-$HOME/OneDrive}/Scripts-ssh-ssl-keys/socialupload/.env"; do
+    [ -f "$c" ] && SAU_ENV="$c" && break
+  done
+fi
+# Public base URL comes from the .env; fall back to the production domain.
+export SAU_API="${SAU_API:-$(grep -hE '^SAU_PUBLIC_BASE_URL=' "$SAU_ENV" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\"')}"
+export SAU_API="${SAU_API:-https://socialupload.iamwillywang.com}"
+export SAU_TOKEN="${SAU_TOKEN:-$(grep -hE '^SAU_API_TOKENS=' "$SAU_ENV" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\"')}"
 # every call needs:  -H "Authorization: Bearer $SAU_TOKEN"
-curl -s "$SAU_API/healthz"        # confirm it is alive before expensive work
+curl -s "$SAU_API/healthz"        # confirm the deployed app is alive before expensive work
 ```
+
+If `SAU_TOKEN` is empty, stop and ask the user for the `.env` path — do **not**
+fall back to a local server. There is no local backend to use.
 
 ## 1. The prefix rule (read this first)
 
@@ -179,6 +196,31 @@ one thing this skill must never do.
 
 ## 2. Get the files to the app
 
+### Default: upload over HTTP (works from any client)
+
+Upload each clip with the app's own endpoint. It returns the stored name under
+`videoFile/`:
+
+```bash
+# -> {"code":200,"data":"<uuid>_<sanitised name>.mp4","msg":"File uploaded successfully"}
+curl -s -X POST "$SAU_API/upload" \
+  -H "Authorization: Bearer $SAU_TOKEN" \
+  -F "file=@/path/to/SFW NW clip.mp4"
+```
+
+Use `"videoFile/<that data value>"` as the `mediaFilePaths` entry in
+`/publish-center/submit`. `secure_filename` turns spaces/punctuation into `_`, and
+the SFW/NSFW rating parser accepts that (`SFW_NW_clip.mp4` is still SFW). Keep the
+default → uploaded name mapping so the routing decision (section 1) still matches
+the file you submitted.
+
+For large files use the presigned routes instead of the proxy: `POST /upload/direct`
+(returns a presigned PUT URL) then `POST /upload/register`, or the
+`/upload/multipart/init` + `/presign` + `/complete` trio. `/upload` is fine up to a
+few hundred MB.
+
+### Only when you are ON the deploy host
+
 Staged media must be readable by the **container**, which is not the same as being
 readable on the host. Two things are true on this deployment and both save time:
 
@@ -206,8 +248,9 @@ transfer.
 
 | route | when |
 |---|---|
-| **Local → Drive → container** (`rclone copy` to `GDrive-willywang8216:sau/videoFile/<batch>/`, then `rclone copy` into `videoFile/` in the container) | the default. It is also the **archive**, so the source survives and a re-run needs no re-upload. |
-| Local → container directly (`docker cp` / `rclone copyto`) | only when Drive is unavailable and the batch is small. |
+| **HTTP upload** (`POST /upload` on the domain) | the default from any client machine: only network + the token are needed. |
+| **Local → Drive → container** (`rclone copy` to `GDrive-willywang8216:sau/videoFile/<batch>/`, then `rclone copy` into `videoFile/` in the container) | on the **deploy host**, when you want the Drive archive (the source survives and a re-run needs no re-upload). |
+| Local → container directly (`docker cp` / `rclone copyto`) | deploy host only, when Drive is unavailable and the batch is small. |
 
 Prefer Drive: it is already the offload target
 (`offload_to_drive.sh` → `GDrive-willywang8216:sau`), so bulk media placed in
@@ -242,20 +285,24 @@ up:
   `options.transcribe: true` — or **automatically** whenever an LLM is configured
   and no transcript exists yet.
 
-So a preview is for *structure and routing*, not final copy. Get the transcript
-yourself when you need the copy approved before submitting:
+So a preview is for *structure and routing*, not final copy. **The transcription
+itself is server-side** — it runs on `/publish-center/submit`, so on a client
+machine you do not run any SAU code. On the **deploy host** (needs the checkout +
+`.venv`) you can transcribe before submitting:
 
 ```bash
-# extract 16kHz mono WAV, then transcribe via the same model the app uses
+# deploy host only
 python -c "from myUtils import media_pipeline as m; \
   m.extract_video_audio('<video>', '/tmp/a.wav')"
 python -c "from myUtils import llm_client as c; \
   print(c.transcribe_audio('/tmp/a.wav'))"
 ```
 
-Then summarise the transcript into subject, tone, key moments, and any
-names/places worth surfacing. If a clip has no speech, say so and build the copy
-from the visual content rather than inventing a transcript.
+From a client, either submit with `options.transcribe: true` and treat the
+generated drafts as the transcript-derived copy, or transcribe with a local
+whisper/LLM tool. Then summarise the transcript into subject, tone, key moments,
+and any names/places worth surfacing. If a clip has no speech, say so and build
+the copy from the visual content rather than inventing a transcript.
 
 
 ## 3. Write the copy (humanize both languages)
@@ -357,14 +404,20 @@ wrong platforms either wastes a split (Twitter's 140 s cap makes 6 parts) or
 sends an adult clip somewhere it will be rejected. That is what the prefix rule in
 section 1 is for.
 
-Do the arithmetic before submitting so you can tell the user what will happen:
+Do the arithmetic before submitting so you can tell the user what will happen.
+On the **deploy host** (needs the checkout + `.venv`):
 
 ```bash
+# deploy host only
 .venv/bin/python -c "
 from myUtils import platform_limits as pl, media_prep as mp
 sec, mb = pl.video_max_seconds('threads'), pl.media_max_mb('threads')
 print(mp._split_count(<duration_s>, <size_bytes>, sec, mb*1024*1024))"
 ```
+
+From a client, use the table above (plus `ffprobe` for duration/size) or just let
+the server plan the split on submit — it re-derives every cap from
+`myUtils/platform_limits.py` and refuses to overrun.
 
 Respect each platform's real limits — the app enforces them and will truncate or
 reject otherwise:
@@ -433,7 +486,8 @@ Queued is not published. After submitting, watch the actual outcome:
 
 ```bash
 curl -s "$SAU_API/jobs/<job_id>" -H "Authorization: Bearer $SAU_TOKEN"
-ls -t logs/jobs/job-*.log | head
+# deploy host only: tail the per-job log
+# ls -t logs/jobs/job-*.log | head
 ```
 
 Per-platform gotchas worth knowing before you report success:

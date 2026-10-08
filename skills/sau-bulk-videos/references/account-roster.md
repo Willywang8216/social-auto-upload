@@ -104,10 +104,28 @@ Covered above in detail; the short version is that language follows the
 **account**, and every clip is published to both the English and Traditional
 Chinese account sets (not one or the other). `SW Blog` is bilingual.
 
-## Getting media to the app (verified on this deployment)
+## Getting media to the app
 
-The app runs in a container on the Email VPS (`socialupload.iamwillywang.com`,
-port 5409). Media must be readable **by the container**:
+The app is deployed at `socialupload.iamwillywang.com` (container on the Email
+VPS). From any client the route is HTTP; the container/Drive routes below are for
+the **deploy host** only.
+
+### From a client (default)
+
+```bash
+curl -s -X POST "$SAU_API/upload" \
+  -H "Authorization: Bearer $SAU_TOKEN" \
+  -F "file=@/path/to/<clip>.mp4"
+# -> {"code":200,"data":"<uuid>_<name>.mp4"}
+# use "videoFile/<data>" in mediaFilePaths
+```
+
+For large files, `POST /upload/direct` + `POST /upload/register`, or the
+`/upload/multipart/*` trio.
+
+### On the deploy host (archive route)
+
+Media must be readable **by the container**:
 
 | path | mechanism |
 |---|---|
