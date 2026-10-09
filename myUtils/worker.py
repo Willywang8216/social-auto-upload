@@ -897,17 +897,34 @@ class PublishWorker:
             now = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(
                 timespec="seconds"
             )
+            # A prep that queued nothing must not regress a campaign that already
+            # has queued posts: leaving it 'publishing' is the truth, while
+            # 'needs_review' + "No publishable posts queued" tells the operator to
+            # re-submit something that is already scheduled (campaign 2599).
+            already_queued = False
+            if not jobs:
+                try:
+                    already_queued = campaign_store.campaign_has_queued_posts(
+                        campaign.id, db_path=self._db_path
+                    )
+                except Exception:  # noqa: BLE001 - status must never break prep
+                    already_queued = False
+            succeeded = bool(jobs) or already_queued
             transitioned = campaign_store.finish_campaign_prep(
                 campaign.id,
                 owner=self._prep_owner,
                 status=(
                     campaign_store.CAMPAIGN_PUBLISHING
-                    if jobs
+                    if succeeded
                     else campaign_store.CAMPAIGN_NEEDS_REVIEW
                 ),
                 prepared_at=now,
-                published_at=now if jobs else None,
-                last_error=None if jobs else "No publishable posts queued",
+                published_at=now if succeeded else None,
+                last_error=(
+                    None
+                    if succeeded
+                    else "No publishable posts queued"
+                ),
                 db_path=self._db_path,
             )
             if transitioned:

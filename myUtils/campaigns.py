@@ -308,6 +308,30 @@ def list_campaigns(
     return [_row_to_campaign(row) for row in rows]
 
 
+def campaign_has_queued_posts(
+    campaign_id: int, *, db_path: Path | None = None
+) -> bool:
+    """Whether this campaign already has posts queued for publishing.
+
+    A re-prep that queues zero new jobs (media gone, every account filtered out,
+    a transient prep failure) used to flip the campaign status to
+    ``needs_review`` with "No publishable posts queued" - even when the campaign
+    already had scheduled posts from an earlier successful prep.
+
+    That is a status regression, not a real failure: campaign 2599 (the SFW
+    Taipei Pride invitation) was reported as needing review while all 13 of its
+    posts sat queued and correctly scheduled for 2026-10-24, which reads to an
+    operator as "this did not schedule" and invites them to re-submit a campaign
+    that was already fine.
+    """
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM campaign_posts WHERE campaign_id = ? AND status = ? LIMIT 1",
+            (campaign_id, CAMPAIGN_POST_QUEUED),
+        ).fetchone()
+    return row is not None
+
+
 def update_campaign(
     campaign_id: int,
     *,

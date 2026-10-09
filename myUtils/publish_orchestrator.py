@@ -690,12 +690,23 @@ def submit_publish(
                             )
                         )
 
+        # A prep that queued nothing must not regress a campaign that already has
+        # queued posts (see campaigns.campaign_has_queued_posts).
+        already_queued = False
+        if not queued_jobs:
+            try:
+                already_queued = campaign_store.campaign_has_queued_posts(
+                    campaign.id, db_path=db_path
+                )
+            except Exception:  # noqa: BLE001 - status must never break prep
+                already_queued = False
+        succeeded = bool(queued_jobs) or already_queued
         campaign_store.update_campaign(
             campaign.id,
-            status=campaign_store.CAMPAIGN_PUBLISHING if queued_jobs else campaign_store.CAMPAIGN_NEEDS_REVIEW,
+            status=campaign_store.CAMPAIGN_PUBLISHING if succeeded else campaign_store.CAMPAIGN_NEEDS_REVIEW,
             prepared_at=now_fn().isoformat(timespec="seconds"),
-            published_at=now_fn().isoformat(timespec="seconds") if queued_jobs else None,
-            last_error=None if queued_jobs else "No publishable posts queued",
+            published_at=now_fn().isoformat(timespec="seconds") if succeeded else None,
+            last_error=None if succeeded else "No publishable posts queued",
             db_path=db_path,
         )
 

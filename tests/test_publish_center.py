@@ -999,3 +999,86 @@ class DuplicateGuardSameFileDifferentGroupTests(unittest.TestCase):
             ),
             "the same file set in any order must be treated as a duplicate",
         )
+
+
+class PrepDoesNotRegressQueuedCampaignTests(unittest.TestCase):
+    """A re-prep that queues nothing must not un-schedule a live campaign.
+
+    Campaign 2599 (the SFW Taipei Pride invitation) was flipped to needs_review
+    with "No publishable posts queued" by a re-prep, while all 13 of its posts sat
+    queued and correctly scheduled for 2026-10-24. To an operator that reads as
+    "this did not schedule" and invites a re-submit of a campaign that was fine.
+    """
+
+    def test_has_queued_posts_detects_a_queued_post(self):
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+
+        import db.createTable as create_table
+        from myUtils import campaigns as campaign_store
+        from myUtils import profiles as profile_registry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "c.db"
+            create_table.bootstrap(db)
+            profile_id = profile_registry.create_profile("P", db_path=db).id
+            connection = sqlite3.connect(str(db))
+            try:
+                connection.execute(
+                    "INSERT INTO media_groups (id, name, notes, status) "
+                    "VALUES (1, 'g', '', 'ready')"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            campaign = campaign_store.create_campaign(
+                profile_id=profile_id, media_group_id=1, db_path=db
+            )
+            self.assertFalse(
+                campaign_store.campaign_has_queued_posts(campaign.id, db_path=db)
+            )
+            post = campaign_store.add_campaign_post(
+                campaign.id, "bluesky", account_ids=[1], db_path=db
+            )
+            campaign_store.update_campaign_post(
+                post.id, status=campaign_store.CAMPAIGN_POST_QUEUED, db_path=db
+            )
+            self.assertTrue(
+                campaign_store.campaign_has_queued_posts(campaign.id, db_path=db)
+            )
+
+    def test_terminal_posts_do_not_count_as_queued(self):
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+
+        import db.createTable as create_table
+        from myUtils import campaigns as campaign_store
+        from myUtils import profiles as profile_registry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "c.db"
+            create_table.bootstrap(db)
+            profile_id = profile_registry.create_profile("P", db_path=db).id
+            connection = sqlite3.connect(str(db))
+            try:
+                connection.execute(
+                    "INSERT INTO media_groups (id, name, notes, status) "
+                    "VALUES (1, 'g', '', 'ready')"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            campaign = campaign_store.create_campaign(
+                profile_id=profile_id, media_group_id=1, db_path=db
+            )
+            post = campaign_store.add_campaign_post(
+                campaign.id, "bluesky", account_ids=[1], db_path=db
+            )
+            campaign_store.update_campaign_post(
+                post.id, status=campaign_store.CAMPAIGN_POST_FAILED, db_path=db
+            )
+            self.assertFalse(
+                campaign_store.campaign_has_queued_posts(campaign.id, db_path=db)
+            )
