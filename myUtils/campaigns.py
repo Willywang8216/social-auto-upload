@@ -667,6 +667,31 @@ def add_campaign_artifact(
     db_path: Path | None = None,
 ) -> CampaignArtifact:
     with _connect(db_path) as conn:
+        # Every artifact that has bytes on local disk must also have a
+        # file_records row. The offload cron moves published media to Drive and
+        # deletes the local copy, keeping it restorable ONLY through the mapping
+        # it writes into file_records (storage_key + storage_backend_id).
+        #
+        # An artifact created without that row is a file the offloader is
+        # supposed to leave alone (its rule 3 keeps anything file_records does
+        # not know about), but anything that removes the local copy by another
+        # route leaves media nothing can restore: 1831 of 2509 campaign
+        # artifacts had no file_records row, and 241 pending targets referenced
+        # one with no public URL - a publish that could only ever fail.
+        #
+        # Registering here closes that gap at the source, so a restorable
+        # mapping exists from the moment the artifact is created. The insert is
+        # idempotent: an existing row for the same path is left untouched, since
+        # the offloader may already have recorded its storage location.
+        if local_path:
+            try:
+                registered = _ensure_artifact_file_record(conn, local_path)
+                if registered is not None and source_file_record_id is None:
+                    source_file_record_id = registered
+            except sqlite3.Error:
+                # Registration is a durability aid, never a reason to fail the
+                # publish that is creating the artifact.
+                pass
         cursor = conn.execute(
             """
             INSERT INTO campaign_artifacts (
@@ -693,6 +718,63 @@ def add_campaign_artifact(
         conn.commit()
         artifact_id = cursor.lastrowid
     return get_campaign_artifact(artifact_id, db_path=db_path)
+
+
+def _ensure_artifact_file_record(conn: sqlite3.Connection, local_path: str) -> int | None:
+    """Ensure a ``file_records`` row exists for ``local_path``; return its id.
+
+    Paths are stored in several shapes across the codebase (repo-relative
+    ``generated/...``, container absolute ``/app/generated/...``, and legacy host
+    absolute). A row is considered to describe the same file when its
+    ``file_path`` is any of those forms for the same tail, so this does not
+    create a duplicate row for a path already known under another prefix.
+    """
+    raw = str(local_path).strip()
+    if not raw:
+        return None
+    relative = _artifact_relative_path(raw)
+    candidates = [raw]
+    if relative:
+        candidates.extend((relative, f"/app/{relative}"))
+    seen: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.append(candidate)
+    placeholders = ",".join("?" for _ in seen)
+    existing = conn.execute(
+        f"SELECT id FROM file_records WHERE file_path IN ({placeholders})",
+        tuple(seen),
+    ).fetchone()
+    if existing is not None:
+        return int(existing[0])
+    from pathlib import Path as _Path
+
+    name = _Path(raw).name
+    size: float | None = None
+    try:
+        candidate_path = _Path(raw)
+        if candidate_path.is_file():
+            size = float(candidate_path.stat().st_size)
+    except OSError:
+        size = None
+    cursor = conn.execute(
+        "INSERT INTO file_records (filename, filesize, file_path) VALUES (?, ?, ?)",
+        (name, size, relative or raw),
+    )
+    return int(cursor.lastrowid)
+
+
+def _artifact_relative_path(local_path: str) -> str | None:
+    """Return the repo-relative form of a media path, or None if not a media root."""
+    raw = str(local_path).strip().replace("\\", "/")
+    for marker in ("/videoFile/", "/uploads/", "/generated/"):
+        if marker in raw:
+            root, tail = marker.strip("/").split("/")[0], raw.split(marker, 1)[1]
+            return f"{root}/{tail}"
+    for prefix in ("videoFile/", "uploads/", "generated/"):
+        if raw.startswith(prefix):
+            return raw
+    return None
 
 
 def get_campaign_artifact(
