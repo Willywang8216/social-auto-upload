@@ -109,3 +109,8 @@ jobs:
             exit 1
           fi
           echo "OK: patchright dependency found"
+
+# Re-register trigger placeholder (2026-10-09): GitHub stopped indexing these
+# workflows after commit d1319216 (no runs for any subsequent push, including an
+# empty probe commit). Touching the file forces GitHub to re-read and
+# re-register it. Remove once Actions is confirmed working again.
