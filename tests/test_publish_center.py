@@ -50,7 +50,15 @@ class ResolveBaseTimeTests(unittest.TestCase):
     def test_publish_now_returns_none(self):
         self.assertIsNone(publish_orchestrator._resolve_base_time({"publishNow": True}))
 
-    def test_start_at_returns_utc_naive_datetime(self):
+    def test_naive_start_at_is_the_operator_wall_clock_converted_to_utc(self):
+        """A naive startAt is local time, not UTC.
+
+        The Publish Center date picker sends ``value-format="YYYY-MM-DDTHH:mm:00"``
+        with no offset, so the string is the wall clock the operator saw. This
+        test previously asserted ``hour == 10`` for an input of 10:00 - i.e. it
+        encoded the bug, under which an operator picking 07:00 got 15:00. With
+        Asia/Shanghai as the operator timezone, 10:00 local is 02:00 UTC.
+        """
         result = publish_orchestrator._resolve_base_time({
             "publishNow": False,
             "startAt": "2026-06-17T10:00:00",
@@ -58,7 +66,7 @@ class ResolveBaseTimeTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.year, 2026)
         self.assertEqual(result.month, 6)
-        self.assertEqual(result.hour, 10)
+        self.assertEqual(result.hour, 2, "10:00 Asia/Shanghai is 02:00 UTC")
         self.assertIsNone(result.tzinfo)
 
     def test_start_at_with_timezone_converts_to_utc(self):

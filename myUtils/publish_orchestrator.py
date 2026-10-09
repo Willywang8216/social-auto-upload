@@ -24,10 +24,12 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from myUtils import campaigns as campaign_store
 from myUtils import content_rating
@@ -167,6 +169,28 @@ def _to_datetime(value) -> datetime | None:
         return None
 
 
+def _operator_timezone() -> tzinfo:
+    """The timezone an operator's naive datetime is expressed in.
+
+    The Publish Center date picker sends a naive local string
+    (``value-format="YYYY-MM-DDTHH:mm:00"``, no offset), while the reschedule
+    path sends a real UTC instant via ``toISOString()``. Treating the naive form
+    as UTC made an operator who picked 07:00 get a post at 15:00, because the
+    intended wall clock was read as 07:00 UTC.
+
+    Defaults to Asia/Shanghai (the deployment's operator timezone, and the cron's
+    ``CRON_TZ``), overridable with ``SAU_OPERATOR_TIMEZONE``.
+    """
+    name = str(os.environ.get("SAU_OPERATOR_TIMEZONE") or "Asia/Shanghai").strip()
+    try:
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001 - an unknown zone must not break scheduling
+        _logger.warning(
+            "unknown SAU_OPERATOR_TIMEZONE %r; treating naive times as UTC", name
+        )
+        return timezone.utc
+
+
 def _resolve_base_time(schedule: dict | None, *, now_fn=datetime.now) -> datetime | None:
     """Resolve the user-requested base publish time.
 
@@ -174,6 +198,12 @@ def _resolve_base_time(schedule: dict | None, *, now_fn=datetime.now) -> datetim
     worker can pick targets up as soon as it sees them. Otherwise returns
     a timezone-naive UTC datetime so all downstream stagger arithmetic is
     consistent with what ``publish_job_targets.schedule_at`` expects.
+
+    An offset-aware input is converted to UTC. A *naive* input is taken as the
+    operator's local wall clock and converted from ``_operator_timezone()``,
+    because that is the only reading of it that matches what the date picker
+    shows. Assuming UTC here silently shifted every scheduled post by the
+    timezone offset (8 hours for CST).
     """
     if not schedule or not isinstance(schedule, dict):
         return None
@@ -183,8 +213,13 @@ def _resolve_base_time(schedule: dict | None, *, now_fn=datetime.now) -> datetim
     if candidate is None:
         return None
     if candidate.tzinfo is not None:
-        candidate = candidate.astimezone(timezone.utc).replace(tzinfo=None)
-    return candidate
+        return candidate.astimezone(timezone.utc).replace(tzinfo=None)
+    # Naive: the operator's wall clock. Localise then convert to UTC.
+    try:
+        localised = candidate.replace(tzinfo=_operator_timezone())
+    except Exception:  # noqa: BLE001
+        return candidate
+    return localised.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _media_role_for_path(path: str | Path) -> str:
@@ -364,6 +399,14 @@ def submit_publish(
     queued_jobs: list[dict] = []
     skipped: list[dict] = []
     stagger_offset = 0  # global ordering of targets across profiles
+    # Serialise slot allocation against other submits for the whole pass.
+    # ``_next_free_slot`` reads the bookings loaded here and appends its choice,
+    # and each choice is written out per post, so two submits interleaving in
+    # that gap both saw the same free minute - the live database held nine such
+    # collisions. The lock is held only for this allocation pass, not the whole
+    # submit, and is best-effort (an unavailable lock logs and proceeds).
+    _slot_lock = slot_reservation_lock(db_path)
+    _slot_lock.__enter__()
     booked_slots = _load_booked_slots(db_path)
 
     # Content rating is derived from the filenames — the operator's rule is
@@ -656,6 +699,7 @@ def submit_publish(
             db_path=db_path,
         )
 
+    _slot_lock.__exit__(None, None, None)
     return SubmitResult(campaign_ids=campaign_ids, jobs=queued_jobs, skipped=skipped)
 
 
@@ -664,6 +708,61 @@ def _compute_schedule_at(base_time: datetime | None, offset_index: int) -> datet
         return None
     anchor = base_time or datetime.now(tz=timezone.utc).replace(tzinfo=None)
     return anchor + timedelta(minutes=STAGGER_MINUTES * offset_index)
+
+
+@contextmanager
+def slot_reservation_lock(db_path: Path | str):
+    """Serialise slot allocation across processes for this database.
+
+    Slot allocation reads every booked ``schedule_at`` for an account and then
+    writes the new target, so two concurrent submits can interleave - both
+    reading the same free minute. The live database carried nine such collisions
+    (account:120 held three pending targets at 2026-10-14T22:00), created by
+    submits minutes apart rather than by a single burst.
+
+    A ``BEGIN IMMEDIATE`` on the main database would lock it for the whole
+    submit, which does far more than allocate. This takes a dedicated advisory
+    lock instead - a tiny separate SQLite file beside the database, held only for
+    the allocation pass. It works across processes and needs no schema change; a
+    UNIQUE index on ``(account_ref, schedule_at)`` would be wrong, because
+    different profiles legitimately share a wall-clock minute.
+
+    Best-effort: if the lock cannot be taken the caller proceeds unlocked rather
+    than failing a publish.
+    """
+    path = Path(str(db_path))
+    lock_path = path.with_name(path.name + ".slots.lock")
+    connection = None
+    try:
+        # mkdir is inside the try on purpose: an unwritable or nonexistent parent
+        # raises here (FileNotFoundError/PermissionError/OSError), and the lock is
+        # best-effort - losing it must degrade to unlocked allocation, never to a
+        # failed publish.
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(str(lock_path), timeout=30)
+        # Take the file's write lock now and hold it until rollback, so a second
+        # allocator waits instead of reading the same pre-allocation state.
+        connection.execute("BEGIN IMMEDIATE")
+    except (sqlite3.Error, OSError, ValueError) as exc:  # pragma: no cover
+        # OSError covers FileNotFoundError, PermissionError and - importantly -
+        # FileExistsError, which `mkdir(exist_ok=True)` raises when a *file*
+        # already occupies the would-be directory. All of them mean "no lock",
+        # which must degrade to unlocked allocation, never fail the publish.
+        _logger.warning(
+            "could not take the slot reservation lock (%s); allocating unlocked", exc
+        )
+        if connection is not None:
+            connection.close()
+        connection = None
+    try:
+        yield
+    finally:
+        if connection is not None:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            connection.close()
 
 
 def _parse_schedule(value: object) -> datetime | None:

@@ -948,6 +948,10 @@ class PublishWorker:
                 # account moved to another profile after this job was queued
                 # would otherwise be handed the wrong profile's campaign.
                 routing_error = _account_profile_mismatch(target, account, job)
+                if routing_error is None:
+                    # A disabled account must not publish either; the same
+                    # window (queued, then the operator disables it) applies.
+                    routing_error = _account_unpublishable(account)
         except Exception:  # noqa: BLE001 — logging must not block publishing
             pass
         log = bind_job_logger(
@@ -1669,6 +1673,23 @@ def _account_profile_mismatch(target, account, job=None) -> str | None:
         f"{account_profile}, but this job is for profile {job_profile}; refusing "
         "to publish across profiles"
     )
+
+
+def _account_unpublishable(account) -> str | None:
+    """Reason this account must not publish, or ``None`` when it may.
+
+    ``enabled=0`` is honoured when a job is *created* (``_resolve_accounts``
+    lists with ``enabled=True``) but ``get_account`` does not filter on it, so a
+    target queued before the account was disabled would still publish. An
+    operator disables an account to stop it publishing - a scheduled target
+    firing anyway is the opposite of what the control promises.
+    """
+    if getattr(account, "enabled", True) is False:
+        return (
+            f"account {getattr(account, 'id', '?')} is disabled; refusing to "
+            "publish. Re-enable it, or cancel this target."
+        )
+    return None
 
 
 # Host-side repo roots that may appear in stored media paths. The app runs in
