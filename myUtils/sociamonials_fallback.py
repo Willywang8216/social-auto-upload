@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
-from myUtils import platform_limits
+from myUtils import media_pipeline, media_prep, platform_limits
 
 logger = logging.getLogger(__name__)
 
@@ -500,6 +500,52 @@ def _assert_video_duration(network: str, local_path: str | None) -> None:
             f"{network} video duration {duration:.0f}s exceeds the "
             f"{int(max_seconds)}s limit"
         )
+
+
+def _split_for_network(
+    network: str, local_path: str | None, *, target_id: int | None = None
+) -> str | None:
+    """Split an over-long video into parts the target network accepts.
+
+    The fallback used to refuse a video longer than the target network's cap, so
+    a 222s clip against X's 140s limit failed permanently even though the direct
+    path has always split such a video into per-part posts. Splitting here keeps
+    the fallback's promise - deliver when the direct path cannot - instead of
+    turning a solvable length problem into a lost publish.
+
+    Returns the path of the FIRST part to publish now; the caller records the
+    remaining parts as warnings. Returns ``None`` when the video already fits,
+    when it cannot be probed, or when a split is not possible, in which case the
+    original refusal stands.
+    """
+    max_seconds = NETWORK_MAX_VIDEO_SECONDS.get(network)
+    if not max_seconds or not local_path:
+        return None
+    path = Path(str(local_path))
+    if not path.is_file():
+        return None
+    try:
+        duration = media_pipeline.probe_video_duration(str(path))
+    except Exception as exc:  # noqa: BLE001 - a probe failure is not a rejection
+        logger.warning("could not probe video duration for the fallback: %s", exc)
+        return None
+    if not duration or duration <= max_seconds:
+        return None
+    parts = media_prep.split_to_seconds(
+        str(path),
+        path.parent,
+        max_seconds,
+    )
+    if len(parts) <= 1:
+        return None
+    logger.info(
+        "sociamonials fallback split a %.0fs video into %d part(s) for %s (cap %.0fs)",
+        duration,
+        len(parts),
+        network,
+        max_seconds,
+    )
+    return str(parts[0])
 
 
 def collect_media(
@@ -1283,7 +1329,28 @@ def publish_via_sociamonials(
             else:
                 image_refs.append(reference)
         if video_ref:
-            _assert_video_duration(network, video_local_path)
+            # An over-long video is split rather than refused: the direct path
+            # splits, so refusing here would lose a publish that is solvable.
+            try:
+                _assert_video_duration(network, video_local_path)
+            except SociamonialsFallbackError:
+                split_first = _split_for_network(network, video_local_path)
+                if split_first is None:
+                    raise
+                # Upload the first part and note the rest, rather than dropping
+                # the video entirely or sending one the network will reject.
+                reference = _resolve_local_media(
+                    http,
+                    headers,
+                    ws,
+                    Path(split_first),
+                    timeout=request_timeout,
+                )
+                video_ref = reference
+                warnings.append(
+                    f"{network} duration limit: published the first split part; "
+                    "remaining parts were not sent by the fallback"
+                )
             body["video_url"] = video_ref
             if image_refs:
                 warnings.append("both video and image media were present; images were dropped")

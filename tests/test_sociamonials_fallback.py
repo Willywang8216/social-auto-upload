@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 import pytest
+from unittest.mock import patch
 
 from myUtils import sociamonials_fallback as sm
 
@@ -949,3 +950,52 @@ def test_reuse_lookup_is_bounded(monkeypatch):
         kind="video", timeout=5,
     ) is None
     assert len(session.requests) == 3, "must respect the page bound"
+
+
+def test_split_returns_none_when_the_video_fits(tmp_path):
+    clip = tmp_path / "ok.mp4"
+    clip.write_bytes(b"x")
+    with patch.object(sm.media_pipeline, "probe_video_duration", return_value=100.0):
+        assert sm._split_for_network("tw", str(clip)) is None
+
+
+def test_split_returns_none_without_a_local_file():
+    # A remote-only video cannot be probed or split here.
+    assert sm._split_for_network("tw", None) is None
+    assert sm._split_for_network("tw", "/nonexistent/x.mp4") is None
+
+
+def test_split_returns_none_for_a_network_with_no_duration_cap(tmp_path):
+    clip = tmp_path / "x.mp4"
+    clip.write_bytes(b"x")
+    assert sm._split_for_network("fb", str(clip)) is None
+
+
+def test_split_probe_failure_is_not_a_rejection(tmp_path):
+    clip = tmp_path / "x.mp4"
+    clip.write_bytes(b"x")
+    with patch.object(
+        sm.media_pipeline, "probe_video_duration", side_effect=RuntimeError("no ffprobe")
+    ):
+        assert sm._split_for_network("tw", str(clip)) is None
+
+
+def test_split_returns_the_first_part(tmp_path):
+    clip = tmp_path / "long.mp4"
+    clip.write_bytes(b"x")
+    parts = [tmp_path / "long_part1of2_pub.mp4", tmp_path / "long_part2of2_pub.mp4"]
+    for part in parts:
+        part.write_bytes(b"x")
+    with patch.object(
+        sm.media_pipeline, "probe_video_duration", return_value=222.0
+    ), patch.object(sm.media_prep, "split_to_seconds", return_value=parts):
+        assert sm._split_for_network("tw", str(clip)) == str(parts[0])
+
+
+def test_split_yielding_one_part_falls_back_to_refusal(tmp_path):
+    clip = tmp_path / "long.mp4"
+    clip.write_bytes(b"x")
+    with patch.object(
+        sm.media_pipeline, "probe_video_duration", return_value=222.0
+    ), patch.object(sm.media_prep, "split_to_seconds", return_value=[clip]):
+        assert sm._split_for_network("tw", str(clip)) is None
