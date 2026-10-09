@@ -55,7 +55,11 @@ MEDIA_MAX_MB: dict[str, int] = {
     "bluesky": 300,
     "facebook": 4096,
     "instagram": 300,
-    "threads": 1024,
+    # 1000 (1 GB) rather than 1024: this table is decimal MB (the publisher
+    # compares `bytes > limit * 1_000_000`), and Meta documents Threads video
+    # at 1 GB. 1024 allowed a file up to 1,024,000,000 bytes, which is over the
+    # documented cap - the operator confirmed 1000.
+    "threads": 1000,
     "tiktok": 4096,
     "youtube": 262144,
     "reddit": 1000,

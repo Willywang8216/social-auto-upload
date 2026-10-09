@@ -750,7 +750,7 @@ class PreparedPublisherTests(unittest.TestCase):
                 )
         message = str(ctx.exception)
         self.assertIn("MB", message)
-        self.assertIn("1024", message)
+        self.assertIn("1000", message)
         self.assertEqual(session.calls, [])
 
     def test_tiktok_publish_auto_refreshes_stale_token(self):

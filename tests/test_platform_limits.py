@@ -41,7 +41,7 @@ class TableTests(unittest.TestCase):
             content_rules.get_platform_rule("threads").max_chars,
             pp.THREADS_MAX_TEXT_CHARS,
         )
-        self.assertEqual(pp.THREADS_MAX_VIDEO_BYTES, 1024 * 1_000_000)
+        self.assertEqual(pp.THREADS_MAX_VIDEO_BYTES, 1000 * 1_000_000)
 
     def test_network_lookup(self) -> None:
         self.assertEqual(pl.limits_for_network("tw")["message_max_chars"], 280)

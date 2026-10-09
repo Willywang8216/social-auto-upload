@@ -65,7 +65,9 @@ class SplitPlanUnitTests(unittest.TestCase):
 
     def test_duration_over_cap_still_plans(self):
         plans = _plan_for(duration=600.0, size_bytes=1000, platforms={"threads"})
-        self.assertIn((300.0, 1024.0), plans)
+        # Read the cap rather than hardcoding it, so the plan and the table
+        # cannot drift apart.
+        self.assertIn((300.0, float(platform_limits.media_max_mb("threads"))), plans)
 
 
 class ProbeFailureIsNotSilentTests(unittest.TestCase):
