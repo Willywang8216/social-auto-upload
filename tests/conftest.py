@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import sys
+from pathlib import Path
 
 # Resolve once, before any test imports the worker, and point the per-job sink
 # at a temp dir that pytest/tmp cleanup owns.
@@ -74,3 +76,36 @@ for _alert_key in (
 # (bans, self-promotion, submission mode, title format) stay enforced, and the
 # tests that cover the guard itself set SAU_SUBREDDIT_STRICT=1 explicitly.
 os.environ["SAU_SUBREDDIT_STRICT"] = "0"
+
+# Point the suite at a throwaway database, not the production one.
+#
+# Most modules default to the live path and only accept a `db_path` override:
+#
+#   myUtils/jobs.py:45          DB_PATH = Path(BASE_DIR) / "db" / "database.db"
+#   myUtils/campaigns.py:15     same
+#   myUtils/account_events.py:14, analytics_store.py:21,
+#   content_generator.py:21     same
+#
+# So any test (or helper) that calls one of those functions without passing
+# db_path writes to PRODUCTION. That is not hypothetical: while a full-suite run
+# was in progress, production campaign 2603 was left with no posts and had to be
+# reclaimed for a clean re-submit, and the queue and campaign status are shared
+# mutable state the tests read too.
+#
+# SAU_DB_PATH is the documented override (see db/createTable.py and
+# scripts/*.py), so pinning it here isolates every reader and writer at once.
+# The file is created empty; tests that need a schema bootstrap it themselves.
+_TEST_DB_DIR = tempfile.mkdtemp(prefix="sau-test-db-")
+os.environ["SAU_DB_PATH"] = os.path.join(_TEST_DB_DIR, "database.db")
+# Also neutralise the module-level constants that were bound at import time from
+# the production path, for any module already imported before this line runs.
+for _module_name in (
+    "myUtils.jobs",
+    "myUtils.campaigns",
+    "myUtils.account_events",
+    "myUtils.analytics_store",
+    "myUtils.content_generator",
+):
+    _module = sys.modules.get(_module_name)
+    if _module is not None and hasattr(_module, "DB_PATH"):
+        _module.DB_PATH = Path(os.environ["SAU_DB_PATH"])
