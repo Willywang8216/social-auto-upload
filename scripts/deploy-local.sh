@@ -4,13 +4,19 @@
 # Why this exists
 # ---------------
 # This repo is a FORK (of dreammis/social-auto-upload). GitHub ran its workflows
-# 495 times and then stopped creating runs entirely after commit d1319216: every
-# subsequent push - including an intentionally empty probe commit - produced no
-# run, while `gh api .../actions/workflows` still listed all three as "active",
-# Actions permissions were enabled, no run was queued or in progress, ci.yml has
-# no paths filter, and GitHub's own status was "All Systems Operational". The
-# remaining likely cause is an account-level Actions limit, which cannot be
-# fixed from inside the repository.
+# 495 times and then disabled Actions on the fork because of its Actions usage:
+# every push after commit d1319216 - including an intentionally empty probe
+# commit - produced no run. The repository's own Actions page states the cause:
+#
+#   "Workflows aren't being run on this fork because of its GitHub Actions
+#    usage. A repository maintainer can re-enable them."
+#
+# Dispatch returns HTTP 422 "Actions has been disabled for this repository", and
+# the REST re-enable (PUT actions/permissions enabled=true) does not clear it.
+# Other repositories on the same account still run Actions, so this is
+# repository-specific (not an account-level or billing limit). Re-enable from
+# the repository's Actions tab in the GitHub UI - it is not fixable through the
+# REST API - or use this script as the fallback.
 #
 # So this script performs the same job the `image.yml` workflow does, locally:
 # build the image, tag both the commit and :latest, restart the service, and
