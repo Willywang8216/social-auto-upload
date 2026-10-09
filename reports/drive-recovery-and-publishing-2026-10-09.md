@@ -96,3 +96,62 @@ container (uid 1000) could not append and job logging was failing with
 ## Test suite
 
 **1474 passed, 1 skipped** (was 1468 at the start of this turn).
+
+---
+
+# Follow-up: the "1 GB" file, compression, and the purge
+
+## Corrections
+
+**"1 GB" was loose language on my part.** The largest raw source in the inbox is
+**574 MB**, not 1 GB. Its size is still absurd for its content, and here is the
+actual probe:
+
+```
+face exercises funny video.mp4
+  574 MB · 2160x3810 (4K vertical) · 60 fps · HEVC · 62 Mbit/s · 74 seconds
+```
+
+A 74-second clip at 62 Mbit/s is a phone exporting at maximum settings. Nothing
+in the pipeline produced it; it arrived that way.
+
+## Compression and split already work — verified end to end
+
+I ran the real code on that real file:
+
+| stage | result |
+| --- | --- |
+| ingest | 574 MB · 2160×3810 · 60 fps |
+| compress | **55 MB** · 1080×1920 · 30 fps → **10% of the original** |
+| split | per-platform parts, each compressed |
+| upload | ≤55 MB per post, under every platform cap |
+
+And the **order is guaranteed in code**: `_shrink_for_publish` runs at line 400
+and `split_to_seconds` at line 670 of `campaign_media_prep.py`, and the split
+takes `publish_path` — the *compressed* file — not the source. So it is
+compress → split, never split → compress.
+
+So there was no compression bug to fix. The one genuinely large file I mentioned
+(target 2054) has since **succeeded**.
+
+## The purge: done
+
+The 105 artifacts whose media is genuinely gone are now deleted. Verified first,
+for all three Drive roots (649 + 483 + 4 objects), that **none** of them is on
+Drive.
+
+**Only the `campaign_artifacts` rows were deleted.** No file, job, target or
+published post was touched — the queue is identical afterwards:
+
+```
+pending 1282   succeeded 1039   failed 156   cancelled 3168   (unchanged)
+```
+
+That is safe because those 105 rows affected only already-terminal targets
+(cancelled 220, failed 52, succeeded 117, **pending 0**). Afterwards: **0
+unrecoverable artifacts remain and 0 live targets reference one.**
+
+The script protects against the obvious mistake: it refuses to delete a row that
+any pending/retrying/running target needs (reporting and skipping it instead),
+re-verifies Drive at run time so a since-re-uploaded file survives, is dry-run by
+default, and copies the database first.
