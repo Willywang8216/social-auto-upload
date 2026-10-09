@@ -2240,13 +2240,30 @@ def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
     def _largest_fitting_parts(candidates: list[dict]) -> list[dict]:
         # Several split plans may exist (X 140s, Threads 300s, a size-only
         # split); use the largest parts that still fit, never a finer split.
-        best_cap = max(float(_meta(a).get("max_duration_seconds") or 0) for a in candidates)
-        chosen = [
-            a for a in candidates
-            if float(_meta(a).get("max_duration_seconds") or 0) == best_cap
-        ]
+        #
+        # Group by part_count rather than by an exact duration. ffmpeg gives the
+        # last part of an equal split a slightly different length (here 200.048s
+        # against 200.083s - 35ms, from frame-boundary rounding). Comparing
+        # durations for equality silently dropped that last part, so a third of
+        # the video never published: a 3-part Threads split selected only parts 1
+        # and 2. part_count identifies the same plan without depending on float
+        # equality, and the median picks the plan whose parts are the largest.
+        by_count: dict[int, list[dict]] = {}
+        for artifact in candidates:
+            count = int(_meta(artifact).get("part_count") or 0)
+            by_count.setdefault(count, []).append(artifact)
+        if not by_count:
+            return []
+
+        def _median_seconds(group: list[dict]) -> float:
+            values = sorted(
+                float(_meta(a).get("max_duration_seconds") or 0) for a in group
+            )
+            return values[len(values) // 2] if values else 0.0
+
+        best_count = max(by_count, key=lambda c: (_median_seconds(by_count[c]), c))
         return sorted(
-            chosen,
+            by_count[best_count],
             key=lambda a: int(_meta(a).get("part_index") or 0),
         )
 
