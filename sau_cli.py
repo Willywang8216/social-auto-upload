@@ -940,6 +940,69 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
     )
 
+    # ----- Schedule maintenance -----
+    schedule_parser = platform_parsers.add_parser(
+        "schedule",
+        help="Schedule maintenance (move queued publish targets forward, etc.)",
+    )
+    schedule_actions = schedule_parser.add_subparsers(dest="action", required=True)
+    shift_parser = schedule_actions.add_parser(
+        "shift",
+        help=(
+            "Move selected scheduled targets forward by N days (default 3), "
+            "preserving the operator wall-clock time and re-spacing the queue "
+            "so no account violates the min-gap / max-per-day rules."
+        ),
+    )
+    shift_parser.add_argument(
+        "--days", type=int, default=3,
+        help="Calendar days to move forward (default: 3; must be >= 1).",
+    )
+    shift_parser.add_argument("--profile", type=int, help="Only targets whose job belongs to this profile id")
+    shift_parser.add_argument(
+        "--platform", dest="platform_filter", default=None,
+        help="Only targets whose job is on this platform (e.g. twitter)",
+    )
+    shift_parser.add_argument(
+        "--account", dest="accounts", action="append", type=int, default=None,
+        help="Only targets for this account id (repeatable)",
+    )
+    shift_parser.add_argument("--campaign", type=int, help="Only targets tied to this campaign id")
+    shift_parser.add_argument(
+        "--status", default="pending,retrying",
+        help="Comma-separated statuses to include (default: pending,retrying)",
+    )
+    shift_parser.add_argument(
+        "--from", dest="date_from", default=None,
+        help="Only targets scheduled on/after this operator-local date (YYYY-MM-DD)",
+    )
+    shift_parser.add_argument(
+        "--to", dest="date_to", default=None,
+        help="Only targets scheduled on/before this operator-local date (YYYY-MM-DD)",
+    )
+    shift_parser.add_argument(
+        "--include-terminal", action="store_true",
+        help="Allow succeeded/cancelled targets to be selected (running is never moved)",
+    )
+    shift_parser.add_argument(
+        "--min-gap", type=int, default=None,
+        help="Override SAU_PUBLISH_MIN_GAP_MINUTES for this run",
+    )
+    shift_parser.add_argument(
+        "--max-per-day", type=int, default=None,
+        help="Override SAU_PUBLISH_MAX_PER_DAY for this run",
+    )
+    shift_parser.add_argument("--db-path", default=None, help="SQLite database (default: SAU_DB_PATH or db/database.db)")
+    shift_parser.add_argument(
+        "--apply", action="store_true",
+        help="Write the changes (default: dry-run, nothing is written)",
+    )
+    shift_parser.add_argument("--json", action="store_true", help="Emit the summary as JSON")
+    shift_parser.add_argument(
+        "--limit", type=int, default=40,
+        help="Max rows in the printed before/after table (default: 40)",
+    )
+
     return parser
 
 
@@ -1341,6 +1404,11 @@ async def dispatch(args: argparse.Namespace) -> int:
             return _skill_remove(client=getattr(args, "client", "all"))
         raise RuntimeError(f"Unsupported skill action: {args.action}")
 
+    if args.platform == "schedule":
+        if args.action == "shift":
+            return _schedule_shift_command(args)
+        raise RuntimeError(f"Unsupported schedule action: {args.action}")
+
     raise RuntimeError(f"Unsupported platform: {args.platform}")
 
 
@@ -1618,6 +1686,98 @@ def _skill_remove(client: str) -> int:
         print(f"skipped (config not found): {', '.join(missing)}")
     if not removed and not missing:
         print("`sau` was not registered anywhere — nothing to do.")
+    return 0
+
+
+def _schedule_shift_command(args) -> int:
+    """``sau schedule shift`` — the operator-facing dry-run/apply entry point."""
+    from myUtils import schedule_shift
+
+    configured = os.environ.get("SAU_DB_PATH")
+    db_path = Path(args.db_path) if args.db_path else (
+        Path(configured) if configured else _resolve_default_db_path()
+    )
+    operator_tz = schedule_shift.po._operator_timezone()
+
+    start_at = end_at = None
+    if args.date_from or args.date_to:
+        start_date = schedule_shift.parse_operator_date(args.date_from) if args.date_from else None
+        end_date = schedule_shift.parse_operator_date(args.date_to) if args.date_to else None
+        if args.date_from and start_date is None:
+            print(f"Invalid --from date (expected YYYY-MM-DD): {args.date_from}", file=sys.stderr)
+            return 2
+        if args.date_to and end_date is None:
+            print(f"Invalid --to date (expected YYYY-MM-DD): {args.date_to}", file=sys.stderr)
+            return 2
+        start_at, end_at = schedule_shift.local_date_range_to_utc(
+            start_date, end_date, operator_tz
+        )
+
+    statuses = tuple(s.strip() for s in str(args.status or "").split(",") if s.strip())
+    scope = schedule_shift.ShiftScope(
+        profile_id=args.profile,
+        platform=args.platform_filter,
+        account_ids=tuple(args.accounts or ()),
+        campaign_id=args.campaign,
+        statuses=statuses or schedule_shift.DEFAULT_STATUSES,
+        start_at=start_at,
+        end_at=end_at,
+        include_terminal=args.include_terminal,
+    )
+
+    common = dict(
+        db_path=db_path,
+        days=args.days,
+        scope=scope,
+        min_gap_minutes=args.min_gap,
+        max_per_day=args.max_per_day,
+        operator_tz=operator_tz,
+    )
+    try:
+        if args.apply:
+            result = schedule_shift.apply_shift(**common, backup=True)
+            plan = result.plan
+            summary = result.summary()
+        else:
+            plan = schedule_shift.plan_shift(**common)
+            result = None
+            summary = plan.summary()
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        payload = {"mode": "apply" if args.apply else "dry-run", "summary": summary}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    mode = "APPLY" if args.apply else "DRY RUN"
+    print(f"{mode}  schedule shift  days={plan.days}  tz={plan.timezone}  db={db_path}")
+    print("=" * 100)
+    print(schedule_shift.format_plan_table(plan, limit=max(1, args.limit)))
+    print()
+    print("summary:", json.dumps(summary, ensure_ascii=False))
+    if plan.adjusted:
+        print()
+        print(
+            f"{len(plan.adjusted)} target(s) moved FURTHER than the plain "
+            f"{plan.days}-day shift:"
+        )
+        for change in plan.adjusted[:20]:
+            print(
+                f"  target {change.target_id} ({change.reason}): "
+                f"shifted {change.shifted} -> {change.new}"
+            )
+        if len(plan.adjusted) > 20:
+            print(f"  ... and {len(plan.adjusted) - 20} more")
+    if not args.apply:
+        print()
+        print("DRY RUN: nothing written. Re-run with --apply to move these targets.")
+    else:
+        print()
+        print(f"applied={result.applied}  backup={result.backup_path}")
+        if result.write_skipped:
+            print(f"skipped at write time (status changed): {len(result.write_skipped)}")
     return 0
 
 

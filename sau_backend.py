@@ -6633,6 +6633,116 @@ def jobs_target_resubmit(target_id):
                     "data": _target_to_payload(target)}), 200
 
 
+@app.route("/jobs/schedule/shift", methods=["POST"])
+def jobs_schedule_shift():
+    """Move selected scheduled targets forward by N days, smartly.
+
+    Body (all optional except that a scope must be resolvable; the default is
+    every pending/retrying target)::
+
+        {
+          "days": 3,
+          "apply": false,
+          "includeTerminal": false,
+          "scope": {
+            "profileId": 1, "platform": "twitter", "accountIds": [4, 5],
+            "campaignId": 42, "statuses": ["pending"],
+            "from": "2026-10-20", "to": "2026-10-22"
+          }
+        }
+
+    Dry-run by default: ``apply`` must be explicitly true to write. When it is,
+    the database is backed up first and the write re-plans under the slot lock.
+    """
+    from myUtils import schedule_shift
+
+    data = request.get_json(silent=True) or {}
+    scope_data = data.get("scope") if isinstance(data.get("scope"), dict) else data
+
+    def _opt_int(value):
+        if value in (None, ""):
+            return None
+        return int(value)
+
+    try:
+        days = int(data.get("days", schedule_shift.DEFAULT_SHIFT_DAYS))
+        if days < 1:
+            raise ValueError("days must be >= 1")
+        profile_id = _opt_int(scope_data.get("profileId"))
+        campaign_id = _opt_int(scope_data.get("campaignId"))
+        raw_accounts = scope_data.get("accountIds") or scope_data.get("account_ids") or []
+        if isinstance(raw_accounts, (int, str)):
+            raw_accounts = [raw_accounts]
+        account_ids = tuple(int(a) for a in raw_accounts)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"code": 400, "msg": f"invalid shift scope: {exc}",
+                        "data": None}), 400
+
+    tz = schedule_shift.po._operator_timezone()
+    start_at = end_at = None
+    raw_from = scope_data.get("from")
+    raw_to = scope_data.get("to")
+    if raw_from or raw_to:
+        start_date = schedule_shift.parse_operator_date(raw_from) if raw_from else None
+        end_date = schedule_shift.parse_operator_date(raw_to) if raw_to else None
+        if (raw_from and start_date is None) or (raw_to and end_date is None):
+            return jsonify({"code": 400, "msg": "from/to must be YYYY-MM-DD",
+                            "data": None}), 400
+        start_at, end_at = schedule_shift.local_date_range_to_utc(
+            start_date, end_date, tz
+        )
+
+    raw_statuses = scope_data.get("statuses") or scope_data.get("status")
+    if isinstance(raw_statuses, str):
+        statuses = tuple(s.strip() for s in raw_statuses.split(",") if s.strip())
+    elif isinstance(raw_statuses, list):
+        statuses = tuple(str(s).strip() for s in raw_statuses if str(s).strip())
+    else:
+        statuses = schedule_shift.DEFAULT_STATUSES
+
+    scope = schedule_shift.ShiftScope(
+        profile_id=profile_id,
+        platform=scope_data.get("platform") or None,
+        account_ids=account_ids,
+        campaign_id=campaign_id,
+        statuses=statuses or schedule_shift.DEFAULT_STATUSES,
+        start_at=start_at,
+        end_at=end_at,
+        include_terminal=bool(
+            scope_data.get("includeTerminal", data.get("includeTerminal"))
+        ),
+    )
+    common = dict(
+        db_path=_current_db_path(),
+        days=days,
+        scope=scope,
+        operator_tz=tz,
+        workspace_id=_workspace_scope(),
+    )
+    try:
+        if bool(data.get("apply")):
+            result = schedule_shift.apply_shift(**common, backup=True)
+            plan = result.plan
+            summary = result.summary()
+            mode = "apply"
+        else:
+            plan = schedule_shift.plan_shift(**common)
+            summary = plan.summary()
+            mode = "dry-run"
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    return jsonify({
+        "code": 200,
+        "msg": mode,
+        "data": {
+            "mode": mode,
+            "summary": summary,
+            "changes": [change.to_dict() for change in plan.changes],
+        },
+    }), 200
+
+
 def _target_to_payload(target: job_runtime.Target) -> dict:
     display = _account_display_name(target.account_ref)
     return {
