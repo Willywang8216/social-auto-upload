@@ -314,10 +314,11 @@ build_route_plan() {
   # the copy/purge pass uses as an rclone --files-from / include filter.
   # Files already in the keep-local EXCLUDES set are dropped so a routing
   # include can never override the in-flight/due-soon guard.
-  python3 - "$DB" "$PLAN_DIR" "$SRC" "${EXCLUDES:-}" <<'PY'
+  python3 - "$DB" "$PLAN_DIR" "$SRC" "${EXCLUDES:-}" "${MIN_AGE_SECONDS:-0}" <<'PY'
 import re
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[3])
@@ -330,6 +331,9 @@ from myUtils.drive_layout import (
 )
 
 db_path, plan_dir, src, excludes_path = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]
+# Mid-write guard in seconds (10 minutes). See the age check below for why this
+# is applied here instead of rclone's --min-age.
+min_age_seconds = float(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else 0.0
 conn = sqlite3.connect(db_path, timeout=15)
 conn.row_factory = sqlite3.Row
 conn.execute("PRAGMA busy_timeout=15000")
@@ -353,9 +357,16 @@ try:
         [(r["status"], r["payload_json"]) for r in targets]
     )
     records = conn.execute(
+        # LEFT JOIN, not INNER: a file that has never been offloaded has
+        # storage_backend_id NULL, and those are exactly the files this pass must
+        # move. With an INNER JOIN they were invisible, so the plan only ever
+        # listed files that were ALREADY on Drive - 102 registrable candidates
+        # that existed locally were dropped and never left the VPS. Rows whose
+        # backend is already a tiered endpoint are skipped below (tier is set),
+        # so already-migrated files are still left alone.
         "SELECT fr.id, fr.file_path, b.endpoint "
-        "FROM file_records fr JOIN storage_backends b ON b.id = fr.storage_backend_id "
-        "WHERE b.provider='rclone'"
+        "FROM file_records fr LEFT JOIN storage_backends b ON b.id = fr.storage_backend_id "
+        "WHERE b.id IS NULL OR b.provider='rclone'"
     ).fetchall()
 finally:
     conn.close()
@@ -369,6 +380,15 @@ for tier in ("published", "inbox"):
 try:
     for row in records:
         tier, root = split_endpoint(row["endpoint"])
+        if row["endpoint"] is None:
+            # Never offloaded: no backend, so no endpoint to read a root from.
+            # Derive it from the stored path instead, which is what makes these
+            # the files this pass exists to move.
+            derived = split_media_path(row["file_path"])
+            if derived is None:
+                continue
+            root = derived[0]
+            tier = None
         # Only legacy, untiered rows are candidates; already-tiered rows and
         # non-media endpoints are left alone.
         if root is None or tier is not None:
@@ -379,6 +399,21 @@ try:
         key = split[1]
         if not key or key in excluded:
             continue
+        # Mid-write guard, applied HERE rather than via rclone's --min-age.
+        # rclone refuses to combine --files-from with ANY other filter:
+        #   "the usage of --files-from overrides all other filters, it should be
+        #    used alone or with --files-from-raw"
+        # --exclude-from AND --min-age both trigger it, which is why every run
+        # failed (rc=1, 85 times, nothing offloaded). A file modified inside the
+        # window may still be being written, so defer it to the next run.
+        if min_age_seconds:
+            source_file = src / root / key
+            try:
+                age = time.time() - source_file.stat().st_mtime
+            except OSError:
+                continue  # already gone: nothing to copy
+            if age < min_age_seconds:
+                continue
         desired = tier_for_media(
             row["id"],
             row["file_path"],
@@ -697,7 +732,11 @@ PY
   elif ! pending_excludes > "$EXCLUDES" || ! grep -q '^# excludes=' "$EXCLUDES"; then
     echo "[$(ts)] SKIPPED offload: could not build the keep-local exclude list"
     rc=3
-  elif ! build_route_plan > "$PLAN_LOG" || ! grep -q '^# route_plan' "$PLAN_LOG"; then
+  # MIN_AGE_SECONDS is the mid-write guard (10 min). Set explicitly here so a
+  # direct/test invocation of build_route_plan defaults to 0 and plans
+  # everything, while a real run still defers a file that may be mid-write.
+  elif ! MIN_AGE_SECONDS="${MIN_AGE_SECONDS:-600}" build_route_plan > "$PLAN_LOG" \
+       || ! grep -q '^# route_plan' "$PLAN_LOG"; then
     echo "[$(ts)] SKIPPED offload: could not build the inbox/published route plan"
     rc=3
   else
@@ -717,10 +756,19 @@ PY
         # Do not skip the per-file verification pass when rclone reports a copy
         # error: it can still have copied readable siblings, while the purge path
         # stages root-owned unreadable files individually and fails closed per file.
-        # --files-from is the route plan; --exclude-from still protects anything
-        # in-flight/due-soon that the plan happened to list.
-        if ! "${RC[@]}" copy "$source_root" "$destination_root" --min-age 10m \
-             --files-from "$list" --exclude-from "$EXCLUDES" \
+        #
+        # NOTE: only --files-from may be passed here. rclone aborts with
+        #   "the usage of --files-from overrides all other filters, it should be
+        #    used alone or with --files-from-raw"
+        # when it is combined with --exclude-from, which made every run fail
+        # (rc=1, 85 occurrences, nothing offloaded). The exclusion is not needed
+        # anyway: build_route_plan already drops every keep-local path from the
+        # plan, so the include can never re-admit an in-flight/due-soon file.
+        # --files-from must be the ONLY filter (no --min-age, no --exclude-from):
+        # rclone aborts when it is combined with anything else, and the age guard
+        # now lives in the route plan. See build_route_plan.
+        if ! "${RC[@]}" copy "$source_root" "$destination_root" \
+             --files-from "$list" \
              --transfers 4 --checkers 8 --stats-one-line -v 2>&1; then
           echo "[$(ts)] copy reported errors under $source_root ($tier); checking each source before any unlink"
         fi
