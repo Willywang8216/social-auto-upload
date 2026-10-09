@@ -115,3 +115,58 @@ used your actual chat id as a fixture - that is now a placeholder.
    reconnected or removed from its campaign.
 3. Unchanged from before: X API credits (402), account 108 OAuth, the
    Sociamonials dedupe (1,949 MB, dry-run only).
+
+---
+
+# Follow-up (same day, commit 96d880e)
+
+## The Threads split gap is now fixed
+
+Two more defects surfaced while verifying 5626.
+
+### a. The last part of an equal split was silently discarded
+
+ffmpeg gives the final part of an equal split a slightly different duration:
+
+```
+part 1  200.083s
+part 2  200.083s
+part 3  200.048s   <- 35ms shorter
+```
+
+`_largest_fitting_parts` grouped parts by an **exact** duration match against the
+maximum, so part 3 was excluded. Only 2 of 3 parts published — **a third of the
+video never reached the platform, with no error**. Parts are now grouped by
+`part_count`, which identifies the same plan without float equality.
+
+### b. Threads had never been given a split at all
+
+```
+splits tagged split_for=twitter : 38
+splits tagged split_for=threads : 0
+```
+
+New `scripts/backfill_platform_splits.py` adds the missing split for an existing
+campaign. Dry-run by default; only **adds** artifacts, never mutates one. It also
+handles the offload cron having removed the local copy (231 of 304 campaign
+directories are empty by design) by fetching the hosted copy first.
+
+Applied to campaign 2555 — the first Threads split ever created:
+
+```
+id    kind            part  split_for   url
+2527  remote_upload   1     ["threads"]  yes
+2528  remote_upload   2     ["threads"]  yes
+2529  remote_upload   3     ["threads"]  yes
+```
+
+### Verified
+
+A fresh submit of campaign 2555 now builds **3 Threads posts** (200.1s, 200.1s,
+200.0s, all with URLs). Previously: 0 posts, and the publish failed on duration.
+
+## Note on resubmit
+
+Resubmitting an already-failed target reuses its **stored payload**, so it
+cannot pick up a newly created split. Campaigns affected by the split gap need a
+fresh submit from the UI rather than a resubmit of the old target.
