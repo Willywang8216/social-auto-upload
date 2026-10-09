@@ -1553,22 +1553,66 @@ class RedditPublisherTests(unittest.TestCase):
         # _message_title truncates to 100 chars first, then publish_reddit_sync truncates to 300
         self.assertLessEqual(len(data["title"]), 300)
 
-    def test_publish_reddit_uses_draft_subreddits_over_config(self):
+    def test_account_subreddits_win_over_a_stale_draft(self):
+        """A queued draft must not override the account's current subreddits.
+
+        The order was reversed, so a list baked into the payload when the job was
+        queued beat the live account config. Job 5445 failed naming six
+        subreddits that had been removed from the account hours earlier: the
+        payload still carried them and the publisher preferred the payload, so
+        correcting the account could not fix an already-queued job.
+        """
         session = _RecordingSession([
             _FakeResponse({"access_token": "token"}),
             _FakeResponse({"json": {"errors": []}}),
         ])
         account = SimpleNamespace(
             account_name="test",
-            config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": ["config_sub"]},
+            config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": ["current_sub"]},
         )
         prepared_publishers.publish_reddit_sync(
             account,
-            {"message": "test", "draft": {"subreddits": ["draft_sub"]}},
+            {"message": "test", "draft": {"subreddits": ["removed_sub"]}},
             session=session,
         )
         data = session.calls[1][2]["data"]
-        self.assertEqual(data["sr"], "draft_sub")
+        self.assertEqual(data["sr"], "current_sub")
+
+    def test_a_draft_may_narrow_the_account_subreddits(self):
+        # A per-post choice is legitimate, as long as it stays within the account.
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": ["a_sub", "b_sub"]},
+        )
+        prepared_publishers.publish_reddit_sync(
+            account,
+            {"message": "test", "draft": {"subreddits": ["b_sub"]}},
+            session=session,
+        )
+        self.assertEqual(session.calls[1][2]["data"]["sr"], "b_sub")
+
+    def test_a_draft_cannot_widen_beyond_the_account(self):
+        session = _RecordingSession([
+            _FakeResponse({"access_token": "token"}),
+            _FakeResponse({"json": {"errors": []}}),
+            _FakeResponse({"json": {"errors": []}}),
+        ])
+        account = SimpleNamespace(
+            account_name="test",
+            config={"clientId": "cid", "clientSecret": "secret", "refreshToken": "refresh", "subreddits": ["a_sub", "b_sub"]},
+        )
+        prepared_publishers.publish_reddit_sync(
+            account,
+            {"message": "test", "draft": {"subreddits": ["b_sub", "foreign_sub"]}},
+            session=session,
+        )
+        self.assertEqual(session.calls[1][2]["data"]["sr"], "b_sub")
+        # Only one submit: the foreign subreddit was dropped, not published.
+        self.assertEqual(len(session.calls), 2)
 
     def test_publish_reddit_extracts_video_over_image(self):
         session = _RecordingSession([

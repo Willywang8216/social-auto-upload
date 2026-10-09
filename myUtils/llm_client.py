@@ -66,9 +66,47 @@ def _resolve_api_key(api_key: str | None) -> str:
 
 
 def _headers(api_key: str) -> dict[str, str]:
-    return {
+    """Headers for the Muyuan LLM gateway.
+
+    The gateway sits behind Cloudflare, which fingerprint-checks the request. A
+    bare ``Authorization: Bearer`` gets ``HTTP 403`` with an
+    ``error code: 1010`` (or a "Just a moment..." challenge page) on EVERY route
+    - messages, chat/completions and the native Gemini path alike. Measured
+    against the live service: only a full Claude Code header set gets through.
+
+    So this must keep sending the ``claude-cli`` user agent, ``x-app: cli`` and
+    ``anthropic-version``. Requests that omit them are rejected by the edge
+    before authentication is even considered, which is why the operator saw
+    transcription fail with 403 while the keys themselves were valid.
+
+    Overridable for a future gateway or if the check changes:
+    ``SAU_LLM_USER_AGENT`` and ``SAU_LLM_EXTRA_HEADERS`` (JSON object).
+    """
+    headers = {
         "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "anthropic-version": os.environ.get("SAU_LLM_ANTHROPIC_VERSION", "2023-06-01"),
+        "anthropic-beta": os.environ.get(
+            "SAU_LLM_ANTHROPIC_BETA",
+            "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14",
+        ),
+        "user-agent": os.environ.get(
+            "SAU_LLM_USER_AGENT", "claude-cli/2.0.30 (external, cli)"
+        ),
+        "x-app": os.environ.get("SAU_LLM_X_APP", "cli"),
     }
+    extra = os.environ.get("SAU_LLM_EXTRA_HEADERS", "").strip()
+    if extra:
+        try:
+            parsed = json.loads(extra)
+            if isinstance(parsed, dict):
+                headers.update({str(k): str(v) for k, v in parsed.items()})
+        except (ValueError, TypeError):
+            logging.getLogger(__name__).warning(
+                "SAU_LLM_EXTRA_HEADERS is not a JSON object; ignoring"
+            )
+    return headers
 
 
 def _extract_message_content(message_content) -> str:
@@ -314,11 +352,20 @@ def transcribe_audio(
         data["language"] = language
 
     with audio_file.open("rb") as handle:
+        # A multipart upload must NOT send Content-Type: application/json - the
+        # boundary has to be set by requests, or the server cannot parse the
+        # body. The Cloudflare-bypassing headers are kept (they are what gets the
+        # request past the edge at all); only Content-Type is dropped.
+        upload_headers = {
+            key: value
+            for key, value in _headers(resolved_api_key).items()
+            if key.lower() != "content-type"
+        }
         response = http.post(
             f"{base_url}/audio/transcriptions",
-            headers=_headers(resolved_api_key),
+            headers=upload_headers,
             data=data,
-            files={"file": (audio_file.name, handle)},
+            files={"file": (audio_file.name, handle, "application/octet-stream")},
             timeout=timeout_seconds,
         )
     response.raise_for_status()

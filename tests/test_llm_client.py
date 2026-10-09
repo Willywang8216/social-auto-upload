@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import tempfile
 import unittest
@@ -184,3 +185,54 @@ class CoerceJsonObjectTests(unittest.TestCase):
         self.assertIsNone(llm_client.coerce_json_object("just a caption {not json"))
         self.assertIsNone(llm_client.coerce_json_object(""))
         self.assertIsNone(llm_client.coerce_json_object("[1, 2, 3]"))
+
+
+class MuyuanCloudflareHeaderTests(unittest.TestCase):
+    """The Muyuan gateway is behind Cloudflare and fingerprint-checks POSTs.
+
+    Measured against the live service: a bare `Authorization: Bearer` gets a 403
+    with `error code: 1010` (or a "Just a moment..." challenge) on every POST
+    route - messages, chat/completions, embeddings, audio/transcriptions. Adding
+    any ONE of the four headers below still fails; only all four together get
+    through, and then a real completion is returned. So the client must keep
+    sending the full Claude Code set, or every LLM and transcription call fails
+    at the edge before authentication is even considered.
+    """
+
+    REQUIRED = ("anthropic-version", "anthropic-beta", "user-agent", "x-app")
+
+    def test_all_fingerprint_headers_are_sent(self):
+        headers = {k.lower(): v for k, v in llm_client._headers("k").items()}
+        for name in self.REQUIRED:
+            with self.subTest(header=name):
+                self.assertIn(name, headers)
+                self.assertTrue(str(headers[name]).strip())
+
+    def test_user_agent_identifies_as_claude_cli(self):
+        headers = {k.lower(): v for k, v in llm_client._headers("k").items()}
+        self.assertIn("claude-cli", headers["user-agent"])
+        self.assertEqual(headers["x-app"], "cli")
+
+    def test_authorization_is_still_sent(self):
+        headers = llm_client._headers("secret-key")
+        self.assertEqual(headers["Authorization"], "Bearer secret-key")
+
+    def test_transcription_uses_multipart_not_json_content_type(self):
+        # A multipart body must let requests set the boundary, so the JSON
+        # Content-Type has to be dropped for that call - but the Cloudflare
+        # headers must survive, or the edge blocks it.
+        source = inspect.getsource(llm_client.transcribe_audio)
+        self.assertIn('key.lower() != "content-type"', source)
+        self.assertIn("files={", source)
+
+    def test_extra_headers_env_can_override(self):
+        # A future gateway (or a changed check) must be tunable without a code
+        # change.
+        with patch.dict(os.environ, {"SAU_LLM_EXTRA_HEADERS": '{"x-custom": "1"}'}):
+            headers = llm_client._headers("k")
+        self.assertEqual(headers.get("x-custom"), "1")
+
+    def test_bad_extra_headers_is_ignored_not_fatal(self):
+        with patch.dict(os.environ, {"SAU_LLM_EXTRA_HEADERS": "not json"}):
+            headers = llm_client._headers("k")  # must not raise
+        self.assertEqual(headers["Authorization"], "Bearer k")

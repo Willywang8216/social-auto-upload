@@ -3417,14 +3417,46 @@ def _reddit_image_post_url(websocket_url: str, timeout: float = 20.0) -> str:
                 pass
 
 
+def _as_subreddit_list(value) -> list[str]:
+    """Normalise a subreddits field into a list of names.
+
+    Accepts a list, a comma-separated string, or None. Returns [] for anything
+    unusable so a malformed value narrows to nothing rather than propagating.
+    """
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(part).strip() for part in value if str(part).strip()]
+    return []
+
+
 def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
     config = dict(account.config or {})
     config.setdefault("accountName", getattr(account, "account_name", "sau"))
-    # Check payload draft for subreddits override, then fall back to account config
+    # The ACCOUNT config is the source of truth, not the payload draft.
+    #
+    # The order used to be reversed: a `draft.subreddits` baked in when the job
+    # was queued won over the account's current list, so correcting the account
+    # could not fix an already-queued job. Job 5445 failed with
+    # "No subreddit on this account can accept this content" naming six
+    # subreddits that had been removed from the account hours earlier - the
+    # payload still carried the old list, and this line preferred it.
+    #
+    # A draft may still NARROW the account's list (a per-post choice is
+    # legitimate); it can never widen it to something the account no longer
+    # targets, which is how a corrected account kept failing.
     draft = payload.get("draft") or {}
-    subreddits = draft.get("subreddits") or config.get("subreddits") or []
-    if isinstance(subreddits, str):
-        subreddits = [s.strip() for s in subreddits.split(",") if s.strip()]
+    account_subreddits = _as_subreddit_list(config.get("subreddits"))
+    draft_subreddits = _as_subreddit_list(draft.get("subreddits"))
+    if account_subreddits:
+        allowed = {name.lower().lstrip("r/") for name in account_subreddits}
+        narrowed = [
+            name for name in draft_subreddits
+            if name.lower().lstrip("r/") in allowed
+        ]
+        subreddits = narrowed or account_subreddits
+    else:
+        subreddits = draft_subreddits
     if not isinstance(subreddits, list) or not subreddits:
         raise PreparedPublishError("Reddit publish requires a non-empty subreddits array")
 

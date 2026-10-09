@@ -2428,11 +2428,21 @@ async def _publish_prepared_reddit(
             raise ValueError("Prepared Reddit cookie publish requires account_file (storage_state)")
         from uploader.reddit_uploader.main import RedditCookieVideo
 
-        # Check payload draft for subreddits override, then fall back to account config
+        # The account config is the source of truth (see publish_reddit_sync);
+        # a draft may narrow it, never widen it to a subreddit the account no
+        # longer targets.
         draft = payload.get("draft") or {}
-        subreddits = draft.get("subreddits") or config.get("subreddits") or []
-        if isinstance(subreddits, str):
-            subreddits = [s.strip() for s in subreddits.split(",") if s.strip()]
+        account_subreddits = prepared_publishers._as_subreddit_list(config.get("subreddits"))
+        draft_subreddits = prepared_publishers._as_subreddit_list(draft.get("subreddits"))
+        if account_subreddits:
+            allowed = {name.lower().lstrip("r/") for name in account_subreddits}
+            narrowed = [
+                name for name in draft_subreddits
+                if name.lower().lstrip("r/") in allowed
+            ]
+            subreddits = narrowed or account_subreddits
+        else:
+            subreddits = draft_subreddits
         if not subreddits:
             raise ValueError("Reddit cookie publish requires at least one subreddit")
         title = payload.get("message") or payload.get("draft", {}).get("message", "") or ""
