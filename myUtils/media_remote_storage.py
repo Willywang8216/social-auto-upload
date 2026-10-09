@@ -174,8 +174,50 @@ def download_from_backend(backend: dict, storage_key: str, local_path: str | Pat
             remote_root=str(backend.get("endpoint") or "").strip() or None,
         )
 
+    if provider == "share":
+        # The share backend uploads through its own API and registers a URL, not
+        # an S3/R2 object, so a share-backed row has no key the do_spaces client
+        # could fetch. Falling through to it silently attempted an S3 download
+        # with a share id and failed. Fetch the stored URL instead.
+        url = str(backend.get("cdn_url") or backend.get("endpoint") or "").strip()
+        if not url and storage_key.lower().startswith(("http://", "https://")):
+            url = storage_key
+        if not url:
+            raise RemoteStorageError(
+                "share backend download needs a URL in the backend row or storage_key"
+            )
+        return download_public_url(url, destination)
+
     client = do_spaces.client_from_row(backend)
     client.download_file(storage_key, destination)
+    return destination
+
+
+def download_public_url(url: str, destination: Path) -> Path:
+    """Fetch a stored object from its public HTTPS URL onto local disk.
+
+    Used for backends that register a URL rather than an S3/R2 key (the share
+    backend), where there is no key for an object client to fetch. Best-effort
+    and streaming: a large video must not be buffered in memory.
+    """
+    import urllib.request
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "sau-media-restore/1.0"}
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        status = int(getattr(response, "status", 200) or 200)
+        if status >= 400:
+            raise RemoteStorageError(f"public URL restore failed with HTTP {status}: {url}")
+        with open(destination, "wb") as handle:
+            while True:
+                chunk = response.read(1024 * 256)
+                if not chunk:
+                    break
+                handle.write(chunk)
+    if not destination.is_file() or destination.stat().st_size == 0:
+        raise RemoteStorageError(f"public URL restore produced no data: {url}")
     return destination
 
 

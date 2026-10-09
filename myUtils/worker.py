@@ -2045,9 +2045,16 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                         f"backend restore failed for {local_path}: {exc!r}"
                     )
 
-            # Try 2: Restore generated artifacts from their registered Drive
-            # mapping first; only then use a validated public HTTPS fallback.
-            if not downloaded and is_generated_artifact:
+            # Try 2: Restore from the artifact's own registered public URL.
+            #
+            # This is NOT gated on ``is_generated_artifact``. A payload artifact
+            # carries the URL the upload path registered for it, and that URL is
+            # valid whatever root the file lives under. Gating it there meant a
+            # non-generated artifact (``videoFile/``, ``uploads/``) whose local
+            # copy the offloader had removed was declared unrestorable even when
+            # its R2 object served 200 with the full byte count - real,
+            # published media discarded while its public copy was alive.
+            if not downloaded:
                 public_url = _normalise_artifact_url(
                     str(artifact.get("public_url") or "")
                 )
@@ -2057,7 +2064,9 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                         downloaded = True
                     except Exception as exc:
                         last_error = exc
-                        _logger.warning(f"generated public URL restore failed for {local_path}: {exc!r}")
+                        _logger.warning(
+                            f"artifact public URL restore failed for {local_path}: {exc!r}"
+                        )
             # Try 3: Download via public CDN URL (R2 public bucket)
             if not downloaded and row["storage_cdn_url"]:
                 try:
@@ -2085,9 +2094,17 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                     last_error = exc
 
             if not downloaded:
-                if is_generated_artifact and not _public_https_url(str(artifact.get("public_url") or "")):
+                # Prefer the most specific reason available. When a restore was
+                # actually attempted (a CDN URL, a media_assets URL) its error is
+                # more useful than a generic "no recovery URL", so surface that
+                # instead of masking it behind the missing-URL message.
+                if last_error is not None:
                     raise MediaRestoreError(
-                        f"Generated artifact is missing and has no safe public HTTPS recovery URL: {local_path}"
+                        f"Artifact restore failed for {local_path}: {last_error}"
+                    ) from last_error
+                if not _public_https_url(str(artifact.get("public_url") or "")):
+                    raise MediaRestoreError(
+                        f"Artifact is missing and has no safe public HTTPS recovery URL: {local_path}"
                     )
                 raise MediaRestoreError(
                     f"Could not restore artifact {local_path} "

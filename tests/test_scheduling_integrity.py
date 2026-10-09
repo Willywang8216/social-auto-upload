@@ -134,3 +134,35 @@ class SlotCollisionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RestoreUsesTheArtifactUrlTests(unittest.TestCase):
+    """A payload artifact's own public URL must be used for any artifact.
+
+    Real production media was being discarded: artifacts under ``videoFile/`` and
+    ``uploads/`` carry the URL their upload registered, and the object served 200
+    with the full byte count, but the restore's public-URL step was gated on
+    the artifact being *generated*. Those targets could not be restored even
+    though the file was one HTTP GET away.
+    """
+
+    def test_public_url_restore_is_not_gated_on_generated(self):
+        source = (
+            REPO_ROOT / "myUtils" / "worker.py"
+        ).read_text(encoding="utf-8")
+        # The public-URL attempt must not require the generated root.
+        self.assertNotIn(
+            "if not downloaded and is_generated_artifact:\n"
+            "                public_url = _normalise_artifact_url(",
+            source,
+        )
+        self.assertIn("artifact public URL restore failed", source)
+
+    def test_media_remote_storage_handles_the_share_backend(self):
+        source = (
+            REPO_ROOT / "myUtils" / "media_remote_storage.py"
+        ).read_text(encoding="utf-8")
+        # Without a share branch a share-backed row fell through to the S3/R2
+        # client and attempted a download with a share id.
+        self.assertIn('provider == "share"', source)
+        self.assertIn("def download_public_url(", source)
