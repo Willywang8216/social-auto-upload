@@ -35,8 +35,10 @@ SRC=/home/will/social-auto-upload
 DST=GDrive-willywang8216:sau
 DB=$SRC/db/database.db
 LOG=$SRC/logs/offload.log
+PLAN_DIR=$SRC/logs/offload-plan
+PLAN_LOG=$SRC/logs/offload-plan.log
 TGENV=/home/will/mailserver/monitor/.telegram_env
-mkdir -p "$SRC/logs"
+mkdir -p "$SRC/logs" "$PLAN_DIR"
 # Cron can overlap when a large transfer runs longer than 30 minutes. Keep the
 # lock in a private, will-owned directory instead of a predictable /tmp path.
 acquire_offload_lock() {
@@ -206,21 +208,28 @@ register_verified_source() {
   local source_root="$1"
   local relative="$2"
   local size="${3:-}"
+  local root endpoint
+  root=$(basename "$source_root")
+  # The tier (inbox/published) is carried in the endpoint. Default to the
+  # legacy untiered root so existing callers/tests keep their behaviour.
+  endpoint="${REGISTER_ENDPOINT:-sau/$root}"
   if [ -z "$size" ]; then
     size=$(stat -c%s -- "$source_root/$relative") || return 1
   fi
-  python3 - "$DB" "$DST" "$source_root" "$relative" "$size" <<'PY'
+  python3 - "$DB" "$DST" "$source_root" "$relative" "$size" "$endpoint" <<'PY'
 import sqlite3
 import sys
 from pathlib import Path
 
-db_path, dst, source_root, relative, size_raw = sys.argv[1:]
+db_path, dst, source_root, relative, size_raw, endpoint = sys.argv[1:]
 root = Path(source_root).name
 remote = dst.split(":", 1)[0]
 relative = Path(relative).as_posix()
 size = int(size_raw)
 if root not in {"videoFile", "uploads", "generated"}:
     raise SystemExit("unsupported source root")
+if not endpoint:
+    endpoint = f"sau/{root}"
 conn = sqlite3.connect(db_path, timeout=15)
 try:
     conn.row_factory = sqlite3.Row
@@ -228,10 +237,10 @@ try:
     conn.execute("BEGIN IMMEDIATE")
     backend = conn.execute(
         "SELECT id FROM storage_backends WHERE provider='rclone' AND bucket=? AND endpoint=? AND enabled=1",
-        (remote, f"sau/{root}"),
+        (remote, endpoint),
     ).fetchone()
     if backend is None:
-        raise RuntimeError(f"missing backend for {remote}:sau/{root}")
+        raise RuntimeError(f"missing backend for {remote}:{endpoint}")
     if root == "videoFile":
         candidates = (relative, f"videoFile/{relative}", f"/app/videoFile/{relative}")
     else:
@@ -260,11 +269,147 @@ finally:
 PY
 }
 
+ensure_layout_backends() {
+  # Additive: create the inbox/published backend rows if they are absent.
+  # Legacy sau/<root> rows are never touched so un-migrated records still
+  # restore. Safe to run on every cron tick (idempotent).
+  python3 - "$DB" "$DST" <<'PY'
+import sqlite3
+import sys
+
+db_path, dst = sys.argv[1], sys.argv[2]
+remote = dst.split(":", 1)[0]
+roots = ("videoFile", "uploads", "generated")
+tiers = ("inbox", "published")
+conn = sqlite3.connect(db_path, timeout=15)
+try:
+    conn.execute("PRAGMA busy_timeout=15000")
+    for tier in tiers:
+        for root in roots:
+            endpoint = f"sau/{tier}/{root}"
+            row = conn.execute(
+                "SELECT id FROM storage_backends WHERE provider='rclone' AND bucket=? AND endpoint=?",
+                (remote, endpoint),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO storage_backends "
+                    "(slug,label,provider,bucket,region,endpoint,access_key,secret_key,cdn_url,is_default,enabled) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,0,1)",
+                    (f"gdrive-{tier}-{root}", f"GDrive {tier} {root}", "rclone", remote, "", endpoint, "", "", ""),
+                )
+    conn.commit()
+except Exception:
+    conn.rollback()
+    raise
+finally:
+    conn.close()
+PY
+}
+
+build_route_plan() {
+  # Decide, per recorded file, whether it belongs in sau/published (a succeeded
+  # target names it) or sau/inbox (everything else: pending, failed, cancelled
+  # or never referenced). Writes one newline-delimited list per root+tier that
+  # the copy/purge pass uses as an rclone --files-from / include filter.
+  # Files already in the keep-local EXCLUDES set are dropped so a routing
+  # include can never override the in-flight/due-soon guard.
+  python3 - "$DB" "$PLAN_DIR" "$SRC" "${EXCLUDES:-}" <<'PY'
+import re
+import sqlite3
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[3])
+from myUtils.drive_layout import (
+    MEDIA_ROOTS,
+    published_refs_from_payloads,
+    split_endpoint,
+    split_media_path,
+    tier_for_media,
+)
+
+db_path, plan_dir, src, excludes_path = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]
+conn = sqlite3.connect(db_path, timeout=15)
+conn.row_factory = sqlite3.Row
+conn.execute("PRAGMA busy_timeout=15000")
+
+# Keep-local patterns are stored anchored and backslash-escaped; unescape to a
+# literal relative key so an include cannot re-admit a protected file.
+excluded: set[str] = set()
+if excludes_path and Path(excludes_path).is_file():
+    for line in Path(excludes_path).read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        excluded.add(re.sub(r"\\(.)", r"\1", line.lstrip("/")))
+
+try:
+    targets = conn.execute(
+        "SELECT t.status AS status, j.payload_json AS payload_json "
+        "FROM publish_job_targets t JOIN publish_jobs j ON j.id = t.job_id"
+    ).fetchall()
+    published_ids, published_keys = published_refs_from_payloads(
+        [(r["status"], r["payload_json"]) for r in targets]
+    )
+    records = conn.execute(
+        "SELECT fr.id, fr.file_path, b.endpoint "
+        "FROM file_records fr JOIN storage_backends b ON b.id = fr.storage_backend_id "
+        "WHERE b.provider='rclone'"
+    ).fetchall()
+finally:
+    conn.close()
+
+plan_dir.mkdir(parents=True, exist_ok=True)
+counts = {(tier, root): 0 for tier in ("published", "inbox") for root in MEDIA_ROOTS}
+handles = {}
+for tier in ("published", "inbox"):
+    for root in MEDIA_ROOTS:
+        handles[(tier, root)] = open(plan_dir / f"{root}.{tier}", "w")
+try:
+    for row in records:
+        tier, root = split_endpoint(row["endpoint"])
+        # Only legacy, untiered rows are candidates; already-tiered rows and
+        # non-media endpoints are left alone.
+        if root is None or tier is not None:
+            continue
+        split = split_media_path(row["file_path"])
+        if split is None or split[0] != root:
+            continue
+        key = split[1]
+        if not key or key in excluded:
+            continue
+        desired = tier_for_media(
+            row["id"],
+            row["file_path"],
+            published_ids=published_ids,
+            published_keys=published_keys,
+        )
+        handles[(desired, root)].write(key + "\n")
+        counts[(desired, root)] += 1
+finally:
+    for handle in handles.values():
+        handle.close()
+
+total = sum(counts.values())
+print(f"# route_plan files={total}")
+for tier in ("published", "inbox"):
+    for root in MEDIA_ROOTS:
+        print(f"#   {root}.{tier}={counts[(tier, root)]}")
+PY
+}
+
 purge_verified_sources() {
   local source_root="$1"
   local remote_root="$2"
   local paths relative failed=0
   paths=$("${RC[@]}" lsf "$source_root" --recursive --files-only --min-age 10m --exclude-from "$EXCLUDES") || return 1
+  # When routing to a tier, only purge the files that this invocation copied.
+  # grep -F -x means the relative name is matched literally and in full, so a
+  # filename with glob/regex metacharacters cannot widen the selection.
+  if [ -n "${PURGE_INCLUDE:-}" ] && [ -f "$PURGE_INCLUDE" ]; then
+    paths=$(printf '%s\n' "$paths" | grep -F -x -f "$PURGE_INCLUDE" || true)
+  fi
   while IFS= read -r relative; do
     [ -n "$relative" ] || continue
     case "$relative" in
@@ -540,7 +685,10 @@ PY
 {
   echo "[$(ts)] offload start"
   EXCLUDES=$(mktemp)
-  if ! preflight_storage_backends; then
+  if ! ensure_layout_backends; then
+    echo "[$(ts)] SKIPPED offload: could not ensure inbox/published storage backends"
+    rc=4
+  elif ! preflight_storage_backends; then
     echo "[$(ts)] SKIPPED offload: a required storage backend is not configured"
     rc=4
   elif ! register_local_generated; then
@@ -549,25 +697,39 @@ PY
   elif ! pending_excludes > "$EXCLUDES" || ! grep -q '^# excludes=' "$EXCLUDES"; then
     echo "[$(ts)] SKIPPED offload: could not build the keep-local exclude list"
     rc=3
+  elif ! build_route_plan > "$PLAN_LOG" || ! grep -q '^# route_plan' "$PLAN_LOG"; then
+    echo "[$(ts)] SKIPPED offload: could not build the inbox/published route plan"
+    rc=3
   else
     KEEP_COUNT=$(grep -vc '^#' "$EXCLUDES" || true)
     echo "[$(ts)] keeping ${KEEP_COUNT} file(s) local (in-flight / due soon / unrecorded / _library)"
+    echo "[$(ts)] route plan: $(grep -v '^#' "$PLAN_LOG" | tr '\n' ' ')"
     for d in videoFile uploads generated; do
       [ -d "$SRC/$d" ] || continue
       source_root="$SRC/$d"
-      destination_root="$DST/$d"
-      # Copy, verify and persist restore metadata before purging each root.
-      # Do not skip the per-file verification pass when rclone reports a copy
-      # error: it can still have copied readable siblings, while the purge path
-      # stages root-owned unreadable files individually and fails closed per file.
-      if ! "${RC[@]}" copy "$source_root" "$destination_root" --min-age 10m --exclude-from "$EXCLUDES" \
-        --transfers 4 --checkers 8 --stats-one-line -v 2>&1; then
-        echo "[$(ts)] copy reported errors under $source_root; checking each source before any unlink"
-      fi
-      if ! purge_verified_sources "$source_root" "$destination_root"; then
-        echo "[$(ts)] could not remove all verified sources under $source_root"
-        rc=1
-      fi
+      # Route to published vs inbox per file. A root+tier with no planned files
+      # is skipped entirely so an empty inbox never creates empty Drive dirs.
+      for tier in published inbox; do
+        list="$PLAN_DIR/$d.$tier"
+        [ -s "$list" ] || continue
+        destination_root="$DST/$tier/$d"
+        # Copy, verify and persist restore metadata before purging each root.
+        # Do not skip the per-file verification pass when rclone reports a copy
+        # error: it can still have copied readable siblings, while the purge path
+        # stages root-owned unreadable files individually and fails closed per file.
+        # --files-from is the route plan; --exclude-from still protects anything
+        # in-flight/due-soon that the plan happened to list.
+        if ! "${RC[@]}" copy "$source_root" "$destination_root" --min-age 10m \
+             --files-from "$list" --exclude-from "$EXCLUDES" \
+             --transfers 4 --checkers 8 --stats-one-line -v 2>&1; then
+          echo "[$(ts)] copy reported errors under $source_root ($tier); checking each source before any unlink"
+        fi
+        if ! PURGE_INCLUDE="$list" REGISTER_ENDPOINT="sau/$tier/$d" \
+             purge_verified_sources "$source_root" "$destination_root"; then
+          echo "[$(ts)] could not remove all verified sources under $source_root ($tier)"
+          rc=1
+        fi
+      done
     done
   fi
   rm -f "$EXCLUDES"

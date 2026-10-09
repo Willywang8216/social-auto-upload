@@ -466,6 +466,97 @@ notify "$1" "$2"
             )
             self.assertEqual(result.stdout.strip(), "0")
 
+    def test_register_verified_source_honours_tiered_endpoint(self):
+        """The offloader must record the endpoint it actually copied to."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "source"
+            media = src / "generated" / "campaigns" / "clip.mp4"
+            media.parent.mkdir(parents=True)
+            media.write_bytes(b"tiered bytes")
+            db = root / "db.sqlite"
+            import sqlite3
+            with sqlite3.connect(db) as conn:
+                conn.execute("CREATE TABLE storage_backends (id INTEGER PRIMARY KEY, provider TEXT, bucket TEXT, endpoint TEXT, enabled INTEGER)")
+                conn.execute("INSERT INTO storage_backends VALUES (9,'rclone','drive','sau/inbox/generated',1)")
+                conn.execute("CREATE TABLE file_records (id INTEGER PRIMARY KEY, filename TEXT, file_path TEXT, filesize INTEGER, storage_key TEXT, storage_backend_id INTEGER)")
+                conn.execute("INSERT INTO file_records (filename,file_path,filesize) VALUES (?,?,?)", ("clip.mp4", "generated/campaigns/clip.mp4", media.stat().st_size))
+            source_text = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+            body = source_text.split("register_verified_source() {", 1)[1].split("\n}", 1)[0]
+            script = 'DB="$TEST_DB"\nDST=drive:sau\nREGISTER_ENDPOINT=sau/inbox/generated\nregister_verified_source() {\n' + body + '\n}\nregister_verified_source "$TEST_SOURCE_ROOT" campaigns/clip.mp4\n'
+            result = subprocess.run(["bash", "-c", script], env={**os.environ, "TEST_DB": str(db), "TEST_SOURCE_ROOT": str(src / "generated")}, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with sqlite3.connect(db) as conn:
+                self.assertEqual(
+                    conn.execute("SELECT storage_key,storage_backend_id FROM file_records").fetchone(),
+                    ("campaigns/clip.mp4", 9),
+                )
+
+    def test_build_route_plan_splits_published_from_inbox(self):
+        """Published records and never-published records get separate lists."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "db.sqlite"
+            import sqlite3
+            import sys as _sys
+
+            repo = Path(__file__).resolve().parents[1]
+            if str(repo) not in _sys.path:
+                _sys.path.insert(0, str(repo))
+            import db.createTable as create_table
+
+            create_table.bootstrap(db)
+            with sqlite3.connect(db) as conn:
+                conn.execute(
+                    "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key,enabled) "
+                    "VALUES ('legacy','L','rclone','drive','','sau/videoFile','','',1)"
+                )
+                backend_id = conn.execute(
+                    "SELECT id FROM storage_backends WHERE endpoint='sau/videoFile'"
+                ).fetchone()[0]
+                conn.execute(
+                    "INSERT INTO file_records (filename,filesize,file_path,storage_key,storage_backend_id) VALUES (?,?,?,?,?)",
+                    ("pub.mp4", 1, "videoFile/pub.mp4", "pub.mp4", backend_id),
+                )
+                published_id = conn.execute("SELECT id FROM file_records").fetchone()[0]
+                conn.execute(
+                    "INSERT INTO file_records (filename,filesize,file_path,storage_key,storage_backend_id) VALUES (?,?,?,?,?)",
+                    ("new.mp4", 1, "videoFile/new.mp4", "new.mp4", backend_id),
+                )
+                conn.execute(
+                    "INSERT INTO publish_jobs (idempotency_key,platform,status,payload_json) VALUES (?,?,?,?)",
+                    ("k", "tiktok", "succeeded", '{"artifacts":[{"source_file_record_id":%d}]}' % published_id),
+                )
+                job_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                conn.execute(
+                    "INSERT INTO publish_job_targets (job_id,account_ref,file_ref,status) VALUES (?,?,?,?)",
+                    (job_id, "acct", "campaign_post:1", "succeeded"),
+                )
+            excludes = root / "excludes"
+            excludes.write_text("/_library/keep.mp4\n")
+            plan_dir = root / "plan"
+            source_text = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+            body = source_text.split("build_route_plan() {", 1)[1].split("\n}", 1)[0]
+            script = (
+                'DB="$TEST_DB"\nPLAN_DIR="$TEST_PLAN"\nSRC="$TEST_SRC"\nEXCLUDES="$TEST_EXCLUDES"\n'
+                "build_route_plan() {\n" + body + "\n}\nbuild_route_plan\n"
+            )
+            result = subprocess.run(
+                ["bash", "-c", script],
+                env={
+                    **os.environ,
+                    "TEST_DB": str(db),
+                    "TEST_PLAN": str(plan_dir),
+                    "TEST_SRC": str(repo),
+                    "TEST_EXCLUDES": str(excludes),
+                },
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("# route_plan", result.stdout)
+            self.assertEqual((plan_dir / "videoFile.published").read_text().split(), ["pub.mp4"])
+            self.assertEqual((plan_dir / "videoFile.inbox").read_text().split(), ["new.mp4"])
 
 
 if __name__ == "__main__":
