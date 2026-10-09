@@ -938,10 +938,16 @@ class PublishWorker:
         job = jobs.get_job(target.job_id, db_path=self._db_path)
         payload_state = {"payload": dict(job.payload)}
         account_name = ""
+        routing_error: str | None = None
         try:
             account = _resolve_structured_account(target.account_ref, db_path=self._db_path)
             if account is not None:
                 account_name = str(account.nickname or account.account_name or "").strip()
+                # Refuse to publish across profiles. A target stores only
+                # ``account:<id>``, and the account is re-resolved here, so an
+                # account moved to another profile after this job was queued
+                # would otherwise be handed the wrong profile's campaign.
+                routing_error = _account_profile_mismatch(target, account, job)
         except Exception:  # noqa: BLE001 — logging must not block publishing
             pass
         log = bind_job_logger(
@@ -953,6 +959,16 @@ class PublishWorker:
             attempt=target.attempts,
         )
         log.info("target claimed; starting execution")
+
+        if routing_error:
+            # Permanent and not retryable: the account/profile pairing cannot
+            # become valid by trying again, and a retry would publish the wrong
+            # profile's content if the account were moved back mid-flight.
+            log.error(f"refusing to publish: {routing_error}")
+            if jobs.mark_target_failed(target.id, routing_error, db_path=self._db_path):
+                self._alert_publish_failure(target, routing_error)
+            self._maybe_close_job_sink(target.job_id)
+            return
 
         try:
             async with self._concurrency.slot(target.account_ref):
@@ -1102,17 +1118,43 @@ class PublishWorker:
         self, target: jobs.Target, exc: BaseException, log
     ) -> None:
         message = f"{type(exc).__name__}: {exc}"
+        # The platform decides whether a permanent failure may be re-routed.
+        job_platform = ""
+        try:
+            failed_job = jobs.get_job(target.job_id, db_path=self._db_path)
+            if failed_job is not None:
+                job_platform = str(failed_job.platform or "")
+        except Exception:  # noqa: BLE001 - routing detail must not mask the error
+            job_platform = ""
         error_details = getattr(exc, "details", None)
         if isinstance(error_details, dict) and error_details:
             message += f" | details={json.dumps(error_details, ensure_ascii=False, separators=(',', ':'))}"
         attempts = target.attempts  # already incremented when claimed
         if getattr(exc, "retryable", True) is False:
-            # A permanent failure on ANY platform may still be deliverable by
-            # Sociamonials, which holds its own OAuth connections. Let the
-            # fallback decide: an unmapped account or bad media makes it return
-            # False and the target is marked failed exactly as before, so this
-            # is not a silent re-route.
-            if await self._try_sociamonials_fallback(target, message, log):
+            # A permanent failure means the direct path cannot be retried: the
+            # subreddit banned us, the media is gone, the credential is dead.
+            # Re-routing that to a different Sociamonials account does not fix
+            # the cause, so the module's own guard refuses it
+            # (should_attempt_fallback, documented at sociamonials_fallback.py:23).
+            #
+            # X is the one exception, and only because Sociamonials holds its OWN
+            # X OAuth connection: a dead or out-of-credits X credential is
+            # permanent for us yet perfectly deliverable there. That case is
+            # already routed to the fallback before the executor runs (see the
+            # X-skip shortcut in _run_target), so it never reaches this branch.
+            if (
+                job_platform != "twitter"
+                and not sociamonials_fallback.should_attempt_fallback(
+                    retryable=False,
+                    attempts=attempts,
+                    max_attempts=self._config.retry.max_attempts,
+                )
+            ):
+                log.info(
+                    f"permanent failure on {job_platform}; not re-routing to the "
+                    "Sociamonials fallback"
+                )
+            elif await self._try_sociamonials_fallback(target, message, log):
                 self._maybe_close_job_sink(target.job_id)
                 return
             transitioned = jobs.mark_target_failed(
@@ -1276,6 +1318,40 @@ class PublishWorker:
                     f"sociamonials fallback delivered nothing (post_id="
                     f"{result.get('post_id')}, network={result.get('network')}); "
                     f"marked failed: {_scrub_secrets(message)}"
+                )
+                self._alert_publish_failure(target, message)
+            return True
+
+        # "Accepted" is not "delivered", but the two unconfirmed cases differ and
+        # must not be collapsed:
+        #
+        #   pending  - still queued when the polling budget ran out. It may
+        #              deliver moments later and the idempotency key prevents a
+        #              duplicate, so failing it would be wrong and would discard
+        #              a post that is about to land.
+        #   held for approval - a human at Sociamonials must release it. It will
+        #              NOT deliver on its own, so reporting success would tell
+        #              the operator a post is live when nobody can see it. That is
+        #              the exact "200 but nothing landed" failure this fallback
+        #              was reported for.
+        #
+        # So only the approval case is a failure; pending succeeds but says so.
+        held_for_approval = bool(result.get("requires_approval")) or (
+            delivery_state == "requires_approval"
+        )
+        if held_for_approval:
+            message = (
+                "Sociamonials accepted the post but is holding it for approval; "
+                "it will not deliver until a human releases it"
+            )
+            transitioned = jobs.mark_target_failed(
+                target.id, message, db_path=self._db_path
+            )
+            if transitioned:
+                log.error(
+                    f"sociamonials fallback held for approval (post_id="
+                    f"{result.get('post_id')}); marked failed so it is not read as "
+                    "published"
                 )
                 self._alert_publish_failure(target, message)
             return True
@@ -1562,6 +1638,37 @@ def _resolve_structured_account(account_ref: str, *, db_path: Path | None = None
     account_id = int(account_ref.split(":", 1)[1])
     kwargs = {"db_path": db_path} if db_path is not None else {}
     return profile_registry.get_account(account_id, **kwargs)
+
+
+def _account_profile_mismatch(target, account, job=None) -> str | None:
+    """Reason this target's account no longer belongs to its job's profile.
+
+    A target stores only ``account:<id>``. Accounts can be moved between profiles
+    after a job is queued, and the worker re-resolves the account at publish
+    time, so without this check an account moved to another profile would be
+    handed a campaign it does not belong to - publishing Nakedwill content to a
+    Sexualwill account, or a Chinese Teaching post to an English account.
+
+    The submit path already scopes account lookup by ``profile_id``
+    (``publish_orchestrator._resolve_accounts`` lists by profile first, then
+    intersects the selected ids), so a foreign id cannot enter a NEW job. This
+    guards the window between queueing and publishing, which that check cannot
+    cover.
+
+    Returns a human-readable reason, or ``None`` when the pairing is valid or
+    cannot be judged (no job, no profile on the job, or account/profile missing).
+    """
+    job_profile = getattr(job, "profile_id", None)
+    account_profile = getattr(account, "profile_id", None)
+    if job_profile is None or account_profile is None:
+        return None
+    if int(job_profile) == int(account_profile):
+        return None
+    return (
+        f"account {getattr(account, 'id', '?')} belongs to profile "
+        f"{account_profile}, but this job is for profile {job_profile}; refusing "
+        "to publish across profiles"
+    )
 
 
 # Host-side repo roots that may appear in stored media paths. The app runs in

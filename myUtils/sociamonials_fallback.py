@@ -645,30 +645,68 @@ def _lookup_reusable_asset(
     """
     if not _reuse_assets_enabled():
         return None
-    params: dict[str, Any] = {"search": filename, "limit": 200}
     workspace = _workspace_int(workspace_id)
-    if workspace is not None:
-        params["workspace_registration_id"] = workspace
-    try:
-        response = session.get(
-            MEDIA_ASSETS_URL, headers=dict(headers), params=params, timeout=timeout
+
+    # Page through the library rather than reading one page of 200. The whole
+    # point of this lookup is to avoid re-uploading media that already exists,
+    # and the incident it was written for was duplicate uploads filling a 4 GB
+    # quota. With a single page, once the library grew past 200 assets the match
+    # would be missed and the file re-uploaded - re-inflating the quota it exists
+    # to protect. ``_REUSE_LOOKUP_MAX_PAGES`` bounds the work; a search filter is
+    # still sent so the common case returns on page one.
+    max_pages = _reuse_lookup_max_pages()
+    page_size = 200
+    for page in range(max_pages):
+        params: dict[str, Any] = {
+            "search": filename,
+            "limit": page_size,
+            "offset": page * page_size,
+        }
+        if workspace is not None:
+            params["workspace_registration_id"] = workspace
+        try:
+            response = session.get(
+                MEDIA_ASSETS_URL, headers=dict(headers), params=params, timeout=timeout
+            )
+        except Exception as exc:  # noqa: BLE001 - lookup is an optimisation
+            logger.warning("sociamonials media reuse lookup failed: %s", exc)
+            return None
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status >= 400 or status == 0:
+            logger.info(
+                "sociamonials media reuse lookup HTTP %s; uploading instead", status
+            )
+            return None
+        body = _json_body(response)
+        rows = body.get("assets")
+        if not isinstance(rows, list):
+            rows = []
+        match = select_reusable_asset(
+            rows, filename=filename, size_bytes=size_bytes, kind=kind
         )
-    except Exception as exc:  # noqa: BLE001 - lookup is an optimisation
-        logger.warning("sociamonials media reuse lookup failed: %s", exc)
-        return None
-    status = int(getattr(response, "status_code", 0) or 0)
-    if status >= 400 or status == 0:
-        logger.info(
-            "sociamonials media reuse lookup HTTP %s; uploading instead", status
-        )
-        return None
-    body = _json_body(response)
-    rows = body.get("assets")
-    if not isinstance(rows, list):
-        rows = []
-    return select_reusable_asset(
-        rows, filename=filename, size_bytes=size_bytes, kind=kind
+        if match is not None:
+            return match
+        # A short page is the last page: stop rather than issue a request that
+        # can only return nothing.
+        if len(rows) < page_size:
+            return None
+    logger.info(
+        "sociamonials media reuse lookup exhausted %s page(s) without a match "
+        "for %s; uploading",
+        max_pages,
+        filename,
     )
+    return None
+
+
+def _reuse_lookup_max_pages() -> int:
+    """How many library pages the reuse lookup may read (default 5 = 1000 assets)."""
+    raw = os.environ.get("SAU_SOCIAMONIALS_REUSE_MAX_PAGES")
+    try:
+        value = int(str(raw).strip()) if raw not in (None, "") else 5
+    except (TypeError, ValueError):
+        value = 5
+    return max(1, min(value, 50))
 
 
 def _resolve_local_media(

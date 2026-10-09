@@ -872,3 +872,80 @@ def test_publish_uses_the_teaching_workspace(monkeypatch):
     assert seen["auth"] == "Bearer teach_key"
     assert seen["body"]["workspace_registration_id"] == 34293
     assert seen["body"]["networks"] == {"tw": {"profile_refs": ["16087"]}}
+
+
+class _FakeLibraryResponse:
+    def __init__(self, assets):
+        self.status_code = 200
+        self._assets = assets
+
+    def json(self):
+        return {"assets": self._assets}
+
+
+class _FakeLibrarySession:
+    """Records every page request so pagination is observable."""
+
+    def __init__(self, pages):
+        self._pages = list(pages)
+        self.requests: list[dict] = []
+
+    def get(self, url, headers=None, params=None, timeout=None):
+        self.requests.append(dict(params or {}))
+        index = int((params or {}).get("offset", 0)) // int((params or {}).get("limit", 200))
+        if index < len(self._pages):
+            return _FakeLibraryResponse(self._pages[index])
+        return _FakeLibraryResponse([])
+
+
+def test_reuse_lookup_paginates_past_the_first_page(monkeypatch):
+    """A match on page 2 must be found, not re-uploaded.
+
+    The lookup is a single page of 200 by original design. Once the library grew
+    past one page the match was missed and the file re-uploaded, re-inflating the
+    quota this lookup exists to protect.
+    """
+    monkeypatch.setenv("SAU_SOCIAMONIALS_REUSE_ASSETS", "1")
+    page_one = [
+        {"asset_id": i, "filename": f"other{i}.mp4", "size_bytes": 1, "media_type": "video"}
+        for i in range(200)
+    ]
+    page_two = [
+        {"asset_id": 999, "filename": "wanted.mp4", "size_bytes": 10, "media_type": "video"}
+    ]
+    session = _FakeLibrarySession([page_one, page_two])
+    found = sm._lookup_reusable_asset(
+        session, {}, "26985", filename="wanted.mp4", size_bytes=10,
+        kind="video", timeout=5,
+    )
+    assert found is not None and found["asset_id"] == 999
+    assert len(session.requests) == 2, "must have walked to the second page"
+    assert session.requests[1]["offset"] == 200
+
+
+def test_reuse_lookup_stops_on_a_short_page(monkeypatch):
+    monkeypatch.setenv("SAU_SOCIAMONIALS_REUSE_ASSETS", "1")
+    session = _FakeLibrarySession([[
+        {"asset_id": 1, "filename": "other.mp4", "size_bytes": 1, "media_type": "video"}
+    ]])
+    assert sm._lookup_reusable_asset(
+        session, {}, "26985", filename="missing.mp4", size_bytes=9,
+        kind="video", timeout=5,
+    ) is None
+    # A page shorter than the page size is the last page: do not keep asking.
+    assert len(session.requests) == 1
+
+
+def test_reuse_lookup_is_bounded(monkeypatch):
+    monkeypatch.setenv("SAU_SOCIAMONIALS_REUSE_ASSETS", "1")
+    monkeypatch.setenv("SAU_SOCIAMONIALS_REUSE_MAX_PAGES", "3")
+    full_page = [
+        {"asset_id": i, "filename": f"o{i}.mp4", "size_bytes": 1, "media_type": "video"}
+        for i in range(200)
+    ]
+    session = _FakeLibrarySession([full_page, full_page, full_page, full_page])
+    assert sm._lookup_reusable_asset(
+        session, {}, "26985", filename="missing.mp4", size_bytes=9,
+        kind="video", timeout=5,
+    ) is None
+    assert len(session.requests) == 3, "must respect the page bound"

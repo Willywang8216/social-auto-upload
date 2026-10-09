@@ -135,21 +135,26 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
         patched.assert_not_called()
         self.assertEqual(self._status(), jobs.TARGET_FAILED)
 
-    def test_non_retryable_failure_attempts_the_fallback(self) -> None:
-        """A permanent failure now reaches the fallback on any platform.
+    def test_non_retryable_failure_does_not_attempt_the_fallback(self) -> None:
+        """A permanent failure must NOT be re-routed to another connection.
 
-        When the fallback cannot deliver (here: no mapping), the target still
-        ends permanently failed rather than being silently re-routed.
+        sociamonials_fallback's docstring is explicit: the fallback "must never
+        fire for a target that is already classified non-retryable for a
+        permanent reason (banned subreddit, missing media, ...)". This fixture is
+        a bluesky account, where a permanent failure is genuinely permanent - no
+        other connection can fix a banned subreddit or a missing file.
+
+        This test previously asserted the opposite ("a permanent failure now
+        reaches the fallback on any platform"), contradicting the module contract
+        and its own should_attempt_fallback guard, which was dead code.
         """
         self._enable_fallback()
         with patch.object(
-            sociamonials_fallback,
-            "publish_via_sociamonials",
-            side_effect=sociamonials_fallback.SociamonialsFallbackError("no mapping"),
+            sociamonials_fallback, "publish_via_sociamonials"
         ) as patched:
             self._enqueue_failing_target()
             self._drain(exc_type=_BoomPermanent)
-        patched.assert_called_once()
+        patched.assert_not_called()
         self.assertEqual(self._status(), jobs.TARGET_FAILED)
 
     def test_non_retryable_x_failure_falls_back_to_sociamonials(self) -> None:
@@ -582,6 +587,41 @@ class SociamonialsDeliveryVerificationTests(unittest.TestCase):
             "warnings": [],
         })
         self.assertEqual(status, jobs.TARGET_SUCCEEDED)
+
+    def test_a_post_held_for_approval_is_not_recorded_as_delivered(self):
+        # Sociamonials can hold a post until a human releases it. It will NOT
+        # deliver on its own, so reporting success tells the operator a post is
+        # live when nobody can see it - the "200 but nothing landed" failure this
+        # fallback exists to prevent. ``pending`` is different and still succeeds
+        # (see the test above): that post may deliver moments later.
+        status, error = self._run({
+            "ok": True,
+            "post_id": 2,
+            "status": "scheduled",
+            "network": "tw",
+            "delivery_state": "pending",
+            "delivered": False,
+            "delivery_error": "",
+            "requires_approval": True,
+            "warnings": [],
+        })
+        self.assertEqual(status, jobs.TARGET_FAILED)
+        self.assertIn("approval", error)
+
+    def test_an_explicit_approval_delivery_state_is_not_delivered(self):
+        status, error = self._run({
+            "ok": True,
+            "post_id": 3,
+            "status": "scheduled",
+            "network": "tw",
+            "delivery_state": "requires_approval",
+            "delivered": False,
+            "delivery_error": "",
+            "requires_approval": False,
+            "warnings": [],
+        })
+        self.assertEqual(status, jobs.TARGET_FAILED)
+        self.assertIn("approval", error)
 
 
 class ArtifactUrlNormalisationTests(unittest.TestCase):
