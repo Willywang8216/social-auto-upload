@@ -166,3 +166,24 @@ class RestoreUsesTheArtifactUrlTests(unittest.TestCase):
         # client and attempted a download with a share id.
         self.assertIn('provider == "share"', source)
         self.assertIn("def download_public_url(", source)
+
+
+class CampaignArtifactRestoreQueryTests(unittest.TestCase):
+    """The campaign_artifacts restore branch must be satisfiable.
+
+    It required ``remote_path IS NOT NULL AND storage_backend_id IS NOT NULL``,
+    but add_campaign_artifact never writes storage_backend_id, so the predicate
+    matched 0 of 2509 live rows and the branch could never fire - a generated
+    artifact's restore fell through to other lookups by luck, not design.
+    """
+
+    def test_the_restore_query_no_longer_requires_an_unwritten_column(self):
+        source = (REPO_ROOT / "myUtils" / "worker.py").read_text(encoding="utf-8")
+        self.assertNotIn(
+            "WHERE local_path=? AND remote_path IS NOT NULL AND storage_backend_id IS NOT NULL",
+            source,
+        )
+        self.assertIn(
+            "AND (public_url IS NOT NULL OR remote_path IS NOT NULL)",
+            source,
+        )

@@ -1943,9 +1943,20 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                         campaign_refs.append(str(stored))
                     campaign_row = None
                     for campaign_ref in campaign_refs:
+                        # This previously required remote_path AND
+                        # storage_backend_id to be non-null, but
+                        # add_campaign_artifact never writes storage_backend_id,
+                        # so the predicate was unsatisfiable (0 of 2509 rows) and
+                        # the branch could never fire. It now selects the columns
+                        # the restore actually uses - the artifact's public_url
+                        # (as the CDN url) and remote_path (as a storage key when
+                        # a backend id is also present, which older rows may set
+                        # through a repair script).
                         campaign_row = conn.execute(
-                            "SELECT remote_path AS storage_key, storage_backend_id, public_url AS storage_cdn_url, local_path AS file_path "
-                            "FROM campaign_artifacts WHERE local_path=? AND remote_path IS NOT NULL AND storage_backend_id IS NOT NULL",
+                            "SELECT remote_path AS storage_key, storage_backend_id, "
+                            "public_url AS storage_cdn_url, local_path AS file_path "
+                            "FROM campaign_artifacts WHERE local_path=? "
+                            "AND (public_url IS NOT NULL OR remote_path IS NOT NULL)",
                             (campaign_ref,),
                         ).fetchone()
                         if campaign_row:
