@@ -121,3 +121,60 @@ mutated except additive repairs, and any migration is reversible.
 Operator decisions still needed: Threads 1,000 vs 1,024 MB; whether an
 unverified YouTube >15 min should be refused proactively; and whether the 241
 legacy at-risk targets should be cancelled or re-prepped.
+
+---
+
+# Execution log
+
+All steps below are committed, CI-green, deployed, and verified live.
+
+| Step | Commit | What shipped |
+| --- | --- | --- |
+| pre | `3dc5832` | A1: register a `file_records` row when an artifact is created (1831 artifacts were unrestorable) |
+| 1 | `cf39dd1` | B1 over-cap refusals `retryable=False`; B3 decimal MB (prep said 305MB fit a 300MB cap); B5 probe failure no longer silent |
+| 2 | `7a7db06` | F1 fallback no longer re-routes permanent failures (`should_attempt_fallback` was dead code); F2 approval-held posts not marked delivered; F3 reuse lookup paginates |
+| 3 | `2e44617` | S2 naive schedule treated as the operator's wall clock (was 8h off); S1 atomic slot reservation; R2 disabled accounts refused |
+| 4 | `c2aa2eb` | Restore uses an artifact's own public URL for **any** artifact (real R2 media was being discarded); `share` backend downloads |
+| 5 | `edba1f3` | Made the `campaign_artifacts` restore branch reachable (matched 0 of 2509 rows) |
+
+Suite: **1468 passed, 1 skipped** (was 1435 at audit start).
+
+## Bugs found by the fixes' own tests
+
+Three defects were caught by writing the tests, not by the audit:
+
+1. `slot_reservation_lock` raised `FileNotFoundError`, then `FileExistsError`, when
+   the lock path was unwritable — so a lock problem could fail a publish instead
+   of degrading to unlocked allocation.
+2. The same failure path called `logger`, which does not exist in that module (it
+   uses `_logger`) — a `NameError` on every failed lock acquisition.
+3. Broadening the "no recovery URL" message masked the CDN attempt's specific
+   cause behind a generic one; a recorded attempt error is now preferred.
+
+## Verified live (deployed container)
+
+```
+S2 tz      naive 10:00 -> 2026-06-17 02:00:00 UTC   (was 10:00)
+S1 lock    present
+R2         disabled account refused
+R1         cross-profile account refused
+B1         over-cap raises retryable=False
+Restore    target 3849: 571,987 bytes recovered from R2
+```
+
+## Remaining, agreed with the operator
+
+* **B4** the split backfill creates artifacts but no posts/jobs, so campaign
+  2555's Threads parts are orphaned; affected campaigns need a fresh submit from
+  the UI (resubmit reuses the stored payload).
+* **B2/B7** TikTok still never receives a split, and its cap is 3600s where the
+  Content Posting API allows 600s. Split is the prerequisite, so these ship
+  together.
+* **P2 hygiene**: two ffmpeg paths bypass `SAU_ENCODE_CONCURRENCY`; Threads
+  1000 vs 1024 MB; no aspect-ratio enforcement; Reddit's native-video cap applied
+  to a link-only path.
+* **Metadata** (M1 Simplified-character set, M3 trimming, M5 Reddit title,
+  M8 per-account prepare isolation) — analysed in `reports/audit-metadata-lang.md`.
+* **Operator decisions**: 241 legacy targets on unrecoverable media (cancel or
+  re-prep); Threads 1000 vs 1024 MB; whether an unverified YouTube >15 min should
+  be refused proactively.
