@@ -626,10 +626,22 @@ def prepare_campaign_media_artifacts(
         # equal parts (one post each) so nothing is dropped; platforms whose
         # caps it already meets (IG 900s, YouTube 12h) keep the full _pub.mp4.
         if _is_video_file(publish_path) and selected_platforms:
+            duration_probe_failed = False
             try:
                 duration = float((media_prep.probe(publish_path) or {}).get("duration") or 0)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                # Do NOT treat "could not measure" as "fits": a probe failure
+                # silently disabled duration splitting for EVERY platform, which
+                # is how a 600s source reached Threads unsplit. Record it, carry
+                # on with the size trigger, and say so.
+                duration_probe_failed = True
                 duration = 0.0
+                logging.getLogger(__name__).warning(
+                    "media prep could not probe the duration of %s for campaign "
+                    "%d (%s); duration-based splitting is unavailable and an "
+                    "over-cap video will be refused by the publisher instead",
+                    publish_path, campaign_id, exc,
+                )
             try:
                 size_bytes = int(Path(publish_path).stat().st_size)
             except OSError:
@@ -637,12 +649,18 @@ def prepare_campaign_media_artifacts(
             # One plan per distinct (seconds, MB) cap pair that the source
             # exceeds, tagging which platforms asked for it so a large-cap
             # platform (YouTube) never picks a small-cap platform's parts.
+            #
+            # MB here is DECIMAL, matching platform_limits and the publisher's
+            # `size_bytes > limit * 1_000_000` check. Using 1024*1024 made prep
+            # believe a 305 MB file fit Instagram's 300 MB cap (305e6 <
+            # 314.6e6) while the publisher refused it (305e6 > 300e6), so the
+            # split never happened and the publish always failed.
             plans: dict[tuple[float | None, float | None], set[str]] = {}
             for platform_name in selected_platforms:
                 sec = platform_limits.video_max_seconds(platform_name)
                 mb = platform_limits.media_max_mb(platform_name)
                 over_time = bool(sec and duration and duration > float(sec))
-                over_size = bool(mb and size_bytes and size_bytes > float(mb) * 1024 * 1024)
+                over_size = bool(mb and size_bytes and size_bytes > float(mb) * 1_000_000)
                 if over_time or over_size:
                     plans.setdefault((float(sec) if sec else None, float(mb) if mb else None), set()).add(
                         str(platform_name)
@@ -653,7 +671,10 @@ def prepare_campaign_media_artifacts(
                         publish_path,
                         media_pipeline.build_campaign_workspace(campaign_id),
                         sec,
-                        max_bytes=(mb * 1024 * 1024) if mb else None,
+                        # Decimal MB: platform_limits and the publisher both use
+                        # `bytes > limit * 1_000_000`, so the split target must
+                        # use the same unit or a part can still exceed the cap.
+                        max_bytes=(mb * 1_000_000) if mb else None,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logging.getLogger(__name__).warning(
@@ -664,7 +685,8 @@ def prepare_campaign_media_artifacts(
                 if len(parts) <= 1:
                     continue
                 part_seconds = (duration / len(parts)) if duration else None
-                part_mb = (size_bytes / len(parts) / (1024 * 1024)) if size_bytes else None
+                # Decimal MB to match the cap the publisher enforces.
+                part_mb = (size_bytes / len(parts) / 1_000_000) if size_bytes else None
                 for index, part in enumerate(parts, start=1):
                     part_remote = None
                     part_public = None

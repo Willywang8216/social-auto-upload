@@ -105,6 +105,12 @@ def _enforce_video_limits(local_path: str, platform: str) -> None:
     import path; a prepared/API payload can reach a publisher unchecked. Probe
     the local artifact here so the error names the real limit instead of an
     opaque platform rejection later. A probe/size failure is not a rejection.
+
+    Raised with ``retryable=False``: the file's size and duration do not change
+    between attempts, so retrying only burns the budget and delays the operator
+    seeing the real problem. Target 5626 retried a 600s-on-Threads refusal three
+    times for exactly this reason. ``retryable=False`` still allows the
+    Sociamonials fallback to decide, which is where a genuine re-route belongs.
     """
     path = Path(str(local_path or ""))
     if not path.is_file():
@@ -118,7 +124,8 @@ def _enforce_video_limits(local_path: str, platform: str) -> None:
         if size_bytes > size_limit_mb * 1_000_000:
             raise PreparedPublishError(
                 f"{platform} video {size_bytes / 1_000_000:.0f} MB exceeds the "
-                f"{size_limit_mb} MB limit"
+                f"{size_limit_mb} MB limit",
+                retryable=False,
             )
     max_seconds = platform_limits.video_max_seconds(platform)
     if max_seconds:
@@ -129,7 +136,8 @@ def _enforce_video_limits(local_path: str, platform: str) -> None:
         if duration and duration > max_seconds:
             raise PreparedPublishError(
                 f"{platform} video duration {duration:.0f}s exceeds the "
-                f"{max_seconds:.0f}s limit"
+                f"{max_seconds:.0f}s limit",
+                retryable=False,
             )
 
 
@@ -1932,7 +1940,8 @@ def _validate_threads_video_artifact(item: dict[str, Any]) -> None:
     if file_size > THREADS_MAX_VIDEO_BYTES:
         raise PreparedPublishError(
             f"Threads video size {file_size / 1_000_000:.0f} MB exceeds the "
-            f"{platform_limits.media_max_mb('threads')} MB limit"
+            f"{platform_limits.media_max_mb('threads')} MB limit",
+            retryable=False,
         )
     try:
         duration_seconds = media_pipeline.probe_video_duration(source)
@@ -1940,11 +1949,14 @@ def _validate_threads_video_artifact(item: dict[str, Any]) -> None:
         logger.warning("Could not probe Threads video duration for %s: %s", source, exc)
         return
     if duration_seconds > THREADS_MAX_VIDEO_SECONDS:
+        # retryable=False: the duration is a property of the file, so a retry
+        # can only fail again. Target #5626 burned all three attempts on this.
         raise PreparedPublishError(
             f"Threads video duration {duration_seconds:.0f}s exceeds the "
             f"{int(THREADS_MAX_VIDEO_SECONDS)}s limit; re-encode a shorter cut "
             "before publishing (Instagram Reels allow up to 15 minutes, which is "
-            "why the same file may publish there)"
+            "why the same file may publish there)",
+            retryable=False,
         )
 
 
@@ -2169,20 +2181,28 @@ def _validate_tiktok_video_artifact(item: dict[str, Any], *, message: str, confi
 
         file_size = source.stat().st_size
         if file_size > TIKTOK_MAX_PULL_FROM_URL_BYTES:
+            # retryable=False: a size refusal is deterministic for this file.
             raise PreparedPublishError(
                 "TikTok video uploads support up to "
-                f"{platform_limits.media_max_mb('tiktok')} MB"
+                f"{platform_limits.media_max_mb('tiktok')} MB",
+                retryable=False,
             )
 
         duration_seconds = media_pipeline.probe_video_duration(source)
         if duration_seconds < TIKTOK_MIN_VIDEO_SECONDS:
-            raise PreparedPublishError(f"TikTok videos must be at least {TIKTOK_MIN_VIDEO_SECONDS} seconds")
+            raise PreparedPublishError(
+                f"TikTok videos must be at least {TIKTOK_MIN_VIDEO_SECONDS} seconds",
+                retryable=False,
+            )
         # Check against creator_info's max_video_post_duration_sec if available,
         # otherwise fall back to the hardcoded maximum.
         creator_max = config.get("_tiktok_max_video_duration_sec")
         max_sec = creator_max if creator_max and creator_max > 0 else TIKTOK_MAX_VIDEO_SECONDS
         if duration_seconds > max_sec:
-            raise PreparedPublishError(f"TikTok video duration ({duration_seconds:.0f}s) exceeds the limit ({max_sec:.0f}s)")
+            raise PreparedPublishError(
+                f"TikTok video duration ({duration_seconds:.0f}s) exceeds the limit ({max_sec:.0f}s)",
+                retryable=False,
+            )
 
         cover_timestamp_raw = config.get("videoCoverTimestampMs")
         if cover_timestamp_raw not in (None, ""):
@@ -4601,10 +4621,13 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
             # sub-millisecond noise, so a genuinely over-length clip still fails.
             if duration and duration > BLUESKY_MAX_VIDEO_SECONDS + 0.5:
                 over_by = duration - BLUESKY_MAX_VIDEO_SECONDS
+                # retryable=False: the clip's duration is fixed, so a retry can
+                # only fail again and delay the operator seeing the real problem.
                 raise PreparedPublishError(
                     f"Bluesky video duration {duration:.1f}s exceeds the "
                     f"{BLUESKY_MAX_VIDEO_SECONDS:.0f}s limit by {over_by:.1f}s; "
-                    "re-encode or split a shorter cut"
+                    "re-encode or split a shorter cut",
+                    retryable=False,
                 )
             shrunk_path = _bluesky_shrink_video(local_path)
             blob = _bluesky_upload_blob(
