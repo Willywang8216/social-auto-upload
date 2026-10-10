@@ -56,6 +56,11 @@ PERMANENT_CLASSES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "video artifact not found",
             "requires either a public_url or a local_path",
             "requires at least one video or image",
+            # A publish target that opens a media path and gets FileNotFoundError
+            # is missing an artifact that no retry can recreate (e.g. targets
+            # #75/#76, whose /app/uploads PNGs are gone and whose old
+            # up.iamwillywang.com URL returns 404).
+            "FileNotFoundError",
         ),
     ),
     (
@@ -70,7 +75,19 @@ PERMANENT_CLASSES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "failed to process: no diagnostic",
             "failed to process: Error: Media upl",
             "Range Not Satisfiable",
+            # The Reddit registry refuses every subreddit on the account for
+            # this content (explicit media, or a monetised brand). The rules are
+            # content-based, so the same payload is refused on every retry.
+            "No subreddit on this account can accept this content",
         ),
+    ),
+    (
+        # The destination cannot serve the content that was submitted, and the
+        # payload cannot change: YouTube has no video (the campaign is image
+        # only). The orchestrator now skips such destinations at enqueue time;
+        # these rows predate that guard.
+        "destination-incompatible",
+        ("YouTube publish requires a local video artifact",),
     ),
     (
         "content-permanent",

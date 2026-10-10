@@ -41,6 +41,7 @@ class PermanentFailureClassificationTests(unittest.TestCase):
             "MediaRestoreError: Generated artifact is missing",
             "PreparedPublishError: Telegram media file is missing or empty: /app/x",
             "PreparedPublishError: TikTok video artifact not found: /x",
+            "FileNotFoundError: [Errno 2] No such file or directory: '/app/uploads/a.png'",
         ):
             with self.subTest(message=message):
                 self.assertEqual(mod.classify(message), "media-unrecoverable")
@@ -51,9 +52,20 @@ class PermanentFailureClassificationTests(unittest.TestCase):
             "SUBMIT_VALIDATION_LINK_WHITELIST",
             "NO_SELFS: This community doesn't allow text posts",
             "TikTok app is in development mode",
+            "PreparedPublishError: No subreddit on this account can accept this content: "
+            "r/NudistMen: does not accept explicit content",
         ):
             with self.subTest(message=message):
                 self.assertEqual(mod.classify(message), "platform-refused")
+
+    def test_destination_incompatible_is_permanent(self):
+        # An image-only campaign sent to YouTube can never become a video.
+        self.assertEqual(
+            mod.classify(
+                "PreparedPublishError: YouTube publish requires a local video artifact"
+            ),
+            "destination-incompatible",
+        )
 
     def test_content_guard_is_permanent(self):
         self.assertEqual(
