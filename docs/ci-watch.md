@@ -49,3 +49,5 @@ CI_WATCH_DRY_RUN=1 scripts/ci-watch.sh # report only; change nothing
 builds and deploys **`origin/main`**, autonomously. When Actions is re-enabled,
 the watcher becomes redundant and the cron entry can be removed; the workflows
 are untouched and keep working.
+
+_Verified: on 2026-10-10 the watcher built and deployed the immediately-following commit from `origin/main` (see `logs/ci-watch.log`)._
