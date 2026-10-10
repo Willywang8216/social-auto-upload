@@ -90,6 +90,10 @@ def normalize_draft_fields(draft: dict) -> dict:
                 stripped_lines.append(line)
         text = re.sub(r"\n{3,}", "\n\n", "\n".join(stripped_lines)).strip()
 
+    # Drop any standalone machine-label line so a prompt echo cannot put the
+    # media-group name in front of the audience alongside real copy.
+    text = strip_machine_label_lines(text)
+
     result["message"] = text
     if title:
         result["title"] = title
@@ -112,6 +116,41 @@ _MEDIA_FILENAME_RE = re.compile(
     r"^[\w\-. ()]+\.(?:mp4|mov|webm|m4v|jpg|jpeg|png|gif|webp|bmp)$",
     re.IGNORECASE,
 )
+# A whole line that is nothing but a machine label: the publish-center
+# media-group name, a bare media filename, or a screenshot tag. When the model
+# echoes the prompt's "Media group: <name>" line ahead of the real caption (the
+# bug behind the "✨ publish-center-20260921-015359\n\nReal copy" payloads), the
+# label is noise in front of perfectly good copy. Strip the standalone label
+# line so the guard sees the real caption, not the label. A message that is
+# *only* a label collapses to empty and is still rejected as placeholder copy.
+_MACHINE_LABEL_LINE_RE = re.compile(
+    r"^\s*(?:\u2728\s*)?(?:publish-center-\d{8}-\d{6}|"
+    r"[\w\-. ()]+\.(?:mp4|mov|webm|m4v|jpg|jpeg|png|gif|webp|bmp)|"
+    r"(?:\u622a\u5716|screenshot)\s*\d*)\s*$",
+    re.IGNORECASE,
+)
+
+
+def strip_machine_label_lines(text: str | None) -> str:
+    """Drop lines that are pure machine labels, keeping the real copy.
+
+    A leading ``publish-center-<stamp>`` line or a bare filename is prompt
+    scaffolding, never caption text. Removing it lets a caption that merely
+    *contains* a label keep the human copy, while a caption made only of labels
+    becomes empty and is still rejected by :func:`is_usable_copy`.
+    """
+    value = str(text or "")
+    if not value:
+        return value
+    lines = value.splitlines()
+    if not any(_MACHINE_LABEL_LINE_RE.match(line) for line in lines):
+        return value
+    kept = [line for line in lines if not _MACHINE_LABEL_LINE_RE.match(line)]
+    # Re-join the surviving lines. A message that was only labels collapses to
+    # the empty string, which callers (and the guard) treat as "no copy".
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+
+
 # An LLM safety refusal must never be published as if it were copy.
 _LLM_REFUSAL_RE = re.compile(
     r"^\s*(?:i can'?t|i cannot|i'?m unable|i am unable|i won'?t|i will not|"
@@ -336,11 +375,6 @@ def prepare_platform_draft(
         expected_count=rule.hashtag_count,
     )
 
-    if rule.require_emoji:
-        message = ensure_emoji_prefix(message)
-    if hashtags and not all(tag in message for tag in hashtags):
-        message = f"{message} {' '.join(hashtags)}".strip()
-
     prepared_contact_details = (
         str(prepared.get("contactDetails") or contact_details or "").strip()
     )
@@ -350,6 +384,25 @@ def prepare_platform_draft(
         raise ValueError(f"{platform} draft requires contact details")
     if rule.require_cta and not prepared_cta:
         raise ValueError(f"{platform} draft requires a CTA")
+
+    # No real copy after normalisation (the model returned nothing, or only a
+    # machine label that ``strip_machine_label_lines`` removed). Do not
+    # fabricate a caption out of the required emoji and hashtags: an emoji plus
+    # ``#socialmedia #content #campaign`` is exactly the generic placeholder the
+    # pre-publish guard exists to reject. Return an empty message so the caller
+    # surfaces a real generation failure.
+    if not message:
+        prepared["hashtags"] = hashtags
+        prepared["contactDetails"] = prepared_contact_details
+        prepared["cta"] = prepared_cta
+        prepared["message"] = ""
+        prepared["charCount"] = 0
+        return prepared
+
+    if rule.require_emoji:
+        message = ensure_emoji_prefix(message)
+    if hashtags and not all(tag in message for tag in hashtags):
+        message = f"{message} {' '.join(hashtags)}".strip()
 
     if rule.require_contact_details and prepared_contact_details and prepared_contact_details not in message:
         message = f"{message}\n\n{prepared_contact_details}".strip()

@@ -206,12 +206,46 @@ class CampaignApiTests(unittest.TestCase):
             response = self.client.post("/campaigns/prepare", json={
                 "profileId": profile["id"], "mediaGroupId": group,
                 "selectedAccountIds": [account["id"]],
-                # The media context is deliberately empty; a usable brief is what
-                # lets the no-LLM fallback produce copy instead of a placeholder.
+                # The media context is deliberately empty. With the LLM off the
+                # fallback needs a real transcript or an explicit title; it must
+                # never echo the operator brief, which is an instruction, not a
+                # caption.
                 "notes": "A calm, honest moment in the forest.",
+                "title": "A calm, honest moment in the forest.",
                 "useLlm": False, "exportToSheet": False, "uploadToRemote": False,
             })
         self.assertEqual(response.status_code, 200, response.get_json())
+        posts = response.get_json()["data"]["posts"]
+        self.assertEqual(posts[0]["draft"]["message"], "A calm, honest moment in the forest.")
+
+    def test_campaign_prepare_refuses_to_publish_the_operator_brief(self) -> None:
+        """No LLM + no media context + only a brief must fail, not ship the brief.
+
+        This is the loop behind the placeholder guard: the fallback used to echo
+        the brief as the caption, which the guard then rejected at publish time.
+        Surfacing the failure at prepare time is the fix.
+        """
+        source_file = self.base_dir / "brief-only.jpg"
+        source_file.write_bytes(b"img")
+        file_id = self._insert_file_record(source_file.name, str(source_file))
+        profile = self.client.post("/profiles", json={"name": "Brief only"}).get_json()["data"]
+        account = self.client.post(f"/profiles/{profile['id']}/accounts", json={
+            "platform": "discord", "accountName": "brief-only", "authType": "manual",
+            "config": {"webhookUrl": "https://discord.example/webhook"},
+        }).get_json()["data"]
+        group = self.client.post("/media-groups", json={
+            "name": "Brief only", "items": [{"fileRecordId": file_id, "role": "image"}],
+        }).get_json()["data"]["id"]
+        with patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={}), \
+             patch.object(self.sau_backend, "_account_audience_language", return_value=""):
+            response = self.client.post("/campaigns/prepare", json={
+                "profileId": profile["id"], "mediaGroupId": group,
+                "selectedAccountIds": [account["id"]],
+                "notes": "SFW invitation to Taipei Pride on 2026-10-31.",
+                "useLlm": False, "exportToSheet": False, "uploadToRemote": False,
+            })
+        self.assertEqual(response.status_code, 400, response.get_json())
+        self.assertIn("operator brief", response.get_json()["msg"])
 
     def test_validate_account_config_warns_when_tiktok_profile_has_watermark(self) -> None:
         profile_response = self.client.post(

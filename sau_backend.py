@@ -3481,19 +3481,25 @@ def _fallback_generated_draft(
         )
     # Order by how likely the source is to be real copy. The media-group name
     # and the batch importer's brief are deliberately NOT candidates: they are
-    # labels, not captions, and publishing them is a visible defect.
+    # labels, not captions, and publishing them is a visible defect. The brief
+    # (``request_data['notes']``) is the operator's *instruction* to the LLM
+    # ("SFW invitation to ...", "adult, honest, 18+ only"), so echoing it as
+    # the caption produces exactly the generic copy the pre-publish guard
+    # rejects. Drop it from the candidate list entirely: when the LLM is down
+    # and there is no transcript, surface a real failure instead of queueing a
+    # placeholder that can never pass the guard.
     transcript = str(media_context.get("transcriptText", "") or "").strip()
-    notes = str(request_data.get("notes", "") or "").strip()
     title = str(request_data.get("title", "") or "").strip()
     message = ""
-    for candidate in (transcript, notes, title):
+    for candidate in (transcript, title):
         if content_rules.is_usable_copy(candidate):
             message = candidate
             break
     if not message:
         raise RuntimeError(
             "Cannot generate copy: the LLM is unavailable and there is no "
-            "usable transcript, notes or title to fall back to"
+            "usable transcript or explicit title to fall back to. The operator "
+            "brief is an instruction, not a caption, and is never published."
         )
     return {
         "message": message[:1000],
@@ -6210,7 +6216,11 @@ def campaigns_prepare():
                         schedule=data.get("schedule"),
                         watermark="Default" if _derive_watermark_spec(profile, data) else "",
                         first_comment=str(draft.get("firstComment", "") or ""),
-                        alt_text=str(data.get("altText", "") or ""),
+                        # Prefer the alt text the LLM wrote for the actual
+                        # media; fall back to an operator-supplied option. The
+                        # generated value was previously discarded here, so the
+                        # sheet row shipped with an empty AltText for every post.
+                        alt_text=str(draft.get("altText") or data.get("altText", "") or ""),
                         post_preset=str((account.config or {}).get("sheetPostPreset", "") or ""),
                     )
                 created_posts.append(

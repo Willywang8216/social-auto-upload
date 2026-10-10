@@ -256,3 +256,71 @@ class TestSheetExcludedPlatforms:
 
     def test_twitter_not_excluded(self):
         assert "twitter" not in content_generator.SHEET_EXCLUDED_PLATFORMS
+
+
+class TestFallbackGeneratedDraft:
+    """The LLM-down fallback must never publish the operator brief.
+
+    Reproduced failure: with the LLM unavailable, ``_fallback_generated_draft``
+    echoed ``request_data['notes']`` (the operator's instruction) as the caption.
+    For the six scheduled campaigns that is a generic brief like "SFW invitation
+    to this year's Taipei Pride ...", which the pre-publish guard accepts as if
+    it were copy. Removing ``notes`` from the candidates makes the fallback fail
+    loudly instead.
+    """
+
+    def _backend(self):
+        try:
+            import sau_backend
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional web extra
+            pytest.skip(f"backend dependencies unavailable: {exc}")
+        return sau_backend
+
+    def _media_group(self):
+        from myUtils.media_groups import MediaGroup
+
+        return MediaGroup(id=1, name="publish-center-20260101-000000", notes="")
+
+    def test_operator_brief_is_never_published_as_copy(self):
+        backend = self._backend()
+        brief = (
+            "SFW invitation to this year's Taipei Pride (2026-10-31). A warm, "
+            "inviting clip for the LGBTQ+ community; invite people to show up."
+        )
+        with pytest.raises(RuntimeError, match="operator brief"):
+            backend._fallback_generated_draft(
+                "bluesky",
+                self._media_group(),
+                {"notes": brief, "title": ""},
+                {"transcriptText": ""},
+            )
+
+    def test_explicit_title_is_still_allowed(self):
+        backend = self._backend()
+        draft = backend._fallback_generated_draft(
+            "bluesky",
+            self._media_group(),
+            {"notes": "operator brief", "title": "A real headline"},
+            {"transcriptText": ""},
+        )
+        assert draft["message"] == "A real headline"
+
+    def test_transcript_is_still_allowed(self):
+        backend = self._backend()
+        draft = backend._fallback_generated_draft(
+            "bluesky",
+            self._media_group(),
+            {"notes": "operator brief", "title": ""},
+            {"transcriptText": "A real transcript sentence."},
+        )
+        assert draft["message"] == "A real transcript sentence."
+
+    def test_account_language_requires_llm(self):
+        backend = self._backend()
+        with pytest.raises(RuntimeError, match="requires an available LLM"):
+            backend._fallback_generated_draft(
+                "bluesky",
+                self._media_group(),
+                {"notes": "brief", "title": "", "_accountLanguage": "en"},
+                {"transcriptText": ""},
+            )

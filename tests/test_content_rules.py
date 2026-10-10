@@ -132,6 +132,76 @@ class NormalizeDraftFieldsTests(unittest.TestCase):
         self.assertEqual(draft["title"], "Taipei Stonewall")
 
 
+class MachineLabelStrippingTests(unittest.TestCase):
+    """A media-group name echoed in front of real copy must not kill the post.
+
+    The failing payloads were literally
+    ``"✨ publish-center-20260709-170824\n\nI Let AI Audit a $5,000/Month Budget"``:
+    the caption was fine, but a prompt echo prefixed it, so the guard rejected
+    the whole thing. The label is stripped at generation time; the real copy
+    survives and a message made only of labels still collapses to empty.
+    """
+
+    def test_leading_media_group_name_line_is_stripped_copy_kept(self) -> None:
+        draft = content_rules.normalize_draft_fields(
+            {
+                "message": (
+                    "✨ publish-center-20260709-170824\n\n"
+                    "I Let AI Audit a $5,000/Month Budget — Here's What It Found"
+                )
+            }
+        )
+        self.assertEqual(
+            draft["message"],
+            "I Let AI Audit a $5,000/Month Budget — Here's What It Found",
+        )
+        self.assertTrue(content_rules.is_usable_copy(draft["message"]))
+
+    def test_message_of_only_machine_labels_is_emptied(self) -> None:
+        for raw in (
+            "publish-center-20260709-170824",
+            "clip_pub.mp4",
+            "截圖12",
+            "screenshot 4",
+        ):
+            with self.subTest(raw=raw):
+                draft = content_rules.normalize_draft_fields({"message": raw})
+                self.assertEqual(draft["message"], "")
+                self.assertFalse(content_rules.is_usable_copy(draft["message"]))
+
+    def test_bare_filename_line_before_copy_is_stripped(self) -> None:
+        draft = content_rules.normalize_draft_fields(
+            {"message": "clip_pub.mp4\n\nA quiet morning in the forest."}
+        )
+        self.assertEqual(draft["message"], "A quiet morning in the forest.")
+
+    def test_prepare_never_fabricates_caption_from_emoji_and_hashtags(self) -> None:
+        # Twitter requires an emoji plus three hashtags. A placeholder must not
+        # become "✨ clip_pub.mp4 #socialmedia #content #campaign" and sneak
+        # through the guard.
+        draft = content_rules.prepare_platform_draft(
+            "twitter", {"message": "clip_pub.mp4", "hashtags": []}
+        )
+        self.assertEqual(draft["message"], "")
+        self.assertEqual(draft["charCount"], 0)
+        self.assertFalse(content_rules.is_usable_copy(draft["message"]))
+
+    def test_prepare_keeps_real_copy_after_stripping_label(self) -> None:
+        draft = content_rules.prepare_platform_draft(
+            "twitter",
+            {
+                "message": (
+                    "✨ publish-center-20260709-170824\n\n"
+                    "I Let AI Audit a $5,000/Month Budget"
+                ),
+                "hashtags": [],
+            },
+        )
+        self.assertNotIn("publish-center", draft["message"])
+        self.assertTrue(content_rules.is_usable_copy(draft["message"]))
+        self.assertEqual(len(draft["hashtags"]), 3)
+
+
 class UsableCopyTests(unittest.TestCase):
     def test_rejects_placeholders_and_labels(self) -> None:
         self.assertFalse(content_rules.is_usable_copy("✨ publish-center-20260921-015359"))

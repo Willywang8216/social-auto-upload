@@ -150,6 +150,36 @@ def is_archive(endpoint: str | None) -> bool:
     return str(endpoint or "").strip("/").startswith(f"{SAU_PREFIX}/{ARCHIVE_TIER}/")
 
 
+def archive_prefix() -> str:
+    """The archive root (``sau/archive``)."""
+    return f"{SAU_PREFIX}/{ARCHIVE_TIER}"
+
+
+def structured_archive_path(
+    relative_path: str,
+    year: int,
+    month: int,
+    *,
+    prefix: str | None = None,
+) -> str:
+    """Full archive path for a bundle object, date-prefixed.
+
+    ``<prefix>/<YYYY>/<MM>/<relative_path>`` where ``relative_path`` is the
+    original archive-relative key (typically ``<bundle>/<everything>``). Only
+    the date prefix is added: the bundle and every following segment are kept
+    verbatim, so a migration never rewrites an object's identity and a
+    size/restore check stays trivial.
+    """
+    year_i, month_i = int(year), int(month)
+    if not (1 <= month_i <= 12):
+        raise ValueError(f"month out of range: {month!r}")
+    key = str(relative_path or "").strip("/")
+    if not key:
+        raise ValueError("archive relative path is empty")
+    root = str(prefix or archive_prefix()).strip("/")
+    return f"{root}/{year_i:04d}/{month_i:02d}/{key}"
+
+
 def full_remote_path(endpoint: str, storage_key: str) -> str:
     """``endpoint`` + ``storage_key`` exactly as the restore code joins them."""
     return "/".join(
@@ -275,6 +305,8 @@ __all__ = [
     "split_endpoint",
     "split_media_path",
     "is_archive",
+    "archive_prefix",
+    "structured_archive_path",
     "full_remote_path",
     "remote_spec",
     "published_refs_from_payloads",
