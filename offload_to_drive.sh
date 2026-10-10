@@ -389,9 +389,14 @@ try:
                 continue
             root = derived[0]
             tier = None
-        # Only legacy, untiered rows are candidates; already-tiered rows and
-        # non-media endpoints are left alone.
-        if root is None or tier is not None:
+        # An already-TIERED row is still planned, into the tier it already
+        # declares. Skipping these left the local copy stranded forever: the row
+        # says the bytes live on Drive (e.g. sau/published/generated) but the
+        # local file was never routed, copied or purged, so 92 rows / 208 MB of
+        # published artifacts sat on the VPS with a live Drive copy. Planning
+        # them means the normal verify-then-purge path reclaims the disk, and the
+        # copy is a no-op when Drive already holds the bytes.
+        if root is None:
             continue
         split = split_media_path(row["file_path"])
         if split is None or split[0] != root:
@@ -686,6 +691,18 @@ for (file_path,) in conn.execute("SELECT file_path FROM file_records"):
     fp = (file_path or "").strip()
     if not fp:
         continue
+    # Normalise a container-absolute prefix first. Rows written by the container
+    # store ``/app/videoFile/_inbox_cache/x``; the os.walk below produces the
+    # repo-relative key ``_inbox_cache/x``, so without this the two never matched
+    # and every such file was emitted as an exclusion - protected forever. That
+    # silently pinned 85 _inbox_cache files / 8.9 GB on the VPS. The restore side
+    # already handles this shape (see the candidates below), so this was the only
+    # blocker.
+    for _root in ("videoFile", "uploads", "generated"):
+        _prefix = f"/app/{_root}/"
+        if fp.startswith(_prefix):
+            fp = f"{_root}/{fp[len(_prefix):]}"
+            break
     if fp.startswith("uploads/"):
         recorded.add(("uploads", fp[len("uploads/"):]))
     elif fp.startswith("generated/"):
