@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import inspect
+import time
 import os
 import tempfile
 import unittest
@@ -236,3 +237,96 @@ class MuyuanCloudflareHeaderTests(unittest.TestCase):
         with patch.dict(os.environ, {"SAU_LLM_EXTRA_HEADERS": "not json"}):
             headers = llm_client._headers("k")  # must not raise
         self.assertEqual(headers["Authorization"], "Bearer k")
+
+
+class MuyuanRateLimitTests(unittest.TestCase):
+    """The gateway rate-limits per key/group and must be respected.
+
+    Measured live: 100 requests / 5 minutes on the welfare and default groups and
+    only 5 / 5 minutes on the Gemini group. Treating 429 as a generic failure
+    burned every remaining endpoint in the pool instantly, so the client now
+    honours Retry-After (bounded), pushes the pacing clock forward so the next
+    call also waits, and paces consecutive requests.
+    """
+
+    class _Resp:
+        def __init__(self, status_code=429, headers=None):
+            self.status_code = status_code
+            self.headers = headers or {}
+
+    def test_retry_after_as_seconds(self):
+        self.assertAlmostEqual(
+            llm_client._retry_after_seconds(self._Resp(headers={"Retry-After": "12"})),
+            12.0,
+        )
+
+    def test_retry_after_is_bounded(self):
+        huge = llm_client._retry_after_seconds(
+            self._Resp(headers={"Retry-After": "99999"})
+        )
+        self.assertLessEqual(huge, llm_client._MAX_RATE_LIMIT_WAIT)
+
+    def test_missing_retry_after_still_backs_off(self):
+        self.assertGreater(llm_client._retry_after_seconds(self._Resp()), 0)
+
+    def test_malformed_retry_after_still_backs_off(self):
+        self.assertGreater(
+            llm_client._retry_after_seconds(self._Resp(headers={"Retry-After": "soon"})),
+            0,
+        )
+
+    def test_note_rate_limit_pushes_the_pacing_clock(self):
+        with patch.object(llm_client, "_LAST_REQUEST_AT", 0.0):
+            llm_client._note_rate_limit(5.0)
+            self.assertGreaterEqual(llm_client._LAST_REQUEST_AT, 5.0)
+
+    def test_pacing_can_be_disabled(self):
+        with patch.dict(os.environ, {"SAU_LLM_MIN_INTERVAL_SECONDS": "0"}):
+            self.assertEqual(llm_client._min_interval_seconds(), 0.0)
+            start = time.monotonic()
+            llm_client._pace_request()  # must not sleep
+            self.assertLess(time.monotonic() - start, 0.5)
+
+    def test_pacing_waits_the_configured_interval(self):
+        with patch.dict(os.environ, {"SAU_LLM_MIN_INTERVAL_SECONDS": "0.3"}):
+            llm_client._pace_request()  # establishes the clock
+            start = time.monotonic()
+            llm_client._pace_request()
+            self.assertGreaterEqual(time.monotonic() - start, 0.25)
+
+    def test_a_429_is_backed_off_and_retried(self):
+        """A 429 must be waited on, not treated as a fatal endpoint failure."""
+        import json as _json
+
+        class _FakeSession:
+            def __init__(self):
+                self.calls = 0
+
+            class _R:
+                def __init__(self, code, headers=None, payload=None):
+                    self.status_code = code
+                    self.headers = headers or {}
+                    self._payload = payload or {}
+
+                def json(self):
+                    return self._payload
+
+                def raise_for_status(self):
+                    if self.status_code >= 400:
+                        raise RuntimeError(f"HTTP {self.status_code}")
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return self._R(429, {"Retry-After": "0"})
+                return self._R(200, {}, {"choices": [{"message": {"content": "ok"}}]})
+
+        session = _FakeSession()
+        pool = [{"base_url": "https://a.example", "api_key": "k", "model": "m"},
+                {"base_url": "https://b.example", "api_key": "k", "model": "m"}]
+        with patch.dict(os.environ, {"SAU_LLM_POOL": _json.dumps(pool)}):
+            result = llm_client.generate_chat_completion(
+                system_prompt="s", user_prompt="u", session=session,
+            )
+        self.assertEqual(getattr(result, "content", result), "ok")
+        self.assertGreaterEqual(session.calls, 2, "the 429 must be retried")

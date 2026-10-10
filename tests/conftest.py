@@ -109,3 +109,4 @@ for _module_name in (
     _module = sys.modules.get(_module_name)
     if _module is not None and hasattr(_module, "DB_PATH"):
         _module.DB_PATH = Path(os.environ["SAU_DB_PATH"])
+os.environ["SAU_LLM_MIN_INTERVAL_SECONDS"] = "0"  # tests must not sleep on LLM pacing

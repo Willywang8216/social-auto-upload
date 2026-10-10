@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
@@ -236,6 +238,82 @@ def _image_content_part(source):
         return None
 
 
+# --- rate limiting -----------------------------------------------------------
+#
+# The LLM gateway enforces a request-count limit per API key/group, measured
+# live: 100 requests / 5 minutes on the "welfare" and "default" groups and only
+# 5 / 5 minutes on the Gemini group. A burst of campaign prep easily exceeds
+# that, so requests are paced locally and a 429 is honoured instead of being
+# treated as a generic endpoint failure (which used to burn every remaining
+# endpoint in the pool instantly).
+#
+# ``SAU_LLM_MIN_INTERVAL_SECONDS`` sets the minimum gap between requests;
+# the default is deliberately conservative (a little over the welfare group's
+# 5-minute budget spread across a batch). Set it to 0 to disable pacing.
+_RATE_LOCK = threading.Lock()
+_LAST_REQUEST_AT = 0.0
+_MAX_RATE_LIMIT_WAIT = 300.0  # never sleep longer than one full window
+
+
+def _min_interval_seconds() -> float:
+    raw = os.environ.get("SAU_LLM_MIN_INTERVAL_SECONDS")
+    if raw is None or str(raw).strip() == "":
+        return 3.0
+    try:
+        return max(0.0, float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return 3.0
+
+
+def _note_rate_limit(wait: float) -> None:
+    """Record that the gateway asked us to slow down.
+
+    Pushes the pacing clock forward so the NEXT call also waits, which stops a
+    retry loop from immediately re-triggering the same 429.
+    """
+    global _LAST_REQUEST_AT
+    with _RATE_LOCK:
+        _LAST_REQUEST_AT = max(_LAST_REQUEST_AT, time.monotonic()) + max(0.0, wait)
+
+
+def _retry_after_seconds(response) -> float:
+    """How long to wait after a 429, from Retry-After when present.
+
+    Accepts both forms the header allows (delta-seconds and an HTTP date).
+    Falls back to a bounded default when the server sends nothing usable, so the
+    caller still backs off rather than hammering a limited key.
+    """
+    raw = str(getattr(response, "headers", {}).get("Retry-After") or "").strip()
+    if raw:
+        try:
+            return min(max(0.0, float(raw)), _MAX_RATE_LIMIT_WAIT)
+        except ValueError:
+            pass
+        try:
+            from email.utils import parsedate_to_datetime
+
+            when = parsedate_to_datetime(raw)
+            delta = when.timestamp() - time.time()
+            return min(max(0.0, delta), _MAX_RATE_LIMIT_WAIT)
+        except Exception:  # noqa: BLE001 - a malformed header is not fatal
+            pass
+    return 10.0
+
+
+def _pace_request() -> None:
+    """Sleep so consecutive LLM requests respect the configured minimum gap."""
+    interval = _min_interval_seconds()
+    if interval <= 0:
+        return
+    global _LAST_REQUEST_AT
+    with _RATE_LOCK:
+        now = time.monotonic()
+        wait = interval - (now - _LAST_REQUEST_AT)
+        if wait > 0:
+            time.sleep(wait)
+        _LAST_REQUEST_AT = time.monotonic()
+
+
 def generate_chat_completion(
     system_prompt: str,
     user_prompt: str,
@@ -289,12 +367,29 @@ def generate_chat_completion(
             }
             if response_json:
                 payload["response_format"] = {"type": "json_object"}
+            _pace_request()
             response = http.post(
                 f"{base_url}/chat/completions",
                 headers=headers,
                 json=payload,
                 timeout=timeout_seconds,
             )
+            if int(getattr(response, "status_code", 0) or 0) == 429:
+                # The gateway rate-limits hard and the limit is per KEY/group:
+                # 100 requests / 5 min on the welfare and default groups, and
+                # only 5 / 5 min on the Gemini group. Treating 429 as a generic
+                # failure burned the remaining endpoints instantly, so honour it:
+                # wait for Retry-After when the server sends one, otherwise back
+                # off, and only THEN move on. The wait is bounded so a persistent
+                # limit still surfaces instead of hanging forever.
+                wait = _retry_after_seconds(response)
+                _note_rate_limit(wait)
+                if wait > 0:
+                    time.sleep(wait)
+                last_error = RuntimeError(
+                    f"rate limited (HTTP 429) by {base_url}; waited {wait:.1f}s"
+                )
+                continue
             response.raise_for_status()
             response_payload = response.json()
             content = _extract_message_content(
@@ -361,12 +456,24 @@ def transcribe_audio(
             for key, value in _headers(resolved_api_key).items()
             if key.lower() != "content-type"
         }
+        _pace_request()
         response = http.post(
             f"{base_url}/audio/transcriptions",
             headers=upload_headers,
             data=data,
             files={"file": (audio_file.name, handle, "application/octet-stream")},
             timeout=timeout_seconds,
+        )
+    if int(getattr(response, "status_code", 0) or 0) == 429:
+        # Transcription shares the same per-key budget as chat completions, so a
+        # 429 here must be reported as a rate limit (and the pacing clock pushed
+        # forward) rather than surfacing as a generic HTTP error. Transcription is
+        # best-effort, so the caller can simply skip it for this campaign.
+        wait = _retry_after_seconds(response)
+        _note_rate_limit(wait)
+        raise RuntimeError(
+            f"rate limited (HTTP 429) transcribing with {base_url}; "
+            f"retry after about {wait:.0f}s"
         )
     response.raise_for_status()
     payload = response.json()
