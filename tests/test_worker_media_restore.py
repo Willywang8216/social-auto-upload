@@ -530,3 +530,67 @@ class WorkerMediaRestoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GeneratedArtifactNeverSubstitutesSourceTests(unittest.TestCase):
+    """A derived artifact must never be restored from its raw source record.
+
+    A payload whose path was not under a /generated/ root (a test-harness /tmp
+    path, or a re-rooted path) slipped past the path-based "is this generated"
+    test, so _record_for fell through to the source_file_record_id fallback and
+    fetched the RAW ORIGINAL for a prepared/watermarked artifact. 27 live payloads
+    did exactly this, restoring 8.5 MB of unrelated media under the prepared
+    file's name.
+
+    The guard is now keyed on artifact_kind too, so a derived artifact is
+    recognised regardless of where its path points.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.db_path = self.root / "derived.db"
+        create_table.bootstrap(self.db_path)
+        with sqlite3.connect(self.db_path) as conn:
+            # The RAW source, which must never be substituted.
+            conn.execute(
+                "INSERT INTO file_records (filename, filesize, file_path, storage_key) "
+                "VALUES (?, ?, ?, ?)",
+                ("raw_source.mp4", 8_591_687.0, "videoFile/raw_source.mp4", "raw_source.mp4"),
+            )
+        self.source_id = 1
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_a_missing_derived_artifact_is_not_replaced_by_its_source(self) -> None:
+        missing = self.root / "nowhere" / "watermarked_video" / "gone.mp4"
+        payload = {"artifacts": [{
+            "local_path": str(missing),
+            "artifact_kind": "watermarked_video",
+            "source_file_record_id": self.source_id,
+            "metadata": {"role": "video"},
+        }]}
+        with patch.object(worker, "BASE_DIR", self.root):
+            with self.assertRaises(worker.MediaRestoreError):
+                worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+        # And nothing was written under the requested name.
+        self.assertFalse(missing.exists())
+
+    def test_a_non_derived_artifact_may_still_use_its_source_record(self) -> None:
+        # The fallback is legitimate for a plain uploaded artifact, so the guard
+        # must not remove it wholesale. Here the source row has no restore route,
+        # so a MediaRestoreError is still the correct outcome - what matters is
+        # that the kind check did not veto the lookup path itself.
+        source = self.root / "videoFile" / "raw_source.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"x" * 32)
+        payload = {"artifacts": [{
+            "local_path": "videoFile/raw_source.mp4",
+            "artifact_kind": "local",
+            "source_file_record_id": self.source_id,
+            "metadata": {"role": "video"},
+        }]}
+        with patch.object(worker, "BASE_DIR", self.root):
+            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+        self.assertTrue(source.exists())

@@ -1953,6 +1953,15 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
 
     def _record_for(artifact: dict, path: Path, *, stored: str | None = None) -> sqlite3.Row | None:
         source_id = artifact.get("source_id") or artifact.get("source_file_record_id")
+        # A generated artifact is one that was DERIVED from a source (watermark,
+        # split, shrink), so its own record must win and the raw source must never
+        # be substituted. Detect it by kind as well as by path: a payload whose
+        # path is not under a /generated/ root slipped past the path test and the
+        # source_file_record_id fallback then restored the RAW ORIGINAL for a
+        # prepared artifact (27 live payloads fetched 8.5 MB of unrelated media
+        # this way).
+        _kind = str(artifact.get("artifact_kind") or "").strip().lower()
+        _derived = _kind in {"watermarked_video", "watermarked_image", "generated"}
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             raw = str(path).replace("\\\\", "/")
@@ -2008,7 +2017,7 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                         return campaign_row
                     # Never substitute original source bytes into a generated target.
                     return None
-            if source_id:
+            if source_id and not _derived:
                 row = conn.execute(
                     "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path FROM file_records WHERE id = ?",
                     (int(source_id),),
@@ -2065,6 +2074,23 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             is_generated_artifact = p.resolve().is_relative_to(generated_root)
         except (OSError, ValueError):
             is_generated_artifact = False
+        # A generated artifact may also be identified by its artifact_kind, not
+        # only by the path resolving under the generated root. The path test
+        # alone missed a payload whose path was somewhere else entirely (a
+        # /tmp/... test-harness path, or a re-rooted path), and for those
+        # _record_for fell through to the `source_file_record_id` fallback and
+        # restored the RAW SOURCE instead of the prepared file - 27 live payloads
+        # did exactly this, fetching 8.5 MB of unrelated media for a
+        # watermarked artifact. Treating a generated KIND as generated keeps the
+        # "never substitute original source bytes" guard in force regardless of
+        # where the path points.
+        artifact_kind = str(artifact.get("artifact_kind") or "").strip().lower()
+        if not is_generated_artifact and artifact_kind in {
+            "watermarked_video",
+            "watermarked_image",
+            "generated",
+        }:
+            is_generated_artifact = True
         try:
             row = _record_for(artifact, p, stored=local_path)
             if row is None and is_generated_artifact:
