@@ -245,3 +245,4 @@ rclone*.conf
 logs/
 *.log
 *.log.[0-9]*
+backups/
