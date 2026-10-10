@@ -35,7 +35,43 @@ from myUtils import profiles as profile_registry
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-INBOX_DIR = Path(os.environ.get("SAU_INBOX", BASE_DIR / "sau-inbox"))
+
+def _resolve_inbox_dir() -> Path:
+    """Locate the SAU-Inbox the watcher actually writes to.
+
+    The production compose mounts the host's ``/home/will/sau-inbox`` at
+    ``/app/sau-inbox``, and the host watcher writes the state file to
+    ``/home/will/sau-inbox/state.json``. Deriving the path from ``BASE_DIR``
+    alone made the two disagree: run on the host and ``BASE_DIR`` is
+    ``/home/will/social-auto-upload``, so the inbox resolved to
+    ``.../social-auto-upload/sau-inbox`` - a directory that does not exist - and
+    ``list_items()`` silently reported zero ready items while 304 were queued.
+    Reading the same state as the container is the only correct behaviour, so the
+    known absolute locations are tried before the project-relative fallback.
+
+    Order: ``SAU_INBOX`` / ``SAU_WATCH_STATE`` (explicit), then
+    ``/home/will/sau-inbox``, then ``/app/sau-inbox``, then ``BASE_DIR/sau-inbox``
+    for local development.
+    """
+    explicit = os.environ.get("SAU_INBOX")
+    if explicit:
+        return Path(explicit)
+    explicit_state = os.environ.get("SAU_WATCH_STATE")
+    if explicit_state:
+        return Path(explicit_state).parent
+    for candidate in ("/home/will/sau-inbox", "/app/sau-inbox"):
+        path = Path(candidate)
+        if (path / "state.json").is_file():
+            return path
+    for candidate in ("/home/will/sau-inbox", "/app/sau-inbox"):
+        if Path(candidate).is_dir():
+            return Path(candidate)
+    return BASE_DIR / "sau-inbox"
+
+
+INBOX_DIR = _resolve_inbox_dir()
+# ``SAU_WATCH_STATE`` wins outright when set, since the watcher may keep its
+# state outside the inbox tree.
 STATE_PATH = Path(os.environ.get(
     "SAU_WATCH_STATE", str(INBOX_DIR / "state.json")))
 
