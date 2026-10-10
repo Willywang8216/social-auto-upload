@@ -246,3 +246,6 @@ logs/
 *.log
 *.log.[0-9]*
 backups/
+
+# 1Panel / DB / env backups are operational artefacts, never source.
+backups/
