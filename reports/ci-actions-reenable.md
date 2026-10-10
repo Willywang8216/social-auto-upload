@@ -52,9 +52,9 @@ $ gh api "repos/Willywang8216/social-auto-upload/actions/runs?per_page=3" \
 2026-10-09T01:45:24Z  CI                      success    edba1f3a
 ```
 
-Every commit after `d1319216` still has **zero** `github-actions` check suites
-(24 commits checked, all `actions_suites=0`), so GitHub's event handler is still
-not creating runs.
+Every commit after `d1319216` produced **zero** `github-actions` check suites
+(22 commits checked at the time, all `actions_suites=0`), so GitHub's event
+handler is still not creating runs.
 
 `d1319216`'s run is the one that was in flight when the disable took effect:
 
