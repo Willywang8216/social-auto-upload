@@ -193,6 +193,44 @@ if ! docker run --rm --entrypoint python "$IMAGE_SHA" -c \
 fi
 
 log "restarting ${SERVICE} (pull disabled so the local image is used)"
+
+# ---------------------------------------------------------------------------
+# Do not restart on top of in-flight publishes
+# ---------------------------------------------------------------------------
+# A restart kills the worker's running targets: the container is recreated, the
+# in-flight ffmpeg/HTTP work is orphaned, and the rows stay 'running' forever
+# because nothing is left to finish them. That is exactly what happened on
+# 2026-10-10 when this script re-deployed at 10:42 and stranded six Sociamonials
+# publishes for an hour.
+#
+# So wait for the queue to drain first. The lease/sweep will eventually recover a
+# truly stuck target, but a publish in progress is far cheaper to wait for than to
+# lose. Set SAU_CI_WATCH_MAX_WAIT_SECONDS to bound the wait (default 30 min);
+# when the bound is hit the deploy proceeds and says so, because a permanently
+# running target must not block security fixes forever.
+MAX_WAIT="${SAU_CI_WATCH_MAX_WAIT_SECONDS:-1800}"
+if [[ "$MAX_WAIT" =~ ^[0-9]+$ ]] && (( MAX_WAIT > 0 )); then
+  DB="${SAU_DB_PATH:-/home/will/social-auto-upload/db/database.db}"
+  waited=0
+  while (( waited < MAX_WAIT )); do
+    running=$(sqlite3 "$DB" "SELECT COUNT(*) FROM publish_job_targets WHERE status IN ('running','retrying');" 2>/dev/null || echo 0)
+    [[ "$running" =~ ^[0-9]+$ ]] || running=0
+    (( running == 0 )) && break
+    if (( waited % 60 == 0 )); then
+      log "waiting for ${running} in-flight target(s) before restart (${waited}s of ${MAX_WAIT}s)"
+    fi
+    sleep 15
+    waited=$(( waited + 15 ))
+  done
+  if (( running != 0 )); then
+    log "WARNING: ${running} target(s) still in flight after ${MAX_WAIT}s; deploying anyway"
+    notify_failure "SAU ci-watch: deploying over ${running} in-flight target(s)" \
+      "Waited ${MAX_WAIT}s for the queue to drain but ${running} target(s) are still running. The restart will strand them; they will need a resubmit."
+  else
+    log "queue drained; safe to restart"
+  fi
+fi
+
 if ! docker compose up -d --force-recreate --pull never "$SERVICE" >>"$LOG" 2>&1; then
   log "ERROR: docker compose up failed for ${SHORT}"
   notify_failure "SAU ci-watch: deploy command failed for ${SHORT}" \
