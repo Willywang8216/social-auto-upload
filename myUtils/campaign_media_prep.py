@@ -40,6 +40,28 @@ _REMOTE_URL_PLATFORMS = {
     profile_registry.PLATFORM_THREADS,
 }
 
+# Hosts that are only reachable from this machine. A ``/getFile`` URL under one
+# of these can never be fetched by a platform, so it must never be stored as an
+# artifact's ``public_url`` (targets #3449/#3450 handed Bluesky a
+# ``http://localhost:5409/getFile`` URL and got a 404).
+_UNREACHABLE_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+
+def _is_public_base_url(base_url: str) -> bool:
+    """True when ``base_url`` is a publicly reachable HTTPS origin.
+
+    A non-HTTPS origin, or one whose host is a loopback address, is only
+    reachable from this process; emitting it as a ``public_url`` guarantees a
+    downstream fetch failure, so callers suppress it instead. The check is
+    deliberately host-based: ``localhost`` as a path segment (rare, but
+    possible in a configured CDN) still passes.
+    """
+    text = str(base_url or "").strip()
+    if not text.startswith("https://"):
+        return False
+    host = _urlparse.urlparse(text).hostname or ""
+    return host.lower() not in _UNREACHABLE_HOSTS
+
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 
@@ -575,19 +597,20 @@ def prepare_campaign_media_artifacts(
                     _rel = _pp.as_posix()
                 served_filename = _urlparse.quote(_rel)
                 candidate = f"{base_url}/getFile?filename={served_filename}"
-                _is_public = (
-                    base_url.startswith("https://")
-                    and "localhost" not in base_url
-                    and "127.0.0.1" not in base_url
-                )
-                if needs_public_url and not _is_public:
-                    logging.getLogger(__name__).warning(
-                        "campaign %d targets URL-fetch platforms but no public "
-                        "storage backend produced a URL; suppressing unreachable %s",
-                        campaign_id, candidate,
-                    )
-                else:
+                # ``public_url`` must be publicly reachable, whether or not a
+                # URL-fetch platform is targeted: a byte-upload platform
+                # (Bluesky/Reddit) falls back to this URL when its local copy
+                # is gone, which is exactly how targets #3449/#3450 reached a
+                # 404. Suppress an unreachable host entirely and let the
+                # publisher report the missing URL instead.
+                if _is_public_base_url(base_url):
                     public_url = candidate
+                else:
+                    logging.getLogger(__name__).warning(
+                        "campaign %d has no publicly reachable origin (%s); "
+                        "suppressing unreachable public_url %s",
+                        campaign_id, base_url, candidate,
+                    )
             except RuntimeError:
                 public_url = None
             campaign_store.add_campaign_artifact(
@@ -600,7 +623,9 @@ def prepare_campaign_media_artifacts(
                 db_path=db_path,
             )
             # Also store a raw (un-watermarked) artifact for TikTok when
-            # watermarks were applied in a mixed-platform batch.
+            # watermarks were applied in a mixed-platform batch. The artifact is
+            # still created (TikTok can byte-upload from ``local_path``) but its
+            # ``public_url`` is left null when the origin is not reachable.
             if (
                 base_url
                 and not tiktok_only
@@ -609,7 +634,11 @@ def prepare_campaign_media_artifacts(
             ):
                 try:
                     raw_served_filename = Path(source_path).name
-                    raw_public_url = f"{base_url}/getFile?filename={raw_served_filename}"
+                    raw_public_url = (
+                        f"{base_url}/getFile?filename={raw_served_filename}"
+                        if _is_public_base_url(base_url)
+                        else None
+                    )
                 except (RuntimeError, NameError):
                     raw_public_url = None
                 campaign_store.add_campaign_artifact(

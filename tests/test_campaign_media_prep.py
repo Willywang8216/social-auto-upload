@@ -113,6 +113,46 @@ class CampaignMediaPrepNoFlaskContextTests(unittest.TestCase):
             self.add_campaign_artifact.call_args.kwargs["public_url"]
         )
 
+    def test_unreachable_origin_is_suppressed_for_any_platform(self) -> None:
+        """A localhost ``/getFile`` URL must never be stored as a public_url.
+
+        Targets #3449/#3450 handed Bluesky ``http://localhost:5409/getFile`` and
+        got a 404 when the local file it fell back to was missing. The origin is
+        unreachable from any platform, so the URL is suppressed for byte-upload
+        platforms too, not only for the URL-fetch set.
+        """
+        self.assertFalse(has_request_context())
+
+        for base in (
+            "http://localhost:5409",
+            "https://localhost:5409",
+            "http://127.0.0.1:5409",
+        ):
+            with self.subTest(base=base):
+                self.add_campaign_artifact.reset_mock()
+                with mock.patch.object(
+                    campaign_media_prep.ops_alerts,
+                    "public_app_origin",
+                    return_value="",
+                ):
+                    context = self._call(public_base_url=base)
+
+                self.assertEqual(context["imageUrls"], [])
+                self.assertIsNone(
+                    self.add_campaign_artifact.call_args.kwargs["public_url"]
+                )
+
+    def test_public_origin_helper_rejects_loopback_and_http(self) -> None:
+        self.assertFalse(campaign_media_prep._is_public_base_url("http://cdn.example.com"))
+        self.assertFalse(campaign_media_prep._is_public_base_url("https://localhost"))
+        self.assertFalse(campaign_media_prep._is_public_base_url("https://127.0.0.1:5409"))
+        self.assertFalse(campaign_media_prep._is_public_base_url(""))
+        self.assertTrue(campaign_media_prep._is_public_base_url("https://cdn.example.com"))
+        # A "localhost" path segment on a real host is not the loopback host.
+        self.assertTrue(
+            campaign_media_prep._is_public_base_url("https://cdn.example.com/localhost")
+        )
+
     def test_configured_public_origin_wins_over_passed_host(self) -> None:
         with mock.patch.object(
             campaign_media_prep.ops_alerts,
