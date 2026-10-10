@@ -797,3 +797,25 @@ class ArtifactPublicUrlBackfillTests(unittest.TestCase):
         }]
         worker._backfill_artifact_public_urls(artifacts, "/nonexistent/dir/db.sqlite")
         self.assertIsNone(artifacts[0]["public_url"])
+
+
+class FallbackNormalisesArtifactUrlsTests(unittest.TestCase):
+    """Raw spaces in a stored URL must be encoded before the fallback sees them.
+
+    Artifact URLs are built from filenames, so older rows carry raw spaces. A raw
+    space is not a valid URI: the R2 object serves 206 for the encoded form and
+    fails for the raw one, and Sociamonials reports "Video URL not accessible
+    after retries" for a URL that is actually fine. _fallback_media_paths()
+    normalises its own output, but collect_media() also reads
+    payload["artifacts"][*]["public_url"] directly, so the payload itself must be
+    normalised.
+    """
+
+    def test_the_payload_artifacts_are_normalised_before_the_fallback(self):
+        import inspect
+
+        source = inspect.getsource(worker)
+        marker = source.index("media_paths = _fallback_media_paths(payload)")
+        preceding = source[max(0, marker - 1200):marker]
+        self.assertIn("_normalise_artifact_url", preceding)
+        self.assertIn('_artifact["public_url"]', preceding)

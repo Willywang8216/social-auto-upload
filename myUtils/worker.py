@@ -1296,6 +1296,19 @@ class PublishWorker:
                 f"{_scrub_secrets(str(exc))}"
             )
 
+        # Normalise every artifact URL in the payload BEFORE the fallback reads
+        # it. _fallback_media_paths() normalises its own output, but
+        # sociamonials_fallback.collect_media() also reads
+        # payload["artifacts"][*]["public_url"] directly, so a raw space in a
+        # stored URL reached the platform unencoded and it reported "Video URL
+        # not accessible after retries" for a URL that serves 206 when encoded.
+        # The rest of the publish path normalises in _run_target; the fallback is
+        # reached from branches that skip it, so it is normalised here too.
+        for _artifact in payload.get("artifacts") or []:
+            if isinstance(_artifact, dict) and _artifact.get("public_url"):
+                _artifact["public_url"] = _normalise_artifact_url(
+                    str(_artifact["public_url"])
+                )
         media_paths = _fallback_media_paths(payload)
 
         try:
@@ -1803,6 +1816,50 @@ def _resolve_account_path(account_ref: str) -> Path:
     return candidate  # let the uploader complain with its own error
 
 
+# Minimal content signatures for the media types the restore path handles. A
+# download that claims a media extension but does not carry the signature is a
+# placeholder or an error page, not media. This is the guard that stopped 63
+# Drive objects that are literally 1-4 bytes (a one-byte ``x`` registered as a
+# ``*_pub.mp4``) from restoring "successfully" and being handed to uploaders.
+_MEDIA_MAGIC: dict[str, tuple[bytes, ...]] = {
+    ".jpg": (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".gif": (b"GIF87a", b"GIF89a"),
+    ".bmp": (b"BM",),
+    ".webp": (b"RIFF",),
+    ".webm": (b"\x1a\x45\xdf\xa3",),
+    ".mkv": (b"\x1a\x45\xdf\xa3",),
+}
+# ISO base media file format (mp4/mov/m4v/3gp) carries a four-char box type at
+# offset 4; ``ftyp`` is the usual first box, but free/wide/moov/mdat also occur.
+_ISO_BMFF_SUFFIXES = (".mp4", ".mov", ".m4v", ".3gp")
+_ISO_BMFF_BOX_TYPES = (b"ftyp", b"moov", b"mdat", b"free", b"wide", b"skip")
+
+
+def _looks_like_media(path: Path, name: str) -> bool:
+    """True when ``path`` plausibly holds the media its extension claims.
+
+    An unknown extension is accepted (fail open): the publish path also
+    restores non-media sidecars, and this guard exists to reject the known
+    placeholder/error-page case, not to reimplement file(1).
+    """
+    suffix = Path(name).suffix.lower()
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(16)
+    except OSError:
+        return False
+    if suffix in _ISO_BMFF_SUFFIXES:
+        return len(head) >= 8 and head[4:8] in _ISO_BMFF_BOX_TYPES
+    signatures = _MEDIA_MAGIC.get(suffix)
+    if signatures is None:
+        return True
+    if suffix == ".webp":
+        return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    return any(head.startswith(signature) for signature in signatures)
+
+
 def _download_atomically(destination: Path, download: Callable[[Path], Any]) -> None:
     """Download into a sibling temporary file and publish it only when complete."""
     import tempfile
@@ -1817,6 +1874,11 @@ def _download_atomically(destination: Path, download: Callable[[Path], Any]) -> 
         download(temporary)
         if not temporary.is_file() or temporary.stat().st_size == 0:
             raise RuntimeError("download returned an empty media file")
+        if not _looks_like_media(temporary, destination.name):
+            raise RuntimeError(
+                "download is not the media it claims to be: "
+                f"{destination.name} ({temporary.stat().st_size} bytes)"
+            )
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
