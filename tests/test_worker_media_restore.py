@@ -10,6 +10,10 @@ from unittest.mock import patch
 import db.createTable as create_table
 from myUtils import worker
 
+# A valid ISO-BMFF header (size + b"ftyp") so the restore media-integrity
+# guard accepts the fixture bytes the mocked downloads write.
+_MP4_FIXTURE = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 120
+
 
 class WorkerMediaRestoreTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -74,7 +78,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         destination = self.root / "videoFile" / "prefixed.mp4"
 
         def write_media(_backend, _key, temporary_path):
-            Path(temporary_path).write_bytes(b"restored media")
+            Path(temporary_path).write_bytes(_MP4_FIXTURE)
 
         with patch.object(worker, "BASE_DIR", self.root), patch.object(
             worker.media_remote_storage, "download_from_backend", side_effect=write_media
@@ -82,7 +86,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             resolved = worker._resolve_file_path("videoFile/prefixed.mp4", db_path=self.db_path)
 
         self.assertEqual(resolved, destination)
-        self.assertEqual(destination.read_bytes(), b"restored media")
+        self.assertEqual(destination.read_bytes(), _MP4_FIXTURE)
 
     def test_artifact_recorded_with_the_video_file_prefix_is_found(self) -> None:
         """file_records carries two path conventions for the same media.
@@ -111,7 +115,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         payload = {"artifacts": [{"local_path": str(self.root / "videoFile" / "_batch1" / "x.mp4")}]}
 
         def write_media(_backend, _key, temporary_path):
-            Path(temporary_path).write_bytes(b"restored via prefix")
+            Path(temporary_path).write_bytes(_MP4_FIXTURE)
 
         with patch.object(worker, "BASE_DIR", self.root), patch.object(
             worker.media_remote_storage, "download_from_backend", side_effect=write_media
@@ -120,7 +124,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
 
         self.assertEqual(
             (self.root / "videoFile" / "_batch1" / "x.mp4").read_bytes(),
-            b"restored via prefix",
+            _MP4_FIXTURE,
         )
 
 
@@ -150,7 +154,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             def raise_for_status(self): return None
             def iter_content(self, chunk_size):
                 assert chunk_size == 1024 * 1024
-                yield b"prepared media"
+                yield _MP4_FIXTURE
 
         with patch.object(worker, "BASE_DIR", self.root), patch.object(
             worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
@@ -159,7 +163,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         ) as get:
             worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
-        self.assertEqual(generated_path.read_bytes(), b"prepared media")
+        self.assertEqual(generated_path.read_bytes(), _MP4_FIXTURE)
         get.assert_called_once_with(
             "https://cdn.example/clip_pub.mp4", timeout=(10, 120),
             stream=True, allow_redirects=False,
@@ -212,10 +216,10 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
         ), patch.object(
             worker.media_remote_storage, "download_from_backend",
-            side_effect=lambda _backend, _key, destination: Path(destination).write_bytes(b"restored bytes"),
+            side_effect=lambda _backend, _key, destination: Path(destination).write_bytes(_MP4_FIXTURE),
         ) as download:
             worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
-        self.assertEqual(generated_path.read_bytes(), b"restored bytes")
+        self.assertEqual(generated_path.read_bytes(), _MP4_FIXTURE)
         self.assertEqual(download.call_args.args[1], "campaigns/campaign-2236/clip_pub.mp4")
 
     def test_generated_artifact_prefers_registered_remote_backend(self) -> None:
@@ -240,12 +244,12 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
         ), patch.object(
             worker.media_remote_storage, "download_from_backend",
-            side_effect=lambda _backend, _key, destination: Path(destination).write_bytes(b"restored bytes"),
+            side_effect=lambda _backend, _key, destination: Path(destination).write_bytes(_MP4_FIXTURE),
         ) as download, patch(
             "requests.get", side_effect=AssertionError("Drive mapping should be preferred")
         ):
             worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
-        self.assertEqual(generated_path.read_bytes(), b"restored bytes")
+        self.assertEqual(generated_path.read_bytes(), _MP4_FIXTURE)
         self.assertEqual(download.call_args.args[1], "campaigns/campaign-4/clip_pub.mp4")
 
     def test_resolve_local_upload_reference_before_any_remote_download(self) -> None:
@@ -349,7 +353,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         }]}
 
         def write_media(_backend, _key, temporary_path):
-            Path(temporary_path).write_bytes(b"restored via host map")
+            Path(temporary_path).write_bytes(_MP4_FIXTURE)
 
         with patch.object(worker, "BASE_DIR", container_root), patch.object(
             worker.media_remote_storage, "download_from_backend", side_effect=write_media
@@ -358,7 +362,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
 
         self.assertEqual(
             (container_root / "videoFile" / "_inbox_cache" / "demo.mp4").read_bytes(),
-            b"restored via host map",
+            _MP4_FIXTURE,
         )
 
     def test_container_prefixed_video_artifact_restores_under_base_dir(self) -> None:
@@ -388,14 +392,14 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         destination = self.root / "videoFile" / "_inbox_cache" / "demo2.mp4"
 
         def write_media(_backend, _key, temporary_path):
-            Path(temporary_path).write_bytes(b"restored via container map")
+            Path(temporary_path).write_bytes(_MP4_FIXTURE)
 
         with patch.object(worker, "BASE_DIR", self.root), patch.object(
             worker.media_remote_storage, "download_from_backend", side_effect=write_media
         ):
             worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
-        self.assertEqual(destination.read_bytes(), b"restored via container map")
+        self.assertEqual(destination.read_bytes(), _MP4_FIXTURE)
 
     def test_container_prefixed_generated_artifact_restores_from_registered_drive(self) -> None:
         """A ``/app/generated`` artifact resolves its own generated record.
@@ -433,11 +437,11 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         ), patch.object(
             worker.media_remote_storage,
             "download_from_backend",
-            side_effect=lambda _backend, _key, dest: Path(dest).write_bytes(b"restored generated"),
+            side_effect=lambda _backend, _key, dest: Path(dest).write_bytes(_MP4_FIXTURE),
         ) as download:
             worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
-        self.assertEqual(destination.read_bytes(), b"restored generated")
+        self.assertEqual(destination.read_bytes(), _MP4_FIXTURE)
         self.assertEqual(download.call_args.args[1], "campaigns/campaign-9/clip_pub.mp4")
 
     def test_missing_artifact_after_normalisation_raises_clear_message(self) -> None:
@@ -526,6 +530,97 @@ class WorkerMediaRestoreTests(unittest.TestCase):
 
         self.assertFalse(destination.exists())
         self.assertEqual(list(destination.parent.glob("*.part")), [])
+
+    def test_media_signature_accepts_real_containers_and_rejects_placeholders(self) -> None:
+        valid = {
+            "a.mp4": b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 20,
+            "b.mov": b"\x00\x00\x00\x14ftypqt  " + b"\x00" * 20,
+            "c.jpg": b"\xff\xd8\xff\xe0" + b"\x00" * 20,
+            "d.png": b"\x89PNG\r\n\x1a\n" + b"\x00" * 20,
+            "e.gif": b"GIF89a" + b"\x00" * 20,
+            "f.webm": b"\x1a\x45\xdf\xa3" + b"\x00" * 20,
+            "g.srt": b"1\n00:00:00,000 --> 00:00:02,000\nhi\n",  # unknown ext fails open
+        }
+        for name, payload in valid.items():
+            path = self.root / name
+            path.write_bytes(payload)
+            self.assertTrue(worker._looks_like_media(path, name), name)
+        for name, payload in {
+            "stub.mp4": b"x",
+            "tiny.mp4": b"xxxx",
+            "empty.mp4": b"",
+            "error.jpg": b"<html>Not Found</html>",
+            "error.png": b"{\"detail\": \"not found\"}",
+        }.items():
+            path = self.root / name
+            path.write_bytes(payload)
+            self.assertFalse(worker._looks_like_media(path, name), name)
+
+    def test_one_byte_placeholder_restore_is_rejected(self) -> None:
+        """A generated Drive object that is literally one byte must not count
+        as a successful restore: it was handed to uploaders as video."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) VALUES (?,?,?,?,?,?,?,?)",
+                ("gdrive-generated", "Generated Drive", "rclone", "drive", "auto", "sau/generated", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            conn.execute(
+                "INSERT INTO file_records (filename,filesize,file_path,storage_key,storage_backend_id) VALUES (?,?,?,?,?)",
+                ("clip_pub.mp4", 1.0, "generated/campaigns/campaign-1/clip_pub.mp4", "campaigns/campaign-1/clip_pub.mp4", backend_id),
+            )
+        generated_root = self.root / "generated" / "campaigns"
+        generated_path = generated_root / "campaign-1" / "clip_pub.mp4"
+        payload = {"artifacts": [{"local_path": str(generated_path)}]}
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
+        ), patch.object(
+            worker.media_remote_storage, "download_from_backend",
+            side_effect=lambda _backend, _key, dest: Path(dest).write_bytes(b"x"),
+        ):
+            with self.assertRaisesRegex(worker.MediaRestoreError, "not the media"):
+                worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+        self.assertFalse(generated_path.exists())
+        self.assertEqual(list(generated_path.parent.glob("*.part")), [])
+
+    def test_one_byte_placeholder_falls_through_to_public_url(self) -> None:
+        """The placeholder backend must not mask a working public URL."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) VALUES (?,?,?,?,?,?,?,?)",
+                ("gdrive-generated", "Generated Drive", "rclone", "drive", "auto", "sau/generated", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            conn.execute(
+                "INSERT INTO file_records (filename,filesize,file_path,storage_key,storage_backend_id) VALUES (?,?,?,?,?)",
+                ("clip_pub.mp4", 1.0, "generated/campaigns/campaign-1/clip_pub.mp4", "campaigns/campaign-1/clip_pub.mp4", backend_id),
+            )
+        generated_root = self.root / "generated" / "campaigns"
+        generated_path = generated_root / "campaign-1" / "clip_pub.mp4"
+        payload = {"artifacts": [{
+            "local_path": str(generated_path),
+            "public_url": "https://cdn.example/clip_pub.mp4",
+        }]}
+
+        class Response:
+            headers = {}
+            is_redirect = False
+            is_permanent_redirect = False
+            def __enter__(self): return self
+            def __exit__(self, *_args): return None
+            def raise_for_status(self): return None
+            def iter_content(self, chunk_size):
+                assert chunk_size == 1024 * 1024
+                yield _MP4_FIXTURE
+
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
+        ), patch.object(
+            worker.media_remote_storage, "download_from_backend",
+            side_effect=lambda _backend, _key, dest: Path(dest).write_bytes(b"x"),
+        ), patch("requests.get", return_value=Response()):
+            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+        self.assertEqual(generated_path.read_bytes(), _MP4_FIXTURE)
 
 
 if __name__ == "__main__":
