@@ -218,3 +218,39 @@ fi
 echo "$TARGET" > "$STATE"
 running="$(docker ps --filter "name=${SERVICE}" --format '{{.Status}}')"
 log "deployed ${SHORT} (healthz 200; container: ${running})"
+
+# ---------------------------------------------------------------------------
+# Reclaim disk: drop older commit-* images
+# ---------------------------------------------------------------------------
+# Every build produces a ~3 GB image tagged commit-<sha>, and nothing ever
+# removed them, so the list grew without bound (11 images after one day). Layers
+# are shared, but the newest layers are not, so this is a real leak on a 97 GB
+# disk that also hosts a dozen other services.
+#
+# Keep the running image plus the newest KEEP_IMAGES commit tags so a rollback is
+# one `docker tag` away, and delete the rest. Only tags produced by this script
+# are touched: no other repo's images, no containers, no volumes. Failures are
+# logged and ignored - cleanup must never turn a healthy deploy into a failure.
+KEEP_IMAGES="${SAU_CI_WATCH_KEEP_IMAGES:-3}"
+if [[ "$KEEP_IMAGES" =~ ^[0-9]+$ ]] && (( KEEP_IMAGES >= 1 )); then
+  # Newest first; skip the first KEEP_IMAGES entries and remove the remainders.
+  mapfile -t stale_tags < <(
+    docker images "${IMAGE_BASE}" --format '{{.Tag}} {{.CreatedAt}}' \
+      | grep -E '^commit-' \
+      | sort -k2 -r \
+      | awk '{print $1}' \
+      | tail -n +$((KEEP_IMAGES + 1))
+  )
+  for tag in "${stale_tags[@]:-}"; do
+    [[ -z "$tag" ]] && continue
+    # Never remove the tag the current commit resolves to.
+    [[ "$tag" == "commit-${SHORT}" ]] && continue
+    if docker rmi "${IMAGE_BASE}:${tag}" >>"$LOG" 2>&1; then
+      log "pruned old image ${IMAGE_BASE}:${tag}"
+    else
+      log "could not prune ${IMAGE_BASE}:${tag} (in use?); leaving it"
+    fi
+  done
+  # Untagged intermediates from failed builds are always safe to drop.
+  docker image prune -f --filter "dangling=true" >>"$LOG" 2>&1 || true
+fi
