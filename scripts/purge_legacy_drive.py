@@ -68,6 +68,18 @@ Usage::
     python scripts/purge_legacy_drive.py --check-tiered
     python scripts/purge_legacy_drive.py --apply --limit 5  # prove the mechanism
     python scripts/purge_legacy_drive.py --apply            # operator-approved, all
+
+Restoring a quarantine
+---------------------
+``--restore`` is the exact inverse: it lists a trash tree
+(``--quarantine-prefix``, default ``sau/trash/<UTC date>``) and moves every
+object back to ``sau/<root>/<key>``, verifying the size before removing the
+trash copy.  It never overwrites an existing legacy object.  Dry-run by
+default; add ``--apply`` to write::
+
+    python scripts/purge_legacy_drive.py --restore                      # plan
+    python scripts/purge_legacy_drive.py --restore --quarantine-prefix sau/trash/2026-10-10 --apply
+    python scripts/purge_legacy_drive.py --restore --restore-key videoFile/a.mp4 --apply
 """
 from __future__ import annotations
 
@@ -77,6 +89,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -118,12 +131,14 @@ def _run_rclone(config: Path, *args: str, attempts: int = 3) -> subprocess.Compl
 
 
 def list_remote_objects(
-    config: Path, remote: str, endpoint: str, *, attempts: int = 3
+    config: Path, remote: str, endpoint: str, *, attempts: int = 3, allow_missing: bool = False
 ) -> list[dict]:
     """Return the live listing for one root as ``[{path, size, isdir}, ...]``.
 
     Always rebuilt from rclone (no cached plan file): a stale listing is exactly
-    what would make a "safe" purge unsafe.
+    what would make a "safe" purge unsafe.  When ``allow_missing`` is set, an
+    rclone "directory not found" (rc=3) is treated as an empty listing rather
+    than an error, so restoring a never-existed/empty trash tree is a no-op.
     """
     completed = _run_rclone(
         config,
@@ -134,6 +149,8 @@ def list_remote_objects(
         attempts=attempts,
     )
     if completed.returncode != 0:
+        if allow_missing and completed.returncode == 3:
+            return []
         raise RuntimeError(
             f"rclone listing failed for {remote}:{endpoint}: "
             f"{completed.stderr.strip() or completed.returncode}"
@@ -434,6 +451,280 @@ def quarantine(
     return outcome
 
 
+def _write_files_from(keys: list[str]) -> str:
+    """Write an rclone ``--files-from`` list to a private temp file."""
+    fd, path = tempfile.mkstemp(prefix="sau-purge-", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        for key in keys:
+            handle.write(str(key).strip("\n") + "\n")
+    return path
+
+
+def _batch_outcome(
+    remote: str, quarantine_prefix: str, row: dict, status: str, **extra
+) -> dict:
+    source, destination = _destination_spec(remote, quarantine_prefix, row)
+    outcome = {
+        "root": row["root"],
+        "key": row["key"],
+        "bytes": row["bytes"],
+        "source": source,
+        "destination": destination,
+        "status": status,
+    }
+    outcome.update(extra)
+    return outcome
+
+
+def quarantine_batch(
+    config: Path,
+    remote: str,
+    quarantine_prefix: str,
+    rows: list[dict],
+    *,
+    dry_run: bool,
+) -> list[dict]:
+    """Batch equivalent of :func:`quarantine` for many objects.
+
+    Per legacy root it performs three rclone invocations instead of three per
+    object: one ``copy --files-from`` (server-side), one recursive ``lsjson``
+    that verifies every destination exists at the expected size, and one
+    ``delete --files-from`` for only the verified sources.  No source is removed
+    until its destination has been verified, exactly as in the per-object path.
+    """
+    if dry_run:
+        return [
+            quarantine(config, remote, quarantine_prefix, row, dry_run=True)
+            for row in rows
+        ]
+
+    by_root: dict[str, list[dict]] = {}
+    for row in rows:
+        by_root.setdefault(row["root"], []).append(row)
+
+    outcomes: list[dict] = []
+    for root in sorted(by_root):
+        root_rows = by_root[root]
+        source_root = f"{remote}:{LEGACY_ENDPOINTS[root]}"
+        destination_root = f"{remote}:{PurePosixPath(quarantine_prefix, root)}"
+
+        copy_list = _write_files_from([row["key"] for row in root_rows])
+        try:
+            copied = _run_rclone(
+                config,
+                "copy",
+                "--files-from",
+                copy_list,
+                source_root,
+                destination_root,
+                attempts=2,
+            )
+        finally:
+            os.unlink(copy_list)
+
+        verified = _run_rclone(
+            config, "lsjson", "-R", "--files-only", destination_root, attempts=3
+        )
+        destination_sizes: dict[str, int] = {}
+        if verified.returncode == 0:
+            try:
+                for entry in json.loads(verified.stdout or "[]"):
+                    path = str(entry.get("Path") or "").strip("/")
+                    if path:
+                        destination_sizes[path] = int(entry.get("Size") or 0)
+            except (ValueError, TypeError):
+                destination_sizes = {}
+
+        verified_rows: list[dict] = []
+        for row in root_rows:
+            if copied.returncode != 0:
+                outcomes.append(
+                    _batch_outcome(
+                        remote,
+                        quarantine_prefix,
+                        row,
+                        "copy_failed",
+                        error=copied.stderr.strip() or f"rc={copied.returncode}",
+                    )
+                )
+                continue
+            destination_size = destination_sizes.get(row["key"])
+            if destination_size == row["bytes"]:
+                verified_rows.append(row)
+            else:
+                outcomes.append(
+                    _batch_outcome(
+                        remote,
+                        quarantine_prefix,
+                        row,
+                        "verify_failed",
+                        destination_size=destination_size,
+                        error=(
+                            f"destination size {destination_size} != "
+                            f"source size {row['bytes']}"
+                        ),
+                    )
+                )
+
+        if verified_rows:
+            delete_list = _write_files_from([row["key"] for row in verified_rows])
+            try:
+                removed = _run_rclone(
+                    config,
+                    "delete",
+                    "--files-from",
+                    delete_list,
+                    source_root,
+                    attempts=3,
+                )
+            finally:
+                os.unlink(delete_list)
+            for row in verified_rows:
+                if removed.returncode == 0:
+                    outcomes.append(
+                        _batch_outcome(
+                            remote,
+                            quarantine_prefix,
+                            row,
+                            "quarantined",
+                            verified_size=row["bytes"],
+                        )
+                    )
+                else:
+                    outcomes.append(
+                        _batch_outcome(
+                            remote,
+                            quarantine_prefix,
+                            row,
+                            "delete_failed",
+                            error=removed.stderr.strip() or f"rc={removed.returncode}",
+                        )
+                    )
+    return outcomes
+
+
+def parse_trash_entries(entries: list[dict]) -> list[dict]:
+    """Turn a ``sau/trash/<date>`` listing into ``{root, key, bytes}`` rows.
+
+    Each remote path is ``<root>/<key...>``; the first segment names the legacy
+    media root and everything after it is the original drive key.  Paths whose
+    first segment is not a known media root are dropped (fail closed: the
+    restore path would not know where to put them).
+    """
+    rows: list[dict] = []
+    for entry in entries:
+        key = str(entry.get("path") or "").strip("/")
+        if not key:
+            continue
+        parts = key.split("/", 1)
+        root = parts[0]
+        if root not in MEDIA_ROOTS or len(parts) != 2 or not parts[1]:
+            continue
+        rows.append({"root": root, "key": parts[1], "bytes": int(entry.get("size") or 0)})
+    return rows
+
+
+def _restore_spec(remote: str, quarantine_prefix: str, root: str, key: str) -> tuple[str, str]:
+    """Return ``(trash_source, legacy_destination)`` for one quarantined object."""
+    source_key = str(PurePosixPath(quarantine_prefix, root, key))
+    source = f"{remote}:{source_key}"
+    destination = drive_layout.remote_spec(remote, LEGACY_ENDPOINTS[root], key)
+    return source, destination
+
+
+def restore_object(
+    config: Path,
+    remote: str,
+    quarantine_prefix: str,
+    row: dict,
+    *,
+    dry_run: bool,
+) -> dict:
+    """Move one quarantined object back to its legacy path.
+
+    Symmetric to :func:`quarantine`: copy to the legacy path, verify the size
+    with ``rclone lsjson``, and only then remove the trash copy.  If the legacy
+    path already exists it is never overwritten: an equal-size object is
+    reported ``already_present`` and a different-size object is a
+    ``destination_conflict``.
+    """
+    source, destination = _restore_spec(remote, quarantine_prefix, row["root"], row["key"])
+    actions = [
+        f"{RCLONE} --config {config} copyto {json.dumps(source)} {json.dumps(destination)}",
+        f"{RCLONE} --config {config} lsjson {json.dumps(destination)}",
+        f"{RCLONE} --config {config} deletefile {json.dumps(source)}",
+    ]
+    outcome = {
+        "root": row["root"],
+        "key": row["key"],
+        "bytes": row["bytes"],
+        "source": source,
+        "destination": destination,
+        "actions": actions,
+        "status": "planned" if dry_run else "pending",
+    }
+    if dry_run:
+        return outcome
+
+    existing = _run_rclone(config, "lsjson", destination, attempts=2)
+    destination_size: int | None = None
+    if existing.returncode == 0:
+        try:
+            listing = json.loads(existing.stdout or "[]")
+            if listing:
+                destination_size = int(listing[0].get("Size") or 0)
+        except (ValueError, TypeError, IndexError):
+            destination_size = None
+    # Only a *non-empty* listing means the legacy path is occupied; an empty
+    # listing (or rc=3 "not found") means the slot is free and we may copy back.
+    if destination_size is not None:
+        if destination_size == row["bytes"]:
+            outcome["status"] = "already_present"
+            outcome["destination_size"] = destination_size
+            return outcome
+        outcome["status"] = "destination_conflict"
+        outcome["destination_size"] = destination_size
+        outcome["error"] = (
+            f"legacy path already holds a different object "
+            f"({destination_size} B != expected {row['bytes']} B); refusing to overwrite"
+        )
+        return outcome
+
+    copied = _run_rclone(config, "copyto", source, destination, attempts=2)
+    if copied.returncode != 0:
+        outcome["status"] = "copy_failed"
+        outcome["error"] = copied.stderr.strip() or f"rc={copied.returncode}"
+        return outcome
+
+    verified = _run_rclone(config, "lsjson", destination, attempts=3)
+    restored_size: int | None = None
+    if verified.returncode == 0:
+        try:
+            listing = json.loads(verified.stdout or "[]")
+            if listing:
+                restored_size = int(listing[0].get("Size") or 0)
+        except (ValueError, TypeError, IndexError):
+            restored_size = None
+    if verified.returncode != 0 or restored_size != row["bytes"]:
+        outcome["status"] = "verify_failed"
+        outcome["destination_size"] = restored_size
+        outcome["error"] = (
+            verified.stderr.strip()
+            or f"restored size {restored_size} != trash size {row['bytes']}"
+        )
+        return outcome
+
+    removed = _run_rclone(config, "deletefile", source, attempts=3)
+    if removed.returncode != 0:
+        outcome["status"] = "delete_failed"
+        outcome["error"] = removed.stderr.strip() or f"rc={removed.returncode}"
+        return outcome
+
+    outcome["status"] = "restored"
+    outcome["verified_size"] = restored_size
+    return outcome
+
+
 def list_tiered_keys(config: Path, remote: str) -> set[tuple[str, str]]:
     """Every ``(root, key)`` already present under ``sau/inbox`` / ``sau/published``."""
     tiered: set[tuple[str, str]] = set()
@@ -467,6 +758,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="perform the quarantine moves (default: dry-run)",
     )
     parser.add_argument(
+        "--batch",
+        action="store_true",
+        help=(
+            "with --apply, quarantine each root with copy-all/verify-all/"
+            "delete-verified instead of three rclone calls per object"
+        ),
+    )
+    parser.add_argument(
+        "--restore",
+        action="store_true",
+        help=(
+            "move a trash tree back to the legacy roots instead of quarantining; "
+            "use --quarantine-prefix to name the tree and --apply to write"
+        ),
+    )
+    parser.add_argument(
+        "--restore-key",
+        default="",
+        help=(
+            "comma-separated <root>/<key> pairs to restore (default: everything "
+            "in the trash tree); only meaningful with --restore"
+        ),
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=0,
@@ -497,6 +812,133 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_restore_mode(args, roots: list[str]) -> int:
+    """List a trash tree and move its objects back to the legacy roots."""
+    prefix = args.quarantine_prefix or (
+        "sau/trash/" + datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    )
+    wanted: set[tuple[str, str]] = set()
+    for item in (args.restore_key or "").split(","):
+        item = item.strip().strip("/")
+        if not item:
+            continue
+        parts = item.split("/", 1)
+        if len(parts) != 2 or parts[0] not in MEDIA_ROOTS or not parts[1]:
+            print(f"ignoring malformed --restore-key {item!r}", file=sys.stderr)
+            continue
+        wanted.add((parts[0], parts[1]))
+
+    print(f"listing {args.remote}:{prefix} ...", file=sys.stderr, flush=True)
+    try:
+        entries = list_remote_objects(
+            args.rclone_config, args.remote, prefix, allow_missing=True
+        )
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    rows = [row for row in parse_trash_entries(entries) if row["root"] in roots]
+    if wanted:
+        rows = [row for row in rows if (row["root"], row["key"]) in wanted]
+
+    seen: set[tuple[str, str]] = set()
+    uniq: list[dict] = []
+    duplicates: list[tuple[str, str]] = []
+    for row in rows:
+        ident = (row["root"], row["key"])
+        if ident in seen:
+            duplicates.append(ident)
+            continue
+        seen.add(ident)
+        uniq.append(row)
+
+    selected = uniq[: args.limit] if args.limit and args.limit > 0 else uniq
+    planned = [
+        restore_object(
+            args.rclone_config,
+            args.remote,
+            prefix,
+            row,
+            dry_run=not args.apply,
+        )
+        for row in selected
+    ]
+
+    report = {
+        "remote": args.remote,
+        "trash_prefix": prefix,
+        "restore": True,
+        "apply": bool(args.apply),
+        "limit": args.limit,
+        "filter": sorted(f"{r}/{k}" for r, k in wanted),
+        "totals": {
+            "in_trash": len(rows),
+            "restorable": len(uniq),
+            "selected": len(selected),
+            "duplicates_skipped": len(duplicates),
+        },
+        "selected": planned,
+    }
+
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
+
+    print("=" * 78)
+    print(
+        f"legacy Drive restore — remote={args.remote} from={prefix} "
+        f"mode={'APPLY' if args.apply else 'DRY-RUN'}"
+    )
+    print("=" * 78)
+    print(f"  objects in trash tree : {len(rows)}")
+    print(f"  distinct restorable   : {len(uniq)}")
+    print(f"  duplicate names skipped: {len(duplicates)}")
+    for root in roots:
+        bucket = [row for row in uniq if row["root"] == root]
+        if bucket:
+            print(
+                f"  {root:<12} {len(bucket):>5} object(s)  "
+                f"{sum(r['bytes'] for r in bucket):>16,} B"
+            )
+    for ident in duplicates:
+        print(f"  SKIP duplicate-name {ident[0]}/{ident[1]}")
+
+    print()
+    print(
+        f"{'RESTORE' if args.apply else 'DRY-RUN'}: {len(selected)} object(s) "
+        f"selected from {prefix}"
+    )
+    for row in planned[: args.list_actions]:
+        print(
+            f"  {row['root']}/{row['key']}  ({row['bytes']:,} B) -> {row['destination']}"
+        )
+        for action in row.get("actions", []):
+            print(f"      $ {action}")
+    if len(planned) > args.list_actions:
+        print(f"  ... and {len(planned) - args.list_actions} more")
+
+    if args.apply:
+        statuses: dict[str, int] = {}
+        restored_bytes = 0
+        for row in planned:
+            statuses[row["status"]] = statuses.get(row["status"], 0) + 1
+            if row["status"] == "restored":
+                restored_bytes += row["bytes"]
+        print()
+        print("restore results:")
+        for status, count in sorted(statuses.items()):
+            print(f"  {status}: {count}")
+        print(f"  restored bytes: {restored_bytes:,}")
+        return 0 if not any(
+            s in {"copy_failed", "verify_failed", "delete_failed", "destination_conflict"}
+            for s in statuses
+        ) else 1
+
+    print()
+    print("dry-run only; nothing changed. Re-run with --restore --apply to move back.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     roots = [root.strip() for root in args.roots.split(",") if root.strip()]
@@ -504,6 +946,9 @@ def main(argv: list[str] | None = None) -> int:
         if root not in MEDIA_ROOTS:
             print(f"unknown legacy root: {root!r}", file=sys.stderr)
             return 2
+
+    if args.restore:
+        return run_restore_mode(args, roots)
 
     try:
         conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
@@ -552,6 +997,7 @@ def main(argv: list[str] | None = None) -> int:
 
     planned: list[dict] = []
     if args.apply:
+        queued: list[dict] = []
         for row in selected:
             if row["duplicate"]:
                 planned.append(
@@ -563,15 +1009,28 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 )
                 continue
-            planned.append(
-                quarantine(
+            queued.append(row)
+        if args.batch:
+            planned.extend(
+                quarantine_batch(
                     args.rclone_config,
                     args.remote,
                     quarantine_prefix,
-                    row,
+                    queued,
                     dry_run=False,
                 )
             )
+        else:
+            for row in queued:
+                planned.append(
+                    quarantine(
+                        args.rclone_config,
+                        args.remote,
+                        quarantine_prefix,
+                        row,
+                        dry_run=False,
+                    )
+                )
     else:
         for row in selected:
             source, destination = _destination_spec(
