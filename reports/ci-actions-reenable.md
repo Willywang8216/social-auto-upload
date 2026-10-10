@@ -383,6 +383,27 @@ A real build/deploy failure takes the same path: log to
 | `96bd767` | yes | yes | yes | 200 |
 | `f5be35a` | yes | yes | yes | 200 |
 
+### 7.6 Autonomous cron-driven deploy (no manual step)
+
+This report was committed as `f9bc67d` and pushed to `origin/main`. With **no
+manual invocation**, the installed cron entry picked it up on its next tick and
+deployed it:
+
+```
+[2026-10-10T01:28:16Z] deployed f9bc67d (healthz 200; container: Up 2 seconds (health: starting))
+
+$ docker inspect -f '{{.Image}}' social-auto-upload
+sha256:83b8c2db8afbc965d8eceae36a569fde4ebdb77cd41602731b5275ab481ad70c
+$ docker image inspect -f '{{.Id}}' ghcr.io/willywang8216/social-auto-upload:commit-f9bc67d
+sha256:83b8c2db8afbc965d8eceae36a569fde4ebdb77cd41602731b5275ab481ad70c
+$ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:5409/healthz
+200
+```
+
+That is the end-to-end guarantee the disabled Actions workflows used to provide:
+push to `main` → image built → service deployed and healthy, entirely on this
+host.
+
 ---
 
 ## 8. Operator notes
