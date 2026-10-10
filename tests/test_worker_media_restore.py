@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -277,12 +278,35 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             container_root / "videoFile" / "_inbox_cache" / "demo.mp4",
         )
 
-    def test_resolve_media_path_leaves_container_prefix_untouched(self) -> None:
-        with patch.object(worker, "BASE_DIR", self.root):
+    def test_resolve_media_path_rewrites_container_prefix_to_base_dir(self) -> None:
+        """A host-run worker maps the container mount onto BASE_DIR.
+
+        The container runs the worker with ``BASE_DIR=/app`` and host-run
+        workers (manual drains, scripts, this suite) with the host checkout.
+        A stored ``/app/...`` path left untouched on the host pointed at the
+        root-owned ``/app`` directory, so media restore died with EACCES while
+        creating ``/app/videoFile`` even though the record and the Drive
+        object existed.
+        """
+        host_root = self.root / "social-auto-upload"
+        with patch.object(worker, "BASE_DIR", host_root):
+            resolved = worker._resolve_media_path("/app/videoFile/x.mp4")
+        self.assertEqual(resolved, host_root / "videoFile" / "x.mp4")
+
+    def test_resolve_media_path_keeps_container_prefix_identity_in_container(self) -> None:
+        """In the container ``/app`` is BASE_DIR, so the mapping is an identity."""
+        with patch.object(worker, "BASE_DIR", Path("/app")):
             self.assertEqual(
                 worker._resolve_media_path("/app/videoFile/x.mp4"),
                 Path("/app/videoFile/x.mp4"),
             )
+
+    def test_base_dir_alias_env_override(self) -> None:
+        with patch.dict(os.environ, {"SAU_BASE_DIR_ALIASES": "/mnt/repo"}, clear=False), patch.object(
+            worker, "BASE_DIR", self.root
+        ):
+            resolved = worker._resolve_media_path("/mnt/repo/videoFile/x.mp4")
+        self.assertEqual(resolved, self.root / "videoFile" / "x.mp4")
 
     def test_resolve_media_path_leaves_relative_path_untouched(self) -> None:
         with patch.object(worker, "BASE_DIR", self.root):
@@ -336,6 +360,85 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             (container_root / "videoFile" / "_inbox_cache" / "demo.mp4").read_bytes(),
             b"restored via host map",
         )
+
+    def test_container_prefixed_video_artifact_restores_under_base_dir(self) -> None:
+        """End-to-end: ``/app/videoFile/...`` lands under this process's BASE_DIR.
+
+        This is the path shape behind the ``Permission denied: '/app/videoFile'``
+        failures: the record and the bytes were fine, the destination could not
+        be created because the container prefix was never mapped.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO file_records (filename, filesize, file_path, storage_key) VALUES (?, ?, ?, ?)",
+                ("demo2.mp4", 1.0, "videoFile/_inbox_cache/demo2.mp4", "_inbox_cache/demo2.mp4"),
+            )
+            conn.execute(
+                "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("test-drive", "Test Drive", "rclone", "drive", "auto", "sau/videoFile", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            conn.execute(
+                "UPDATE file_records SET storage_backend_id=? WHERE file_path='videoFile/_inbox_cache/demo2.mp4'",
+                (backend_id,),
+            )
+
+        payload = {"artifacts": [{"local_path": "/app/videoFile/_inbox_cache/demo2.mp4"}]}
+        destination = self.root / "videoFile" / "_inbox_cache" / "demo2.mp4"
+
+        def write_media(_backend, _key, temporary_path):
+            Path(temporary_path).write_bytes(b"restored via container map")
+
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_remote_storage, "download_from_backend", side_effect=write_media
+        ):
+            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
+        self.assertEqual(destination.read_bytes(), b"restored via container map")
+
+    def test_container_prefixed_generated_artifact_restores_from_registered_drive(self) -> None:
+        """A ``/app/generated`` artifact resolves its own generated record.
+
+        Before the container prefix was mapped, ``is_generated_artifact`` was
+        false and the by-name generated fallback was skipped, so the artifact
+        was declared to have no file record even though a Drive mapping existed.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("gdrive-generated", "Generated Drive", "rclone", "drive", "auto", "sau/generated", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            conn.execute(
+                "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_backend_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                ("clip_pub.mp4", 14, "generated/campaigns/campaign-9/clip_pub.mp4", "campaigns/campaign-9/clip_pub.mp4", backend_id),
+            )
+
+        generated_root = self.root / "generated" / "campaigns"
+        payload = {
+            "artifacts": [
+                {
+                    "local_path": "/app/generated/campaigns/campaign-9/clip_pub.mp4",
+                    "source_file_record_id": 1,
+                }
+            ]
+        }
+        destination = generated_root / "campaign-9" / "clip_pub.mp4"
+
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
+        ), patch.object(
+            worker.media_remote_storage,
+            "download_from_backend",
+            side_effect=lambda _backend, _key, dest: Path(dest).write_bytes(b"restored generated"),
+        ) as download:
+            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
+        self.assertEqual(destination.read_bytes(), b"restored generated")
+        self.assertEqual(download.call_args.args[1], "campaigns/campaign-9/clip_pub.mp4")
 
     def test_missing_artifact_after_normalisation_raises_clear_message(self) -> None:
         payload = {"artifacts": [{

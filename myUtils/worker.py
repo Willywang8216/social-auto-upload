@@ -1709,22 +1709,48 @@ def _account_unpublishable(account) -> str | None:
     return None
 
 
-# Host-side repo roots that may appear in stored media paths. The app runs in
-# a container where the repo is mounted at ``BASE_DIR`` (``/app``), but rows
-# created by host-side tooling or an earlier deploy carry the host absolute
-# prefix (``/home/will/social-auto-upload/...``). Both shapes live in the DB.
-# Configurable so a repo move or a second host needs no code change; the test
-# suite runs on the host, where the default prefix equals ``BASE_DIR`` and the
-# mapping is an identity.
+# Repo mount points that may appear as a stored media-path prefix. The app
+# normally runs in a container where the repo is mounted at ``BASE_DIR``
+# (``/app``), but the worker is also run on the host (manual drains, scripts,
+# the test suite) and rows written on either side carry the other side's
+# absolute prefix. Both shapes live in the DB:
+#
+#   host mount       /home/will/social-auto-upload/...
+#   container mount  /app/...
+#
+# Every known mount is rewritten onto this process's ``BASE_DIR`` so a stored
+# path from either side resolves. Configurable for a repo move, a second host,
+# or a non-standard container mount. In the container the container alias maps
+# onto itself, so the mapping stays an identity there.
+_BASE_DIR_ALIASES_ENV = "SAU_BASE_DIR_ALIASES"
 _HOST_BASE_DIRS_ENV = "SAU_HOST_BASE_DIRS"
+_CONTAINER_BASE_DIRS_ENV = "SAU_CONTAINER_BASE_DIRS"
 _DEFAULT_HOST_BASE_DIRS = ("/home/will/social-auto-upload",)
+_DEFAULT_CONTAINER_BASE_DIRS = ("/app",)
 
 
-def _host_base_dirs() -> tuple[Path, ...]:
-    raw = os.environ.get(_HOST_BASE_DIRS_ENV, "")
-    roots = [part.strip() for part in raw.split(",") if part.strip()]
+def _base_dir_aliases() -> tuple[Path, ...]:
+    """Repo mount points to map onto ``BASE_DIR``, in priority order.
+
+    ``SAU_BASE_DIR_ALIASES`` overrides both lists with a single comma-separated
+    list. Otherwise ``SAU_HOST_BASE_DIRS`` (host mounts) and
+    ``SAU_CONTAINER_BASE_DIRS`` (container mounts) are combined, each falling
+    back to its default when unset or empty.
+    """
+    override = os.environ.get(_BASE_DIR_ALIASES_ENV, "")
+    roots = [part.strip() for part in override.split(",") if part.strip()]
     if not roots:
-        roots = list(_DEFAULT_HOST_BASE_DIRS)
+        host_raw = os.environ.get(_HOST_BASE_DIRS_ENV, "")
+        roots.extend(part.strip() for part in host_raw.split(",") if part.strip())
+        if not roots:
+            roots.extend(_DEFAULT_HOST_BASE_DIRS)
+        container_raw = os.environ.get(_CONTAINER_BASE_DIRS_ENV, "")
+        container_roots = [
+            part.strip() for part in container_raw.split(",") if part.strip()
+        ]
+        if not container_roots:
+            container_roots = list(_DEFAULT_CONTAINER_BASE_DIRS)
+        roots.extend(container_roots)
     return tuple(Path(root) for root in roots)
 
 
@@ -1734,10 +1760,10 @@ def _resolve_media_path(value: str | Path) -> Path:
     This is the single canonical normaliser for every stored path the worker
     turns into a real filesystem path. Rows written by host-side tooling (or
     an earlier deploy) carry the host repo prefix while the worker runs in a
-    container that mounts the same directories under ``BASE_DIR``. Rewrite
-    only a known host prefix onto ``BASE_DIR``; a path already using a
-    container prefix, a relative path (``videoFile/_batch1/x.mp4``), and any
-    unrelated absolute path are returned untouched.
+    container that mounts the same directories under ``BASE_DIR``; a host-run
+    worker instead sees the container prefix (``/app/...``). Rewrite any known
+    repo mount onto ``BASE_DIR``; a relative path (``videoFile/_batch1/x.mp4``)
+    and any unrelated absolute path are returned untouched.
     """
     text = str(value or "").strip()
     if not text:
@@ -1746,11 +1772,11 @@ def _resolve_media_path(value: str | Path) -> Path:
     if not candidate.is_absolute():
         return candidate
     base_dir = Path(BASE_DIR)
-    for host_root in _host_base_dirs():
-        if candidate == host_root:
+    for alias in _base_dir_aliases():
+        if candidate == alias:
             return base_dir
         try:
-            relative = candidate.relative_to(host_root)
+            relative = candidate.relative_to(alias)
         except ValueError:
             continue
         return base_dir / relative
@@ -2026,6 +2052,12 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
         # ``/home/will``) otherwise fails as EACCES on an ancestor that does
         # not exist, which reads like a permissions bug rather than a path bug.
         p = _resolve_media_path(local_path)
+        # A relative stored path (``videoFile/x``) is anchored to BASE_DIR,
+        # not to whatever directory the worker happens to run from. Offload
+        # rows are written relative to the repo root; without this, a worker
+        # started from anywhere else checks and writes the wrong location.
+        if not p.is_absolute():
+            p = Path(BASE_DIR) / p
         if p.exists():
             continue
         generated_root = media_pipeline.GENERATED_MEDIA_ROOT.resolve()
