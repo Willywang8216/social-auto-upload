@@ -298,13 +298,13 @@ Full suite:
 ```
 
 ```
-1559 passed, 1 skipped, 139 subtests passed in 137.18s (0:02:17)
+1559 passed, 1 skipped, 139 subtests passed in 113.02s (0:01:53)
 ```
 
-Collected count is 1559 with the new file and 1541 without it (+18 collected,
-+1 via the added layout test = 19 new tests). The stated baseline was 1526;
-the repo already carried 15 tests from parallel work by the time this ran, so
-the delta is +19 new, all green, 1 pre-existing skip.
+Collection count is 1560 with the new file and 1541 without it, i.e. exactly
++19 new tests, all green. The stated baseline was 1526; the repo already
+carried 15 tests from parallel work by the time this ran, so the delta is +19
+new tests against the current tree, with 1 pre-existing skip.
 
 ---
 
