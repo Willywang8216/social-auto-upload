@@ -41,6 +41,7 @@ overlapping ticks are safe.
 scripts/ci-watch.sh                    # exactly what cron runs
 CI_WATCH_FORCE=1 scripts/ci-watch.sh   # redeploy even if the marker matches
 CI_WATCH_DRY_RUN=1 scripts/ci-watch.sh # report only; change nothing
+CI_WATCH_TEST_ALERT=1 scripts/ci-watch.sh # send one test Telegram alert, then exit
 ```
 
 ## Relationship to `scripts/deploy-local.sh`

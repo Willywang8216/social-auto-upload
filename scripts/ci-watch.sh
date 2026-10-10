@@ -42,6 +42,7 @@
 #   scripts/ci-watch.sh                     # normal cron entry point
 #   CI_WATCH_FORCE=1 scripts/ci-watch.sh    # ignore the deployed-state marker
 #   CI_WATCH_DRY_RUN=1 scripts/ci-watch.sh  # report what would happen; change nothing
+#   CI_WATCH_TEST_ALERT=1 scripts/ci-watch.sh # send one test alert, then exit
 #
 set -euo pipefail
 
@@ -89,6 +90,14 @@ ${body}" >/dev/null 2>&1; then
 exec 9>"$LOCK"
 if ! flock -n 9; then
   log "another ci-watch run holds the lock; exiting"
+  exit 0
+fi
+
+# Optional one-shot self-test of the alert channel (not used by cron).
+if [[ "${CI_WATCH_TEST_ALERT:-0}" == "1" ]]; then
+  log "sending a test alert (no action needed)"
+  notify_failure "SAU ci-watch: test alert (no action needed)" \
+    "One-off verification that ci-watch can reach the alert channel. Nothing is wrong."
   exit 0
 fi
 
