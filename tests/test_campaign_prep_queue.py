@@ -142,6 +142,29 @@ class PrepQueuePersistenceTests(unittest.TestCase):
         self.assertEqual(refreshed.status, campaigns.CAMPAIGN_NEEDS_REVIEW)
         self.assertIn("prep lease expired", refreshed.last_error or "")
 
+    def test_requeue_stale_preparing_keeps_a_queued_campaign_scheduled(self) -> None:
+        # scripts/reprep_campaigns.py puts campaigns with live targets back to
+        # ``preparing``. If that re-prep's worker dies, the lease sweep must not
+        # flip an already-scheduled campaign to needs_review.
+        campaign = self._preparing_campaign()
+        post = campaigns.add_campaign_post(
+            campaign.id, "bluesky", account_ids=[1], db_path=self.db_path
+        )
+        campaigns.update_campaign_post(
+            post.id, status=campaigns.CAMPAIGN_POST_QUEUED, db_path=self.db_path
+        )
+        self._force_lease(
+            campaign.id, owner="dead-worker", minutes_ago=999, attempts=3
+        )
+        moved = campaigns.requeue_stale_preparing(
+            older_than_minutes=120, max_attempts=3, db_path=self.db_path
+        )
+        self.assertEqual(moved, 1)
+        refreshed = campaigns.get_campaign(campaign.id, db_path=self.db_path)
+        self.assertEqual(refreshed.status, campaigns.CAMPAIGN_PUBLISHING)
+        self.assertIsNone(refreshed.last_error)
+        self.assertNotIn(campaigns.PREP_LEASE_KEY, refreshed.metadata)
+
     def test_finish_campaign_prep_rejects_foreign_owner(self) -> None:
         campaign = self._preparing_campaign()
         campaigns.claim_next_preparing_campaign(owner="worker-a", db_path=self.db_path)
@@ -253,6 +276,34 @@ class WorkerPrepExecutionTests(unittest.TestCase):
         refreshed = campaigns.get_campaign(campaign.id, db_path=self.db_path)
         self.assertEqual(refreshed.status, campaigns.CAMPAIGN_NEEDS_REVIEW)
         self.assertIn("ffmpeg exploded", refreshed.last_error or "")
+        self.assertNotIn(campaigns.PREP_LEASE_KEY, refreshed.metadata)
+
+    def test_worker_prep_failure_does_not_regress_a_queued_campaign(self) -> None:
+        # Campaigns 2129/2132/2133/2134/2171/2215-2218/2411 are legacy (no
+        # persisted prepRequest); a worker claimed them, raised ValueError, and
+        # the exception handler flipped them to needs_review while their posts
+        # were already queued.
+        campaign = self._preparing_campaign()
+        post = campaigns.add_campaign_post(
+            campaign.id, "bluesky", account_ids=[1], db_path=self.db_path
+        )
+        campaigns.update_campaign_post(
+            post.id, status=campaigns.CAMPAIGN_POST_QUEUED, db_path=self.db_path
+        )
+
+        def boom(_campaign, _db_path):
+            raise RuntimeError("prep failed: no persisted prep request")
+
+        worker = PublishWorker(
+            lambda *_args: None,
+            config=WorkerConfig(poll_interval=0.001),
+            db_path=self.db_path,
+            prep_runner=boom,
+        )
+        self._drive_one_tick(worker)
+        refreshed = campaigns.get_campaign(campaign.id, db_path=self.db_path)
+        self.assertEqual(refreshed.status, campaigns.CAMPAIGN_PUBLISHING)
+        self.assertIsNone(refreshed.last_error)
         self.assertNotIn(campaigns.PREP_LEASE_KEY, refreshed.metadata)
 
     def test_worker_empty_result_lands_in_needs_review(self) -> None:

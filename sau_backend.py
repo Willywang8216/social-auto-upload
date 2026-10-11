@@ -6403,11 +6403,25 @@ def campaigns_publish(campaign_id):
             db_path=db_path,
         )
 
+    # A publish pass that queues nothing must not un-schedule a campaign that
+    # already has queued posts. This is the same rule the prep paths apply:
+    # re-running publish after every account was disabled (or after the posts
+    # were already queued) reports "no publishable posts" while the campaign is
+    # in fact still scheduled.
+    already_queued = False
+    if not queued_jobs:
+        try:
+            already_queued = campaign_store.campaign_has_queued_posts(
+                campaign.id, db_path=db_path
+            )
+        except Exception:  # noqa: BLE001 - status must never break the response
+            already_queued = False
+    succeeded = bool(queued_jobs) or already_queued
     campaign = campaign_store.update_campaign(
         campaign.id,
-        status=campaign_store.CAMPAIGN_PUBLISHING if queued_jobs else campaign_store.CAMPAIGN_NEEDS_REVIEW,
-        published_at=datetime.now().isoformat(timespec="seconds") if queued_jobs else campaign.published_at,
-        last_error=None if queued_jobs else "No publishable posts were queued",
+        status=campaign_store.CAMPAIGN_PUBLISHING if succeeded else campaign_store.CAMPAIGN_NEEDS_REVIEW,
+        published_at=datetime.now().isoformat(timespec="seconds") if succeeded else campaign.published_at,
+        last_error=None if succeeded else "No publishable posts were queued",
         db_path=db_path,
     )
     return jsonify(

@@ -150,6 +150,67 @@ class CampaignApiTests(unittest.TestCase):
             "queued",
         )
 
+    def test_campaign_publish_does_not_regress_an_already_queued_campaign(self) -> None:
+        """A publish pass that queues nothing must not un-schedule a campaign.
+
+        Re-running /campaigns/<id>/publish after every account was disabled is
+        the common case: the posts are already queued (truth: publishing), so
+        reporting "no publishable posts were queued" would read as a failure.
+        """
+        source_file = self.base_dir / "source.jpg"
+        source_file.write_bytes(b"img")
+        file_record_id = self._insert_file_record("source.jpg", str(source_file))
+        profile_id = self.client.post(
+            "/profiles", json={"name": "Regression brand"}
+        ).get_json()["data"]["id"]
+        account_id = self.client.post(
+            f"/profiles/{profile_id}/accounts",
+            json={
+                "platform": "twitter",
+                "accountName": "regression-main",
+                "authType": "oauth",
+                "enabled": True,
+            },
+        ).get_json()["data"]["id"]
+        media_group_id = self.client.post(
+            "/media-groups",
+            json={
+                "name": "Regression batch",
+                "items": [{"fileRecordId": file_record_id, "role": "image"}],
+            },
+        ).get_json()["data"]["id"]
+        prepare = self.client.post(
+            "/campaigns/prepare",
+            json={
+                "profileId": profile_id,
+                "mediaGroupId": media_group_id,
+                "selectedAccountIds": [account_id],
+                "title": "A calm launch moment",
+                "useLlm": False,
+                "exportToSheet": False,
+                "uploadToRemote": False,
+            },
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.get_json())
+        campaign_id = prepare.get_json()["data"]["id"]
+
+        first = self.client.post(f"/campaigns/{campaign_id}/publish", json={})
+        self.assertEqual(first.status_code, 200, first.get_json())
+        self.assertEqual(
+            first.get_json()["data"]["campaign"]["status"], "publishing"
+        )
+
+        # Disable the only account, then publish again: nothing can be queued,
+        # but the campaign already has a queued post and must stay publishing.
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE accounts SET enabled = 0 WHERE id = ?", (account_id,))
+            conn.commit()
+        second = self.client.post(f"/campaigns/{campaign_id}/publish", json={})
+        self.assertEqual(second.status_code, 200, second.get_json())
+        payload = second.get_json()["data"]
+        self.assertEqual(payload["campaign"]["status"], "publishing")
+        self.assertIsNone(payload["campaign"]["last_error"])
+
     def test_campaign_prepare_builds_drafts_per_account_language(self) -> None:
         source_file = self.base_dir / "source.jpg"
         source_file.write_bytes(b"img")

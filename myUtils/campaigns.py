@@ -575,22 +575,49 @@ def requeue_stale_preparing(
                 next_metadata = dict(metadata)
                 next_metadata.pop(PREP_LEASE_KEY, None)
                 if attempts >= int(max_attempts):
-                    cursor = conn.execute(
-                        """
-                        UPDATE campaigns
-                        SET status = ?, metadata_json = ?, last_error = ?
-                        WHERE id = ? AND status = ? AND metadata_json = ?
-                        """,
-                        (
-                            CAMPAIGN_NEEDS_REVIEW,
-                            json.dumps(next_metadata, ensure_ascii=False),
-                            f"prep lease expired after {attempts} attempt(s); "
-                            "worker died mid-prep",
-                            row["id"],
-                            CAMPAIGN_PREPARING,
-                            raw,
-                        ),
-                    )
+                    # The same truth as the worker's prep-completion paths: a
+                    # campaign that already has queued posts is scheduled, so a
+                    # re-prep that died mid-run must not flip it to
+                    # needs_review. Scripts/reprep_campaigns.py puts campaigns
+                    # with live targets back to ``preparing``, so this is a real
+                    # path for an already-scheduled campaign.
+                    already_queued = conn.execute(
+                        "SELECT 1 FROM campaign_posts "
+                        "WHERE campaign_id = ? AND status = ? LIMIT 1",
+                        (row["id"], CAMPAIGN_POST_QUEUED),
+                    ).fetchone() is not None
+                    if already_queued:
+                        cursor = conn.execute(
+                            """
+                            UPDATE campaigns
+                            SET status = ?, metadata_json = ?, last_error = NULL
+                            WHERE id = ? AND status = ? AND metadata_json = ?
+                            """,
+                            (
+                                CAMPAIGN_PUBLISHING,
+                                json.dumps(next_metadata, ensure_ascii=False),
+                                row["id"],
+                                CAMPAIGN_PREPARING,
+                                raw,
+                            ),
+                        )
+                    else:
+                        cursor = conn.execute(
+                            """
+                            UPDATE campaigns
+                            SET status = ?, metadata_json = ?, last_error = ?
+                            WHERE id = ? AND status = ? AND metadata_json = ?
+                            """,
+                            (
+                                CAMPAIGN_NEEDS_REVIEW,
+                                json.dumps(next_metadata, ensure_ascii=False),
+                                f"prep lease expired after {attempts} attempt(s); "
+                                "worker died mid-prep",
+                                row["id"],
+                                CAMPAIGN_PREPARING,
+                                raw,
+                            ),
+                        )
                 else:
                     cursor = conn.execute(
                         """

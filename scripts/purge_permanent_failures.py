@@ -32,15 +32,30 @@ Usage
 -----
     python scripts/purge_permanent_failures.py            # report only
     python scripts/purge_permanent_failures.py --apply
+
+A pending target has no ``last_error`` to match, so the ``--pending-media``
+mode inspects the job payload instead and cancels only when EVERY artifact is
+gone: absent from local disk, absent from the supplied Drive listing, with no
+storage mapping and no ``remote_path``, and its ``public_url`` (if any) is
+verified dead. It requires ``--drive-listing`` and ``--verify-urls`` so it can
+never cancel on a guess:
+
+    python scripts/purge_permanent_failures.py --pending-media \
+        --drive-listing /tmp/drive_index.txt --verify-urls
+    python scripts/purge_permanent_failures.py --pending-media \
+        --drive-listing /tmp/drive_index.txt --verify-urls --apply
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sqlite3
 import sys
-from datetime import datetime, timezone
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -122,9 +137,141 @@ def classify(message: str) -> str | None:
     return None
 
 
+# Media trees the offloader writes to Drive; the relative path under one of
+# these is what a Drive listing addresses.
+MEDIA_ROOTS = ("videoFile", "generated", "uploads")
+
+
+def _local_media_exists(local_path: str) -> bool:
+    raw = str(local_path or "")
+    if not raw:
+        return False
+    candidates = [raw]
+    if raw.startswith("/app/"):
+        candidates.append(raw[len("/app/"):])
+    for candidate in candidates:
+        try:
+            if Path(candidate).is_file() or (REPO_ROOT / candidate).is_file():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _drive_has(local_path: str, drive_index: set[str]) -> bool:
+    raw = str(local_path or "").replace("\\", "/").lstrip("/")
+    for root in MEDIA_ROOTS:
+        marker = f"/{root}/"
+        if marker in f"/{raw}":
+            tail = raw.split(marker, 1)[1]
+            if f"{root}/{tail}" in drive_index:
+                return True
+    return False
+
+
+def _storage_route(
+    connection: sqlite3.Connection,
+    local_path: str,
+    source_file_record_id: object,
+) -> bool:
+    """True when a file_records row gives a usable restore route."""
+    rows: list[sqlite3.Row] = []
+    if source_file_record_id is not None:
+        rows = connection.execute(
+            "SELECT storage_key, storage_backend_id, storage_cdn_url "
+            "FROM file_records WHERE id = ?",
+            (int(source_file_record_id),),
+        ).fetchall()
+    if not rows and local_path:
+        raw = str(local_path)
+        rel = raw[len("/app/"):] if raw.startswith("/app/") else raw
+        candidates = [raw, rel, f"/app/{rel}"]
+        placeholders = ",".join("?" for _ in candidates)
+        rows = connection.execute(
+            f"SELECT storage_key, storage_backend_id, storage_cdn_url "
+            f"FROM file_records WHERE file_path IN ({placeholders})",
+            tuple(candidates),
+        ).fetchall()
+    for storage_key, backend_id, cdn_url in rows:
+        if (storage_key and backend_id) or cdn_url:
+            return True
+    return False
+
+
+def _url_is_live(url: str, *, timeout: int = 20) -> bool | None:
+    """True/False when the URL answered, None when it could not be checked."""
+    request = urllib.request.Request(
+        url, method="GET", headers={"Range": "bytes=0-0"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = int(getattr(response, "status", response.getcode()))
+            return 200 <= status < 400
+    except urllib.error.HTTPError as exc:
+        return 200 <= int(exc.code) < 400
+    except Exception:  # noqa: BLE001 - a network blip is not proof of death
+        return None
+
+
+def classify_pending_target(
+    connection: sqlite3.Connection,
+    payload: dict,
+    drive_index: set[str],
+    *,
+    verify_urls: bool,
+) -> str | None:
+    """Classify a pending payload's media as permanently unrecoverable.
+
+    Returns ``"media-unrecoverable"`` only when EVERY artifact is gone. A single
+    recoverable artifact keeps the target alive, because the publish may still
+    succeed. Anything this cannot prove is left alone (``None``).
+    """
+    artifacts = payload.get("artifacts") or []
+    if not artifacts:
+        return None
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            return None
+        local_path = str(artifact.get("local_path") or "")
+        public_url = str(artifact.get("public_url") or "")
+        if artifact.get("remote_path"):
+            return None
+        if local_path and _local_media_exists(local_path):
+            return None
+        if local_path and _drive_has(local_path, drive_index):
+            return None
+        if _storage_route(
+            connection, local_path, artifact.get("source_file_record_id")
+        ):
+            return None
+        if public_url:
+            if not verify_urls:
+                return None
+            if _url_is_live(public_url) is not False:
+                return None  # live, or could not be checked: leave it
+    return "media-unrecoverable"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--pending-media",
+        action="store_true",
+        help="also cancel PENDING targets whose payload media is provably gone",
+    )
+    parser.add_argument(
+        "--drive-listing",
+        default="",
+        help="a `rclone lsf REMOTE: --recursive --files-only --format p` "
+        "listing; required by --pending-media",
+    )
+    parser.add_argument(
+        "--verify-urls",
+        action="store_true",
+        help="HTTP-probe artifact public_urls; a 404 is not a recovery route",
+    )
+    parser.add_argument("--min-age-days", type=int, default=7)
     args = parser.parse_args()
 
     db = _db_path()
@@ -151,7 +298,72 @@ def main() -> int:
     for target_id, message in review[:10]:
         print(f"       {target_id}: {message}")
 
+    # --- pending targets with provably unrecoverable media ---
+    pending_buckets: dict[str, list[int]] = {}
+    pending_review = 0
+    pending_scanned = 0
+    if args.pending_media:
+        if not args.drive_listing:
+            print(
+                "\n--pending-media requires --drive-listing; "
+                "pending targets left alone"
+            )
+        else:
+            drive_index = {
+                line.strip()
+                for line in Path(args.drive_listing).read_text().splitlines()
+                if line.strip()
+            }
+            cutoff = (
+                datetime.now(tz=timezone.utc).replace(tzinfo=None)
+                - timedelta(days=args.min_age_days)
+            ).isoformat(sep=" ")
+            pending_rows = connection.execute(
+                "SELECT t.id, t.job_id, j.created_at, j.payload_json "
+                "FROM publish_job_targets t "
+                "JOIN publish_jobs j ON j.id = t.job_id "
+                "WHERE t.status = 'pending'"
+            ).fetchall()
+            for row in pending_rows:
+                created = str(row["created_at"] or "")
+                if created and created > cutoff:
+                    continue  # a fresh target may simply not be offloaded yet
+                pending_scanned += 1
+                try:
+                    payload = json.loads(row["payload_json"] or "{}")
+                except (TypeError, ValueError):
+                    pending_review += 1
+                    continue
+                cls = classify_pending_target(
+                    connection,
+                    payload,
+                    drive_index,
+                    verify_urls=args.verify_urls,
+                )
+                if cls is None:
+                    pending_review += 1
+                else:
+                    pending_buckets.setdefault(cls, []).append(int(row["id"]))
+
+            print(
+                f"\npending targets scanned (>= {args.min_age_days}d): "
+                f"{pending_scanned}"
+            )
+            for name, ids in sorted(pending_buckets.items(), key=lambda kv: -len(kv[1])):
+                print(f"  {name:<22} {len(ids):4}  -> cancel")
+            if pending_buckets:
+                print(
+                    "  ids:", sorted(
+                        i for ids in pending_buckets.values() for i in ids
+                    )
+                )
+            print(
+                f"  {'NOT CLASSIFIED':<22} {pending_review:4}  "
+                "-> LEFT ALONE (review)"
+            )
+
     to_cancel = [i for ids in buckets.values() for i in ids]
+    to_cancel += [i for ids in pending_buckets.values() for i in ids]
     if not args.apply:
         print(f"\nDRY RUN - would cancel {len(to_cancel)} target(s).")
         return 0
@@ -168,19 +380,32 @@ def main() -> int:
     for name, ids in buckets.items():
         reason = f"cancelled: permanent failure ({name}) - retry cannot succeed"
         for target_id in ids:
-            connection.execute(
+            cursor = connection.execute(
                 "UPDATE publish_job_targets SET status='cancelled', last_error=? "
                 "WHERE id=? AND status='failed'",
                 (reason, target_id),
             )
-            cancelled += connection.total_changes and 1 or 0
+            cancelled += cursor.rowcount
+    for name, ids in pending_buckets.items():
+        reason = f"cancelled: permanent failure ({name}) - retry cannot succeed"
+        for target_id in ids:
+            cursor = connection.execute(
+                "UPDATE publish_job_targets SET status='cancelled', last_error=? "
+                "WHERE id=? AND status='pending'",
+                (reason, target_id),
+            )
+            cancelled += cursor.rowcount
     connection.commit()
-    print(f"cancelled {len(to_cancel)} target(s)")
+    print(f"cancelled {cancelled} target(s)")
 
     remaining = connection.execute(
         "SELECT COUNT(*) FROM publish_job_targets WHERE status='failed'"
     ).fetchone()[0]
     print(f"failed targets remaining: {remaining}")
+    remaining_pending = connection.execute(
+        "SELECT COUNT(*) FROM publish_job_targets WHERE status='pending'"
+    ).fetchone()[0]
+    print(f"pending targets remaining: {remaining_pending}")
     connection.close()
     return 0
 

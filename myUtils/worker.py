@@ -939,12 +939,31 @@ class PublishWorker:
                 )
         except Exception as exc:  # noqa: BLE001
             _logger.exception(f"campaign {campaign.id} prep failed")
+            # A prep that fails must not regress a campaign that already has
+            # queued posts either. Campaigns 2129/2132/2133/2134/2171/2215-2218/
+            # 2411 are legacy (no persisted prepRequest); a worker claimed them,
+            # raised ValueError, and this handler flipped them to needs_review
+            # while their posts were already queued. The success path above
+            # already guards this; the failure path must use the same truth.
+            already_queued = False
+            try:
+                already_queued = campaign_store.campaign_has_queued_posts(
+                    campaign.id, db_path=self._db_path
+                )
+            except Exception:  # noqa: BLE001 - status must never break prep
+                already_queued = False
             try:
                 campaign_store.finish_campaign_prep(
                     campaign.id,
                     owner=self._prep_owner,
-                    status=campaign_store.CAMPAIGN_NEEDS_REVIEW,
-                    last_error=f"prep failed: {exc}",
+                    status=(
+                        campaign_store.CAMPAIGN_PUBLISHING
+                        if already_queued
+                        else campaign_store.CAMPAIGN_NEEDS_REVIEW
+                    ),
+                    last_error=(
+                        None if already_queued else f"prep failed: {exc}"
+                    ),
                     db_path=self._db_path,
                 )
             except Exception:

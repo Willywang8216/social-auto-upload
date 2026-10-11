@@ -6,8 +6,11 @@ anything that a later attempt could fix (rate limits), must be left alone.
 """
 
 import importlib.util
+import sqlite3
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -92,6 +95,149 @@ class PermanentFailureClassificationTests(unittest.TestCase):
         self.assertIsNone(
             mod.classify("MediaRestoreError ... but retry later: rate limited 429")
         )
+
+
+class PendingMediaClassificationTests(unittest.TestCase):
+    """A pending target is cancelled only when no artifact can be recovered."""
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.execute(
+            "CREATE TABLE file_records (id INTEGER PRIMARY KEY, file_path TEXT, "
+            "storage_key TEXT, storage_backend_id INTEGER, storage_cdn_url TEXT)"
+        )
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _payload(self, **artifact):
+        entry = {
+            "local_path": "/app/nonexistent.mp4",
+            "public_url": "https://socialupload.iamwillywang.com/getFile?filename=nonexistent.mp4",
+            "remote_path": None,
+            "source_file_record_id": 1187,
+        }
+        entry.update(artifact)
+        return {"artifacts": [entry]}
+
+    def test_dead_url_with_no_route_is_unrecoverable(self):
+        with patch.object(mod, "_url_is_live", return_value=False):
+            self.assertEqual(
+                mod.classify_pending_target(
+                    self.conn, self._payload(), set(), verify_urls=True
+                ),
+                "media-unrecoverable",
+            )
+
+    def test_live_url_is_recoverable(self):
+        with patch.object(mod, "_url_is_live", return_value=True):
+            self.assertIsNone(
+                mod.classify_pending_target(
+                    self.conn, self._payload(), set(), verify_urls=True
+                )
+            )
+
+    def test_unverifiable_url_is_left_alone(self):
+        # verify_urls off means a URL cannot be proven dead - never cancel.
+        self.assertIsNone(
+            mod.classify_pending_target(
+                self.conn, self._payload(), set(), verify_urls=False
+            )
+        )
+
+    def test_network_error_probe_is_left_alone(self):
+        with patch.object(mod, "_url_is_live", return_value=None):
+            self.assertIsNone(
+                mod.classify_pending_target(
+                    self.conn, self._payload(), set(), verify_urls=True
+                )
+            )
+
+    def test_local_file_is_recoverable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "here.mp4"
+            path.write_bytes(b"x")
+            with patch.object(mod, "_url_is_live", return_value=False):
+                self.assertIsNone(
+                    mod.classify_pending_target(
+                        self.conn,
+                        self._payload(local_path=str(path)),
+                        set(),
+                        verify_urls=True,
+                    )
+                )
+
+    def test_drive_object_is_recoverable(self):
+        index = {"videoFile/_inbox_cache/demo.mp4"}
+        with patch.object(mod, "_url_is_live", return_value=False):
+            self.assertIsNone(
+                mod.classify_pending_target(
+                    self.conn,
+                    self._payload(
+                        local_path="/home/will/social-auto-upload/videoFile/_inbox_cache/demo.mp4"
+                    ),
+                    index,
+                    verify_urls=True,
+                )
+            )
+
+    def test_storage_route_is_recoverable(self):
+        self.conn.execute(
+            "INSERT INTO file_records (id, file_path, storage_key, storage_backend_id) "
+            "VALUES (1187, 'nonexistent.mp4', 'key', 1)"
+        )
+        self.conn.commit()
+        with patch.object(mod, "_url_is_live", return_value=False):
+            self.assertIsNone(
+                mod.classify_pending_target(
+                    self.conn, self._payload(), set(), verify_urls=True
+                )
+            )
+
+    def test_remote_path_is_recoverable(self):
+        with patch.object(mod, "_url_is_live", return_value=False):
+            self.assertIsNone(
+                mod.classify_pending_target(
+                    self.conn,
+                    self._payload(remote_path="sau/videoFile/kept.mp4"),
+                    set(),
+                    verify_urls=True,
+                )
+            )
+
+    def test_no_artifacts_is_left_alone(self):
+        self.assertIsNone(
+            mod.classify_pending_target(self.conn, {"artifacts": []}, set(), verify_urls=True)
+        )
+
+    def test_a_partially_recoverable_payload_is_left_alone(self):
+        payload = {
+            "artifacts": [
+                {
+                    "local_path": "/app/nonexistent.mp4",
+                    "public_url": "https://example/dead",
+                    "remote_path": None,
+                    "source_file_record_id": 1187,
+                },
+                {
+                    "local_path": "/app/also-gone.mp4",
+                    "public_url": None,
+                    "remote_path": None,
+                    "source_file_record_id": None,
+                },
+            ]
+        }
+
+        def fake_live(url, **_kwargs):
+            return url == "https://example/dead"
+
+        with patch.object(mod, "_url_is_live", side_effect=fake_live):
+            self.assertIsNone(
+                mod.classify_pending_target(
+                    self.conn, payload, set(), verify_urls=True
+                )
+            )
 
 
 if __name__ == "__main__":
