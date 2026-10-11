@@ -146,7 +146,7 @@ wrong — they need the fixture status decision below.
 | **legacy: no persisted `prepRequest`** | **32** | 2169, 2172, 2264, 2365, 2408, 2530–2533, 2537–2540, 2544, 2546–2549, 2551–2553, 2560–2563, 2570–2576 | Sync-submitted campaigns the async worker claimed; `run_campaign_prep` raises because there is no async prep payload. Pre-dates the async queue; prep/re-submit path needs a decision. |
 | **demo-fixture media (dead `_inbox_cache/demo.mp4`)** | **11** | 2583, 2584, 2585, 2589, 2591, 2592, 2593, 2594, 2595, 2596, 2597 | `No publishable posts queued`; artifacts reference file_record 1188 exactly like the Part 1 fixtures. Unrecoverable — spent. |
 | **media gone (other)** | **2** | 63, 2395 | 63: `artifact prep failed: /app/test.mp4` (no local/Drive/storage copy). 2395: `artifact prep failed: /app/data/publish/sfw-teaching-least-squares-proof-calculus.png` (same). |
-| **real media, still produced nothing** | **1** | 2604 | Not a fixture: source on Drive (`storage_key` + backend 689), 8 enabled accounts, 8+ generated artifacts, but 0 posts. Needs operator investigation (draft generation / duplicate-media guard). **Excluded from the 2598–2603 no-touch set but not modified.** |
+| **real media, still produced nothing** | **1** | 2604 | **Resolved: redundant resubmission.** Campaign 2603 (`publishing`) schedules the exact same file (file_record 1205) to the same 8 accounts. `publish_orchestrator._already_queued_for_media` matches on the whole file-record set, so 2604's accounts were all skipped and it queued nothing. Correct behaviour, not a defect; retire 2604. **Excluded from the 2598–2603 no-touch set but not modified.** |
 
 Total: **173 + 51 + 32 + 11 + 2 + 1 = 270**, plus the 13 wrong-status = **283**.
 
@@ -276,11 +276,28 @@ New/updated tests:
 5. **Decide on the 32 legacy no-`prepRequest` campaigns** — they predate the
    async queue and cannot be driven by the worker as-is; either reconstruct a
    `prepRequest` (as `reprep_campaigns.py` does) or leave them spent.
-6. **Investigate campaign 2604** (real media, 8 enabled accounts, artifacts, 0
-   posts) — the only non-fixture "prep produced nothing" case that is not
-   explained by a missing source.
+6. **Retire campaign 2604** — it is a redundant resubmission of media campaign 2603 already schedules to the same 8 accounts; the duplicate-media guard correctly queued nothing.
 7. **Retire the 11 spent fixture `needs_review` campaigns** (2583, 2584, 2585,
    2589, 2591–2597) and 63/2395 once the operator accepts they are spent.
 8. **Leave the remaining 25 failed targets alone** — they are retryable or need
    a code fix already tracked elsewhere (localhost URL, Sociamonials quota,
    Threads duration, TikTok invalid params, etc.).
+
+---
+
+## Part 6 — Fleet coordination (2026-10-11, after the first pass)
+
+The parallel re-prep fleet is alive and progressing, so no extra prep workers
+were spawned (4 CPU cores: the container worker plus two direct prep processes
+already saturates them; more would thrash).
+
+- Purged `pi-2650` (CLI bundle broken, idle, all tasks `done`, no file leases).
+- Aligned `reprep-batch-a`/`reprep-batch-b` with this pass: the 19 fixtures are
+  cancelled, skip 2577/2578/2579/2587, and do not fan out more prep.
+- `verify-publish-e2e` committed `f498d49` (duplicate split-post fix + DB-path
+  isolation) and is finalising; its 2602/2603 duplicate-target cancellation is
+  **operator-gated** by this task's no-touch rule.
+- Re-prep fleet progress at this pass: of the 30 recoverable campaigns
+  (2455–2501), **25 are `publishing`** and 5 remain `preparing`, with 14 fresh
+  `campaign_artifacts` since 12:30Z today. The remaining re-prep is CPU-bound,
+  not blocked.

@@ -211,23 +211,31 @@ log "restarting ${SERVICE} (pull disabled so the local image is used)"
 MAX_WAIT="${SAU_CI_WATCH_MAX_WAIT_SECONDS:-1800}"
 if [[ "$MAX_WAIT" =~ ^[0-9]+$ ]] && (( MAX_WAIT > 0 )); then
   DB="${SAU_DB_PATH:-/home/will/social-auto-upload/db/database.db}"
+  # A restart also kills an in-flight campaign PREP: the worker runs prep
+  # in-process, so the `preparing` row's lease goes stale and the campaign is
+  # not recovered until the stale-lease sweep (up to ~2h). Wait for active
+  # preps too - a `preparing` campaign whose lease was refreshed in the last 30
+  # minutes. Dead leases are ignored so a stranded campaign cannot block deploys
+  # forever.
   waited=0
   while (( waited < MAX_WAIT )); do
     running=$(sqlite3 "$DB" "SELECT COUNT(*) FROM publish_job_targets WHERE status IN ('running','retrying');" 2>/dev/null || echo 0)
     [[ "$running" =~ ^[0-9]+$ ]] || running=0
-    (( running == 0 )) && break
+    preparing=$(sqlite3 "$DB" "SELECT COUNT(*) FROM campaigns WHERE status='preparing' AND json_extract(metadata_json,'\$._prepLease.claimedAt') IS NOT NULL AND replace(json_extract(metadata_json,'\$._prepLease.claimedAt'),'T',' ') >= datetime('now','-30 minutes');" 2>/dev/null || echo 0)
+    [[ "$preparing" =~ ^[0-9]+$ ]] || preparing=0
+    (( running == 0 && preparing == 0 )) && break
     if (( waited % 60 == 0 )); then
-      log "waiting for ${running} in-flight target(s) before restart (${waited}s of ${MAX_WAIT}s)"
+      log "waiting for ${running} in-flight target(s) and ${preparing} active prep(s) before restart (${waited}s of ${MAX_WAIT}s)"
     fi
     sleep 15
     waited=$(( waited + 15 ))
   done
-  if (( running != 0 )); then
-    log "WARNING: ${running} target(s) still in flight after ${MAX_WAIT}s; deploying anyway"
-    notify_failure "SAU ci-watch: deploying over ${running} in-flight target(s)" \
-      "Waited ${MAX_WAIT}s for the queue to drain but ${running} target(s) are still running. The restart will strand them; they will need a resubmit."
+  if (( running != 0 || preparing != 0 )); then
+    log "WARNING: ${running} target(s) and ${preparing} active prep(s) still in flight after ${MAX_WAIT}s; deploying anyway"
+    notify_failure "SAU ci-watch: deploying over in-flight work" \
+      "Waited ${MAX_WAIT}s but ${running} target(s) and ${preparing} active prep(s) are still running. The restart will strand them; they will need a resubmit."
   else
-    log "queue drained; safe to restart"
+    log "queue and prep drained; safe to restart"
   fi
 fi
 
