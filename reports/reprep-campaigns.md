@@ -172,7 +172,7 @@ through the production worker.
 | 2439 | publishing | 2 | Drive **8,215,255 B** |
 | 2446 | publishing | 8 | Drive `…_pub.mp4` **63,917,729 B** + parts 25,384,654 / 33,694,806 |
 | 2447 | publishing | 8 | Drive **67,878,714 B** + parts 34,279,830 / 28,177,524 |
-| 2448 | preparing | 8 | in flight (254 MB source, ffmpeg re-encode) |
+| 2448 | publishing | 8 | local **69,116,032 B** `part1of2_pub.mp4` (+ 33,082,863 part 2), production worker 9 jobs |
 
 2436 was the fix-validation run: first attempt (before `35e4315`) produced only
 the raw-source path with ffmpeg errors; after the fix it produced a real
@@ -183,19 +183,26 @@ the raw-source path with ffmpeg errors; after the fix it produced a real
 
 | campaign | status | verified media |
 | --- | --- | --- |
-| 2449 / 2450 | preparing | in flight (leases killed by a mid-prep container restart; stale sweep will re-queue) |
-| 2451 | publishing | local 44,669,992 B, `ftypisom` |
-| 2452 | publishing | local 56,766,277 B, `ftypisom` |
-| 2453 / 2454 | preparing | in flight |
+| 2449 / 2450 | preparing | in flight (mid-prep container restart; stale-lease sweep re-queued and re-claimed them) |
+| 2451 | publishing | Drive 44,669,992 B (`ftypisom`) |
+| 2452 | publishing | Drive 56,766,277 B (`ftypisom`) |
+| 2453 | publishing | local 48,582,957 B (`part1of2_pub.mp4`), production worker 9 jobs |
+| 2454 | preparing | in flight |
 
 ### Batch 3 — 2465, 2466, 2467, 2480, 2485 (smallest sources first)
 
 | campaign | status | verified media |
 | --- | --- | --- |
-| 2465 | publishing | local 33,351,388 B (13 jobs queued) |
-| 2466 / 2467 / 2480 / 2485 | preparing | in flight |
+| 2465 | publishing | Drive 33,351,388 B (13 jobs queued) |
+| 2466 | publishing | Drive 35,617,339 B (13 jobs queued) |
+| 2467 | publishing | local 58,266,070 B (7 jobs queued) |
+| 2480 | preparing | in flight |
+| 2485 | publishing | local 8,278,397 B (7 jobs queued) |
 
-After batches 1–3 the scope had dropped from 375 targets / 50 campaigns to:
+**Verified at the end of batch 3:** 13 of the 17 touched campaigns are `publishing`
+and every one of their live targets resolves to a Drive or local object between
+**2.4 MB and 69.1 MB** with a valid ISO-BMFF header; 4 (2449, 2450, 2454, 2480)
+are still mid-prep. The scope had dropped from 375 targets / 50 campaigns to:
 
 ```text
 unrecoverable           : 253 targets across 34 campaigns
@@ -243,20 +250,23 @@ additions from the parallel sessions (commit `7518616` added 2,
 
 ## 7. What is left
 
-1. **25 recoverable campaigns** are still in the re-prep queue (2448–2450,
-   2453–2454, 2466–2467, 2480, 2485, plus the rest of the 2436–2501 family that
-   batches 1–3 did not reach). The tool is resumable — re-running
-   `scripts/reprep_campaigns.py --apply` finds only what remains.
-2. **4 fixture campaigns** (2577, 2578, 2579, 2587 / 19 targets) reference
+1. **13 of the 17 touched campaigns are done and verified** (audited real media
+   above). **4 are still mid-prep** (2449, 2450, 2454, 2480) and were re-queued
+   after a mid-prep container restart; the worker's stale-lease sweep recovered
+   them automatically, so they need no operator action.
+2. **30 recoverable campaigns remain** in the re-prep queue. The tool is
+   resumable — re-running `scripts/reprep_campaigns.py --apply` finds only what
+   is left and processes them in `--limit` batches.
+3. **4 fixture campaigns** (2577, 2578, 2579, 2587 / 19 targets) reference
    `demo.mp4` / `nonexistent.mp4`; they have no raw source and must be cancelled
    by the operator, not re-prepped.
-3. **Environment interference:** the parallel session's pytest claims production
+4. **Environment interference:** the parallel session's pytest claims production
    `preparing` campaigns and writes artifacts under `/tmp/sau-test-generated-*`.
    Those junk `campaign_artifacts` rows (2436/2446/2503) are inert — the live
    payloads select the real artifacts — but they should not exist. The tests
    should use an isolated DB (`SAU_DB_PATH`) so they cannot claim production
    campaigns; this also caused a transient `database is locked` during polling.
-4. **`ci-watch` restarts mid-prep** kill an in-flight `preparing` campaign; the
+5. **`ci-watch` restarts mid-prep** kill an in-flight `preparing` campaign; the
    worker's stale-lease sweep re-queues it after 45 min, so no data is lost, but
    it slows a batch. Not new — the auto-deploy is otherwise correct.
 
