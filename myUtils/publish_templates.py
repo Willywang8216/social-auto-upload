@@ -23,10 +23,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from utils.conf_defaults import BASE_DIR
+from utils.conf_defaults import BASE_DIR, default_db_path
 
 
-DB_PATH = Path(BASE_DIR) / "db" / "database.db"
+DB_PATH = default_db_path()
 
 ALL_SETTINGS: tuple[str, ...] = (
     "profileIds",

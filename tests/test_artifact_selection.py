@@ -37,7 +37,7 @@ def _video(artifact_id: int, **overrides) -> dict:
     return artifact
 
 
-def _part(artifact_id: int, index: int, count: int, cap: int, split_for: list | None = None) -> dict:
+def _part(artifact_id: int, index: int, count: int, cap: int, split_for: list | None = None, **overrides) -> dict:
     metadata = {
         "role": "video",
         "max_duration_seconds": cap,
@@ -46,7 +46,7 @@ def _part(artifact_id: int, index: int, count: int, cap: int, split_for: list | 
     }
     if split_for is not None:
         metadata["split_for"] = split_for
-    return _video(artifact_id, metadata=metadata)
+    return _video(artifact_id, metadata=metadata, **overrides)
 
 
 class SelectVideosForPlatformTests(unittest.TestCase):
@@ -145,6 +145,28 @@ class ArtifactPartGroupsTests(unittest.TestCase):
         groups = sau_backend._artifact_part_groups_for_platform(artifacts, "threads")
         self.assertEqual(len(groups), 1)
         self.assertEqual([a["id"] for a in groups[0]], [1])
+
+    def test_duplicate_artifact_rows_do_not_duplicate_posts(self) -> None:
+        """A re-prep appends a second copy of every split part.
+
+        ``campaign_artifacts`` accumulates one row per prep run, so a later prep
+        saw two copies of each part and queued each part as its own post twice
+        (live campaigns 2602/2603 each posted every part twice). Exactly one post
+        per (part_count, part_index, split_for) must survive, and a copy with a
+        public_url must win over one without it.
+        """
+        artifacts = [
+            _video(1),
+            _part(10, 1, 2, 140, split_for=["twitter"]),
+            _part(11, 2, 2, 140, split_for=["twitter"]),
+            _part(20, 1, 2, 140, split_for=["twitter"], public_url=None),
+            _part(21, 2, 2, 140, split_for=["twitter"], public_url=None),
+        ]
+        groups = sau_backend._artifact_part_groups_for_platform(artifacts, "twitter")
+        self.assertEqual(len(groups), 2)
+        self.assertEqual([g[0]["metadata"]["part_index"] for g in groups], [1, 2])
+        self.assertEqual([g[0]["id"] for g in groups], [10, 11])
+        self.assertTrue(all(g[0].get("public_url") for g in groups))
 
     def test_payload_drops_raw_and_picks_videos_per_source(self) -> None:
         artifacts = [

@@ -23,9 +23,9 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from utils.conf_defaults import BASE_DIR
+from utils.conf_defaults import BASE_DIR, default_db_path
 
-DEFAULT_DB_PATH = Path(BASE_DIR) / "db" / "database.db"
+DEFAULT_DB_PATH = default_db_path()
 
 # Candidate offload-to-Drive log locations, in priority order. The first
 # candidate that yields a parseable "offload done" line wins.

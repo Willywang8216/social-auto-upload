@@ -15,10 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from utils.conf_defaults import BASE_DIR
+from utils.conf_defaults import BASE_DIR, default_db_path
 from myUtils import platform_limits
 
-DB_PATH = Path(BASE_DIR) / "db" / "database.db"
+DB_PATH = default_db_path()
 
 # Exact 20 columns in order
 SHEET_COLUMN_ORDER = [

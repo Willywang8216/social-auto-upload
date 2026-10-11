@@ -10,9 +10,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
-from utils.conf_defaults import BASE_DIR
+from utils.conf_defaults import BASE_DIR, default_db_path
 
-DB_PATH = Path(BASE_DIR) / "db" / "database.db"
+DB_PATH = default_db_path()
 
 CAMPAIGN_DRAFT = "draft"
 CAMPAIGN_PREPARING = "preparing"

@@ -23,10 +23,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
-from utils.conf_defaults import BASE_DIR
+from utils.conf_defaults import BASE_DIR, default_db_path
 from myUtils import config_crypto
 
-DB_PATH = Path(BASE_DIR) / "db" / "database.db"
+DB_PATH = default_db_path()
 COOKIE_ROOT = Path(BASE_DIR) / "cookies"
 
 

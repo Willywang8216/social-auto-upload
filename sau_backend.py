@@ -2262,8 +2262,26 @@ def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
             return values[len(values) // 2] if values else 0.0
 
         best_count = max(by_count, key=lambda c: (_median_seconds(by_count[c]), c))
+        # A re-prep appends a fresh copy of every split part instead of
+        # replacing the previous one (campaign_artifacts keeps growing), so the
+        # same (part_count, part_index) can appear several times. Returning
+        # every copy made _artifact_part_groups_for_platform emit one post per
+        # copy: campaign 2602 queued each of its two X parts twice (4 posts per
+        # account) and 2603 queued each of five parts twice. Collapse to one
+        # artifact per index, preferring a copy that carries a public_url so a
+        # URL-fetching publisher (and the Sociamonials fallback) still sees the
+        # served copy.
+        deduped: dict[int, dict] = {}
+        for artifact in by_count[best_count]:
+            index = int(_meta(artifact).get("part_index") or 0)
+            current = deduped.get(index)
+            if current is None or (
+                not str(current.get("public_url") or "").strip()
+                and str(artifact.get("public_url") or "").strip()
+            ):
+                deduped[index] = artifact
         return sorted(
-            by_count[best_count],
+            deduped.values(),
             key=lambda a: int(_meta(a).get("part_index") or 0),
         )
 
