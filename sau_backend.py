@@ -7044,7 +7044,18 @@ def _publish_scheduler_loop(interval_seconds: int) -> None:
 
     while True:
         try:
+            # Wake for EITHER kind of work.
+            #
+            # _start_worker_drain_thread() runs drain(), and drain() is also what
+            # runs the prep tick (_prep_tick). Gating that on a due publish
+            # target alone meant a campaign sitting in 'preparing' was never
+            # prepped until some unrelated target happened to come due - so a
+            # re-prep could sit idle for hours, and a fresh submit whose accounts
+            # were all scheduled for a later slot looked stuck. Check for a
+            # claimable preparing campaign too.
             if job_runtime.has_claimable_targets():
+                _start_worker_drain_thread()
+            elif campaign_store.has_claimable_preparing_campaigns():
                 _start_worker_drain_thread()
         except Exception:  # noqa: BLE001
             logging.getLogger(__name__).exception("Publish scheduler tick failed")

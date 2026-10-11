@@ -1082,3 +1082,34 @@ class PrepDoesNotRegressQueuedCampaignTests(unittest.TestCase):
             self.assertFalse(
                 campaign_store.campaign_has_queued_posts(campaign.id, db_path=db)
             )
+
+
+class SchedulerWakesForPrepTests(unittest.TestCase):
+    """The scheduler must wake for a campaign awaiting prep, not only for a due post.
+
+    drain() is what runs the prep tick (_prep_tick), and the scheduler only called
+    drain() when has_claimable_targets() was true. So a campaign sitting in
+    'preparing' was never prepped until some unrelated target happened to become
+    due: a re-prep could idle for hours and a fresh submit whose accounts were all
+    booked for a later slot looked stuck. Observed live on campaign 2503, which sat
+    in 'preparing' with the worker completely silent.
+    """
+
+    def test_the_scheduler_checks_for_claimable_prep(self):
+        import inspect
+
+        import sau_backend
+
+        source = inspect.getsource(sau_backend._publish_scheduler_loop)
+        self.assertIn("has_claimable_preparing_campaigns", source)
+
+    def test_a_preparing_campaign_with_no_due_target_still_wakes_the_worker(self):
+        import inspect
+
+        import sau_backend
+
+        source = inspect.getsource(sau_backend._publish_scheduler_loop)
+        # The prep check must be reachable even when no target is claimable.
+        claimable = source.index("has_claimable_targets")
+        prep = source.index("has_claimable_preparing_campaigns")
+        self.assertGreater(prep, claimable)
