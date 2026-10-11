@@ -29,6 +29,7 @@ import db.createTable as create_table
 from myUtils import jobs
 from myUtils import profiles as profile_registry
 from myUtils import sociamonials_fallback
+from myUtils import sociamonials_reclaim
 from myUtils import worker
 from myUtils import campaigns as campaign_store
 from myUtils.worker import PublishWorker, RetryPolicy, WorkerConfig
@@ -587,6 +588,26 @@ class SociamonialsDeliveryVerificationTests(unittest.TestCase):
             "warnings": [],
         })
         self.assertEqual(status, jobs.TARGET_SUCCEEDED)
+
+    def test_delivered_assets_are_recorded_for_reclaim(self):
+        status, _ = self._run({
+            "ok": True,
+            "post_id": 7,
+            "status": "scheduled",
+            "network": "tw",
+            "workspace_id": 26985,
+            "used_assets": [
+                {"asset_id": 9001, "filename": "clip.mp4", "size_bytes": 1234, "media_type": "video"}
+            ],
+            "delivery_state": "pending",
+            "delivered": False,
+            "delivery_error": "",
+            "requires_approval": False,
+            "warnings": [],
+        })
+        self.assertEqual(status, jobs.TARGET_SUCCEEDED)
+        ledger = sociamonials_reclaim.load_delivered_assets(self.db_path)
+        self.assertIn(9001, ledger)
 
     def test_a_post_held_for_approval_is_not_recorded_as_delivered(self):
         # Sociamonials can hold a post until a human releases it. It will NOT

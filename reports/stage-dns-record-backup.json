@@ -1,0 +1,18 @@
+[
+  {
+    "id": "31a2faa09bf499cb816f206d7c99382e",
+    "name": "stage.sexualwill.com",
+    "type": "A",
+    "content": "129.150.36.167",
+    "proxiable": true,
+    "proxied": true,
+    "ttl": 1,
+    "settings": {},
+    "meta": {},
+    "comment": "NotionNextSite",
+    "tags": [],
+    "created_on": "2024-03-26T11:53:24.63057Z",
+    "modified_on": "2024-11-22T08:33:47.28116Z",
+    "comment_modified_on": "2024-11-22T08:33:47.28116Z"
+  }
+]

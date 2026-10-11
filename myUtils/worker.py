@@ -41,6 +41,7 @@ from myUtils import profiles as profile_registry
 from myUtils import prepared_publishers
 from myUtils import content_rules
 from myUtils import sociamonials_fallback
+from myUtils import sociamonials_reclaim
 from myUtils.job_logging import (
     bind_job_logger,
     close_job_sink,
@@ -1401,6 +1402,31 @@ class PublishWorker:
                 f"network={result.get('network')}, status={result.get('status')}){note}; "
                 f"the direct publish had failed with: {message}"
             )
+            # Record which library assets this delivery used, so the reclaim
+            # policy can later free them without guessing from filenames. This
+            # is the "record enough to know the asset can be reclaimed" half of
+            # the progressive-upload policy (see myUtils/sociamonials_reclaim.py).
+            try:
+                recorded = sociamonials_reclaim.record_delivered_assets(
+                    self._db_path,
+                    result.get("used_assets"),
+                    workspace_id=result.get("workspace_id"),
+                    job_id=target.job_id,
+                    target_id=target.id,
+                    post_id=result.get("post_id"),
+                    network=str(result.get("network") or ""),
+                )
+                if recorded:
+                    log.info(
+                        f"recorded {recorded} delivered Sociamonials asset(s) for "
+                        f"target {target.id}; they are reclaimable once no live "
+                        "target needs them"
+                    )
+            except Exception as exc:  # noqa: BLE001 — the post is already delivered
+                log.warning(
+                    f"could not record delivered Sociamonials assets for target "
+                    f"{target.id}: {_scrub_secrets(str(exc))}"
+                )
         else:
             log.info(
                 "sociamonials fallback delivered, but the target was already "

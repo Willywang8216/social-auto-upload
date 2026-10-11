@@ -762,12 +762,22 @@ def _resolve_local_media(
     local_path: Path,
     *,
     timeout: float,
+    db_path: Any = None,
+    used_assets: list[dict[str, Any]] | None = None,
 ) -> str:
     """Return an ``asset://<id>`` for ``local_path``, reusing when possible.
 
     This is the single place the reuse-vs-upload decision is made, so the
     upload path cannot silently regress into re-uploading a file already in
     the library. Both branches log which one happened.
+
+    Before a *new* upload the quota guard reads the workspace storage block and,
+    when the file will not fit, reclaims already-delivered assets first. That is
+    the policy the operator asked for: add an asset, publish it, then add the
+    next one - a full library never becomes a wall that stops publishing. When
+    it still will not fit, the guard raises a clear error naming the numbers
+    instead of leaving the caller with an opaque ``storage_quota_exceeded``.
+    A reuse makes no new bytes, so it does not need the guard.
     """
     kind = _media_kind(str(local_path))
     size_bytes = local_path.stat().st_size
@@ -782,23 +792,81 @@ def _resolve_local_media(
     )
     reused_id = _asset_id(reusable)
     if reused_id is not None:
+        reference = f"asset://{reused_id}"
         logger.info(
             "sociamonials media reused asset://%s for %s (%.1f MB)",
             reused_id,
             local_path.name,
             size_bytes / 1_000_000,
         )
-        return f"asset://{reused_id}"
-    reference = _upload_local_media(
-        session, headers, workspace_id, local_path, timeout=timeout
-    )
-    logger.info(
-        "sociamonials media uploaded %s as %s (%.1f MB)",
-        local_path.name,
-        reference,
-        size_bytes / 1_000_000,
-    )
+    else:
+        _guard_storage_for_upload(
+            session,
+            headers,
+            workspace_id,
+            local_path=local_path,
+            size_bytes=size_bytes,
+            db_path=db_path,
+            timeout=timeout,
+        )
+        reference = _upload_local_media(
+            session, headers, workspace_id, local_path, timeout=timeout
+        )
+        logger.info(
+            "sociamonials media uploaded %s as %s (%.1f MB)",
+            local_path.name,
+            reference,
+            size_bytes / 1_000_000,
+        )
+    if used_assets is not None:
+        from myUtils import sociamonials_reclaim as reclaim
+
+        entry = reclaim.collect_used_assets(
+            reference, local_path=local_path, kind=kind
+        )
+        if entry is not None and entry.get("asset_id") not in {
+            item.get("asset_id") for item in used_assets
+        }:
+            used_assets.append(entry)
     return reference
+
+
+def _guard_storage_for_upload(
+    session: Any,
+    headers: Mapping[str, str],
+    workspace_id: str,
+    *,
+    local_path: Path,
+    size_bytes: int,
+    db_path: Any,
+    timeout: float,
+) -> None:
+    """Reclaim delivered assets when needed to fit ``local_path``.
+
+    Best-effort by design: a storage read that fails (unavailable accounting)
+    must not stop the upload, because the platform itself does not refuse for
+    storage in that state. A genuine "still will not fit" raises, which is the
+    one case the caller must see rather than an opaque 422 later.
+    """
+    if db_path is None:
+        return
+    try:
+        from myUtils import sociamonials_reclaim as reclaim
+
+        reclaim.ensure_headroom(
+            session=session,
+            headers=headers,
+            workspace_id=workspace_id,
+            db_path=db_path,
+            size_bytes=size_bytes,
+            timeout=timeout,
+        )
+    except SociamonialsFallbackError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the guard is an optimisation
+        logger.warning(
+            "sociamonials quota guard skipped for %s: %s", local_path.name, exc
+        )
 
 
 def _upload_local_media(
@@ -1211,6 +1279,7 @@ def publish_via_sociamonials(
     target_id: int | None = None,
     settings: Any = None,
     session: Any = None,
+    db_path: Any = None,
     api_key: str | None = None,
     workspace_id: str | None = None,
     timeout: float | None = None,
@@ -1255,6 +1324,8 @@ def publish_via_sociamonials(
     request_timeout = float(timeout if timeout is not None else _timeout())
     http = _get_session(session)
     headers = _headers(key)
+    resolved_db_path = db_path if db_path is not None else payload.get("_db_path")
+    used_assets: list[dict[str, Any]] = []
 
     warnings: list[str] = []
     message, moved_links = compose_message_with_links(payload, network=network)
@@ -1311,6 +1382,8 @@ def publish_via_sociamonials(
                         ws,
                         local,
                         timeout=request_timeout,
+                        db_path=resolved_db_path,
+                        used_assets=used_assets,
                     )
                 elif not (public_url and is_direct_media_url(public_url)):
                     # A declared local artifact that is gone and no usable URL:
@@ -1345,6 +1418,8 @@ def publish_via_sociamonials(
                     ws,
                     Path(split_first),
                     timeout=request_timeout,
+                    db_path=resolved_db_path,
+                    used_assets=used_assets,
                 )
                 video_ref = reference
                 warnings.append(
@@ -1411,6 +1486,8 @@ def publish_via_sociamonials(
         "warnings": warnings,
         "network": network,
         "profile_refs": list(mapping["profile_refs"]),
+        "workspace_id": _workspace_int(ws),
+        "used_assets": used_assets,
         "delivery_state": delivery.get("state"),
         "delivered": delivery.get("delivered"),
         "delivery_error": delivery.get("error"),
