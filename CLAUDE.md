@@ -240,3 +240,32 @@ When a cleanup pass runs, state how many sessions were ended and confirm each wa
 safe (work committed, tasks done, leases released). Do not silently leave orphans:
 a session still running with no task and no recent activity is exactly what this
 rule exists to prevent.
+
+## MCP servers available on this host (check these BEFORE asking the operator)
+
+Credentials and integrations are already configured. When a task touches one of
+these, look up the MCP server instead of asking for credentials:
+
+| need | MCP server | where it is configured |
+| --- | --- | --- |
+| Cloudflare DNS / zones / tunnels | `cloudflare-ryan`, `cloudflare-sub` | `~/.claude.json` → `mcpServers` |
+| 1Panel | `1panel` | `~/.claude.json` → `mcpServers` |
+| GitHub | `github` | `~/.claude.json` → `mcpServers` |
+| rclone | `rclone` | `~/.claude.json` → `mcpServers` |
+| SAU itself | `sau` | `~/.claude.json` → `mcpServers` |
+
+Secrets resolve through **`~/.claude/secrets.json`** (the launcher reads the
+`CLOUDFLARE_*`, `TELEGRAM_*`, `GITHUB_*` etc. keys from there).
+
+The Cloudflare wrapper authenticates with **`X-Auth-Email` + `X-Auth-Key`**, NOT
+`Authorization: Bearer` — so it needs `CLOUDFLARE_EMAIL` as well as the key. That
+email was missing and cost a round trip; it is now recorded
+(`CLOUDFLARE_EMAIL`, plus `CLOUDFLARE_RYAN_EMAIL` / `CLOUDFLARE_SUB_EMAIL`).
+
+Account mapping: **RYAN** = `ryanbossomhot@yahoo.com.tw` (zones `iamwillywang.com`,
+`willywangdata.com`, …); **SUB** = `forsubscription1993@gmail.com` (zones
+`nakedwill.com`, `sexualwill.com`).
+
+**Rule: when a task needs an external service, check `~/.claude.json` and
+`~/.claude/secrets.json` FIRST.** Do not ask the operator for a credential that is
+already on the box.
