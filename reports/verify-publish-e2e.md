@@ -280,3 +280,26 @@ existing rows, and this verification was forbidden from touching them.
 
 Verdict: **scheduling and publishing are healthy; do not re-prep 2602/2603, and
 cancel the four duplicate X targets on 2602 and the ten on 2603 before they fire.**
+
+---
+
+## 8. Follow-up — the re-prep fleet finished (2026-10-11 evening)
+
+After this verification, the coordinator finished the placeholder-media re-prep
+fleet. The authoritative result is in `reports/reprep-fleet-final.md`:
+
+- **45/45 recoverable campaigns re-prepped and verified** (real MP4, 2.4-110 MB,
+  `ftyp` present). Final scan: **0 recoverable, 0 unrecoverable, 0 fixtures**,
+  and **0 campaigns left in `preparing`**.
+- The fleet had died mid-run for two real reasons, both fixed:
+  - `scripts/ci-watch.sh` restarted over active preps (it waited for in-flight
+    *publishes* but not *preps*). Fixed with a 30-minute-active-prep lease check
+    (commit `83a50da`).
+  - The container was on a stale image, so ci-watch redeployed hourly and killed
+    the in-container preps. The remainder was run on the host instead.
+- Four campaigns that had been killed after cancelling their targets but before
+  re-queuing (2456, 2458, 2464, 2487) were re-prepped and verified.
+- Full suite after the work: `1663 passed, 1 skipped, 161 subtests passed`.
+- The six operator campaigns (2598-2603) remain byte-for-byte untouched; the
+  duplicate-target and `needs_review` decisions in §7 are still owed to the
+  operator.
