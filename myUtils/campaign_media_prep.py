@@ -386,11 +386,21 @@ def prepare_campaign_media_artifacts(
             candidate = Path(BASE_DIR) / "videoFile" / raw_path
             if candidate.exists():
                 raw_path = candidate
-            else:
-                # Try downloading from remote storage
-                downloaded = _download_file_from_storage(media_file["file_path"], db_path=db_path)
-                if downloaded:
-                    raw_path = downloaded
+        if not raw_path.exists():
+            # The offload cron moves published media to Drive and deletes the
+            # local copy, so a re-prep of an old campaign starts with the raw
+            # source absent *regardless of whether file_records stored an
+            # absolute or a relative path*. Restore it from storage before
+            # probing/transcoding. Previously this branch only ran for relative
+            # paths, so an absolute ``/app/videoFile/...`` source silently went
+            # missing: ffprobe/ffmpeg failed, prep recorded a "prepared"
+            # artifact pointing at the absent raw file, and the re-prep queued
+            # targets that could not publish.
+            downloaded = _download_file_from_storage(
+                media_file["file_path"], db_path=db_path
+            )
+            if downloaded:
+                raw_path = downloaded
         source_path = raw_path.resolve()
         publish_path = source_path
         artifact_kind = None
