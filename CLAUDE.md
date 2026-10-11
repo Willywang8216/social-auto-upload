@@ -171,6 +171,35 @@ sau skill install
 *   The `package.json` file in the `sau_frontend` directory lists the frontend dependencies.
 *   Platform posting limits are owned in code by `myUtils/platform_limits.py` (the enforced single source of truth, locked by `tests/test_platform_limits.py`); draft generation, media prep and the publishers all read from it. The human-readable table (with app-vs-API differences and notable restrictions) is in `docs/platform-posting-limits.md`, and the per-number source citations are in `logs/platform-limits-research.md`. Update the module first, then keep both docs in sync.
 
+## Repository visibility, remotes & CI
+
+*   **Visibility:** `Willywang8216/social-auto-upload` is currently **PUBLIC**.
+    It is a fork of `dreammis/social-auto-upload` and GitHub **rejects**
+    `PATCH /repos/Willywang8216/social-auto-upload {private:true}` with
+    `422 Public forks can't be made private`. To become private it must first
+    **Leave fork network** (Settings → General → Danger Zone) — a *permanent*
+    step that discards its 72 PRs and other fork metadata. Not done; see
+    `reports/repo-privacy-upstream.md` for options and the operator decision.
+*   **Remotes:**
+    *   `origin` = `git@github.com:Willywang8216/social-auto-upload.git` — our own
+        line of work; the push target (`main` tracks `origin/main`).
+    *   `upstream` = `https://github.com/dreammis/social-auto-upload.git` — the
+        **original** project, fetch/compare/integrate only.
+        Its push URL is set to `DISABLED` to enforce read-only. Use it to compare
+        divergence (`git rev-list --left-right --count upstream/main...origin/main`),
+        never to push.
+*   **CI/CD:** GitHub Actions was disabled on this fork after heavy usage (see
+    `reports/ci-actions-reenable.md`), so deployments run through
+    `scripts/ci-watch.sh` (a per-user cron watcher that builds `origin/main`
+    locally and deploys with `--pull never`). As of 2026-10-11 Actions is
+    actually enabled and running again, but the watcher remains the
+    GitHub-independent fallback and is harmless if left in place. Do not remove
+    it without confirming Actions is healthy. See `docs/ci-watch.md`.
+*   **Images:** the app image `ghcr.io/willywang8216/social-auto-upload` is a
+    **private** GHCR package (the host is authenticated); the Dockerfile base
+    `ghcr.io/willywang8216/sau-base:slim` is public. Deploys build locally, so
+    neither package's visibility gates a deploy.
+
 ## Agent sessions (default hygiene)
 
 Subagents and parallel sessions must not accumulate. **Ending finished sessions is
