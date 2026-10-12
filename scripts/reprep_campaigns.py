@@ -48,6 +48,7 @@ import argparse
 import collections
 import importlib.util
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -286,14 +287,26 @@ def reconstruct_prep_request(campaign_row: sqlite3.Row, store: "vpi.Store") -> d
     if first_at:
         try:
             utc_dt = datetime.fromisoformat(first_at)
-            local_dt = (
-                utc_dt.replace(tzinfo=timezone.utc)
-                .astimezone(ZoneInfo("Asia/Shanghai"))
-                .replace(tzinfo=None)
-            )
-            schedule = {"startAt": local_dt.isoformat(timespec="seconds")}
+            # Only preserve a schedule that is still in the future; a past one
+            # would fire immediately on re-prep.
+            if utc_dt > datetime.now(timezone.utc).replace(tzinfo=None):
+                local_dt = (
+                    utc_dt.replace(tzinfo=timezone.utc)
+                    .astimezone(ZoneInfo("Asia/Shanghai"))
+                    .replace(tzinfo=None)
+                )
+                schedule = {"startAt": local_dt.isoformat(timespec="seconds")}
         except ValueError:
             schedule = None
+
+    if schedule is None:
+        # A campaign with no target history would otherwise re-prep as
+        # ``publish-now`` and fire immediately. ``SAU_REPREP_DEFAULT_START``
+        # (set by ``--default-start``) parks it in a far-future slot instead, so
+        # a backlog re-prep drips out over months rather than flooding.
+        default_start = os.environ.get("SAU_REPREP_DEFAULT_START", "").strip()
+        if default_start:
+            schedule = {"startAt": default_start}
 
     media_paths: list[str] = []
     items = store.con.execute(
@@ -458,8 +471,17 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="force a specific campaign id (repeatable); still refuses operator campaigns",
     )
+    ap.add_argument(
+        "--default-start",
+        default="",
+        help="local ISO startAt (Asia/Taipei) applied to campaigns with no "
+        "existing target schedule; without it those re-prep as publish-now",
+    )
     ap.add_argument("--json-out", default="")
     args = ap.parse_args(argv)
+
+    if args.default_start:
+        os.environ["SAU_REPREP_DEFAULT_START"] = args.default_start
 
     db_path = Path(args.db)
     global _STORE
