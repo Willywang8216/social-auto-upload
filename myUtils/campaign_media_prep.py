@@ -303,6 +303,26 @@ def _resolve_ai_config(profile: profile_registry.Profile) -> dict:
     return {"api_base_url": None, "api_key": None, "model": None}
 
 
+def _resolve_stt_config(profile: profile_registry.Profile) -> dict:
+    """Resolve speech-to-text config.
+
+    Mirrors :func:`_resolve_ai_config` (same ``aiServices[0]`` shape) so an
+    operator can point STT at their own gateway through the profile, but a
+    dedicated ``SAU_STT_*`` env var wins because STT is a DIFFERENT gateway
+    from the drafting LLM (``wzw.pp.ua`` vs ``muyuan.do``). ``None`` values let
+    :func:`myUtils.llm_client.transcribe_audio_via_chat` fall back to the
+    verified ``mimo-v2.6-flash`` defaults.
+    """
+    profile_ai = _resolve_ai_config(profile)
+    return {
+        "api_base_url": os.environ.get(llm_client.STT_BASE_URL_ENV)
+        or profile_ai["api_base_url"],
+        "api_key": os.environ.get(llm_client.STT_API_KEY_ENV)
+        or profile_ai["api_key"],
+        "model": os.environ.get(llm_client.STT_MODEL_ENV) or profile_ai["model"],
+    }
+
+
 def prepare_campaign_media_artifacts(
     campaign_id: int,
     profile: profile_registry.Profile,
@@ -369,7 +389,24 @@ def prepare_campaign_media_artifacts(
         "screenshotPaths": [],
         "screenshotUrls": [],
         "transcriptText": str(request_data.get("transcriptText", "") or "").strip(),
+        # Draft generation seeds per-account language routing from this. A
+        # supplied transcript wins; otherwise the title is classified and STT
+        # (below) overwrites it with the model's declared language.
+        "language": None,
     }
+    _supplied_language = str(request_data.get("language", "") or "").strip().lower()
+    if artifacts_context["transcriptText"]:
+        artifacts_context["language"] = (
+            _supplied_language
+            if _supplied_language in {"zh", "en"}
+            else llm_client.detect_language(artifacts_context["transcriptText"])
+        )
+    elif _supplied_language in {"zh", "en"}:
+        artifacts_context["language"] = _supplied_language
+    elif str(request_data.get("title", "") or "").strip():
+        artifacts_context["language"] = llm_client.detect_language(
+            str(request_data.get("title"))
+        )
 
     screenshots_spec = request_data.get("screenshots") if isinstance(request_data.get("screenshots"), dict) else {}
     screenshots_enabled = bool(screenshots_spec.get("enabled"))
@@ -801,12 +838,17 @@ def prepare_campaign_media_artifacts(
                 suffix=".wav",
             )
             media_pipeline.extract_video_audio(source_path, audio_path)
-            transcribe_kwargs = {}
-            if ai_config["api_base_url"]:
-                transcribe_kwargs["api_base_url"] = ai_config["api_base_url"]
-            if ai_config["api_key"]:
-                transcribe_kwargs["api_key"] = ai_config["api_key"]
-            transcript = llm_client.transcribe_audio(audio_path, **transcribe_kwargs)
+            stt_config = _resolve_stt_config(profile)
+            # ``mimo-v2.6-flash`` on wzw.pp.ua is reachable only through
+            # /v1/chat/completions with an input_audio part; the native
+            # /audio/transcriptions route returns bad_response_status_code.
+            transcript = llm_client.transcribe_audio_via_chat(
+                audio_path,
+                model=stt_config["model"],
+                api_base_url=stt_config["api_base_url"],
+                api_key=stt_config["api_key"],
+                title=str(request_data.get("title", "") or ""),
+            )
             transcript_path = media_pipeline.prepare_campaign_artifact_path(
                 campaign_id,
                 source_path,
@@ -815,6 +857,9 @@ def prepare_campaign_media_artifacts(
             )
             transcript_path.write_text(transcript.text, encoding="utf-8")
             artifacts_context["transcriptText"] = transcript.text
+            artifacts_context["language"] = transcript.language or artifacts_context.get(
+                "language"
+            )
             campaign_store.add_campaign_artifact(
                 campaign_id,
                 source_file_record_id=primary_video["file_record_id"],

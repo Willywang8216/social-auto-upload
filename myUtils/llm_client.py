@@ -25,6 +25,33 @@ DEFAULT_CHAT_MODEL = os.environ.get("SAU_LLM_MODEL", "gpt-4.1-mini")
 DEFAULT_TRANSCRIPTION_MODEL = "whisper-1"
 DEFAULT_BASE_URL_ENV = "SAU_LLM_API_BASE_URL"
 DEFAULT_API_KEY_ENV = "SAU_LLM_API_KEY"
+
+# Speech-to-text on the ``wzw.pp.ua`` gateway (model ``mimo-v2.6-flash``).
+# This gateway has no ``/v1/audio/transcriptions`` route for the model and no
+# ``whisper-*`` endpoint at all (both return ``bad_response_status_code``); the
+# only working path is ``/v1/chat/completions`` with an OpenAI ``input_audio``
+# content part. The endpoint is deliberately configured separately from the
+# chat/LLM endpoint because it is a different gateway.
+#
+# The base URL and model are non-secret, operator-verified values. The API key
+# is NOT baked in: this repository is public. It must come from
+# ``SAU_STT_API_KEY`` (or an explicit/profile-supplied key); ``_resolve_stt_endpoint``
+# raises a clear error when it is missing.
+_DEFAULT_STT_BASE_URL = "https://wzw.pp.ua"
+_DEFAULT_STT_MODEL = "mimo-v2.6-flash"
+_DEFAULT_STT_API_KEY = ""
+STT_BASE_URL_ENV = "SAU_STT_BASE_URL"
+STT_API_KEY_ENV = "SAU_STT_API_KEY"
+STT_MODEL_ENV = "SAU_STT_MODEL"
+
+# The instruction the model expects alongside the audio. The gateway itself
+# does not enforce any shape, but the verified live calls returned the
+# transcript on one line and ``LANGUAGE=zh`` / ``LANGUAGE=en`` on the next, so
+# the parser below understands exactly that convention.
+STT_INSTRUCTION = (
+    "Transcribe the audio exactly as spoken, in its original language. "
+    "Then on a new line write LANGUAGE=zh or LANGUAGE=en."
+)
 # JSON array of endpoints for rotation, e.g.
 #   [{"base_url": "...", "api_key": "...", "model": "...", "headers": {...}}]
 # When unset/empty the client falls back to the single DEFAULT_* env vars, so
@@ -46,6 +73,10 @@ class ChatCompletionResult:
 class TranscriptionResult:
     text: str
     payload: dict
+    # ``zh`` / ``en`` when known. The native ``/audio/transcriptions`` path
+    # leaves this ``None``; the chat-audio path always fills it in (from the
+    # model's LANGUAGE line, the transcript's CJK codepoints, or the title).
+    language: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -121,6 +152,75 @@ def _extract_message_content(message_content) -> str:
                 text_parts.append(str(item.get("text", "")))
         return "".join(text_parts)
     return str(message_content or "")
+
+
+# ``LANGUAGE=zh`` / ``LANGUAGE: en`` on its own line (the model sometimes
+# writes a colon, a full stop, or trailing whitespace).
+_LANGUAGE_LINE_RE = re.compile(
+    r"(?im)^[ \t]*LANGUAGE[ \t]*[:=][ \t]*(zh|en)[ \t]*[.!]?[ \t]*$"
+)
+
+# The model sometimes wraps its reply in a ``<think>…</think>`` block (usually
+# unclosed when it reached the token limit). ``reasoning_content`` is the field
+# that carries this, and the transcript is the text between/after the tags, so
+# strip the tags themselves and keep the text.
+_THINK_TAG_RE = re.compile(r"(?is)</?think>")
+
+
+def _contains_cjk(text: str) -> bool:
+    """True when ``text`` has a CJK ideograph / punctuation codepoint."""
+    for char in str(text or ""):
+        codepoint = ord(char)
+        if (
+            0x3400 <= codepoint <= 0x4DBF  # CJK Unified Ideographs Extension A
+            or 0x4E00 <= codepoint <= 0x9FFF  # CJK Unified Ideographs
+            or 0xF900 <= codepoint <= 0xFAFF  # CJK Compatibility Ideographs
+            or 0x3000 <= codepoint <= 0x303F  # CJK symbols and punctuation
+            or 0xFF00 <= codepoint <= 0xFFEF  # Fullwidth forms
+            or 0x20000 <= codepoint <= 0x2FA1F  # Extensions B..F
+        ):
+            return True
+    return False
+
+
+def detect_language(text: str | None) -> str:
+    """Classify a transcript as ``zh`` (any CJK codepoint) else ``en``."""
+    return "zh" if _contains_cjk(str(text or "")) else "en"
+
+
+def _split_transcript_language(raw: str) -> tuple[str, str | None]:
+    """Split the model's reply into ``(transcript, language_or_None)``.
+
+    Strips a trailing ``LANGUAGE=zh`` / ``LANGUAGE=en`` line so the caption
+    seed does not contain it, and returns the declared language when present.
+    """
+    text = _THINK_TAG_RE.sub("", str(raw or ""))
+    match = _LANGUAGE_LINE_RE.search(text)
+    language = match.group(1).lower() if match else None
+    cleaned = _LANGUAGE_LINE_RE.sub("", text).strip()
+    return cleaned, language
+
+
+def _resolve_stt_endpoint(
+    api_base_url: str | None, api_key: str | None, model: str | None
+) -> tuple[str, str, str]:
+    """Resolve the STT base URL/key/model: explicit > ``SAU_STT_*`` > default."""
+    base = (
+        api_base_url
+        or os.environ.get(STT_BASE_URL_ENV)
+        or _DEFAULT_STT_BASE_URL
+    ).strip()
+    key = (
+        api_key or os.environ.get(STT_API_KEY_ENV) or _DEFAULT_STT_API_KEY
+    ).strip()
+    if not key:
+        raise ValueError(
+            "No STT API key configured; set SAU_STT_API_KEY or pass api_key"
+        )
+    resolved_model = (
+        model or os.environ.get(STT_MODEL_ENV) or _DEFAULT_STT_MODEL
+    ).strip()
+    return base, key, resolved_model
 
 
 _JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
@@ -478,3 +578,98 @@ def transcribe_audio(
     response.raise_for_status()
     payload = response.json()
     return TranscriptionResult(text=str(payload.get("text", "")).strip(), payload=payload)
+
+
+def transcribe_audio_via_chat(
+    audio_path: str | Path,
+    *,
+    model: str | None = None,
+    api_base_url: str | None = None,
+    api_key: str | None = None,
+    session=None,
+    timeout_seconds: int = 600,
+    title: str | None = None,
+) -> TranscriptionResult:
+    """Transcribe audio through ``/v1/chat/completions`` (``mimo-v2.6-flash``).
+
+    The ``wzw.pp.ua`` gateway publishes ``mimo-v2.6-flash`` only as a chat
+    model with an OpenAI ``input_audio`` content part - it has no
+    ``/v1/audio/transcriptions`` route for it (and no ``whisper-*`` model), so
+    the native :func:`transcribe_audio` path returns ``bad_response_status_code``.
+    This sends the WAV as base64 inside the user message instead.
+
+    Two quirks are handled here because they were observed against the live
+    service:
+
+    * Cloudflare rejects a bare ``Authorization: Bearer`` with ``403 error code:
+      1010``, so the request reuses :func:`_headers` (the Claude Code
+      fingerprint set) exactly like every other call.
+    * The model frequently puts the transcript in ``message.reasoning_content``
+      rather than ``message.content``, so both are read (``content`` first).
+
+    ``api_base_url`` / ``api_key`` / ``model`` fall back to ``SAU_STT_BASE_URL``,
+    ``SAU_STT_API_KEY`` and ``SAU_STT_MODEL`` and then to the verified defaults.
+    Returns a :class:`TranscriptionResult` whose ``language`` is ``zh`` or
+    ``en`` (declared ``LANGUAGE=`` line, else CJK detection, else ``title``).
+    """
+    base, resolved_api_key, resolved_model = _resolve_stt_endpoint(
+        api_base_url, api_key, model
+    )
+    base_url = _normalise_api_base_url(base)
+    audio_file = Path(audio_path).expanduser().resolve()
+    if not audio_file.is_file():
+        raise FileNotFoundError(f"Audio file not found: {audio_file}")
+    if session is None:
+        if requests is None:
+            raise RuntimeError("requests is required for audio transcription")
+        http = requests.Session()
+    else:
+        http = session
+
+    encoded = base64.b64encode(audio_file.read_bytes()).decode("ascii")
+    audio_format = audio_file.suffix.lower().lstrip(".") or "wav"
+    if audio_format == "wave":
+        audio_format = "wav"
+    payload = {
+        "model": resolved_model,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": encoded, "format": audio_format},
+                    },
+                    {"type": "text", "text": STT_INSTRUCTION},
+                ],
+            }
+        ],
+    }
+    headers = {**_headers(resolved_api_key), "Content-Type": "application/json"}
+    _pace_request()
+    response = http.post(
+        f"{base_url}/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=timeout_seconds,
+    )
+    if int(getattr(response, "status_code", 0) or 0) == 429:
+        # Same per-key budget as the chat calls; back off (bounded) and surface
+        # a rate-limit error so the caller can skip transcription.
+        wait = _retry_after_seconds(response)
+        _note_rate_limit(wait)
+        raise RuntimeError(
+            f"rate limited (HTTP 429) transcribing with {base_url}; "
+            f"retry after about {wait:.0f}s"
+        )
+    response.raise_for_status()
+    response_payload = response.json()
+    message = (response_payload.get("choices") or [{}])[0].get("message") or {}
+    # The model often uses reasoning_content for this task; read both fields.
+    content = _extract_message_content(message.get("content", "")).strip()
+    reasoning = _extract_message_content(message.get("reasoning_content", "")).strip()
+    raw = content or reasoning
+    text, declared_language = _split_transcript_language(raw)
+    language = declared_language or detect_language(text or title or "")
+    return TranscriptionResult(text=text, payload=response_payload, language=language)

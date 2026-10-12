@@ -19,7 +19,7 @@ allowed-tools:
   - AskUserQuestion
 metadata:
   owner: social-auto-upload
-  trigger: publish these videos, process this folder, batch upload, bulk videos, SFW NW, NSFW NW, SFW SW, NSFW SW, Teaching, pub date, publish on a date, urgent news
+  trigger: publish these videos, process this folder, batch upload, bulk videos, SFW NW, NSFW NW, SFW SW, NSFW SW, Teaching, pub date, publish on a date, urgent news, Drive inbox, SAU-Inbox, filename convention, Title_SFW_YYYYMMDD, Title_NSFW_YYYYMMDD, transcript .txt, STT fallback, publishDate, language routing
 ---
 
 # Batch-publish a folder of videos
@@ -201,6 +201,35 @@ Worked examples:
 If a filename carries **no** prefix, do not guess: ask the user which profile and
 rating to use, then rename the file so the run is reproducible.
 
+### Drive inbox filename convention (new)
+
+A second, folder-based naming convention is accepted alongside the prefix rule
+above, for files dropped into the Drive inbox. Full reference:
+[`docs/gdrive-filename-convention.md`](../../docs/gdrive-filename-convention.md)
+(spec: `reports/gdrive-filename-spec.md`).
+
+```
+<Title with spaces>_<SFW|NSFW>_<YYYYMMDD>.<ext>
+```
+
+* **Persona comes from the folder**, not the name: Drive root `SAU-Inbox/` with
+  `nw/`, `sw/`, `both/`, `teaching/`, `msl/`, each holding `video/` (`img/`,
+  `thumb/`). `both/` = `profileIds: [1, 3]`.
+* **Title** = everything before the final two `_`-separated tokens; may contain
+  spaces. **Flag** = `SFW`/`NSFW` (case-insensitive). **Date** = optional
+  `YYYYMMDD` in local `Asia/Taipei`; absent → schedule from now.
+* The legacy `<topic?>__<sfw|nsfw>` form (inbox README) still works.
+* A **same-name sibling note** (`.txt`, `.md`, or `<stem>.content.txt`) in the
+  same folder is the transcript/copy source. If absent, the **backend** runs STT
+  on the video audio — the submitting agent does not transcribe.
+* **Language** is detected from the transcript (CJK ⇒ `zh`, else `en`), falling
+  back to the title; it seeds the per-account routing in "Language is chosen
+  automatically, per account" above.
+* **`publishDate` → `schedule.startAt`:** `"YYYY-MM-DDT21:00:00"`, **naive**
+  local `Asia/Taipei`, default hour `21:00` unless the operator sets another.
+  The `_next_free_slot` allocator resolves collisions (≥30 min gap between one
+  account's posts, ≤3 posts/account/day) — same policy as section 5 below.
+
 ### The gate is real and enforced server-side
 
 `myUtils/content_rating.py` is the single authority:
@@ -305,10 +334,11 @@ up:
 - `preview` builds its media context with an **empty `transcriptText`**. It drafts
   from the filename and `brief` only, so a preview never reflects what is *said*.
 - The real transcription runs in `_prepare_campaign_media_artifacts` on the
-  **submit** path, using `whisper-1` via the configured LLM
-  (`myUtils/llm_client.transcribe_audio`), and it is enabled by
-  `options.transcribe: true` — or **automatically** whenever an LLM is configured
-  and no transcript exists yet.
+  **submit** path, using `mimo-v2.6-flash` on the `SAU_STT_*` gateway
+  (`myUtils/llm_client.transcribe_audio_via_chat` — the old
+  `/v1/audio/transcriptions` / `whisper-1` route is not available for it), and
+  it is enabled by `options.transcribe: true` — or **automatically** whenever an
+  LLM is configured and no transcript exists yet.
 
 So a preview is for *structure and routing*, not final copy. **The transcription
 itself is server-side** — it runs on `/publish-center/submit`, so on a client
@@ -320,7 +350,7 @@ machine you do not run any SAU code. On the **deploy host** (needs the checkout 
 python -c "from myUtils import media_pipeline as m; \
   m.extract_video_audio('<video>', '/tmp/a.wav')"
 python -c "from myUtils import llm_client as c; \
-  print(c.transcribe_audio('/tmp/a.wav'))"
+  print(c.transcribe_audio_via_chat('/tmp/a.wav'))"
 ```
 
 From a client, either submit with `options.transcribe: true` and treat the
