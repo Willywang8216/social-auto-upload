@@ -330,6 +330,65 @@ def _resolve_accounts(
     return [account for account in rows if account.id in allowed]
 
 
+def _account_language_tokens(account, profile) -> set[str]:
+    """Language tags an account accepts (``audience_language`` etc.)."""
+    config = getattr(account, "config", None) or {}
+    settings = getattr(profile, "settings", None) or {}
+    raw = str(
+        config.get("audience_language")
+        or config.get("audienceLanguage")
+        or settings.get("default_language")
+        or settings.get("defaultLanguage")
+        or ""
+    ).lower().replace(",", " ").replace("+", " ").replace("/", " ")
+    return {token for token in raw.split() if token}
+
+
+def _content_language(media_context, request_data) -> str | None:
+    """The prepared content's language (``zh``/``en``), or None when unknown."""
+    for source in (media_context or {}, request_data or {}):
+        language = str(source.get("language") or "").strip().lower()
+        if language in {"zh", "en"}:
+            return language
+    return None
+
+
+def language_routing_skip_reason(
+    content_language: str | None,
+    account,
+    profile,
+    *,
+    include_zh_for_english: bool = False,
+) -> str | None:
+    """Why ``account`` must not receive ``content_language`` content, or None.
+
+    Chinese content goes only to Chinese-audience accounts. English content
+    goes to English-audience accounts, and additionally to Chinese ones only
+    when the caller explicitly opts in (``includeZhForEnglish``). An account
+    with no audience language is never filtered (it is not classified).
+    """
+    language = str(content_language or "").strip().lower()
+    if language not in {"zh", "en"}:
+        return None
+    tokens = _account_language_tokens(account, profile)
+    if not tokens:
+        return None
+    is_zh = any(token.startswith("zh") for token in tokens)
+    is_en = any(token.startswith("en") for token in tokens)
+    if language == "zh":
+        if is_zh:
+            return None
+        return "content language is zh; account audience is English-only"
+    if is_en:
+        return None
+    if include_zh_for_english and is_zh:
+        return None
+    return (
+        "content language is en; account audience is Chinese-only "
+        "(pass includeZhForEnglish to allow this)"
+    )
+
+
 def _files_with_roles(media_files: list[dict]) -> list[dict]:
     """Pick out only ``video`` and ``image`` items so intro/outro auxiliary
     files don't accidentally end up in a single-media split.
@@ -543,6 +602,21 @@ def submit_publish(
                         "accountName": account.nickname or account.account_name,
                         "platform": account.platform,
                         "reason": "this media is already queued for this account",
+                    })
+                    continue
+                routing_skip = language_routing_skip_reason(
+                    _content_language(media_context, request_data),
+                    account,
+                    profile,
+                    include_zh_for_english=bool((options or {}).get("includeZhForEnglish")),
+                )
+                if routing_skip:
+                    skipped.append({
+                        "profileId": profile_id,
+                        "accountId": account.id,
+                        "accountName": account.nickname or account.account_name,
+                        "platform": account.platform,
+                        "reason": routing_skip,
                     })
                     continue
                 draft_override = account_drafts.get(str(account.id)) or account_drafts.get(account.id)

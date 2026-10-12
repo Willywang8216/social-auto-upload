@@ -126,6 +126,22 @@ def finalize_campaign(
                 })
                 continue
 
+            routing_skip = publish_orchestrator.language_routing_skip_reason(
+                publish_orchestrator._content_language(media_context, request_data),
+                account,
+                profile,
+                include_zh_for_english=bool((options or {}).get("includeZhForEnglish")),
+            )
+            if routing_skip:
+                skipped.append({
+                    "profileId": profile_id,
+                    "accountId": account.id,
+                    "accountName": account.nickname or account.account_name,
+                    "platform": account.platform,
+                    "reason": routing_skip,
+                })
+                continue
+
             draft_override = account_drafts.get(str(account.id)) or account_drafts.get(account.id)
             if isinstance(draft_override, dict) and draft_override.get("message"):
                 draft = content_rules.normalize_draft_fields(dict(draft_override))

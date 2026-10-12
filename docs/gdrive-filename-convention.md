@@ -255,10 +255,20 @@ tiktok `Teaching_TK`, teaching_blog `Teaching Blog`.
 **Money Systems Lab — profile 10 (`en`)**
 teaching_blog `MSL Blog` · youtube `Willy Dev tutor`.
 
-An English clip on `SFW NW` therefore publishes to the **EN set and the ZH set** —
-both, not one or the other. Write English copy for the EN accounts and Traditional
-Chinese copy (not Simplified) for the ZH accounts, then humanize with `humanizer`
-(English) or `humanizer-zh` (繁中).
+**Routing policy (backend-enforced).** Content language selects the accounts:
+
+* **Chinese** content goes **only** to Chinese (`zh`/`zh-Hant`) accounts.
+* **English** content goes to English (`en`) accounts by default. To also send
+  it to the Chinese accounts, pass `options.includeZhForEnglish: true` in the
+  submit payload ("English can go to the zh one if I said so").
+* **Bilingual** accounts (`audience_language: en,zh-Hant`) accept either.
+* An account with **no** `audience_language` is never filtered.
+
+The backend drops the non-matching accounts at draft time and lists them in
+`skipped` with a `content language is …` reason. So an English clip on `SFW NW`
+goes to the EN set; the ZH set joins only when you opt in. Copy is written (and
+humanized) in each kept account's own language — Traditional Chinese (not
+Simplified) for `zh-Hant`.
 
 ---
 
@@ -270,7 +280,10 @@ Chinese copy (not Simplified) for the ZH accounts, then humanize with `humanizer
 3. Look for the same-name `.txt` / `.md` / `.content.txt` → `transcript`; if
    absent, submit and let the backend STT it.
 4. Detect `language` (`zh`/`en`) from the transcript or title.
-5. Route per `audience_language` (§8); write + humanize both sets.
+5. Route per `audience_language` (§8): Chinese content → ZH accounts only;
+   English → EN accounts only, unless the operator opts in with
+   `options.includeZhForEnglish: true`. Write + humanize the copy in each kept
+   account's language.
 6. Map `publishDate` → `schedule.startAt = "<date>T21:00:00"` naive
    `Asia/Taipei`, and let the allocator resolve ≥30 min / ≤3-per-day collisions.
 7. Preview → operator approval → submit; report per-platform delivery.

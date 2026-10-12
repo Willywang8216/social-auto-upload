@@ -86,9 +86,14 @@ bluesky `SW Bluesky ZH` · telegram `SW TG 中文` · twitter `光光`
 **Bilingual (accepts either script)**
 nw_sw_blog `SW Blog` (`en,zh-Hant`)
 
-So an English clip on `SFW NW`: write English copy for the EN accounts and
-Traditional Chinese copy for the three ZH accounts. The English set and the
-Chinese set both go out; they are not alternatives.
+**Routing policy (enforced by the backend).** Content language selects the
+accounts: Chinese content goes **only** to Chinese (`zh`/`zh-Hant`) accounts;
+English content goes to English (`en`) accounts by default, and also to the
+Chinese accounts only when the operator opts in with
+`options.includeZhForEnglish: true`. Bilingual (`en,zh-Hant`) accounts accept
+either; an account with no `audience_language` is never filtered. So an English
+clip on `SFW NW` goes to the EN set — not automatically to the EN *and* ZH sets.
+The backend drops non-matching accounts and lists them in `skipped`.
 
 **Write the copy in the account's language, then humanize with the matching
 skill** — `humanizer` for English, `humanizer-zh` for 繁中. Simplified Chinese is
