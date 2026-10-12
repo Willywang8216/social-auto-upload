@@ -34,18 +34,23 @@ $ .venv/bin/python scripts/reprep_campaigns.py --drive-listing logs/reprep-drive
 
 `campaigns`: **264 preparing**, `needs_review` → 0 (after the purge below).
 
-Preps run on the host in 4 parallel slices (immune to container recreations):
+Preps run through **atomic-claim workers** so nothing is prepped twice. The
+first attempt used four `direct_prep.py` slices, but that helper overwrites a
+lease unconditionally and raced the production worker (13 duplicate targets
+appeared on campaigns 1896/1898-1900, cancelled by
+`scripts/dedup_pending_targets.py --apply`). It was replaced with three host
+standalone workers plus the container worker — `claim_next_preparing_campaign`
+is a compare-and-swap, so two workers can never take the same campaign:
 
 ```
-nohup env SAU_REPREP_REPO=/home/will/social-auto-upload \
-  SAU_PUBLISH_SCHEDULER_INTERVAL_SECONDS=0 .venv/bin/python \
-  logs/reprep/direct_prep.py --owner reprep-backlog-{1..4} <ids> \
-  > logs/reprep/backlog-{1..4}.txt
+nohup .venv/bin/python -m myUtils.worker --max-concurrent 2 \
+  > logs/reprep/host-worker-{1..3}.log 2>&1 &
 ```
 
-Each slice holds 66 campaigns. First completion: `1896: jobs=5 succeeded=True
-lease_ok=True (94s)`. Progress is in `logs/reprep/backlog-*.txt`; verify with
-`logs/reprep/verify_reprep.py <ids>`.
+`prep_max_concurrent=1` per worker ⇒ 4 concurrent preps (3 host + 1 container).
+First completion: `1896: jobs=5 succeeded=True lease_ok=True (94s)`; a sample of
+prepared `_pub_pub.mp4` files is 18-102 MB with a valid `ftyp` header. Progress
+is in `logs/worker.log` and `logs/reprep/host-worker-*.log`.
 
 ### 3. Unrecoverable entries purged
 
@@ -75,7 +80,9 @@ the 14 duplicate-X cancellations from the earlier task.
 
 ## Remaining
 
-None from this task. The 264 preps are running; when they finish the campaigns
-are `publishing` with targets from 2027-02-01 onward. If any individual prep
-fails it returns to `needs_review` with a reason and can be retried with
-`direct_prep.py --owner reprep-retry <id>`.
+The 264 preps are running through the 4 workers; 11 completed in the first
+~30 minutes, then the switches. ETA is ~10-12h of CPU-bound prep on 4 cores
+(load ~25-30). When they finish the campaigns are `publishing` with targets from
+2027-02-01 onward. If an individual prep fails it returns to `needs_review` with
+a reason and can be retried by the workers; the stray `reprep-backlog-*` leases
+from the abandoned slices were cleared so the workers pick those up.
