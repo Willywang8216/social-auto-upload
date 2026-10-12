@@ -278,12 +278,19 @@ def _request_data_for_options(
         or _clean_text(profile_settings.get("ctaText"))
     )
 
-    if options.get("watermark"):
-        request_data["watermark"] = options.get("watermarkOverride") or profile_settings.get("watermark")
-    else:
-        # An empty string short-circuits _derive_watermark_spec's defaults
-        # so the prep pipeline skips the watermark step entirely.
+    if options.get("watermarkDisabled") is True:
+        # Explicit opt-out: an empty string short-circuits
+        # _derive_watermark_spec's fallback, so no watermark is applied.
         request_data["watermark"] = ""
+    else:
+        # Default: an explicit override wins, otherwise the profile's
+        # configured watermark. This brands every image and video without
+        # relying on the caller to opt in; pass options.watermarkDisabled=true
+        # (or a watermarkOverride of "") to turn it off.
+        override = options.get("watermarkOverride")
+        request_data["watermark"] = (
+            override if override is not None else profile_settings.get("watermark")
+        ) or ""
 
     if options.get("intro"):
         request_data["intros"] = options.get("intros") or profile_settings.get("intros") or []

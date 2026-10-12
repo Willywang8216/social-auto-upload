@@ -140,17 +140,26 @@ class RequestDataForOptionsTests(unittest.TestCase):
         profile = MagicMock()
         profile.settings = {"watermark": "Brand WM"}
         result = publish_orchestrator._request_data_for_options(
-            brief="test", options={"watermark": False}, profile=profile,
+            brief="test", options={"watermarkDisabled": True}, profile=profile,
         )
         self.assertEqual(result["watermark"], "")
 
-    def test_watermark_enabled_uses_profile_default(self):
+    def test_watermark_defaults_to_the_profile_config(self):
+        profile = MagicMock()
+        profile.settings = {"watermark": "Brand WM"}
+        # No toggle: the profile watermark still applies.
+        result = publish_orchestrator._request_data_for_options(
+            brief="test", options={}, profile=profile,
+        )
+        self.assertEqual(result["watermark"], "Brand WM")
+
+    def test_watermark_override_wins(self):
         profile = MagicMock()
         profile.settings = {"watermark": "Brand WM"}
         result = publish_orchestrator._request_data_for_options(
-            brief="test", options={"watermark": True}, profile=profile,
+            brief="test", options={"watermarkOverride": "Custom WM"}, profile=profile,
         )
-        self.assertEqual(result["watermark"], "Brand WM")
+        self.assertEqual(result["watermark"], "Custom WM")
 
     def test_intro_disabled_sets_empty_list(self):
         profile = MagicMock()
