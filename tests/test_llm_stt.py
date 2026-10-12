@@ -139,7 +139,7 @@ class ChatAudioSttTests(unittest.TestCase):
         session = _FakeSession({"choices": [{"message": {"reasoning_content": "今天天气很好"}}]})
         with tempfile.TemporaryDirectory() as tmp, _env():
             audio = _write_wav(tmp)
-            result = llm_client.transcribe_audio_via_chat(audio, session=session)
+            result = llm_client.transcribe_audio_via_chat(audio, session=session, api_key="sk-test")
         self.assertEqual(result.text, "今天天气很好")
         self.assertEqual(result.language, "zh")
 
@@ -148,7 +148,7 @@ class ChatAudioSttTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, _env():
             audio = _write_wav(tmp)
             result = llm_client.transcribe_audio_via_chat(
-                audio, session=session, title="我的影片"
+                audio, session=session, title="我的影片", api_key="sk-test"
             )
         self.assertEqual(result.text, "")
         self.assertEqual(result.language, "zh")
@@ -198,7 +198,7 @@ class ChatAudioSttTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):
                 llm_client.transcribe_audio_via_chat(
-                    Path(tmp) / "nope.wav", session=_FakeSession({})
+                    Path(tmp) / "nope.wav", session=_FakeSession({}), api_key="sk-test"
                 )
 
 
