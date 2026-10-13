@@ -83,6 +83,24 @@ class ArtifactUrlBackfillTests(unittest.TestCase):
         worker._backfill_artifact_public_urls([artifact], self.db)
         self.assertEqual(artifact.get("public_url"), "https://cdn/full_pub.mp4")
 
+    def test_restore_rewrites_local_path_to_the_resolved_file(self) -> None:
+        """A publisher in another process must get the real path, not /app/..."""
+        import tempfile as _tempfile
+        from unittest.mock import patch
+
+        with _tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "clip.mp4"
+            real.write_bytes(b"x" * 20)
+            artifact = {
+                "local_path": "/app/generated/campaigns/c/x.mp4",
+                "artifact_kind": "local",
+            }
+            with patch.object(worker, "_resolve_media_path", return_value=real):
+                worker._ensure_artifact_paths_local(
+                    {"artifacts": [artifact]}, db_path=self.db
+                )
+        self.assertEqual(artifact["local_path"], str(real))
+
 
 if __name__ == "__main__":
     unittest.main()

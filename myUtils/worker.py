@@ -2205,6 +2205,10 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
         if not p.is_absolute():
             p = Path(BASE_DIR) / p
         if p.exists():
+            # Rewrite to the resolved path: a publisher in another process
+            # (e.g. the host worker, where ``/app/...`` is not a real path)
+            # must read this file, not fall back to a dead public URL.
+            artifact["local_path"] = str(p)
             continue
         generated_root = media_pipeline.GENERATED_MEDIA_ROOT.resolve()
         try:
@@ -2340,6 +2344,10 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                     f"(file_record={row['file_path']}): {last_error or 'no usable storage source'}",
                     retryable=False,
                 )
+            # The bytes are local now; hand the resolved absolute path to the
+            # publisher so it does not re-derive ``/app/...`` in a process
+            # (the host worker) where that path does not exist.
+            artifact["local_path"] = str(p)
 
         except MediaRestoreError:
             raise
