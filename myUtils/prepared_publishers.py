@@ -2353,6 +2353,15 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         reviewed_title = str(tt_settings.get("title") or "").strip()
         post_title = reviewed_title[:TIKTOK_MAX_CAPTION_CHARS] if reviewed_title else message[:TIKTOK_MAX_CAPTION_CHARS]
 
+        # TikTok rejects the request with "invalid_params: The request post info is empty or incorrect"
+        # when the title is empty. Validate early and raise a clear error.
+        if not post_title:
+            raise PreparedPublishError(
+                "TikTok publish requires a non-empty title/description. "
+                "The payload message is empty; provide a message or set tiktokPostSettings.title.",
+                retryable=False,
+            )
+
         post_info = {
             "title": post_title,
             "privacy_level": privacy_level,
@@ -3458,7 +3467,12 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
     else:
         subreddits = draft_subreddits
     if not isinstance(subreddits, list) or not subreddits:
-        raise PreparedPublishError("Reddit publish requires a non-empty subreddits array")
+        account_name = getattr(account, "account_name", None) or config.get("accountName", "unknown")
+        raise PreparedPublishError(
+            f"Reddit account '{account_name}' publish requires a non-empty subreddits array. "
+            f"Fix: add subreddits to the account config (e.g., config['subreddits'] = ['subreddit1', 'subreddit2'])",
+            retryable=False,
+        )
 
     http = _get_session(session)
     access_token = _reddit_access_token(config, session=http)
@@ -3622,6 +3636,13 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
                 "NO_IMAGES",
                 "SUBREDDIT_NOTALLOWED_BANNED",
             }
+            # RATELIMIT is a transient rate limit from Reddit; retry with backoff.
+            is_ratelimit = "RATELIMIT" in codes
+            if is_ratelimit:
+                raise PreparedPublishError(
+                    f"Reddit submit failed for r/{subreddit}: rate limit exceeded, retry with backoff",
+                    retryable=True,
+                )
             raise PreparedPublishError(
                 f"Reddit submit failed for r/{subreddit}: {errors}",
                 retryable=not bool(codes & permanent_codes),
@@ -4316,6 +4337,36 @@ def publish_nw_sw_blog_sync(
         if existing_sha:
             put_body["sha"] = existing_sha
         put_resp = http.put(get_url, headers=headers, json=put_body, timeout=30)
+
+        # Handle 409 Conflict: the file was modified between our GET and PUT.
+        # Re-read the file to get the latest SHA and retry. If the content is
+        # already what we want, treat it as success (idempotent).
+        if put_resp.status_code == 409:
+            logger.warning(
+                "nw_sw_blog 409 conflict for %s; re-reading and retrying",
+                file_path,
+            )
+            retry_resp = http.get(get_url, headers=headers, params={"ref": branch}, timeout=30)
+            if retry_resp.status_code == 200:
+                retry_sha = (retry_resp.json() or {}).get("sha")
+                # Check if the existing content matches what we want (idempotent).
+                existing_content = (retry_resp.json() or {}).get("content") or ""
+                if existing_content == content_b64:
+                    # Content already matches; treat as success.
+                    put_json = retry_resp.json() or {}
+                    results.append({
+                        "locale": locale,
+                        "path": file_path,
+                        "sha": (put_json.get("content") or {}).get("sha") or retry_sha,
+                        "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{file_path}",
+                        "persona": persona,
+                        "idempotent": True,
+                    })
+                    continue
+                # Content differs; retry with the fresh SHA.
+                put_body["sha"] = retry_sha
+                put_resp = http.put(get_url, headers=headers, json=put_body, timeout=30)
+
         _raise_for_status(put_resp)
         put_json = put_resp.json() if hasattr(put_resp, "json") else {}
         results.append({

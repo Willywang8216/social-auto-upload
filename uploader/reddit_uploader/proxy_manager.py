@@ -22,6 +22,34 @@ REDDIT_API = "https://oauth.reddit.com"
 REDDIT_WWW = "https://www.reddit.com"
 _HEALTH_CACHE_TTL = 300  # 5 minutes
 
+# Error codes/messages that indicate the cookie/session is dead (not retryable).
+_CREDENTIAL_ERROR_CODES = frozenset({"USER_REQUIRED"})
+_CREDENTIAL_ERROR_SUBSTRINGS = ("please log in",)
+
+
+class RedditCredentialError(Exception):
+    """Raised when Reddit rejects a request due to expired/invalid credentials.
+
+    This is NOT retryable – the user must re-login.
+    """
+
+
+def _is_credential_error_code(code: str, message: str) -> bool:
+    """True when a Reddit API error code/message indicates dead credentials."""
+    if code in _CREDENTIAL_ERROR_CODES:
+        return True
+    msg_lower = (message or "").lower()
+    return any(sub in msg_lower for sub in _CREDENTIAL_ERROR_SUBSTRINGS)
+
+
+def _looks_like_credential_error(status_code: int, body: str) -> bool:
+    """True when an HTTP error response indicates dead credentials."""
+    if status_code in (401, 403):
+        return True
+    body_lower = (body or "").lower()
+    return any(sub in body_lower for sub in _CREDENTIAL_ERROR_SUBSTRINGS)
+
+
 
 def _normalize_proxy(url: str) -> str:
     if url.startswith("socks://"):
@@ -370,7 +398,10 @@ class RedditClient:
             return None
 
     def submit_post(self, subreddit: str, title: str, url: str, nsfw: bool = True) -> str | None:
-        """Submit a link post. Returns post URL or None."""
+        """Submit a link post. Returns post URL or None.
+
+        Raises RedditCredentialError when the response indicates expired cookies.
+        """
         data = {
             "sr": subreddit,
             "kind": "link",
@@ -386,12 +417,23 @@ class RedditClient:
             return None
 
         if r.status_code != 200:
-            log.error("Submit failed: %s %s", r.status_code, r.text[:200])
+            body = r.text[:200]
+            if _looks_like_credential_error(r.status_code, body):
+                raise RedditCredentialError(
+                    f"Reddit API error (HTTP {r.status_code}): cookie expired or invalid – re-login required"
+                )
+            log.error("Submit failed: %s %s", r.status_code, body)
             return None
 
         result = r.json()
         errors = result.get("json", {}).get("errors", [])
         if errors:
+            code = errors[0][0] if errors else ""
+            message = errors[0][1] if len(errors[0]) > 1 else ""
+            if _is_credential_error_code(code, message):
+                raise RedditCredentialError(
+                    f"Reddit API error: {message or code} – re-login required"
+                )
             log.error("Submit error: %s", errors[0])
             return None
 
@@ -400,7 +442,10 @@ class RedditClient:
         return post_url
 
     def submit_self_post(self, subreddit: str, title: str, body: str, nsfw: bool = True) -> str | None:
-        """Submit a text post. Returns post URL or None."""
+        """Submit a text post. Returns post URL or None.
+
+        Raises RedditCredentialError when the response indicates expired cookies.
+        """
         data = {
             "sr": subreddit,
             "kind": "self",
@@ -416,12 +461,23 @@ class RedditClient:
             return None
 
         if r.status_code != 200:
-            log.error("Submit failed: %s %s", r.status_code, r.text[:200])
+            body_text = r.text[:200]
+            if _looks_like_credential_error(r.status_code, body_text):
+                raise RedditCredentialError(
+                    f"Reddit API error (HTTP {r.status_code}): cookie expired or invalid – re-login required"
+                )
+            log.error("Submit failed: %s %s", r.status_code, body_text)
             return None
 
         result = r.json()
         errors = result.get("json", {}).get("errors", [])
         if errors:
+            code = errors[0][0] if errors else ""
+            message = errors[0][1] if len(errors[0]) > 1 else ""
+            if _is_credential_error_code(code, message):
+                raise RedditCredentialError(
+                    f"Reddit API error: {message or code} – re-login required"
+                )
             log.error("Submit error: %s", errors[0])
             return None
 

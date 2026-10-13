@@ -19,7 +19,16 @@ from patchright.async_api import Page, async_playwright
 from utils.conf_defaults import DEBUG_MODE, LOCAL_CHROME_HEADLESS, REDDIT_PROXY
 from utils.browser_hook import get_browser_options
 from utils.base_social_media import set_init_script
-from uploader.reddit_uploader.proxy_manager import RedditClient
+from uploader.reddit_uploader.proxy_manager import RedditClient, RedditCredentialError
+
+try:
+    from myUtils.prepared_publishers import PreparedPublishError
+except ImportError:  # pragma: no cover - fallback if run outside the full project
+    class PreparedPublishError(RuntimeError):
+        def __init__(self, message: str, *, details=None, retryable: bool = True):
+            super().__init__(message)
+            self.details = details or {}
+            self.retryable = retryable
 
 log = logging.getLogger(__name__)
 
@@ -127,7 +136,11 @@ async def _post_reddit_cookie(
     *,
     headless: bool = True,
 ) -> str:
-    """Post to Reddit. Tries API first with self-healing proxy, falls back to browser."""
+    """Post to Reddit. Tries API first with self-healing proxy, falls back to browser.
+
+    Credential failures (expired cookies) are NOT retried and do NOT fall back
+    to browser – they raise PreparedPublishError(retryable=False) immediately.
+    """
     resolved_account = str(Path(account_file).expanduser().resolve())
 
     try:
@@ -135,6 +148,12 @@ async def _post_reddit_cookie(
             resolved_account, subreddit, title,
             body_text, str(media_path) if media_path else None,
         )
+    except RedditCredentialError as exc:
+        # Cookie is dead – do NOT fall back to browser, it will also fail.
+        raise PreparedPublishError(
+            f"Reddit cookie expired: {exc} – re-login required",
+            retryable=False,
+        ) from exc
     except Exception as e:
         if media_path:
             raise RuntimeError(f"Reddit media publish failed; refusing text-only fallback: {e}") from e
@@ -229,7 +248,10 @@ async def _post_via_browser(
                 await asyncio.sleep(3)
 
             if "/login" in page.url:
-                raise RuntimeError("Not logged in - re-login required")
+                raise PreparedPublishError(
+                    "Reddit cookie expired: browser redirected to login page – re-login required",
+                    retryable=False,
+                )
 
             await _select_community(page, subreddit)
             await _wait_and_fill(page, TITLE_SELECTOR, title, timeout_ms=10000)

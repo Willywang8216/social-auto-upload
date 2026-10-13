@@ -71,6 +71,20 @@ _ALERT_REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
+# A revoked or expired credential is permanent until a human re-authorises the
+# account, so it must not burn the retry budget or be re-routed to the fallback.
+_CREDENTIAL_FAILURE_RE = re.compile(
+    r"(HTTP 401|Unauthorized|Please log in|invalid_grant|refresh_token_revoked|"
+    r"credentials? (?:are )?(?:invalid|revoked|expired)|re-?authoris|re-?authoriz)",
+    re.IGNORECASE,
+)
+
+
+def _is_credential_failure(message: str) -> bool:
+    """True when the failure is a dead credential, not a transient error."""
+    return bool(_CREDENTIAL_FAILURE_RE.search(str(message or "")))
+
+
 TARGET_EXECUTION_TIMEOUT_SECONDS = float(
     os.environ.get("SAU_TARGET_TIMEOUT_SECONDS", "1200") or 1200
 )
@@ -1171,7 +1185,13 @@ class PublishWorker:
         if isinstance(error_details, dict) and error_details:
             message += f" | details={json.dumps(error_details, ensure_ascii=False, separators=(',', ':'))}"
         attempts = target.attempts  # already incremented when claimed
-        if getattr(exc, "retryable", True) is False:
+        credential_failure = _is_credential_failure(message)
+        if credential_failure:
+            message = (
+                f"{message} | credential rejected (revoked/expired): "
+                "re-authorise this account before retrying"
+            )
+        if credential_failure or getattr(exc, "retryable", True) is False:
             # A permanent failure means the direct path cannot be retried: the
             # subreddit banned us, the media is gone, the credential is dead.
             # Re-routing that to a different Sociamonials account does not fix

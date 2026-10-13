@@ -738,14 +738,27 @@ def prepare_campaign_media_artifacts(
             except Exception as exc:  # noqa: BLE001
                 # Do NOT treat "could not measure" as "fits": a probe failure
                 # silently disabled duration splitting for EVERY platform, which
-                # is how a 600s source reached Threads unsplit. Record it, carry
-                # on with the size trigger, and say so.
+                # is how a 600s source reached Threads unsplit. When we cannot
+                # measure the duration, we cannot verify the video fits the
+                # platform cap, so we must raise instead of silently publishing
+                # an oversized file that the platform will reject.
                 duration_probe_failed = True
                 duration = 0.0
+                # Check if any target platform has a duration cap
+                has_duration_cap = any(
+                    platform_limits.video_max_seconds(p) is not None
+                    for p in selected_platforms
+                )
+                if has_duration_cap:
+                    raise ValueError(
+                        f"Campaign {campaign_id}: cannot probe video duration for "
+                        f"{publish_path}. Target platforms have duration caps and the "
+                        f"video cannot be verified to fit. Probe error: {exc}"
+                    ) from exc
                 logging.getLogger(__name__).warning(
                     "media prep could not probe the duration of %s for campaign "
-                    "%d (%s); duration-based splitting is unavailable and an "
-                    "over-cap video will be refused by the publisher instead",
+                    "%d (%s); no target platform has a duration cap, continuing "
+                    "with size-based checks only",
                     publish_path, campaign_id, exc,
                 )
             try:
@@ -783,13 +796,29 @@ def prepare_campaign_media_artifacts(
                         max_bytes=(mb * 1_000_000) if mb else None,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    logging.getLogger(__name__).warning(
-                        "media split at seconds=%s mb=%s failed for campaign %d: %s",
-                        sec, mb, campaign_id, exc,
-                    )
-                    continue
+                    # A split failure must NOT silently fall back to the original
+                    # oversized file. That is how a 600s source reached Threads
+                    # (300s cap) unsplit and the publisher rejected it with
+                    # "duration exceeds limit". Raise instead so the campaign
+                    # fails with a clear, actionable message.
+                    raise ValueError(
+                        f"Campaign {campaign_id}: media split failed for platforms "
+                        f"{sorted(split_for)} (max_seconds={sec}, max_mb={mb}). "
+                        f"The source video ({duration:.0f}s, {size_bytes / 1_000_000:.0f} MB) "
+                        f"exceeds the platform cap and cannot be split: {exc}"
+                    ) from exc
                 if len(parts) <= 1:
-                    continue
+                    # The split returned only the original file, which means it
+                    # did not actually split. This is also a failure - the video
+                    # is over the cap but was not split. Raise instead of
+                    # silently using the oversized file.
+                    raise ValueError(
+                        f"Campaign {campaign_id}: media split did not produce multiple parts "
+                        f"for platforms {sorted(split_for)} (max_seconds={sec}, max_mb={mb}). "
+                        f"The source video ({duration:.0f}s, {size_bytes / 1_000_000:.0f} MB) "
+                        f"exceeds the platform cap but split_to_seconds returned only 1 part. "
+                        f"This indicates the split logic failed to divide the video."
+                    )
                 part_seconds = (duration / len(parts)) if duration else None
                 # Decimal MB to match the cap the publisher enforces.
                 part_mb = (size_bytes / len(parts) / 1_000_000) if size_bytes else None

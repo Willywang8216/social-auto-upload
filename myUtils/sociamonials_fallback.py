@@ -40,7 +40,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse, urlunparse
 
 from myUtils import media_pipeline, media_prep, platform_limits
 
@@ -427,6 +427,32 @@ def is_direct_media_url(url: str | None) -> bool:
     if "/file/d/" in parsed.path:
         return False
     return _has_media_suffix(raw)
+
+
+def _normalize_public_url(url: str) -> str:
+    """Percent-encode characters a platform's media fetcher rejects.
+
+    Stored artifacts with a literal space (e.g. ``SFW clip.mp4``) otherwise
+    reach Sociamonials' fetch guard as an invalid URL and fail with
+    'Video URL not accessible after retries'. Only the unsafe characters are
+    encoded, so an already-encoded URL is unchanged.
+    """
+    text = str(url or "").strip()
+    if not text:
+        return text
+    parts = urlparse(text)
+    if not parts.scheme or not parts.netloc:
+        return text
+    return urlunparse(
+        (
+            parts.scheme,
+            parts.netloc,
+            quote(parts.path, safe="/%:@!$&'()*+,;="),
+            parts.params,
+            quote(parts.query, safe="=&%?+:;,/"),
+            quote(parts.fragment, safe=""),
+        )
+    )
 
 
 def _verify_remote_media(url: str, session: Any, *, timeout: float) -> bool:
@@ -1390,10 +1416,14 @@ def publish_via_sociamonials(
                     # nothing to attach.
                     raise SociamonialsFallbackError(f"local media missing: {local}")
             if reference is None and public_url and is_direct_media_url(public_url):
-                if verify_media and not _verify_remote_media(public_url, http, timeout=request_timeout):
-                    warnings.append(f"media url could not be verified: {public_url}")
+                # Normalize the URL (percent-encode spaces etc.) so Sociamonials'
+                # fetch guard can reach it. Without this, a URL with a literal space
+                # fails with 'Video URL not accessible after retries'.
+                normalized_url = _normalize_public_url(public_url)
+                if verify_media and not _verify_remote_media(normalized_url, http, timeout=request_timeout):
+                    warnings.append(f"media url could not be verified: {normalized_url}")
                 else:
-                    reference = public_url
+                    reference = normalized_url
             if reference is None:
                 continue
             if kind == "video":
@@ -1477,6 +1507,18 @@ def publish_via_sociamonials(
         if post_id and effective_delivery_timeout > 0
         else {"state": "unknown", "delivered": None, "error": ""}
     )
+
+    # Check if delivery failed due to URL accessibility issues.
+    # When Sociamonials cannot fetch the video URL, it reports a delivery failure.
+    # Raise a clear error so the caller knows the post was accepted but not delivered.
+    delivery_error = str(delivery.get("error") or "").strip()
+    if delivery.get("delivered") is False and delivery_error:
+        error_lower = delivery_error.lower()
+        if "url" in error_lower and ("not accessible" in error_lower or "not reachable" in error_lower or "cannot fetch" in error_lower):
+            raise SociamonialsFallbackError(
+                f"Sociamonials accepted the post but delivery failed: {delivery_error}. "
+                f"The video URL may be unreachable or require authentication."
+            )
 
     return {
         "ok": True,
