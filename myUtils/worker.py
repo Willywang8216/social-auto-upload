@@ -1930,7 +1930,19 @@ def _download_atomically(destination: Path, download: Callable[[Path], Any]) -> 
 
 
 class MediaRestoreError(RuntimeError):
-    """A required publish media file could not be restored locally."""
+    """A required publish media file could not be restored locally.
+
+    ``retryable`` distinguishes a transient download failure (the mapping
+    exists and the bytes are on the backend, but the fetch failed —
+    network timeout, 503, etc.) from a permanent one (no mapping at all,
+    or the mapping is stale and the object is gone).  The worker's
+    ``_handle_failure`` reads this attribute to decide whether the target
+    should be retried or marked permanently failed.
+    """
+
+    def __init__(self, *args, retryable: bool = True) -> None:
+        super().__init__(*args)
+        self.retryable = retryable
 
 
 def _resolve_file_path(file_ref: str, *, db_path: Path | None = None) -> Path:
@@ -1955,7 +1967,10 @@ def _resolve_file_path(file_ref: str, *, db_path: Path | None = None) -> Path:
         downloaded = _try_download_from_storage(storage_ref, db_path)
         if downloaded is not None and downloaded.is_file():
             return downloaded
-    raise MediaRestoreError(f"Required media is unavailable locally or in storage: {file_ref}")
+    raise MediaRestoreError(
+        f"Required media is unavailable locally or in storage: {file_ref}",
+        retryable=False,
+    )
 
 
 def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
@@ -2020,7 +2035,10 @@ def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
         _logger.warning(
             f"could not restore {file_ref} from remote storage: {exc!r}"
         )
-        raise MediaRestoreError(f"Remote restore failed for {file_ref}: {exc}") from exc
+        raise MediaRestoreError(
+            f"Remote restore failed for {file_ref}: {exc}",
+            retryable=True,
+        ) from exc
 
 
 def _prepared_artifact_local_paths(payload: dict) -> list[Path]:
@@ -2203,13 +2221,17 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             if row is None and is_generated_artifact:
                 row = _generated_record_by_name(p)
         except Exception as exc:
-            raise MediaRestoreError(f"Could not find artifact source record for {local_path}: {exc}") from exc
+            raise MediaRestoreError(
+                f"Could not find artifact source record for {local_path}: {exc}",
+                retryable=False,
+            ) from exc
         try:
             if row is None and is_generated_artifact:
                 row = {"storage_key": None, "storage_backend_id": None, "storage_cdn_url": None, "file_path": str(p)}
             if row is None:
                 raise MediaRestoreError(
-                    f"Artifact {local_path} is missing locally and has no file record"
+                    f"Artifact {local_path} is missing locally and has no file record",
+                    retryable=False,
                 )
 
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -2293,15 +2315,18 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                 # instead of masking it behind the missing-URL message.
                 if last_error is not None:
                     raise MediaRestoreError(
-                        f"Artifact restore failed for {local_path}: {last_error}"
+                        f"Artifact restore failed for {local_path}: {last_error}",
+                        retryable=True,
                     ) from last_error
                 if not _public_https_url(str(artifact.get("public_url") or "")):
                     raise MediaRestoreError(
-                        f"Artifact is missing and has no safe public HTTPS recovery URL: {local_path}"
+                        f"Artifact is missing and has no safe public HTTPS recovery URL: {local_path}",
+                        retryable=False,
                     )
                 raise MediaRestoreError(
                     f"Could not restore artifact {local_path} "
-                    f"(file_record={row['file_path']}): {last_error or 'no usable storage source'}"
+                    f"(file_record={row['file_path']}): {last_error or 'no usable storage source'}",
+                    retryable=False,
                 )
 
         except MediaRestoreError:
@@ -2317,11 +2342,15 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                 f"Could not restore artifact {local_path!r}: after normalisation "
                 f"it resolves to {p}, which could not be found and could not be "
                 f"created ({exc}). The stored path may use a host prefix that "
-                f"does not map onto BASE_DIR ({BASE_DIR})."
+                f"does not map onto BASE_DIR ({BASE_DIR}).",
+                retryable=False,
             ) from exc
         except Exception as exc:
             _logger.exception(f"artifact restore failed for {local_path}")
-            raise MediaRestoreError(f"Artifact restore failed for {local_path}: {exc}") from exc
+            raise MediaRestoreError(
+                f"Artifact restore failed for {local_path}: {exc}",
+                retryable=True,
+            ) from exc
 
 
 def _now_utc_naive() -> datetime:

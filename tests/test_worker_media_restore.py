@@ -689,3 +689,249 @@ class GeneratedArtifactNeverSubstitutesSourceTests(unittest.TestCase):
         with patch.object(worker, "BASE_DIR", self.root):
             worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
         self.assertTrue(source.exists())
+
+
+class ArtifactRestoreFromBackendTests(unittest.TestCase):
+    """An artifact with a file_records row must be downloaded via the backend.
+
+    These tests reproduce the failure behind the 47 missing-media targets:
+    an artifact whose file is absent locally but has a file_records row
+    (storage_key + storage_backend_id) must be downloaded via the backend,
+    size-verified, and placed at the local path BEFORE the publisher runs.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.db_path = self.root / "restore.db"
+        create_table.bootstrap(self.db_path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_file_records_row_triggers_backend_download_and_size_verification(self) -> None:
+        """An artifact whose file is absent locally but has a file_records row
+        (storage_key + storage_backend_id) must be downloaded via the backend,
+        size-verified, and placed at the local path.
+
+        This reproduces the campaign-2514 failure: the file_records row existed
+        with storage_key=campaigns/campaign-2514/...mp4 and storage_backend_id=691,
+        but the publisher still raised 'media file is missing or empty'.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("gdrive", "GDrive", "rclone", "GDrive-willywang8216", "auto", "sau/inbox/generated", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            conn.execute(
+                "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_backend_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                ("watermarked_video.mp4", 140.0, "generated/campaigns/campaign-2514/watermarked_video.mp4",
+                 "campaigns/campaign-2514/watermarked_video.mp4", backend_id),
+            )
+
+        local_path = self.root / "generated" / "campaigns" / "campaign-2514" / "watermarked_video.mp4"
+        payload = {"artifacts": [{"local_path": str(local_path)}]}
+
+        def write_media(backend, storage_key, temporary_path):
+            # Verify the storage_key is correct (endpoint is the actual URL, not the path prefix)
+            assert storage_key == "campaigns/campaign-2514/watermarked_video.mp4"
+            Path(temporary_path).write_bytes(_MP4_FIXTURE)
+
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_pipeline, "GENERATED_MEDIA_ROOT", self.root / "generated"
+        ), patch.object(
+            worker.media_remote_storage, "download_from_backend", side_effect=write_media
+        ) as download:
+            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
+        self.assertTrue(local_path.exists())
+        self.assertEqual(local_path.read_bytes(), _MP4_FIXTURE)
+        download.assert_called_once()
+
+    def test_campaign_artifacts_fallback_with_public_url(self) -> None:
+        """When no file_records row exists but campaign_artifacts has public_url,
+        the restore must use the public URL.
+
+        This covers the campaign-2568 case: campaign_artifacts row exists with
+        public_url set, but no file_records row, so the restore must fall back
+        to the campaign_artifacts.public_url path.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO campaigns (name, profile_id, media_group_id) VALUES (?, ?, ?)",
+                ("Test Campaign", 1, 1),
+            )
+            campaign_id = conn.execute("SELECT id FROM campaigns").fetchone()[0]
+            local_path = self.root / "generated" / "campaigns" / f"campaign-{campaign_id}" / "clip.mp4"
+            conn.execute(
+                "INSERT INTO campaign_artifacts (campaign_id, artifact_kind, local_path, public_url, remote_path)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (campaign_id, "watermarked_video", str(local_path),
+                 "https://cdn.example/clip.mp4", None),
+            )
+
+        payload = {"artifacts": [{"local_path": str(local_path)}]}
+
+        class Response:
+            headers = {}
+            is_redirect = False
+            is_permanent_redirect = False
+            def __enter__(self): return self
+            def __exit__(self, *_args): return None
+            def raise_for_status(self): return None
+            def iter_content(self, chunk_size):
+                yield _MP4_FIXTURE
+
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_pipeline, "GENERATED_MEDIA_ROOT", self.root / "generated"
+        ), patch("requests.get", return_value=Response()) as get:
+            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
+        self.assertTrue(local_path.exists())
+        self.assertEqual(local_path.read_bytes(), _MP4_FIXTURE)
+        get.assert_called_once()
+
+    def test_generated_artifact_restores_from_file_records(self) -> None:
+        """A generated artifact (watermarked_video kind) with a file_records row
+        must restore from the backend, not fall back to source bytes.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("gdrive-generated", "Generated Drive", "rclone", "drive", "auto", "sau/generated", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            conn.execute(
+                "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_backend_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                ("watermarked_video.mp4", 140.0,
+                 "generated/campaigns/campaign-100/watermarked_video.mp4",
+                 "campaigns/campaign-100/watermarked_video.mp4", backend_id),
+            )
+
+        local_path = self.root / "generated" / "campaigns" / "campaign-100" / "watermarked_video.mp4"
+        payload = {"artifacts": [{
+            "local_path": str(local_path),
+            "artifact_kind": "watermarked_video",
+            "source_file_record_id": 999,  # Should NOT be used
+        }]}
+
+        def write_media(backend, storage_key, temporary_path):
+            assert storage_key == "campaigns/campaign-100/watermarked_video.mp4"
+            Path(temporary_path).write_bytes(_MP4_FIXTURE)
+
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_pipeline, "GENERATED_MEDIA_ROOT", self.root / "generated"
+        ), patch.object(
+            worker.media_remote_storage, "download_from_backend", side_effect=write_media
+        ) as download:
+            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
+        self.assertTrue(local_path.exists())
+        self.assertEqual(local_path.read_bytes(), _MP4_FIXTURE)
+        download.assert_called_once()
+
+
+class MediaRestoreErrorRetryableTests(unittest.TestCase):
+    """MediaRestoreError must distinguish retryable vs permanent failures.
+
+    The worker's _handle_failure reads the retryable attribute to decide whether
+    the target should be retried or marked permanently failed. A missing-mapping
+    failure is permanent (retrying won't help), while a transient download
+    failure is retryable (the bytes exist on the backend).
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.db_path = self.root / "restore.db"
+        create_table.bootstrap(self.db_path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_no_mapping_is_permanent(self) -> None:
+        """An artifact with no file_records row and no campaign_artifacts row
+        must raise MediaRestoreError with retryable=False.
+
+        Retrying won't help: there's no mapping to restore from.
+        """
+        local_path = self.root / "videoFile" / "missing.mp4"
+        payload = {"artifacts": [{"local_path": str(local_path)}]}
+
+        with patch.object(worker, "BASE_DIR", self.root):
+            with self.assertRaises(worker.MediaRestoreError) as cm:
+                worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
+        self.assertFalse(cm.exception.retryable)
+        self.assertIn("no file record", str(cm.exception))
+
+    def test_backend_download_failure_is_retryable(self) -> None:
+        """An artifact with a file_records row but a failed backend download
+        must raise MediaRestoreError with retryable=True (transient).
+
+        The bytes exist on the backend (the mapping is valid), but the download
+        failed due to a transient error (network timeout, 503, etc.). Retrying
+        may succeed.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("gdrive", "GDrive", "rclone", "drive", "auto", "sau/videoFile", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            conn.execute(
+                "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_backend_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                ("clip.mp4", 140.0, "videoFile/clip.mp4", "clip.mp4", backend_id),
+            )
+
+        local_path = self.root / "videoFile" / "clip.mp4"
+        payload = {"artifacts": [{"local_path": str(local_path)}]}
+
+        def fail_download(backend, storage_key, temporary_path):
+            raise OSError("connection timeout")
+
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_remote_storage, "download_from_backend", side_effect=fail_download
+        ):
+            with self.assertRaises(worker.MediaRestoreError) as cm:
+                worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
+        self.assertTrue(cm.exception.retryable)
+        self.assertIn("connection timeout", str(cm.exception))
+
+    def test_successful_restore_does_not_raise(self) -> None:
+        """A successful restore must not raise and must place the file."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("gdrive", "GDrive", "rclone", "drive", "auto", "sau/videoFile", "", ""),
+            )
+            backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
+            conn.execute(
+                "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_backend_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                ("clip.mp4", 140.0, "videoFile/clip.mp4", "clip.mp4", backend_id),
+            )
+
+        local_path = self.root / "videoFile" / "clip.mp4"
+        payload = {"artifacts": [{"local_path": str(local_path)}]}
+
+        def write_media(backend, storage_key, temporary_path):
+            Path(temporary_path).write_bytes(_MP4_FIXTURE)
+
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_remote_storage, "download_from_backend", side_effect=write_media
+        ):
+            # Should not raise
+            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+
+        self.assertTrue(local_path.exists())
+        self.assertEqual(local_path.read_bytes(), _MP4_FIXTURE)

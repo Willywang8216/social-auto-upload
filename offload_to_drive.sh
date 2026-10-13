@@ -685,6 +685,81 @@ emit_owed(
 )
 emit_owed(DUE_SOON_SQL, (due_cutoff,))
 
+# Fail-closed invariant: a file referenced by ANY live target (pending,
+# running, retrying) that lacks a verified restore mapping must stay local.
+# Without a mapping the worker cannot pull the bytes back from Drive, so
+# the publisher would fail with 'media file is missing'. A verified mapping
+# is either a file_records row with storage_key+storage_backend_id, or a
+# campaign_artifacts row with public_url or remote_path.
+def has_restore_mapping(local_path: str) -> bool:
+    """Check if a file has a verified restore mapping."""
+    # Check file_records for storage_key+storage_backend_id
+    for marker in ("/videoFile/", "/uploads/", "/generated/"):
+        if marker in local_path:
+            rel = local_path.split(marker, 1)[1]
+            root = marker.strip("/")
+            candidates = (f"{root}/{rel}", f"/app/{root}/{rel}")
+            placeholders = ",".join("?" for _ in candidates)
+            row = conn.execute(
+                f"SELECT 1 FROM file_records WHERE file_path IN ({placeholders}) "
+                f"AND storage_key IS NOT NULL AND storage_backend_id IS NOT NULL",
+                candidates,
+            ).fetchone()
+            if row:
+                return True
+            break
+    # Check campaign_artifacts for public_url/remote_path
+    row = conn.execute(
+        "SELECT 1 FROM campaign_artifacts WHERE local_path = ? "
+        "AND (public_url IS NOT NULL OR remote_path IS NOT NULL)",
+        (local_path,),
+    ).fetchone()
+    if row:
+        return True
+    return False
+
+def emit_file_ref_if_unmapped(ref: str) -> None:
+    """Emit a file_ref only if it lacks a verified restore mapping."""
+    ref = (ref or "").strip()
+    if not ref or ref.startswith("campaign_post:"):
+        return
+    if has_restore_mapping(ref):
+        return
+    emit_file_ref(ref)
+
+def emit_media_path_if_unmapped(local_path: str) -> None:
+    """Emit a media path only if it lacks a verified restore mapping."""
+    if not local_path or has_restore_mapping(local_path):
+        return
+    for marker in ("/videoFile/", "/uploads/", "/generated/"):
+        if marker in local_path:
+            emit(local_path.split(marker, 1)[1])
+            return
+
+# 5: far-future pending targets' files without a verified restore mapping.
+# These are NOT covered by the due-soon exclusion, but the worker cannot
+# restore them without a mapping, so they must stay local.
+for payload_json, file_ref in conn.execute(
+    """
+    SELECT j.payload_json, t.file_ref FROM publish_jobs j
+    JOIN publish_job_targets t ON t.job_id = j.id
+    WHERE t.status IN ('pending', 'running', 'retrying')
+    """
+):
+    emit_file_ref_if_unmapped(file_ref)
+    try:
+        data = json.loads(payload_json)
+    except Exception:
+        continue
+    for artifact in data.get("artifacts") or []:
+        local_path = artifact.get("local_path") or ""
+        if local_path:
+            emit_media_path_if_unmapped(local_path)
+    for ref in data.get("threadFileRefs") or []:
+        if isinstance(ref, str) and ref:
+            emit_media_path_if_unmapped(ref)
+            emit_file_ref_if_unmapped(ref)
+
 # 3 + 4: unrecorded files, and the _library tree the Reddit tool walks.
 recorded = set()
 for (file_path,) in conn.execute("SELECT file_path FROM file_records"):

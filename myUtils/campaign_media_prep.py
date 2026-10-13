@@ -110,6 +110,32 @@ def _load_storage_backend_by_id(backend_id: int, *, db_path: Path) -> dict | Non
     return dict(row) if row else None
 
 
+def _resolve_backend_id_for_artifact(
+    remote_artifact,
+    *,
+    db_path: Path,
+) -> int | None:
+    """Look up the ``storage_backends.id`` that matches a ``RemoteArtifact``.
+
+    The ``upload_artifact`` dispatch returns a :class:`RemoteArtifact` whose
+    ``remote_name`` identifies the backend (``"share"``, ``"do_spaces"``, or
+    an rclone remote name). Matching by provider slug or bucket gives the
+    row id the restore path needs to download through the right backend.
+    """
+    remote_name = getattr(remote_artifact, "remote_name", None)
+    if not remote_name:
+        return None
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        # rclone remotes store the remote name in ``bucket``; share/DO Spaces
+        # use a provider slug. Try both.
+        row = conn.execute(
+            "SELECT id FROM storage_backends WHERE bucket = ? OR slug = ? LIMIT 1",
+            (remote_name, remote_name),
+        ).fetchone()
+    return int(row["id"]) if row else None
+
+
 def _download_file_from_storage(file_path: str, *, db_path: Path) -> Path | None:
     """Download a file from storage if it has a storage_key or CDN URL. Returns local path or None."""
     with sqlite3.connect(db_path) as conn:
@@ -576,6 +602,7 @@ def prepare_campaign_media_artifacts(
                 artifact_subdir="videos" if _is_video_file(remote_source) else "images",
             )
             public_url = remote_artifact.public_url
+            _backend_id = _resolve_backend_id_for_artifact(remote_artifact, db_path=db_path)
             campaign_store.add_campaign_artifact(
                 campaign_id,
                 source_file_record_id=media_file["file_record_id"],
@@ -583,6 +610,7 @@ def prepare_campaign_media_artifacts(
                 local_path=str(remote_source),
                 public_url=remote_artifact.public_url,
                 remote_path=remote_artifact.remote_path,
+                storage_backend_id=_backend_id,
                 metadata={"role": media_file["role"]},
                 db_path=db_path,
             )
@@ -593,6 +621,7 @@ def prepare_campaign_media_artifacts(
                     artifact_subdir="videos" if _is_video_file(source_path) else "images",
                 )
                 raw_public_url = raw_remote_artifact.public_url
+                _raw_backend_id = _resolve_backend_id_for_artifact(raw_remote_artifact, db_path=db_path)
                 campaign_store.add_campaign_artifact(
                     campaign_id,
                     source_file_record_id=media_file["file_record_id"],
@@ -600,6 +629,7 @@ def prepare_campaign_media_artifacts(
                     local_path=str(source_path),
                     public_url=raw_remote_artifact.public_url,
                     remote_path=raw_remote_artifact.remote_path,
+                    storage_backend_id=_raw_backend_id,
                     metadata={"role": media_file["role"]},
                     db_path=db_path,
                 )
@@ -779,6 +809,7 @@ def prepare_campaign_media_artifacts(
                                 "media split remote upload failed for campaign %d: %s",
                                 campaign_id, exc,
                             )
+                    part_backend_id = _resolve_backend_id_for_artifact(part_remote, db_path=db_path) if part_remote else None
                     campaign_store.add_campaign_artifact(
                         campaign_id,
                         source_file_record_id=media_file["file_record_id"],
@@ -786,6 +817,7 @@ def prepare_campaign_media_artifacts(
                         local_path=str(part),
                         public_url=part_public,
                         remote_path=getattr(part_remote, "remote_path", None) if part_remote else None,
+                        storage_backend_id=part_backend_id,
                         metadata={
                             "role": media_file["role"],
                             "max_duration_seconds": part_seconds,

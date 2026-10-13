@@ -72,6 +72,7 @@ class CampaignArtifact:
     local_path: str | None = None
     public_url: str | None = None
     remote_path: str | None = None
+    storage_backend_id: int | None = None
     metadata: dict | None = None
     created_at: str | None = None
 
@@ -151,6 +152,11 @@ def _row_to_campaign(row: sqlite3.Row) -> Campaign:
 
 
 def _row_to_campaign_artifact(row: sqlite3.Row) -> CampaignArtifact:
+    storage_backend_id = None
+    try:
+        storage_backend_id = row["storage_backend_id"]
+    except (IndexError, KeyError):
+        pass
     return CampaignArtifact(
         id=row["id"],
         campaign_id=row["campaign_id"],
@@ -159,6 +165,7 @@ def _row_to_campaign_artifact(row: sqlite3.Row) -> CampaignArtifact:
         local_path=row["local_path"],
         public_url=row["public_url"],
         remote_path=row["remote_path"],
+        storage_backend_id=storage_backend_id,
         metadata=_json_load(row["metadata_json"], {}),
         created_at=row["created_at"],
     )
@@ -714,6 +721,7 @@ def add_campaign_artifact(
     local_path: str | None = None,
     public_url: str | None = None,
     remote_path: str | None = None,
+    storage_backend_id: int | None = None,
     metadata: dict | None = None,
     db_path: Path | None = None,
 ) -> CampaignArtifact:
@@ -752,9 +760,10 @@ def add_campaign_artifact(
                 local_path,
                 public_url,
                 remote_path,
+                storage_backend_id,
                 metadata_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 campaign_id,
@@ -763,6 +772,7 @@ def add_campaign_artifact(
                 local_path,
                 public_url,
                 remote_path,
+                storage_backend_id,
                 json.dumps(metadata or {}, ensure_ascii=False),
             ),
         )
@@ -855,6 +865,82 @@ def list_campaign_artifacts(
         query += " AND artifact_kind = ?"
         params.append(artifact_kind)
     query += " ORDER BY id"
+    with _connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [_row_to_campaign_artifact(row) for row in rows]
+
+
+def update_campaign_artifact_mapping(
+    artifact_id: int,
+    *,
+    public_url: str | None | object = _UNSET,
+    remote_path: str | None | object = _UNSET,
+    storage_backend_id: int | None | object = _UNSET,
+    db_path: Path | None = None,
+) -> CampaignArtifact:
+    """Set restore-mapping fields on an existing campaign artifact.
+
+    Used by the repair script to backfill a restorable mapping on an artifact
+    whose bytes exist on Drive or locally but whose row was created without one.
+    Only the supplied fields are updated; the rest are left untouched.
+    """
+    sets: list[str] = []
+    params: list[object] = []
+    if public_url is not _UNSET:
+        sets.append("public_url = ?")
+        params.append(public_url)
+    if remote_path is not _UNSET:
+        sets.append("remote_path = ?")
+        params.append(remote_path)
+    if storage_backend_id is not _UNSET:
+        sets.append("storage_backend_id = ?")
+        params.append(storage_backend_id)
+    if not sets:
+        return get_campaign_artifact(artifact_id, db_path=db_path)
+    params.append(artifact_id)
+    with _connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE campaign_artifacts SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+        conn.commit()
+    return get_campaign_artifact(artifact_id, db_path=db_path)
+
+
+def list_artifacts_without_mapping(
+    *,
+    campaign_id: int | None = None,
+    db_path: Path | None = None,
+) -> list[CampaignArtifact]:
+    """Artifacts with a ``local_path`` but no restorable mapping.
+
+    An artifact is unmapped when it has a ``local_path`` but neither a
+    ``file_records`` row (via ``source_file_record_id`` pointing at a row with
+    ``storage_key`` + ``storage_backend_id``) nor its own ``public_url`` /
+    ``remote_path`` on the ``campaign_artifacts`` row. These are the artifacts
+    the restore cannot reach.
+    """
+    query = """
+        SELECT ca.*
+        FROM campaign_artifacts ca
+        WHERE ca.local_path IS NOT NULL
+          AND ca.public_url IS NULL
+          AND ca.remote_path IS NULL
+          AND (
+              ca.source_file_record_id IS NULL
+              OR NOT EXISTS (
+                  SELECT 1 FROM file_records fr
+                  WHERE fr.id = ca.source_file_record_id
+                    AND fr.storage_key IS NOT NULL
+                    AND fr.storage_backend_id IS NOT NULL
+              )
+          )
+    """
+    params: list[object] = []
+    if campaign_id is not None:
+        query += " AND ca.campaign_id = ?"
+        params.append(campaign_id)
+    query += " ORDER BY ca.id"
     with _connect(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
     return [_row_to_campaign_artifact(row) for row in rows]
