@@ -1633,6 +1633,18 @@ def _backfill_artifact_public_urls(artifacts: list, db_path) -> None:
                 candidates = by_source.get(artifact.get("source_file_record_id")) or []
                 if not candidates:
                     continue
+                # Only a sibling for the SAME FILE may supply the URL. Matching
+                # on source_file_record_id alone let a part artifact inherit
+                # the full video's URL, so the publisher fetched the wrong
+                # (404) object instead of the local part.
+                wanted_name = _Path(str(artifact.get("local_path") or "")).name
+                if wanted_name:
+                    candidates = [
+                        c for c in candidates
+                        if _Path(str(c.get("local_path") or "")).name == wanted_name
+                    ]
+                if not candidates:
+                    continue
                 # Prefer a sibling whose artifact_kind matches this one (the
                 # watermarked upload for a watermarked payload), else any.
                 kind = artifact.get("artifact_kind")
