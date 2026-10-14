@@ -33,6 +33,7 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from utils.conf_defaults import BASE_DIR
 from myUtils import jobs
+from myUtils import bundle_social
 from myUtils import campaign_prep
 from myUtils import campaigns as campaign_store
 from myUtils import media_remote_storage
@@ -105,6 +106,23 @@ def _x_direct_publish_enabled() -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return not sociamonials_fallback.is_enabled()
+
+
+def _reddit_direct_publish_enabled() -> bool:
+    """Whether the direct Reddit OAuth path should run before bundle.social.
+
+    Reddit revoked the API credentials for both configured accounts, so every
+    direct submit is now a guaranteed 401. When bundle.social is configured and
+    this is unset, skip the doomed direct path and hand Reddit straight to
+    bundle.social (its own Reddit OAuth app for the same account). Set
+    ``SAU_REDDIT_DIRECT_PUBLISH=1`` once the credentials are restored.
+    """
+    raw = str(os.environ.get("SAU_REDDIT_DIRECT_PUBLISH", "")).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return not bundle_social.is_enabled()
 
 
 def _content_guard_error(payload: dict, target: "jobs.Target", db_path: Path) -> str | None:
@@ -1097,6 +1115,29 @@ class PublishWorker:
                         self._alert_publish_failure(target, message)
                     self._maybe_close_job_sink(target.job_id)
                     return
+                if job.platform == "reddit" and not _reddit_direct_publish_enabled():
+                    # Reddit revoked the API credentials for both accounts, so the
+                    # direct path is a guaranteed 401. bundle.social holds its own
+                    # Reddit OAuth app for the same account, so go straight there.
+                    log.info(
+                        "Reddit direct publish disabled; using bundle.social fallback"
+                    )
+                    if await self._try_bundle_social_fallback(
+                        target, "Reddit direct publish disabled", log
+                    ):
+                        self._maybe_close_job_sink(target.job_id)
+                        return
+                    message = (
+                        "Reddit direct publish disabled and the bundle.social "
+                        "fallback failed"
+                    )
+                    if jobs.mark_target_failed(
+                        target.id, message, db_path=self._db_path
+                    ):
+                        log.error(f"target failed: {message}")
+                        self._alert_publish_failure(target, message)
+                    self._maybe_close_job_sink(target.job_id)
+                    return
                 result = self._executor(job.platform, payload, target)
                 if inspect.isawaitable(result):
                     outcome = await asyncio.wait_for(
@@ -1515,6 +1556,222 @@ class PublishWorker:
         else:
             log.info(
                 "sociamonials fallback delivered, but the target was already "
+                "transitioned (cancel race); counters left untouched"
+            )
+        return transitioned
+
+    async def _try_bundle_social_fallback(
+        self, target: jobs.Target, message: str, log, *, only_platform: str | None = None
+    ) -> bool:
+        """Publish a Reddit target through bundle.social. Best-effort.
+
+        bundle.social holds its own Reddit OAuth app for the same account, so it
+        is how Reddit posts continue while the direct credentials are dead. Every
+        subreddit rule is enforced before a submit (see myUtils/bundle_social.py)
+        and the organization's monthly post cap is respected. Returns ``True``
+        only when at least one post was accepted; never raises into the loop.
+        """
+        if not bundle_social.is_enabled():
+            return False
+        try:
+            job = jobs.get_job(target.job_id, db_path=self._db_path)
+        except Exception:  # noqa: BLE001 - a missing job only costs context
+            return False
+        if only_platform and str(job.platform or "").strip().lower() != only_platform:
+            return False
+        payload = dict(job.payload or {})
+        payload["_db_path"] = str(self._db_path)
+
+        try:
+            sau_account = _resolve_structured_account(
+                target.account_ref, db_path=self._db_path
+            )
+        except Exception as exc:  # noqa: BLE001 - never raise into the loop
+            log.info(
+                f"bundle.social fallback skipped: account lookup failed for "
+                f"{target.account_ref} ({_scrub_secrets(str(exc))})"
+            )
+            return False
+        if sau_account is None:
+            log.info("bundle.social fallback skipped: account could not be resolved")
+            return False
+
+        # The direct path restores offloaded media in default_executor, but the
+        # Reddit shortcut skips the executor, so restore here exactly as the
+        # Sociamonials fallback does - and refuse to submit if a declared local
+        # artifact is still missing rather than uploading a URL that may be dead.
+        restore_error: Exception | None = None
+        try:
+            await asyncio.to_thread(
+                _ensure_artifact_paths_local, payload, db_path=self._db_path
+            )
+        except Exception as exc:  # noqa: BLE001 - a restore miss is not a crash
+            restore_error = exc
+            log.info(
+                f"bundle.social fallback media restore failed: "
+                f"{_scrub_secrets(str(exc))}"
+            )
+        if restore_error is not None:
+            still_missing = [
+                str(a.get("local_path"))
+                for a in (payload.get("artifacts") or [])
+                if isinstance(a, dict)
+                and a.get("local_path")
+                and not _resolve_media_path(str(a["local_path"])).exists()
+            ]
+            if still_missing:
+                raise MediaRestoreError(
+                    "bundle.social fallback could not materialise local media "
+                    f"({len(still_missing)} file(s)); retrying",
+                    retryable=True,
+                ) from restore_error
+        for _artifact in payload.get("artifacts") or []:
+            if isinstance(_artifact, dict) and _artifact.get("public_url"):
+                _artifact["public_url"] = _normalise_artifact_url(
+                    str(_artifact["public_url"])
+                )
+
+        config = dict(sau_account.config or {})
+        draft = payload.get("draft") or {}
+        try:
+            title = prepared_publishers._message_title(payload)
+        except Exception:  # noqa: BLE001 - a fallback title is better than none
+            title = str(draft.get("title") or "Campaign post").strip()
+        try:
+            body = prepared_publishers._payload_message(payload)
+        except Exception:  # noqa: BLE001
+            body = str(draft.get("message") or "").strip()
+
+        account_subs = prepared_publishers._as_subreddit_list(config.get("subreddits"))
+        draft_subs = prepared_publishers._as_subreddit_list(draft.get("subreddits"))
+        if account_subs:
+            allowed = {s.lower().lstrip("r/") for s in account_subs}
+            narrowed = [s for s in draft_subs if s.lower().lstrip("r/") in allowed]
+            subreddits = narrowed or account_subs
+        else:
+            subreddits = draft_subs
+        if not subreddits:
+            log.info("bundle.social fallback skipped: the account has no subreddits")
+            return False
+
+        media = prepared_publishers._extract_media(payload)
+        media_kind: str | None = None
+        media_path = media_url = None
+        item = None
+        if media.get("videos"):
+            media_kind = "video"
+            item = media["videos"][0]
+        elif media.get("images"):
+            media_kind = "image"
+            item = media["images"][0]
+        if item:
+            media_path = item.get("local_path")
+            media_url = item.get("public_url")
+
+        from myUtils import subreddits as _subreddits
+
+        registry = _subreddits.get_registry()
+        content_kind = prepared_publishers._reddit_content_kind(media)
+        monetised = bool(config.get("monetised") or config.get("adultBrand") or True)
+        strict = str(os.environ.get("SAU_SUBREDDIT_STRICT", "1")).strip().lower() not in (
+            "0", "false", "no", "off", "",
+        )
+        try:
+            channels = bundle_social.reddit_channels(
+                bundle_social.get_reddit_account()
+            )
+        except bundle_social.BundleSocialError as exc:
+            log.warning(
+                f"bundle.social fallback failed: {_scrub_secrets(str(exc))}"
+            )
+            return False
+
+        eligible: list[str] = []
+        blocked: list[str] = []
+        for sub in subreddits:
+            reason = registry.denial_reason(
+                sub,
+                content_kind=content_kind,
+                monetised=monetised,
+                title=title,
+                require_known=strict,
+            )
+            if reason:
+                blocked.append(f"r/{sub}: {reason}")
+                continue
+            denial = bundle_social.subreddit_denial(channels, sub, media_kind=media_kind)
+            if denial:
+                blocked.append(denial)
+                continue
+            eligible.append(sub)
+        if blocked:
+            log.info("bundle.social fallback skipped subreddits: " + " | ".join(blocked))
+        if not eligible:
+            return False
+
+        budget = min(
+            bundle_social.max_subreddits_per_target(),
+            bundle_social.remaining_posts(),
+        )
+        if budget <= 0:
+            log.warning(
+                "bundle.social fallback skipped: monthly post quota reached "
+                f"({bundle_social.monthly_post_cap()}/month)"
+            )
+            return False
+
+        posted: list[dict] = []
+        errors: list[str] = []
+        for sub in eligible[:budget]:
+            flair_raw = prepared_publishers._reddit_flair_id(payload, config, sub)
+            flair_id = str(flair_raw).strip() or None
+            try:
+                result = await asyncio.to_thread(
+                    bundle_social.publish_reddit_post,
+                    subreddit=sub,
+                    title=title,
+                    body=body,
+                    media_path=media_path,
+                    media_url=media_url,
+                    media_kind=media_kind,
+                    flair_id=flair_id,
+                    nsfw=True,
+                    reference=bundle_social.reference_key(target.id, sub),
+                )
+                posted.append(result)
+            except bundle_social.BundleSocialQuotaError as exc:
+                errors.append(str(exc))
+                break
+            except bundle_social.BundleSocialRuleError as exc:
+                errors.append(f"r/{sub}: {exc}")
+                continue
+            except bundle_social.BundleSocialError as exc:
+                if getattr(exc, "retryable", False):
+                    raise MediaRestoreError(
+                        "bundle.social fallback could not complete the upload: "
+                        f"{_scrub_secrets(str(exc))}",
+                        retryable=True,
+                    ) from exc
+                errors.append(f"r/{sub}: {_scrub_secrets(str(exc))}")
+                continue
+        if not posted:
+            if errors:
+                log.warning(
+                    "bundle.social fallback posted nothing: " + " | ".join(errors)
+                )
+            return False
+
+        transitioned = jobs.mark_target_success(target.id, db_path=self._db_path)
+        if transitioned:
+            log.info(
+                "delivered via bundle.social fallback (post_ids="
+                f"{[p.get('post_id') for p in posted]}, subreddits="
+                f"{[p.get('subreddit') for p in posted]}); the direct publish "
+                f"had failed with: {message}"
+            )
+        else:
+            log.info(
+                "bundle.social fallback delivered, but the target was already "
                 "transitioned (cancel race); counters left untouched"
             )
         return transitioned
