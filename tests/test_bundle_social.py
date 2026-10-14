@@ -167,6 +167,7 @@ def test_publish_creates_flaired_post_with_upload(monkeypatch, tmp_path):
         media_kind="video",
         flair_id="flair-xyz",
         reference="sau-reddit-9-body",
+        verify_delivery=False,
         session=session,
     )
     assert result["post_id"] == "post-1"
@@ -200,6 +201,70 @@ def test_publish_is_idempotent_by_reference_key(monkeypatch):
     assert result["deduplicated"] is True
     assert result["post_id"] == "old-post"
     assert not [c for c in session.calls if c[0] == "POST"]
+
+
+def test_delivery_error_after_acceptance_is_a_failure(monkeypatch):
+    """A 200 from create is 'accepted', not 'published'.
+
+    Reddit rejects the post seconds later (RD:SUBREDDIT_NOTALLOWED); reporting
+    success on the 200 told the operator a post was live when nothing landed.
+    """
+    monkeypatch.setattr(
+        bs, "reddit_channels",
+        lambda account: _channels(Body={"allowVideos": True}),
+    )
+    monkeypatch.setattr(bs, "get_reddit_account", lambda **k: {"username": "u"})
+    monkeypatch.setattr(bs, "remaining_posts", lambda **k: 20)
+    monkeypatch.setattr(bs, "get_post_by_reference_key", lambda *a, **k: None)
+
+    def handler(method, url, kwargs):
+        if method == "POST" and url.endswith("/api/v1/post/"):
+            return FakeResponse(200, {"id": "p1", "status": "SCHEDULED"})
+        if method == "GET" and url.endswith("/api/v1/post/p1"):
+            return FakeResponse(
+                200,
+                {
+                    "id": "p1",
+                    "status": "ERROR",
+                    "errorsVerbose": {
+                        "REDDIT": {
+                            "code": "RD:SUBREDDIT_NOTALLOWED",
+                            "errorMessage": "trusted members only",
+                        }
+                    },
+                },
+            )
+        return FakeResponse(200, {})
+
+    with pytest.raises(bs.BundleSocialDeliveryError) as excinfo:
+        bs.publish_reddit_post(
+            subreddit="Body",
+            title="t",
+            media_kind=None,
+            reference="sau-reddit-9-body",
+            session=FakeSession(handler),
+        )
+    assert "SUBREDDIT_NOTALLOWED" in str(excinfo.value)
+    assert excinfo.value.retryable is False
+
+
+def test_delivery_posted_returns_the_final_status(monkeypatch):
+    monkeypatch.setattr(bs, "reddit_channels", lambda account: _channels(Body={"allowVideos": True}))
+    monkeypatch.setattr(bs, "get_reddit_account", lambda **k: {"username": "u"})
+    monkeypatch.setattr(bs, "remaining_posts", lambda **k: 20)
+    monkeypatch.setattr(bs, "get_post_by_reference_key", lambda *a, **k: None)
+
+    def handler(method, url, kwargs):
+        if method == "POST" and url.endswith("/api/v1/post/"):
+            return FakeResponse(200, {"id": "p2", "status": "SCHEDULED"})
+        if method == "GET" and url.endswith("/api/v1/post/p2"):
+            return FakeResponse(200, {"id": "p2", "status": "POSTED"})
+        return FakeResponse(200, {})
+
+    result = bs.publish_reddit_post(
+        subreddit="Body", title="t", media_kind=None, session=FakeSession(handler)
+    )
+    assert result["status"] == "POSTED"
 
 
 def test_publish_refuses_video_to_a_video_less_channel(monkeypatch):

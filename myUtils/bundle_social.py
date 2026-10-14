@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -73,6 +74,16 @@ class BundleSocialRuleError(BundleSocialError):
 
 class BundleSocialQuotaError(BundleSocialError):
     """The monthly post quota is exhausted. Do not retry this month."""
+
+
+class BundleSocialDeliveryError(BundleSocialError):
+    """bundle.social accepted the post but the platform then refused it.
+
+    "Accepted" is not "published": create returns 200 and the platform only
+    reports the real outcome seconds later (``status=ERROR`` with a Reddit code
+    such as ``RD:SUBREDDIT_NOTALLOWED`` or ``RD:403``). Treating the 200 as
+    success is how an operator is told a post is live when nothing landed.
+    """
 
 
 # --------------------------------------------------------------------------- #
@@ -377,6 +388,58 @@ def get_post_by_reference_key(key: str, *, session: Any = None) -> dict[str, Any
     except Exception:  # noqa: BLE001
         return None
     return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def get_post(post_id: str, *, session: Any = None) -> dict[str, Any]:
+    payload = _request("GET", f"/api/v1/post/{post_id}", session=session)
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def delivery_status(post: Mapping[str, Any]) -> str:
+    return str(post.get("status") or "").upper()
+
+
+def delivery_error_detail(post: Mapping[str, Any]) -> str:
+    """A short, human-readable reason from a failed bundle.social post."""
+    verbose = post.get("errorsVerbose") or {}
+    if isinstance(verbose, Mapping):
+        for platform, detail in verbose.items():
+            if isinstance(detail, Mapping):
+                code = str(detail.get("code") or "")
+                message = str(
+                    detail.get("errorMessage")
+                    or detail.get("userFacingMessage")
+                    or ""
+                )
+                if code or message:
+                    return f"{platform}: {code} {message}".strip()
+    errors = post.get("errors") or {}
+    if isinstance(errors, Mapping) and errors:
+        return "; ".join(f"{k}: {v}" for k, v in errors.items())
+    return "unknown delivery error"
+
+
+def wait_for_delivery(
+    post_id: str,
+    *,
+    timeout: float | None = None,
+    interval: float | None = None,
+    session: Any = None,
+) -> dict[str, Any]:
+    """Poll until the post is POSTED/ERROR/DELETED, or the budget runs out."""
+    if timeout is None:
+        timeout = float(os.environ.get("SAU_BUNDLE_SOCIAL_DELIVERY_TIMEOUT", "300"))
+    if interval is None:
+        interval = float(os.environ.get("SAU_BUNDLE_SOCIAL_POLL_INTERVAL", "6"))
+    deadline = time.monotonic() + max(0.0, timeout)
+    last: dict[str, Any] = {}
+    while True:
+        last = get_post(post_id, session=session)
+        if delivery_status(last) in {"POSTED", "ERROR", "DELETED"}:
+            return last
+        if time.monotonic() >= deadline:
+            return last
+        time.sleep(max(0.5, interval))
 
 
 # --------------------------------------------------------------------------- #
@@ -691,6 +754,7 @@ def publish_reddit_post(
     scheduled_at: str | None = None,
     team_id: str | None = None,
     account: Mapping[str, Any] | None = None,
+    verify_delivery: bool = True,
     session: Any = None,
 ) -> dict[str, Any]:
     """Enforce every rule, then submit. Raises on any violation.
@@ -765,8 +829,29 @@ def publish_reddit_post(
         reference=reference,
         session=session,
     )
+    post_id = str(result.get("id") or "")
+    if verify_delivery and post_id:
+        # A 200 from create means *accepted*, not published. Reddit decides
+        # seconds later and reports errors on the post (RD:SUBREDDIT_NOTALLOWED,
+        # RD:403 media, ...). Poll so a rejected post is a failure, never a
+        # phantom success.
+        final = wait_for_delivery(post_id, session=session)
+        state = delivery_status(final)
+        if state == "ERROR":
+            raise BundleSocialDeliveryError(
+                "bundle.social accepted the post but the platform refused it: "
+                f"{delivery_error_detail(final)}",
+                retryable=False,
+            )
+        return {
+            "post_id": post_id,
+            "status": state or str(result.get("status") or status).upper(),
+            "subreddit": normalize_subreddit(subreddit),
+            "flair_id": flair_id,
+            "upload_ids": upload_ids,
+        }
     return {
-        "post_id": result.get("id"),
+        "post_id": post_id,
         "status": str(result.get("status") or status).upper(),
         "subreddit": normalize_subreddit(subreddit),
         "flair_id": flair_id,
