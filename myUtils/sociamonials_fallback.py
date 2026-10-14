@@ -1311,6 +1311,7 @@ def publish_via_sociamonials(
     timeout: float | None = None,
     verify_media: bool = True,
     delivery_timeout: float | None = None,
+    idempotency_suffix: str | None = None,
 ) -> dict[str, Any]:
     """Publish one exhausted target through Sociamonials.
 
@@ -1383,7 +1384,16 @@ def publish_via_sociamonials(
     if options.get("title") and network == "yt":
         body["networks"][network]["title"] = options["title"]
     if target_id is not None:
-        body["idempotency_key"] = f"sau-target-{target_id}"
+        # The key must be stable WITHIN one attempt (a retried HTTP call must
+        # not create a second post) but change ACROSS attempts. A fixed
+        # ``sau-target-<id>`` made every retry return the original post, so a
+        # post that Sociamonials had permanently failed to deliver was returned
+        # forever and the target could never recover (observed: post_id
+        # 10689041 on every retry of X target 3391).
+        suffix = str(idempotency_suffix or "").strip()
+        body["idempotency_key"] = (
+            f"sau-target-{target_id}" + (f"-{suffix}" if suffix else "")
+        )
 
     media = collect_media(payload, media_paths)
     if media:

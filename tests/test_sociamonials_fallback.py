@@ -332,6 +332,33 @@ def test_publish_maps_network_and_idempotency_key():
     assert "#naturism" in body["message"]
 
 
+def test_retry_uses_a_new_idempotency_key():
+    """A retry must not return the previously-failed post.
+
+    A fixed key made Sociamonials return the original post on every retry, so a
+    post it had permanently failed to deliver (post_id 10689041) came back
+    forever and X target 3391 could never recover.
+    """
+    session = FakeSession(_posts_handler())
+    account = _Account(77, platform="twitter")
+    for suffix in ("a1-20261013T080000", "a2-20261013T081000"):
+        sm.publish_via_sociamonials(
+            platform="twitter",
+            account=account,
+            payload={"draft": {"message": "Hello"}},
+            target_id=4321,
+            api_key="sm_agent_x",
+            session=session,
+            idempotency_suffix=suffix,
+        )
+    posts = session.calls_for("POST", "/api/v1/posts")
+    keys = [call[2]["json"]["idempotency_key"] for call in posts]
+    assert keys == [
+        "sau-target-4321-a1-20261013T080000",
+        "sau-target-4321-a2-20261013T081000",
+    ]
+
+
 def test_publish_x_moves_links_from_body_to_first_comment():
     session = FakeSession(_posts_handler())
     sm.publish_via_sociamonials(

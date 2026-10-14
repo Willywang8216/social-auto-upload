@@ -1400,6 +1400,12 @@ class PublishWorker:
                 media_paths=media_paths,
                 target_id=target.id,
                 settings=profile_settings,
+                # A retry must create a NEW Sociamonials post; the same key
+                # would return the previously-failed one forever.
+                idempotency_suffix=(
+                    f"a{target.attempts}-"
+                    f"{(target.started_at or 'x').replace(':', '').replace('-', '').replace('T', '')}"
+                ),
             )
         except sociamonials_fallback.SociamonialsNotConfigured as exc:
             log.info(f"sociamonials fallback unavailable: {exc}")
