@@ -632,12 +632,15 @@ def _asset_id(asset: Mapping[str, Any] | None) -> int | None:
 def _reuse_assets_enabled() -> bool:
     """Whether to look for an existing library asset before uploading.
 
-    Defaults on. Set ``SAU_SOCIAMONIALS_REUSE_ASSETS=0`` to force the old
-    upload-every-time behaviour, for example if the workspace's plan does not
-    include library browsing and the extra GET is not wanted.
+    Defaults **off**. Reuse matches a library asset by filename/size, and an
+    asset that was created from a URL import is delivered by Sociamonials from
+    that URL; when the object later moved, delivery failed forever with "Video
+    URL not accessible" (observed on X targets 3391/3399). Uploading the local
+    bytes instead guarantees byte-backed delivery. Set
+    ``SAU_SOCIAMONIALS_REUSE_ASSETS=1`` to re-enable reuse.
     """
     raw = os.environ.get(REUSE_ASSETS_ENV)
-    return True if raw is None else _truthy(raw)
+    return False if raw is None else _truthy(raw)
 
 
 def _asset_preference(asset: Mapping[str, Any]) -> tuple[int, str, int]:

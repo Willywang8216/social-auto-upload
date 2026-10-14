@@ -550,8 +550,9 @@ def test_publish_uploads_local_image(tmp_path):
     assert body["image_urls"] == ["asset://77"]
 
 
-def test_publish_reuses_an_identical_library_asset(tmp_path):
+def test_publish_reuses_an_identical_library_asset(tmp_path, monkeypatch):
     """A file already in the library must not be uploaded a second time."""
+    monkeypatch.setenv(sm.REUSE_ASSETS_ENV, "1")
     image = tmp_path / "pic.jpg"
     image.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
     existing = {
@@ -583,7 +584,8 @@ def test_publish_reuses_an_identical_library_asset(tmp_path):
     assert body["image_urls"] == ["asset://555"]
 
 
-def test_publish_reuses_an_identical_video_asset(tmp_path):
+def test_publish_reuses_an_identical_video_asset(tmp_path, monkeypatch):
+    monkeypatch.setenv(sm.REUSE_ASSETS_ENV, "1")
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"v" * 64)
     existing = {
@@ -1026,3 +1028,11 @@ def test_split_yielding_one_part_falls_back_to_refusal(tmp_path):
         sm.media_pipeline, "probe_video_duration", return_value=222.0
     ), patch.object(sm.media_prep, "split_to_seconds", return_value=[clip]):
         assert sm._split_for_network("tw", str(clip)) is None
+
+
+def test_asset_reuse_is_off_by_default(monkeypatch):
+    """Reuse must be opt-in: a URL-backed reused asset broke delivery."""
+    monkeypatch.delenv(sm.REUSE_ASSETS_ENV, raising=False)
+    assert sm._reuse_assets_enabled() is False
+    monkeypatch.setenv(sm.REUSE_ASSETS_ENV, "1")
+    assert sm._reuse_assets_enabled() is True
