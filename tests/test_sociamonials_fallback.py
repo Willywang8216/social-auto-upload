@@ -901,7 +901,7 @@ def test_publish_uses_the_teaching_workspace(monkeypatch):
     assert result["post_id"] == 9
     assert seen["auth"] == "Bearer teach_key"
     assert seen["body"]["workspace_registration_id"] == 34293
-    assert seen["body"]["networks"] == {"tw": {"profile_refs": ["16087"]}}
+    assert seen["body"]["networks"] == {"tw": {"profile_refs": ["17650"]}}
 
 
 class _FakeLibraryResponse:
@@ -1036,3 +1036,15 @@ def test_asset_reuse_is_off_by_default(monkeypatch):
     assert sm._reuse_assets_enabled() is False
     monkeypatch.setenv(sm.REUSE_ASSETS_ENV, "1")
     assert sm._reuse_assets_enabled() is True
+
+
+def test_account_107_maps_to_the_willytutordev_x_profile():
+    """Regression: the teaching workspace has two X profiles.
+
+    Account 107 was mapped to 16087 (@weiwei_wang0), so its posts would have
+    landed on the wrong X handle. @willytutordev is 17650.
+    """
+    entry = sm.SAU_ACCOUNT_TO_SOCIAMONIALS[107]
+    assert entry["network"] == "tw"
+    assert entry["profile_refs"] == ["17650"]
+    assert entry["name"] == "willytutordev"

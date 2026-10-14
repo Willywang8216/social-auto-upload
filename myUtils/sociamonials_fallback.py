@@ -159,7 +159,11 @@ SAU_ACCOUNT_TO_SOCIAMONIALS: dict[int, dict[str, Any]] = {
     58: {"network": "fb", "profile_refs": ["26317|220114"], "name": "威威教學", **_TEACHING},
     61: {"network": "thrd", "profile_refs": ["1102"], "name": "supercool_bd", **_TEACHING},
     100: {"network": "tiktok", "profile_refs": ["5800"], "name": "weiwei_wang0", **_TEACHING},
-    107: {"network": "tw", "profile_refs": ["16087"], "name": "weiwei_wang0", **_TEACHING},
+    # 107 is @willytutordev. The teaching workspace holds TWO X profiles and this
+    # used to point at 16087 (@weiwei_wang0), so every 107 post went to the wrong
+    # X handle. Verified 2026-10-14 via the Sociamonials list_social_profiles MCP
+    # tool: the connected profile for @willytutordev is 17650.
+    107: {"network": "tw", "profile_refs": ["17650"], "name": "willytutordev", **_TEACHING},
     108: {"network": "yt", "profile_refs": ["11020"], "name": "威威🌞", **_TEACHING},
     125: {"network": "blsk", "profile_refs": ["1278"], "name": "iamwillywang.bsky.social", **_TEACHING},
 }
