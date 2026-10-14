@@ -123,6 +123,54 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
         self.assertEqual(len(targets), 1)
         return targets[0].status
 
+    def test_missing_local_media_is_retryable_not_a_dead_url(self) -> None:
+        """A missed restore must retry, not submit the payload's public URL.
+
+        Submitting the URL is how a transient restore miss became a permanent
+        failure: Sociamonials could not fetch the stale /getFile or R2 link and
+        the post died.
+        """
+        from unittest.mock import MagicMock
+
+        self._enable_fallback()
+        job = jobs.enqueue_job(
+            jobs.JobSpec(
+                platform="twitter",
+                payload={
+                    "campaignId": 1,
+                    "campaignPostId": 1,
+                    "draft": {"message": "hi"},
+                    "artifacts": [
+                        {
+                            "local_path": "/nonexistent/clip.mp4",
+                            "public_url": "https://example.com/clip.mp4",
+                            "artifact_kind": "local",
+                        }
+                    ],
+                },
+                targets=[(f"account:{self.account_id}", "campaign_post:1", None)],
+                profile_id=self.profile_id,
+                idempotency_key="missing-media",
+            ),
+            db_path=self.db_path,
+        )
+        target = jobs.list_targets(job.id, db_path=self.db_path)[0]
+        instance = PublishWorker(lambda *a, **k: None, db_path=self.db_path)
+        with patch.object(
+            worker,
+            "_ensure_artifact_paths_local",
+            side_effect=worker.MediaRestoreError("restore failed", retryable=True),
+        ), patch.object(
+            sociamonials_fallback, "publish_via_sociamonials"
+        ) as publisher:
+            with self.assertRaises(worker.MediaRestoreError):
+                asyncio.run(
+                    instance._try_sociamonials_fallback(
+                        target, "X direct publish disabled", MagicMock()
+                    )
+                )
+        publisher.assert_not_called()
+
     # ------------------------------------------------------------------
     # disabled / non-retryable guards
     # ------------------------------------------------------------------

@@ -1215,9 +1215,21 @@ class PublishWorker:
                     f"permanent failure on {job_platform}; not re-routing to the "
                     "Sociamonials fallback"
                 )
-            elif await self._try_sociamonials_fallback(target, message, log):
-                self._maybe_close_job_sink(target.job_id)
-                return
+            elif True:
+                try:
+                    _fallback_ok = await self._try_sociamonials_fallback(
+                        target, message, log
+                    )
+                except MediaRestoreError as exc:
+                    # The fallback needs the local media; a missed restore is
+                    # handled by the retry loop above, not treated as a crash.
+                    log.warning(
+                        f"sociamonials fallback media not materialised: {exc}"
+                    )
+                    _fallback_ok = False
+                if _fallback_ok:
+                    self._maybe_close_job_sink(target.job_id)
+                    return
             transitioned = jobs.mark_target_failed(
                 target.id, message, db_path=self._db_path
             )
@@ -1233,7 +1245,14 @@ class PublishWorker:
             # deterministic failures (X media-upload 402 / needs-reconnect,
             # Bluesky 413) into delivered posts instead of permanent failures.
             # Opt-in via SAU_SOCIAMONIALS_FALLBACK; see sociamonials_fallback.
-            if await self._try_sociamonials_fallback(target, message, log):
+            try:
+                _fallback_ok = await self._try_sociamonials_fallback(
+                    target, message, log
+                )
+            except MediaRestoreError as exc:
+                log.warning(f"sociamonials fallback media not materialised: {exc}")
+                _fallback_ok = False
+            if _fallback_ok:
                 self._maybe_close_job_sink(target.job_id)
                 return
             transitioned = jobs.mark_target_failed(
@@ -1326,15 +1345,36 @@ class PublishWorker:
         # target whose direct path failed may have had only a partial restore.
         # Without this the fallback dies with "local media missing" even though
         # the bytes are one rclone call away.
+        restore_error: Exception | None = None
         try:
             await asyncio.to_thread(
                 _ensure_artifact_paths_local, payload, db_path=self._db_path
             )
         except Exception as exc:  # noqa: BLE001 — a restore miss is not a crash
+            restore_error = exc
             log.info(
                 "sociamonials fallback media restore failed: "
                 f"{_scrub_secrets(str(exc))}"
             )
+        if restore_error is not None:
+            # A declared local artifact is still missing. Submitting the
+            # payload's public URL instead is how a transient restore miss
+            # became a permanent failure: the URL (a stale /getFile or R2 link)
+            # was not fetchable by Sociamonials and the post died. Retry the
+            # whole target so the restore can be re-attempted.
+            still_missing = [
+                str(a.get("local_path"))
+                for a in (payload.get("artifacts") or [])
+                if isinstance(a, dict)
+                and a.get("local_path")
+                and not _resolve_media_path(str(a["local_path"])).exists()
+            ]
+            if still_missing:
+                raise MediaRestoreError(
+                    "sociamonials fallback could not materialise local media "
+                    f"({len(still_missing)} file(s)); retrying",
+                    retryable=True,
+                ) from restore_error
 
         # Normalise every artifact URL in the payload BEFORE the fallback reads
         # it. _fallback_media_paths() normalises its own output, but
