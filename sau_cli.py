@@ -1009,7 +1009,7 @@ def build_parser() -> argparse.ArgumentParser:
         "article", help="Publish a long-form Article (requires X Premium)"
     )
     x_article_parser.add_argument(
-        "--account", required=True,
+        "--account", default=None,
         help="Cookie file stem, e.g. sexualwill / model_will / nakedhappylife",
     )
     x_article_parser.add_argument(
@@ -1047,8 +1047,11 @@ async def dispatch_x(args: argparse.Namespace) -> int:
 
     if args.cookie:
         cookie_path = Path(args.cookie).expanduser()
-    else:
+    elif args.account:
         cookie_path = resolve_account_file("twitter", args.account, profile=args.profile)
+    else:
+        print("error: provide --cookie or --account", file=sys.stderr)
+        return 2
     if not cookie_path.exists():
         available = sorted(
             str(p)
