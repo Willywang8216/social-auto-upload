@@ -2091,6 +2091,84 @@ class NwSwBlogGitPushTests(unittest.TestCase):
             session=session,
         )
         self.assertTrue(result["private"])
+    def test_bilingual_value_splits_per_locale_on_a_rule(self):
+        """The production shape: both languages joined by a standalone --- line."""
+        joined = "English Title\n---\n中文標題"
+        self.assertEqual(
+            prepared_publishers._nw_sw_blog_localized_parts(joined),
+            ["English Title", "中文標題"],
+        )
+        payload = {"draft": {"title": joined}, "message": "EN body.\n\n---\n\n中文內文。"}
+        self.assertEqual(
+            prepared_publishers._nw_sw_blog_title_for(payload, payload["message"], 0, "en"),
+            "English Title",
+        )
+        self.assertEqual(
+            prepared_publishers._nw_sw_blog_title_for(payload, payload["message"], 1, "zh"),
+            "中文標題",
+        )
+        self.assertEqual(prepared_publishers._nw_sw_blog_localized("one language only", 1), "one language only")
+
+    def test_frontmatter_scalar_never_spans_a_line(self):
+        """The exact regression: a bare --- inside the block truncated the frontmatter."""
+        import yaml
+
+        fm = prepared_publishers._nw_sw_blog_frontmatter(
+            title="English Title\n---\n中文標題",
+            slug="a-slug",
+            persona="sexualwill",
+            description="EN desc\n---\n中文簡介",
+        )
+        lines = fm.splitlines()
+        rules = [i for i, line in enumerate(lines) if line.strip() == "---"]
+        self.assertEqual(rules, [0, len(lines) - 1], f"frontmatter must be one block, got {rules}")
+        parsed = yaml.safe_load("\n".join(lines[1:-1]))
+        # The guard flattens the newlines instead of leaving a line-spanning scalar, so
+        # the value stays one line and nothing is lost. Picking the right language is
+        # _nw_sw_blog_localized's job, exercised by the end-to-end test below.
+        self.assertEqual(parsed["title"], "English Title --- 中文標題")
+        self.assertEqual(parsed["description"], "EN desc --- 中文簡介")
+        self.assertEqual(parsed["persona"], "sexualwill")
+        self.assertEqual(parsed["audience"], "18+")
+
+    def test_publish_rule_joined_metadata_writes_two_parseable_files(self):
+        """End to end on the payload that broke the build."""
+        import yaml
+
+        session = _RecordingSession([
+            _FakeResponse({}, status_code=404),
+            _FakeResponse({"content": {"sha": "e1"}}),
+            _FakeResponse({}, status_code=404),
+            _FakeResponse({"content": {"sha": "z1"}}),
+        ])
+        account = SimpleNamespace(config=self._nwsw_config())
+        prepared_publishers.publish_nw_sw_blog_sync(
+            account,
+            {
+                "draft": {
+                    "title": "English Title\n---\n中文標題",
+                    "description": "EN desc\n---\n中文簡介",
+                    "slug": "english-title",
+                    "locales": "en,zh",
+                },
+                "message": "**English Title**\n\nEN body.\n\n---\n\n**中文標題**\n\n中文內文。",
+            },
+            session=session,
+        )
+        for call_index, expect_title, expect_body in (
+            (1, "English Title", "EN body."),
+            (3, "中文標題", "中文內文。"),
+        ):
+            decoded = base64.b64decode(session.calls[call_index][2]["json"]["content"]).decode("utf-8")
+            lines = decoded.splitlines()
+            rules = [i for i, line in enumerate(lines) if line.strip() == "---"]
+            self.assertEqual(len(rules), 2, f"frontmatter must be one block, got {rules}")
+            parsed = yaml.safe_load("\n".join(lines[rules[0] + 1:rules[1]]))
+            self.assertEqual(parsed["title"], expect_title)
+            self.assertEqual(parsed["slug"], "english-title")
+            self.assertEqual(parsed["translationKey"], "english-title")
+            self.assertIn(expect_body, decoded)
+
 class TelegramMtprotoTests(unittest.TestCase):
     """Routing + behaviour for publishing Telegram as the user account (MTProto)."""
 

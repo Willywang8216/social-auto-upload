@@ -4162,17 +4162,26 @@ def _nw_sw_blog_lang_sections(message: str) -> list[str]:
     then a Markdown horizontal rule alone on its line (``---``), then the
     second-language version.  A single-language body has no standalone rule
     and is returned whole.
+
+    A leading YAML frontmatter block is not a separator. Its own opening ``---`` used to
+    be taken as the split point, which dropped the first section entirely and then fed
+    the second section to both locales.
     """
     if not message:
         return []
-    lines = message.splitlines()
+    text = message
+    if text.lstrip().startswith("---"):
+        parsed_fm, remainder = _parse_frontmatter(text.lstrip())
+        if parsed_fm and remainder.strip():
+            text = remainder
+    lines = text.splitlines()
     split_at = None
     for i, line in enumerate(lines):
         if line.strip() == "---":
             split_at = i
             break
     if split_at is None:
-        return [message.strip()]
+        return [text.strip()]
     first = "\n".join(lines[:split_at]).strip()
     rest = "\n".join(lines[split_at + 1:]).strip()
     sections = [first]
@@ -4182,8 +4191,15 @@ def _nw_sw_blog_lang_sections(message: str) -> list[str]:
 
 
 def _nw_sw_blog_yaml_quote(value: str) -> str:
-    """Quote a scalar for YAML frontmatter, escaping embedded double quotes."""
-    text = str(value or "").strip()
+    """Quote a scalar for YAML frontmatter, escaping embedded double quotes.
+
+    Newlines are folded into single spaces first. A double-quoted YAML scalar must not
+    span lines here: the bilingual builder used to hand over both languages joined by a
+    standalone ``---`` line, and a bare ``---`` inside the block ends the frontmatter
+    early, leaving the value unterminated and the site build failing on
+    "unexpected end of the stream within a double quoted scalar".
+    """
+    text = " ".join(str(value or "").split())
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -4218,18 +4234,60 @@ def _nw_sw_blog_frontmatter(*, title, slug, persona, description="", category=""
     return "\n".join(lines)
 
 
+def _nw_sw_blog_localized_parts(raw: str) -> list[str]:
+    """Split a possibly bilingual scalar into one item per language.
+
+    The bilingual builder has used two separators: a fullwidth ｜ between short fields
+    and a standalone ``---`` rule between whole sections. Both have to be understood,
+    because failing to split leaves two languages inside one frontmatter value.
+    """
+    text = str(raw or "")
+    if not text.strip():
+        return []
+    if any(line.strip() == "---" for line in text.splitlines()):
+        chunks: list[str] = []
+        current: list[str] = []
+        for line in text.splitlines():
+            if line.strip() == "---":
+                chunks.append("\n".join(current))
+                current = []
+            else:
+                current.append(line)
+        chunks.append("\n".join(current))
+        return [chunk.strip() for chunk in chunks if chunk.strip()]
+    return [part.strip() for part in text.split("｜") if part.strip()]
+
+
+def _nw_sw_blog_localized(raw: str, index: int) -> str:
+    """The index-th language of a possibly bilingual scalar, or the value itself."""
+    parts = _nw_sw_blog_localized_parts(raw)
+    if not parts:
+        return ""
+    return parts[min(index, len(parts) - 1)]
+
+
 def _nw_sw_blog_title_for(payload: dict, message: str, index: int, locale: str) -> str:
-    """Pick a title for one locale out of a possibly ｜-separated multi-title string."""
+    """Pick one locale's title.
+
+    A source that carries a separate title per language wins over one that does not, so
+    the second locale never inherits the first locale's title verbatim.
+    """
     draft = payload.get("draft") or {}
-    raw_title = str(draft.get("title") or "").strip()
-    if not raw_title:
-        parsed_fm, _body = _parse_frontmatter(message)
-        raw_title = str(parsed_fm.get("title") or _message_title(payload)).strip()
-    # The bilingual builder separates short fields with "｜".
-    parts = [p.strip() for p in raw_title.split("｜") if p.strip()]
-    if parts and index < len(parts):
-        return parts[index]
-    return raw_title or f"{locale} post"
+    parsed_fm, _body = _parse_frontmatter(message)
+    candidates = [
+        str(draft.get("title") or "").strip(),
+        str(parsed_fm.get("title") or "").strip(),
+        str(_message_title(payload) or "").strip(),
+    ]
+    for raw_title in candidates:
+        parts = _nw_sw_blog_localized_parts(raw_title)
+        if len(parts) > 1:
+            return parts[min(index, len(parts) - 1)]
+    for raw_title in candidates:
+        parts = _nw_sw_blog_localized_parts(raw_title)
+        if parts:
+            return parts[0]
+    return f"{locale} post"
 
 
 def publish_nw_sw_blog_sync(
@@ -4307,7 +4365,10 @@ def publish_nw_sw_blog_sync(
         parsed_fm, parsed_body = _parse_frontmatter(locale_message)
         body = parsed_body or locale_message.strip()
 
-        description = str(draft.get("description") or parsed_fm.get("description") or "").strip()
+        description = _nw_sw_blog_localized(
+            str(draft.get("description") or parsed_fm.get("description") or ""),
+            index,
+        )
         fm = _nw_sw_blog_frontmatter(
             title=title,
             slug=slug,
@@ -4315,7 +4376,10 @@ def publish_nw_sw_blog_sync(
             description=description,
             category=str(parsed_fm.get("category") or category),
             tags=parsed_fm.get("tags") or tags,
-            content_warning=str(parsed_fm.get("contentWarning") or content_warning),
+            content_warning=_nw_sw_blog_localized(
+                str(parsed_fm.get("contentWarning") or content_warning),
+                index,
+            ),
         )
         mdx = f"{fm}\n\n{body}\n"
 
