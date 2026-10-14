@@ -39,3 +39,32 @@ def test_extract_post_id_finds_nested_rest_id():
 
 def test_extract_post_id_ignores_short_ids():
     assert xa._extract_post_id({"data": {"id": "123"}}) is None
+
+
+class _FakeLocator:
+    def __init__(self, count: int) -> None:
+        self._count = count
+
+    @property
+    def first(self):
+        return self
+
+    async def count(self) -> int:
+        return self._count
+
+
+class _FakePage:
+    def __init__(self, counts: dict) -> None:
+        self._counts = counts
+
+    def get_by_text(self, label, exact=True):
+        return _FakeLocator(self._counts.get(label, 0))
+
+
+def test_first_label_async_awaits_count_and_skips_absent_labels():
+    """Regression: an un-awaited Locator.count() is always truthy."""
+    import asyncio
+
+    page = _FakePage({"撰寫": 0, "Write": 1})
+    assert asyncio.run(xa._first_label_async(page, ("撰寫", "Write"))) is not None
+    assert asyncio.run(xa._first_label_async(page, ("Nope",))) is None

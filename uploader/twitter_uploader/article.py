@@ -88,10 +88,16 @@ def parse_article(text: str) -> tuple[str, list[str]]:
     return title, [p for p in paragraphs if p]
 
 
-def _first_label(page: Any, labels: Sequence[str]):
+async def _first_label_async(page: Any, labels: Sequence[str]):
+    """Return a locator for the first label present, or None.
+
+    ``Locator.count`` is a coroutine on the async API, so it must be awaited —
+    testing the coroutine object itself is always truthy and silently picks the
+    wrong button.
+    """
     for label in labels:
         locator = page.get_by_text(label, exact=True)
-        if locator.count():
+        if await locator.count():
             return locator.first
     return None
 
@@ -115,7 +121,7 @@ class XArticlePublisher:
 
     async def _open_editor(self, page: Any) -> None:
         await page.goto(ARTICLES_URL, timeout=60000, wait_until="domcontentloaded")
-        write = _first_label(page, WRITE_LABELS)
+        write = await _first_label_async(page, WRITE_LABELS)
         if write is None:
             raise XArticleError(
                 "the Articles editor is unavailable for this account "
@@ -173,7 +179,7 @@ class XArticlePublisher:
                 await self._open_editor(page)
                 await self._write_article(page, title=title, paragraphs=paragraphs)
 
-                publish = _first_label(page, PUBLISH_LABELS)
+                publish = await _first_label_async(page, PUBLISH_LABELS)
                 if publish is None:
                     raise XArticleError("the Article editor has no Publish button")
                 await publish.click()
