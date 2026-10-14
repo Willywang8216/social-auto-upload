@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -89,6 +90,11 @@ def _env(name: str) -> str | None:
 
 def api_key() -> str | None:
     return _env(API_KEY_ENV)
+
+
+def _now_iso() -> str:
+    """UTC ISO-8601 with milliseconds and a trailing Z, as bundle.social wants."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def api_base() -> str:
@@ -655,10 +661,13 @@ def create_reddit_post(
         "socialAccountTypes": ["REDDIT"],
         "data": {"REDDIT": reddit},
     }
-    if scheduled_at:
-        body_payload["postDate"] = scheduled_at
     if reference:
         body_payload["referenceKey"] = reference[:128]
+    # bundle.social validates ``postDate`` as required whenever the status is
+    # SCHEDULED (a 400 with ``issues:[{path:[postDate],message:Required}]``).
+    # Set it to now when the caller did not schedule, which is the immediate
+    # publish the publisher wants.
+    body_payload["postDate"] = scheduled_at or _now_iso()
     payload = _request("POST", "/api/v1/post/", json_body=body_payload, session=session)
     return dict(payload) if isinstance(payload, Mapping) else {}
 

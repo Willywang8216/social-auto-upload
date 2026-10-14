@@ -180,6 +180,8 @@ def test_publish_creates_flaired_post_with_upload(monkeypatch, tmp_path):
     assert body["data"]["REDDIT"]["uploadIds"] == ["upload-1"]
     assert body["data"]["REDDIT"]["nsfw"] is True
     assert body["referenceKey"] == "sau-reddit-9-body"
+    # SCHEDULED requires postDate or bundle.social rejects with a 400.
+    assert body["postDate"].endswith("Z")
 
 
 def test_publish_is_idempotent_by_reference_key(monkeypatch):
