@@ -1003,7 +1003,84 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max rows in the printed before/after table (default: 40)",
     )
 
+    x_parser = platform_parsers.add_parser("x", help="X (Twitter) operations")
+    x_actions = x_parser.add_subparsers(dest="action", required=True)
+    x_article_parser = x_actions.add_parser(
+        "article", help="Publish a long-form Article (requires X Premium)"
+    )
+    x_article_parser.add_argument(
+        "--account", required=True,
+        help="Cookie file stem, e.g. sexualwill / model_will / nakedhappylife",
+    )
+    x_article_parser.add_argument(
+        "--profile", default=None,
+        help="Profile slug that owns the cookie (e.g. nw or sw)",
+    )
+    x_article_parser.add_argument(
+        "--cookie", default=None,
+        help="Explicit storage_state JSON path (overrides --account/--profile)",
+    )
+    x_article_parser.add_argument(
+        "--file", default=None,
+        help="Article file; a leading '# Title' line (or the first line) is the title",
+    )
+    x_article_parser.add_argument("--title", default=None, help="Article title (overrides the file)")
+    x_article_parser.add_argument("--body", default=None, help="Article body (overrides the file)")
+    x_article_parser.add_argument(
+        "--caption", default=None,
+        help="Post text shown with the article card (defaults to the title)",
+    )
+    x_article_parser.add_argument(
+        "--headful", action="store_true", help="Show the browser (default: headless)"
+    )
+    x_article_parser.add_argument("--json", action="store_true", help="Emit the result as JSON")
+
     return parser
+
+
+async def dispatch_x(args: argparse.Namespace) -> int:
+    """`sau x article` — publish a long-form X Article via the browser."""
+    from uploader.twitter_uploader import article as xa
+
+    if args.action != "article":
+        raise RuntimeError(f"Unsupported x action: {args.action}")
+
+    if args.cookie:
+        cookie_path = Path(args.cookie).expanduser()
+    else:
+        cookie_path = resolve_account_file("twitter", args.account, profile=args.profile)
+    if not cookie_path.exists():
+        available = sorted(
+            str(p)
+            for p in (resolve_runtime_home() / "cookies" / "twitter").glob("*/*.json")
+        )
+        print(
+            f"error: X cookie not found at {cookie_path}\n"
+            f"available: {', '.join(available) or '(none)'}",
+            file=sys.stderr,
+        )
+        return 2
+
+    title = (args.title or "").strip()
+    body: str | list[str] = (args.body or "").strip()
+    if args.file:
+        text = Path(args.file).read_text(encoding="utf-8")
+        parsed_title, paragraphs = xa.parse_article(text)
+        title = title or parsed_title
+        if not body:
+            body = paragraphs
+    if not title or not body:
+        print("error: provide --file, or --title and --body", file=sys.stderr)
+        return 2
+
+    result = await xa.XArticlePublisher(
+        cookie_path, headless=not args.headful
+    ).publish(title=title, body=body, caption=args.caption or title)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"Published article: {result.get('post_url') or result.get('post_id')}")
+    return 0
 
 
 async def dispatch(args: argparse.Namespace) -> int:
@@ -1409,6 +1486,8 @@ async def dispatch(args: argparse.Namespace) -> int:
             return _schedule_shift_command(args)
         raise RuntimeError(f"Unsupported schedule action: {args.action}")
 
+    if args.platform == "x":
+        return await dispatch_x(args)
     raise RuntimeError(f"Unsupported platform: {args.platform}")
 
 

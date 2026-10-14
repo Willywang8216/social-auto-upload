@@ -125,6 +125,18 @@ def _reddit_direct_publish_enabled() -> bool:
     return not bundle_social.is_enabled()
 
 
+def _reddit_publishing_enabled() -> bool:
+    """Whether Reddit targets may publish at all.
+
+    Default on. Set ``SAU_REDDIT_ENABLED=0`` to pause Reddit entirely; the
+    operator did this after the account was restricted at Reddit and neither the
+    direct path nor bundle.social could post. A paused Reddit target fails
+    immediately instead of burning retries or the bundle.social monthly quota.
+    """
+    raw = str(os.environ.get("SAU_REDDIT_ENABLED", "")).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def _content_guard_error(payload: dict, target: "jobs.Target", db_path: Path) -> str | None:
     """Return a reason to refuse publishing this target, or ``None``.
 
@@ -1113,6 +1125,15 @@ class PublishWorker:
                     ):
                         log.error(f"target failed: {message}")
                         self._alert_publish_failure(target, message)
+                    self._maybe_close_job_sink(target.job_id)
+                    return
+                if job.platform == "reddit" and not _reddit_publishing_enabled():
+                    message = (
+                        "Reddit publishing is disabled by the operator "
+                        "(SAU_REDDIT_ENABLED=0)"
+                    )
+                    log.info(message)
+                    jobs.mark_target_failed(target.id, message, db_path=self._db_path)
                     self._maybe_close_job_sink(target.job_id)
                     return
                 if job.platform == "reddit" and not _reddit_direct_publish_enabled():
