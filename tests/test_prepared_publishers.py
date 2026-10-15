@@ -2013,7 +2013,8 @@ class NwSwBlogGitPushTests(unittest.TestCase):
 
     def test_publish_writes_english_file_with_github_api(self):
         session = _RecordingSession([
-            _FakeResponse({}, status_code=404),   # GET existing -> not found
+            _FakeResponse({}, status_code=404),   # probe GET en -> not found
+            _FakeResponse({}, status_code=404),   # probe GET zh -> not found
             _FakeResponse({"content": {"sha": "abc123"}, "commit": {"sha": "def456"}}),  # PUT
         ])
         account = SimpleNamespace(config=self._nwsw_config(persona="nakedwill", locales="en"))
@@ -2028,13 +2029,13 @@ class NwSwBlogGitPushTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["locale"], "en")
         self.assertEqual(results[0]["path"], "content/posts/why-naturism-is-not-exhibitionism.mdx")
-        # GET then PUT to the same contents URL
-        get_call = session.calls[0]
-        put_call = session.calls[1]
-        self.assertEqual(get_call[0], "GET")
-        self.assertEqual(put_call[0], "PUT")
+        # Both locales are probed first, then the requested locale is written.
+        self.assertEqual([c[0] for c in session.calls], ["GET", "GET", "PUT"])
         expected_url = "https://api.github.com/repos/Willywang8216/sexualwill_static/contents/content/posts/why-naturism-is-not-exhibitionism.mdx"
-        self.assertEqual(get_call[1], expected_url)
+        expected_zh_url = "https://api.github.com/repos/Willywang8216/sexualwill_static/contents/content/posts/zh/why-naturism-is-not-exhibitionism.mdx"
+        self.assertEqual(session.calls[0][1], expected_url)
+        self.assertEqual(session.calls[1][1], expected_zh_url)
+        put_call = session.calls[2]
         self.assertEqual(put_call[1], expected_url)
         body = put_call[2]["json"]
         self.assertEqual(body["branch"], "main")
@@ -2045,10 +2046,10 @@ class NwSwBlogGitPushTests(unittest.TestCase):
 
     def test_publish_writes_bilingual_en_and_zh_files(self):
         session = _RecordingSession([
-            _FakeResponse({}, status_code=404),
-            _FakeResponse({"content": {"sha": "e1"}}),
-            _FakeResponse({}, status_code=404),
-            _FakeResponse({"content": {"sha": "z1"}}),
+            _FakeResponse({}, status_code=404),          # probe GET en
+            _FakeResponse({}, status_code=404),          # probe GET zh
+            _FakeResponse({"content": {"sha": "e1"}}),   # PUT en
+            _FakeResponse({"content": {"sha": "z1"}}),   # PUT zh
         ])
         account = SimpleNamespace(config=self._nwsw_config())
         results = prepared_publishers.publish_nw_sw_blog_sync(
@@ -2072,8 +2073,9 @@ class NwSwBlogGitPushTests(unittest.TestCase):
 
     def test_publish_updates_existing_file_when_present(self):
         session = _RecordingSession([
-            _FakeResponse({"sha": "old-sha", "content": ""}),  # GET 200 -> existing
-            _FakeResponse({"content": {"sha": "new-sha"}}),
+            _FakeResponse({"sha": "old-sha", "content": ""}),  # probe GET en -> existing
+            _FakeResponse({}, status_code=404),                # probe GET zh -> none
+            _FakeResponse({"content": {"sha": "new-sha"}}),    # PUT en
         ])
         account = SimpleNamespace(config=self._nwsw_config(locales="en"))
         prepared_publishers.publish_nw_sw_blog_sync(
@@ -2081,8 +2083,104 @@ class NwSwBlogGitPushTests(unittest.TestCase):
             {"draft": {"title": "Existing Post"}, "message": "# Existing\n\nBody"},
             session=session,
         )
-        put_body = session.calls[1][2]["json"]
+        put_body = session.calls[2][2]["json"]
         self.assertEqual(put_body["sha"], "old-sha")
+
+    def test_effective_persona_precedence(self):
+        eff = prepared_publishers._nw_sw_blog_effective_persona
+        existing = '---\npersona: "sexualwill"\n---\n'
+        sibling = '---\npersona: "nakedwill"\n---\n'
+        # explicit draft value wins
+        self.assertEqual(
+            eff(explicit="nakedwill", existing_text=existing, sibling_text=sibling, configured="sexualwill"),
+            "nakedwill",
+        )
+        # then this file's own recorded persona
+        self.assertEqual(
+            eff(explicit="", existing_text=existing, sibling_text=sibling, configured="nakedwill"),
+            "sexualwill",
+        )
+        # then the sibling locale
+        self.assertEqual(
+            eff(explicit="", existing_text="", sibling_text=sibling, configured="sexualwill"),
+            "nakedwill",
+        )
+        # then the account config, which is what a brand-new post gets
+        self.assertEqual(
+            eff(explicit="", existing_text="", sibling_text="", configured="sexualwill"),
+            "sexualwill",
+        )
+        # a bogus recorded persona falls through instead of being trusted
+        self.assertEqual(
+            eff(explicit="", existing_text='---\npersona: "bogus"\n---\n', sibling_text="", configured="nakedwill"),
+            "nakedwill",
+        )
+
+    def test_republish_cannot_flip_an_existing_post_persona(self):
+        """A differently-configured account re-publishing a slug must not move the post."""
+        existing = '---\ntitle: "Existing"\npersona: "sexualwill"\n---\n\nBody.\n'
+        session = _RecordingSession([
+            _FakeResponse({"sha": "en-sha", "content": base64.b64encode(existing.encode()).decode()}),
+            _FakeResponse({}, status_code=404),
+            _FakeResponse({"content": {"sha": "new-en"}}),
+        ])
+        account = SimpleNamespace(config=self._nwsw_config(persona="nakedwill", locales="en"))
+        results = prepared_publishers.publish_nw_sw_blog_sync(
+            account,
+            {"draft": {"title": "Existing", "slug": "existing"}, "message": "Body."},
+            session=session,
+        )
+        decoded = base64.b64decode(session.calls[2][2]["json"]["content"]).decode("utf-8")
+        self.assertIn('persona: "sexualwill"', decoded)
+        self.assertNotIn('persona: "nakedwill"', decoded)
+        # the reported persona is what was written, not what the account wanted
+        self.assertEqual(results[0]["persona"], "sexualwill")
+
+    def test_republish_inherits_persona_from_the_sibling_locale(self):
+        """A zh-only publish follows the en file that already exists."""
+        existing_en = '---\ntitle: "Existing"\npersona: "sexualwill"\n---\n\nBody.\n'
+        session = _RecordingSession([
+            _FakeResponse({"sha": "en-sha", "content": base64.b64encode(existing_en.encode()).decode()}),
+            _FakeResponse({}, status_code=404),
+            _FakeResponse({"content": {"sha": "new-zh"}}),
+        ])
+        account = SimpleNamespace(config=self._nwsw_config(persona="nakedwill", locales="zh"))
+        prepared_publishers.publish_nw_sw_blog_sync(
+            account,
+            {"draft": {"title": "Existing", "slug": "existing"}, "message": "Body."},
+            session=session,
+        )
+        decoded = base64.b64decode(session.calls[2][2]["json"]["content"]).decode("utf-8")
+        self.assertIn('persona: "sexualwill"', decoded)
+
+    def test_explicit_draft_persona_overrides_an_existing_file(self):
+        existing = '---\ntitle: "Existing"\npersona: "sexualwill"\n---\n\nBody.\n'
+        session = _RecordingSession([
+            _FakeResponse({"sha": "en-sha", "content": base64.b64encode(existing.encode()).decode()}),
+            _FakeResponse({}, status_code=404),
+            _FakeResponse({"content": {"sha": "new-en"}}),
+        ])
+        account = SimpleNamespace(config=self._nwsw_config(persona="sexualwill", locales="en"))
+        prepared_publishers.publish_nw_sw_blog_sync(
+            account,
+            {"draft": {"title": "Existing", "slug": "existing", "persona": "nakedwill"},
+             "message": "Body."},
+            session=session,
+        )
+        decoded = base64.b64decode(session.calls[2][2]["json"]["content"]).decode("utf-8")
+        self.assertIn('persona: "nakedwill"', decoded)
+
+    def test_invalid_draft_persona_is_rejected_before_any_request(self):
+        account = SimpleNamespace(config=self._nwsw_config(locales="en"))
+        session = _RecordingSession([])
+        with self.assertRaises(prepared_publishers.PreparedPublishError) as ctx:
+            prepared_publishers.publish_nw_sw_blog_sync(
+                account,
+                {"draft": {"title": "X", "persona": "bogus"}, "message": "Body."},
+                session=session,
+            )
+        self.assertIn("bogus", str(ctx.exception))
+        self.assertEqual(session.calls, [])
 
     def test_validate_checks_repo_access(self):
         session = _RecordingSession([_FakeResponse({"full_name": "Willywang8216/sexualwill_static", "private": True, "default_branch": "main"})])
@@ -2136,10 +2234,10 @@ class NwSwBlogGitPushTests(unittest.TestCase):
         import yaml
 
         session = _RecordingSession([
-            _FakeResponse({}, status_code=404),
-            _FakeResponse({"content": {"sha": "e1"}}),
-            _FakeResponse({}, status_code=404),
-            _FakeResponse({"content": {"sha": "z1"}}),
+            _FakeResponse({}, status_code=404),          # probe GET en
+            _FakeResponse({}, status_code=404),          # probe GET zh
+            _FakeResponse({"content": {"sha": "e1"}}),   # PUT en
+            _FakeResponse({"content": {"sha": "z1"}}),   # PUT zh
         ])
         account = SimpleNamespace(config=self._nwsw_config())
         prepared_publishers.publish_nw_sw_blog_sync(
@@ -2156,7 +2254,7 @@ class NwSwBlogGitPushTests(unittest.TestCase):
             session=session,
         )
         for call_index, expect_title, expect_body in (
-            (1, "English Title", "EN body."),
+            (2, "English Title", "EN body."),
             (3, "中文標題", "中文內文。"),
         ):
             decoded = base64.b64decode(session.calls[call_index][2]["json"]["content"]).decode("utf-8")

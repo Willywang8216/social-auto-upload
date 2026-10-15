@@ -278,8 +278,10 @@ def test_sociamonials_delivery_failure_on_inaccessible_url():
 def test_nw_sw_blog_409_conflict_retries_with_fresh_sha():
     """409 conflict should re-read the file and retry with fresh SHA."""
     session = _RecordingSession([
-        # Initial GET - file exists
+        # Probe GET en - file exists
         _FakeResponse({"sha": "old-sha-123", "content": base64.b64encode(b"old content").decode()}),
+        # Probe GET zh - no such file
+        _FakeResponse({}, status_code=404),
         # First PUT - 409 conflict
         _FakeResponse({"message": "Conflict"}, status_code=409),
         # Re-GET after 409 - fresh SHA
@@ -305,7 +307,7 @@ def test_nw_sw_blog_409_conflict_retries_with_fresh_sha():
     # Should have made 2 GETs and 2 PUTs
     get_calls = [c for c in session.calls if c[0] == "GET"]
     put_calls = [c for c in session.calls if c[0] == "PUT"]
-    assert len(get_calls) == 2, "Should have re-read after 409"
+    assert len(get_calls) == 3, "2 probes plus the re-read after 409"
     assert len(put_calls) == 2, "Should have retried PUT after 409"
 
 
@@ -319,8 +321,10 @@ def test_nw_sw_blog_409_conflict_idempotent_when_content_matches():
     content_b64 = base64.b64encode(b"simulated full mdx content").decode()
 
     session = _RecordingSession([
-        # Initial GET - file exists
+        # Probe GET en - file exists
         _FakeResponse({"sha": "old-sha-123", "content": base64.b64encode(b"old").decode()}),
+        # Probe GET zh - no such file
+        _FakeResponse({}, status_code=404),
         # First PUT - 409 conflict
         _FakeResponse({"message": "Conflict"}, status_code=409),
         # Re-GET after 409 - content already matches what we want
@@ -344,7 +348,7 @@ def test_nw_sw_blog_409_conflict_idempotent_when_content_matches():
     # Note: In practice, the content comparison is exact, so this test verifies the flow
     get_calls = [c for c in session.calls if c[0] == "GET"]
     put_calls = [c for c in session.calls if c[0] == "PUT"]
-    assert len(get_calls) == 2, "Should have re-read after 409"
+    assert len(get_calls) == 3, "2 probes plus the re-read after 409"
     # Either 1 PUT (if content matched) or 2 PUTs (if content differed and retried)
     assert len(put_calls) in [1, 2], "Should have attempted PUT"
 

@@ -4266,6 +4266,53 @@ def _nw_sw_blog_localized(raw: str, index: int) -> str:
     return parts[min(index, len(parts) - 1)]
 
 
+def _nw_sw_blog_file_path(slug: str, locale: str) -> str:
+    """Where one locale's MDX lives inside the target repo."""
+    content_dir = "content/posts/zh" if locale == "zh" else "content/posts"
+    return f"{content_dir}/{slug}.mdx"
+
+
+def _nw_sw_blog_decode_content(raw) -> str:
+    """Decode the base64 document GitHub returns, tolerating its embedded newlines."""
+    if not raw:
+        return ""
+    try:
+        return base64.b64decode(str(raw).encode("ascii")).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def _nw_sw_blog_frontmatter_persona(text: str) -> str:
+    """The persona already recorded in an MDX document, or '' when it has none."""
+    frontmatter, _body = _parse_frontmatter(text or "")
+    value = str(frontmatter.get("persona") or "").strip().strip('"').strip("'").lower()
+    return value if value in NW_SW_BLOG_VALID_PERSONAS else ""
+
+
+def _nw_sw_blog_effective_persona(*, explicit: str, existing_text: str,
+                                  sibling_text: str, configured: str) -> str:
+    """Decide the persona one locale file is written with.
+
+    A post's brand belongs to the post, not to whichever account published it
+    last. Writing the account's configured persona unconditionally meant a
+    re-publish from a differently-configured account silently moved an existing
+    post, and moved only the locale that account was set up for — which is how
+    one slug ended up nakedwill in en and sexualwill in zh. So an explicit
+    ``draft.persona`` wins, then what this file already says, then the sibling
+    locale, and only then the account's configured persona, which is what a
+    brand-new post gets.
+    """
+    if explicit:
+        return explicit
+    for candidate in (
+        _nw_sw_blog_frontmatter_persona(existing_text),
+        _nw_sw_blog_frontmatter_persona(sibling_text),
+    ):
+        if candidate:
+            return candidate
+    return configured
+
+
 def _nw_sw_blog_title_for(payload: dict, message: str, index: int, locale: str) -> str:
     """Pick one locale's title.
 
@@ -4354,14 +4401,59 @@ def publish_nw_sw_blog_sync(
     primary_title = _nw_sw_blog_title_for(payload, message, 0, locales[0] if locales else "en")
     shared_slug = explicit_slug or _slugify_title(primary_title)
 
+    explicit_persona = str(draft.get("persona") or "").strip().lower()
+    if explicit_persona and explicit_persona not in NW_SW_BLOG_VALID_PERSONAS:
+        raise PreparedPublishError(
+            "NW/SW Blog draft persona must be 'sexualwill' or 'nakedwill', "
+            f"got '{explicit_persona}'"
+        )
+
+    # Read every locale that could already hold this slug, including the sibling
+    # of the locales we are about to write, so the persona decision below can see
+    # the post as it already exists.
+    existing_by_locale: dict[str, dict[str, Any]] = {}
+    for probe_locale in NW_SW_BLOG_VALID_LOCALES:
+        probe_path = _nw_sw_blog_file_path(shared_slug, probe_locale)
+        probe_url = f"{GITHUB_API_ROOT}/repos/{owner}/{repo}/contents/{probe_path}"
+        probe_resp = http.get(probe_url, headers=headers, params={"ref": branch}, timeout=30)
+        if probe_resp.status_code == 200:
+            probe_json = probe_resp.json() or {}
+            existing_by_locale[probe_locale] = {
+                "sha": probe_json.get("sha"),
+                "text": _nw_sw_blog_decode_content(probe_json.get("content")),
+            }
+
     for index, locale in enumerate(locales):
         locale_message = sections[min(index, len(sections) - 1)] if sections else message
 
         title = _nw_sw_blog_title_for(payload, locale_message, index, locale)
         slug = shared_slug
+        file_path = _nw_sw_blog_file_path(slug, locale)
+
+        existing = existing_by_locale.get(locale) or {}
+        existing_sha = existing.get("sha")
+        sibling = next(
+            (value for key, value in existing_by_locale.items() if key != locale),
+            {},
+        )
+        effective_persona = _nw_sw_blog_effective_persona(
+            explicit=explicit_persona,
+            existing_text=str(existing.get("text") or ""),
+            sibling_text=str(sibling.get("text") or ""),
+            configured=persona,
+        )
+        if effective_persona != persona:
+            logger.warning(
+                "nw_sw_blog %s already belongs to persona %s; the account is "
+                "configured as %s, keeping %s so a re-publish cannot move the post",
+                file_path,
+                effective_persona,
+                persona,
+                effective_persona,
+            )
 
         # Re-parse frontmatter already present in the section so round-trips
-        # (SAU → file → edit → re-publish) keep author-set fields.
+        # (SAU to file to edit to re-publish) keep author-set fields.
         parsed_fm, parsed_body = _parse_frontmatter(locale_message)
         body = parsed_body or locale_message.strip()
 
@@ -4372,7 +4464,7 @@ def publish_nw_sw_blog_sync(
         fm = _nw_sw_blog_frontmatter(
             title=title,
             slug=slug,
-            persona=persona,
+            persona=effective_persona,
             description=description,
             category=str(parsed_fm.get("category") or category),
             tags=parsed_fm.get("tags") or tags,
@@ -4383,16 +4475,10 @@ def publish_nw_sw_blog_sync(
         )
         mdx = f"{fm}\n\n{body}\n"
 
-        content_dir = "content/posts/zh" if locale == "zh" else "content/posts"
-        file_path = f"{content_dir}/{slug}.mdx"
         content_b64 = base64.b64encode(mdx.encode("utf-8")).decode("ascii")
 
-        # Idempotent upsert: read existing file SHA when present, then PUT.
+        # Idempotent upsert: reuse the SHA probed above, then PUT.
         get_url = f"{GITHUB_API_ROOT}/repos/{owner}/{repo}/contents/{file_path}"
-        get_resp = http.get(get_url, headers=headers, params={"ref": branch}, timeout=30)
-        existing_sha = None
-        if get_resp.status_code == 200:
-            existing_sha = (get_resp.json() or {}).get("sha")
         put_body: dict[str, Any] = {
             "message": f"publish: {slug} ({locale})",
             "content": content_b64,
@@ -4423,7 +4509,7 @@ def publish_nw_sw_blog_sync(
                         "path": file_path,
                         "sha": (put_json.get("content") or {}).get("sha") or retry_sha,
                         "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{file_path}",
-                        "persona": persona,
+                        "persona": effective_persona,
                         "idempotent": True,
                     })
                     continue
@@ -4438,7 +4524,7 @@ def publish_nw_sw_blog_sync(
             "path": file_path,
             "sha": (put_json.get("content") or {}).get("sha") or put_json.get("commit", {}).get("sha"),
             "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{file_path}",
-            "persona": persona,
+            "persona": effective_persona,
         })
     return results
 
