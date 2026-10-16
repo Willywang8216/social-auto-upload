@@ -113,11 +113,15 @@ rejected on a `zh-Hant` account, so generate Traditional characters.
 - **4.** preview → approve → submit
 - **5.** scheduling so it spreads naturally
 - **6.** verifying real delivery
+- **6b.** archiving + metadata (rename the video, write the summary beside it)
 - **7.** a worked end-to-end example
 
 ---
 
-One pass per folder: **identify → transcribe → summarise → write copy → schedule**.
+One pass per folder: **identify → transcribe → summarise → write copy → schedule →
+archive**. The two rules that matter most: the **filename prefix decides the
+destinations**, and every published video gets a **renamed archive entry plus a
+same-name summary** so the archive stays self-describing.
 The rule that matters most is the **filename prefix decides the destinations**.
 
 ## 0. Talk to the app
@@ -624,6 +628,67 @@ Per-platform gotchas worth knowing before you report success:
 
 Report **published vs failed per platform** with the error text. Do not describe a
 queued target as published.
+
+## 6b. Archive + metadata — rename the video, write the summary beside it
+
+After a clip is published (or when you clear an already-published file out of the
+inbox), the Drive archive must stay self-describing: the video gets a human name
+and a **same-name summary/description file** sits beside it. This is the
+"rename + metadata" step — do it for every video that runs through this skill,
+otherwise `sau/published/` and `sau/archive/` fill with UUID/timestamp names that
+tell a future operator nothing.
+
+**Rename to the filename convention** (same as section 1 and
+[`docs/gdrive-filename-convention.md`](../../docs/gdrive-filename-convention.md)):
+
+```
+<Title with spaces>_<SFW|NSFW>_<YYYYMMDD>.<ext>
+```
+
+- **Title** = the human title distilled from the transcript (or the original topic).
+- **Flag** = `SFW` / `NSFW` (case-insensitive).
+- **Date** = publish date `YYYYMMDD` in Asia/Taipei; omit when there is none.
+- Keep the original extension and bytes — this is a **server-side rename**, never
+  a re-encode.
+
+**Metadata file — same basename, `.txt` (or `.md`):**
+
+```
+My Title_NSFW_20261015.mp4
+My Title_NSFW_20261015.txt     <- polished summary + description/copy
+```
+
+Put into that file: (1) the **polished transcript summary** from section 2b
+(subject / tone / key moments), and (2) the **per-account description/copy** (or
+at least the shared brief), so the archive is the source of truth for "what was
+said and what was posted".
+
+On the **deploy host**, rclone lives in the container (the host shell has no
+config). Rename with `rclone moveto` (server-side, no re-upload, no delete), then
+upload the note beside it:
+
+```bash
+# 1) Rename the archived video on Drive
+printf '%s' '' | docker exec -i social-auto-upload sh -c \
+  "RCLONE_CONFIG=/app/rclone-cache.conf rclone moveto \
+   'GDrive-willywang8216:sau/published/videoFile/<old name>' \
+   'GDrive-willywang8216:sau/published/videoFile/My Title_NSFW_20261015.mp4'"
+
+# 2) Write the same-name summary next to it
+docker exec -i social-auto-upload sh -c \
+  "RCLONE_CONFIG=/app/rclone-cache.conf rclone copyto - \
+   'GDrive-willywang8216:sau/published/videoFile/My Title_NSFW_20261015.txt'" \
+  < /path/to/summary.txt
+```
+
+Verify with `rclone lsf` and only call it done when **both** objects list back:
+the video under its new name and the `.txt` beside it.
+
+**Already-published files still in the inbox** (a campaign already fired but the
+source still sits in `SAU-Inbox/…`): do not re-publish them. Archive them instead —
+rename + write the summary beside the published copy, then move/remove the inbox
+copy so the watcher cannot flag it again. This is the "published video in the
+inbox" cleanup.
 
 ## 7. Worked example
 
