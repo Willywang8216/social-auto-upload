@@ -287,3 +287,75 @@ Simplified) for `zh-Hant`.
 6. Map `publishDate` → `schedule.startAt = "<date>T21:00:00"` naive
    `Asia/Taipei`, and let the allocator resolve ≥30 min / ≤3-per-day collisions.
 7. Preview → operator approval → submit; report per-platform delivery.
+8. **Archive + metadata** (see §10): rename the published source in the Drive
+   archive and write a same-name summary beside it.
+
+---
+
+## 10. Archive + metadata — rename the video, write the summary beside it
+
+After a clip is published (or an already-published inbox file is cleared out),
+the Drive archive must stay self-describing: the video keeps a human name and a
+**same-name summary/description file** sits beside it. This is the "rename +
+metadata" step — do it for every piece of media that runs through the inbox.
+
+**Rename to the filename convention** (same as §1):
+
+```
+<Title with spaces>_<SFW|NSFW>_<YYYYMMDD>.<ext>
+```
+
+- **Title** = the human title distilled from the transcript (or the original topic).
+- **Flag** = `SFW` / `NSFW` (case-insensitive).
+- **Date** = publish date `YYYYMMDD` in Asia/Taipei; omit when there is none.
+- Keep the original extension and bytes — this is a **server-side rename**
+  (`rclone moveto`), never a re-encode.
+
+**Metadata file — same basename, `.txt` (or `.md`):**
+
+```
+My Title_NSFW_20261015.mp4
+My Title_NSFW_20261015.txt     <- polished summary + description/copy
+```
+
+Put into that file: (1) the **polished transcript summary** (subject / tone /
+key moments), and (2) the **per-account description/copy** (or at least the
+shared brief), so the archive is the source of truth for "what was said and what
+was posted".
+
+On the deploy host, rclone lives in the container (the host shell has no
+config). Rename with `rclone moveto` (server-side, no re-upload, no delete),
+then upload the note beside it:
+
+```bash
+docker exec social-auto-upload sh -c \
+  "RCLONE_CONFIG=/app/rclone-cache.conf rclone moveto \
+   'GDrive-willywang8216:sau/published/videoFile/<old name>' \
+   'GDrive-willywang8216:sau/published/videoFile/My Title_NSFW_20261015.mp4'"
+
+docker exec -i social-auto-upload sh -c \
+  "RCLONE_CONFIG=/app/rclone-cache.conf rclone copyto - \
+   'GDrive-willywang8216:sau/published/videoFile/My Title_NSFW_20261015.txt'" \
+  < /path/to/summary.txt
+```
+
+Verify with `rclone lsf` and only call it done when **both** objects list back:
+the video under its new name and the `.txt` beside it. Already-published files
+still in the inbox are archived this way instead of being re-published.
+
+---
+
+## 11. Blog articles are full articles (never empty)
+
+The blog platforms (`nw_sw_blog` and `teaching_blog`) publish **long-form
+articles**, not short captions. The backend prompt requires a complete
+700–1500-word Markdown article (one `# H1`, several `H2/H3` sections, a
+conclusion), and a guard rejects any blog message under 600 chars so an
+"article" that is only a title can never be queued. Thin transcripts/notes are
+expanded with on-topic, first-person reasoning — they are never echoed as the
+body. Copy is then humanized per language (`humanizer` for English,
+`humanizer-zh` for Traditional Chinese).
+
+Re-publish helpers for legacy empty posts live in
+`scripts/fix_empty_blog_articles.py` (full article re-generation) and
+`scripts/fix_bilingual_articles.py` (en + zh-Hant re-publish).

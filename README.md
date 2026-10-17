@@ -54,7 +54,7 @@
 | Substack | ✅ | — | — | ✅ | ✅ (定時) | ✅ | — | 瀏覽�器自動化 |
 | Telegram | ✅ | — | — | ✅ | ✅ | ❌ | ✅ | 本人 MTProto（Telethon，api_id/hash/session）或 Bot API；單帳號多 `chatIds` fan-out，UI 列出可發群組/頻道勾選 |
 | Bluesky | ✅ | ✅ | — | ✅ | ✅ | ❌ | ✅ | AT Protocol；文字/圖片/影片（至 300MB），成人內容 self-label |
-| Sexualwill.com | — | — | — | ✅ | ✅ | ❌ | — | git-push MDX 到 `sexualwill_static` repo（NW/SW persona、en/zh 雙語） |
+| Sexualwill.com | — | — | — | ✅ | ✅ | ❌ | — | git-push MDX 到 `sexualwill_static` repo（NW/SW persona、en/zh 雙語）；後台以長文（700–1500 字）prompt + 600 字下限守門，杜絕「只有標題的空文章」 |
 
 ### Profile 模型（多帳號管理）
 
@@ -272,6 +272,8 @@ TikTok 使用 Content Posting API：
 - [API 參考文件](./docs/api-reference.md)
 - [API 速率限制與配額](./docs/api-rate-limits.md)
 - [平台發佈限制（2026）](./docs/platform-posting-limits.md)
+- [Drive 收件匣檔名慣例 / 轉錄 / 語系路由 / 歸檔 metadata](./docs/gdrive-filename-convention.md)
+- [Media storage pipeline（離線不變式）](./docs/media-storage-pipeline.md)
 
 ## 交流與支援
 
