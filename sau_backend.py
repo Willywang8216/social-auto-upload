@@ -3604,6 +3604,17 @@ def _build_generation_prompt(
                 f"{primary} version first, then a standalone --- line, then the complete "
                 f"{' then '.join(secondary)} version. Do not omit either language.",
             ))
+    if platform in ("nw_sw_blog", "teaching_blog"):
+        user_lines.extend((
+            "",
+            "BLOG ARTICLE REQUIREMENT: this platform publishes a long-form blog "
+            "article. The 'message' field MUST be a complete 700-1500 word Markdown "
+            "article: one # H1 title, several H2/H3 sections, short paragraphs, and "
+            "a conclusion. Never output a short social caption or just a title. "
+            "If the transcript/notes are thin, expand with original, on-topic "
+            "reasoning and concrete detail from the persona's life; do not repeat "
+            "the title as the body.",
+        ))
     user_lines.append(
         "Return JSON with keys: message, title, summary, description, altText, "
         "hashtags, firstComment, contactDetails, cta. Every text field must follow "
@@ -3688,6 +3699,11 @@ def _generate_platform_draft(
         raise RuntimeError(
             "Generated copy looks like a placeholder (media-group name, filename "
             "or generic brief); refusing to queue it"
+        )
+    if platform in ("nw_sw_blog", "teaching_blog") and len(message.strip()) < 600:
+        raise RuntimeError(
+            "Generated blog article is too short "
+            f"({len(message.strip())} chars); refusing to queue an empty article"
         )
     if account_language and not content_rules.message_matches_language(
         message, account_language
