@@ -65,11 +65,19 @@ after publish, rename the video in the Drive archive to
 Applied live: all 29 videos are archived in `sau/published/videoFile/` with a
 same-name `.txt` (the polished summary) beside each.
 
+## Follow-up: nw/sw backlog scheduled too
+
+After the `both/` batch, the operator said "schedule all". The older
+`nw/video/` + `sw/video/` backlog had **21 unscheduled** videos (17 NW + 4 SW;
+the other 46 were already scheduled far-future via the earlier re-prep). Those 21
+were transcribed, given titles + summaries, and submitted (NW → profile 1, SW →
+profile 3) across 2026-11-16 → 12-06, then archived with same-name metadata.
+Three pride-take duplicates (same title) were collapsed to one campaign.
+
 ## State
 
-- 58 campaigns created (29 videos × 2 profiles). 11 `publishing`, 47 `preparing`
-  (worker preps asynchronously — transcode, watermark, per-account drafts), 2
-  `cancelled` (the duplicate).
+- 48 distinct videos scheduled this session (~80 campaigns across NW + SW).
+  17 `publishing`, 59 `preparing`, 4 `cancelled` (duplicates).
 - 91 pending targets already queued, scheduled `2026-10-18 → 2026-11-23`
   (respecting ≥30-min gap / ≤3 per-account-per-day via the allocator).
 - Drive inbox is clean: `SAU-Inbox/both/` holds only the README + the 4 `.docx`
