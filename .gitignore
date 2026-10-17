@@ -169,6 +169,7 @@ node_modules/
 
 # database
 db/database.db
+db/database.db.bak-*
 
 # 临时文件夹
 cookiesFile
@@ -176,6 +177,8 @@ uploadFile
 videoFile
 uploads/
 media/
+# Runtime campaign output (watermarked/transcoded artifacts, offloaded to Drive)
+generated/
 
 /uploader/bilibili_uploader/qrcode.png
 
