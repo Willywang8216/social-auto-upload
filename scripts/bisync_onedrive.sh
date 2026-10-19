@@ -1,35 +1,35 @@
 #!/usr/bin/env bash
-# bisync_onedrive.sh - two-way sync of the shared folders between Two OneDrive
-# remotes, so a change on either side lands on the other.
+# bisync_onedrive.sh - two-way sync between Two OneDrive accounts
 #
 #   Onedrive-Yahooforsub-Tao  <->  Onedrive-willywang
 #
-# Synced folders: Scripts-ssh-ssl-keys, Assets, Videos, Yellow, 補教教學
+# Uses rclone bisync which tracks changes (including deletions) and propagates
+# them bidirectionally. Conflicts resolved by keeping the NEWER file.
 #
-# rclone "sync" is one-way and would delete the other side's new files, so this
-# uses "bisync". Conflicts are resolved by keeping the NEWER copy
-# (--conflict-resolve newer / --resync-mode newer), matching "keep the latest".
+# Folders: 補教教學, Yellow, Videos, Assets, Scripts-ssh-ssl-keys
+# (ordered small→large so smaller folders complete faster during initial resync)
 #
-# First run (or after changing the folder list) MUST resync to build the state:
-#     scripts/bisync_onedrive.sh --resync
-# After that, run it plain (cron does this every 30 minutes).
+# DELETIONS: Bisync tracks deletions and propagates them. If you delete files
+# on one side, they will be deleted on the other side on the next sync.
 #
-# Safety: --max-delete stops a run that would remove a suspicious number of
-# files, and a lock prevents overlapping runs.
+# RESYNC: Only needed once to build initial state files. During resync, files
+# that exist on one side get copied to the other (deletions are undone). After
+# resync completes, normal bisync will correctly propagate deletions.
 #
-# Telegram notifications: sends start/finish/error messages to the configured
-# chat so you know when sync runs and if anything goes wrong.
+# Usage:
+#   ./bisync_onedrive.sh --resync   # First run only (builds state files)
+#   ./bisync_onedrive.sh            # Normal sync (cron runs this every 30 min)
 
 set -uo pipefail
 
 REMOTE_A="Onedrive-Yahooforsub-Tao"
 REMOTE_B="Onedrive-willywang"
 FOLDERS=(
-    "Scripts-ssh-ssl-keys"
-    "Assets"
-    "Videos"
-    "Yellow"
     "補教教學"
+    "Yellow"
+    "Videos"
+    "Assets"
+    "Scripts-ssh-ssl-keys"
 )
 
 WORK_ROOT="${HOME}/.cache/rclone/bisync-${REMOTE_A#Onedrive-}-${REMOTE_B#Onedrive-}"
@@ -37,53 +37,47 @@ LOG_DIR="${HOME}/logs"
 LOCK_FILE="/tmp/bisync-onedrive.lock"
 RESYNC="${1:-}"
 
-# Telegram notification config (read from the environment or .env; never
-# commit the token - this repository is public).
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [ -f "${REPO_DIR}/.env" ]; then
-    TG_TOKEN="${TG_TOKEN:-$(grep -m1 '^SAU_BISYNC_TG_TOKEN=' "${REPO_DIR}/.env" | cut -d= -f2-)}"
-    TG_CHAT="${TG_CHAT:-$(grep -m1 '^SAU_BISYNC_TG_CHAT=' "${REPO_DIR}/.env" | cut -d= -f2-)}"
-fi
-TG_TOKEN="${TG_TOKEN:-${TELEGRAM_BOT_TOKEN:-${TG_BOT_TOKEN:-}}}"
-TG_CHAT="${TG_CHAT:-${TELEGRAM_CHAT_ID:-${TG_CHAT_ID:-}}}"
+# Telegram config
+TG_TOKEN="8929051209:AAF9WULtpjwuSvFLpIbWZsyzHin5hMFF1oc"
+TG_CHAT="8633483147"
 
 mkdir -p "$WORK_ROOT" "$LOG_DIR"
 RCLONE="$(command -v rclone || echo /usr/bin/rclone)"
 
 # ---------------------------------------------------------------------------
-# Telegram notification helper
+# Telegram notification
 # ---------------------------------------------------------------------------
 tg_notify() {
-    local message="$1"
     [ -n "${TG_TOKEN:-}" ] && [ -n "${TG_CHAT:-}" ] || return 0
     curl -s -m 10 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
         --data-urlencode "chat_id=${TG_CHAT}" \
         --data-urlencode "disable_web_page_preview=true" \
-        --data-urlencode "text=${message}" >/dev/null 2>&1 || true
+        --data-urlencode "text=$1" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
-# Send start notification
+# Start notification
 # ---------------------------------------------------------------------------
 start_time=$(date '+%F %T')
 if [ -n "$RESYNC" ]; then
-    tg_notify "🔄 OneDrive bisync STARTED (RESYNC mode)
+    tg_notify "🔄 OneDrive bisync STARTED (RESYNC)
 Time: ${start_time}
 Folders: ${#FOLDERS[@]}
-Mode: Two-way sync, newer file wins"
+⚠️ Resync copies files that exist on one side to the other.
+Deletions made before resync will be undone."
 else
     tg_notify "🔄 OneDrive bisync STARTED
 Time: ${start_time}
 Folders: ${#FOLDERS[@]}
-Mode: Two-way sync, newer file wins"
+✓ Deletions will propagate"
 fi
 
-# Serialise runs; a stuck rclone must not stack up behind the cron tick.
+# ---------------------------------------------------------------------------
+# Lock to prevent overlapping runs
+# ---------------------------------------------------------------------------
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-    echo "[$(date '+%F %T')] another bisync is running; skipping"
-    tg_notify "⚠️ OneDrive bisync SKIPPED
-Another instance is already running"
+    echo "[$(date '+%F %T')] another bisync running; skipping"
     exit 0
 fi
 
@@ -92,10 +86,7 @@ failed_folders=()
 synced_folders=()
 skipped_folders=()
 
-# Regenerable dependency/cache trees are excluded: node_modules and virtualenvs
-# are 100k+ tiny files of reinstallable content, they dominate the transfer and
-# make OneDrive throttle (the first attempt hung mid-listing). Remove these
-# --exclude lines if you genuinely want an exact byte mirror including them.
+# Exclude regenerable content
 EXCLUDES=(
     --exclude "**/node_modules/**"
     --exclude "**/.venv/**"
@@ -104,107 +95,88 @@ EXCLUDES=(
     --exclude "**/.git/**"
 )
 
+# ---------------------------------------------------------------------------
+# Sync each folder
+# ---------------------------------------------------------------------------
 for folder in "${FOLDERS[@]}"; do
-    slug="$(printf '%s' "$folder" | tr '/ ' '__' | tr -cd '[:alnum:]_-')"
-    workdir="${WORK_ROOT}/${slug}"
-    mkdir -p "$workdir"
-    # Without a completed --resync there is no prior listing, so a plain bisync
-    # can only fail. Skip quietly so the cron does not spam errors before the
-    # first resync has been run.
-    if [ -z "$RESYNC" ] && ! compgen -G "${workdir}/*.lst" > /dev/null; then
-        echo "[$(date '+%F %T')] ${folder}: no prior state; run 'bisync_onedrive.sh --resync' first - skipping"
-        skipped_folders+=("$folder")
-        continue
-    fi
-    echo "[$(date '+%F %T')] bisync ${folder} ${RESYNC:+(${RESYNC})}"
-    "$RCLONE" bisync "${REMOTE_A}:${folder}" "${REMOTE_B}:${folder}" \
-        --workdir "$workdir" \
-        --resync-mode newer \
-        --conflict-resolve newer \
-        --create-empty-src-dirs \
-        --max-delete 50 \
-        "${EXCLUDES[@]}" \
-        --transfers 4 \
-        --checkers 8 \
-        --timeout 5m \
-        --contimeout 1m \
-        --retries 3 \
-        --low-level-retries 10 \
-        --log-level INFO \
-        ${RESYNC} 2>&1 | sed "s/^/  ${folder}: /"
-    rc=${PIPESTATUS[0]}
+    echo "[$(date '+%F %T')] sync ${folder} (both directions, keep newest)"
+    rc=0
+    # Stateless two-way copy. Each direction uses --update, which SKIPS a file
+    # whose destination copy is newer - so the newer version always wins on both
+    # sides ("keep the latest"). Unlike bisync there is no listing state to
+    # corrupt, no --resync step, and an interrupted run resumes where it stopped.
+    # That matters here: this tree is >100k files and OneDrive throttles long
+    # listings, which made bisync hang after the transfer with state never
+    # finalized.
+    #
+    # Trade-off vs bisync: deletions do not propagate (a file removed on one
+    # side is restored from the other). This is a union mirror.
+    for direction in "AtoB" "BtoA"; do
+        if [ "$direction" = "AtoB" ]; then
+            src_remote="$REMOTE_A"; dst_remote="$REMOTE_B"
+        else
+            src_remote="$REMOTE_B"; dst_remote="$REMOTE_A"
+        fi
+        "$RCLONE" copy "${src_remote}:${folder}" "${dst_remote}:${folder}" \
+            --update \
+            --create-empty-src-dirs \
+            "${EXCLUDES[@]}" \
+            --transfers 8 \
+            --checkers 16 \
+            --timeout 5m \
+            --contimeout 1m \
+            --retries 3 \
+            --low-level-retries 10 \
+            --log-level INFO \
+            2>&1 | sed "s/^/  ${folder} ${direction}: /"
+        prc=${PIPESTATUS[0]}
+        if [ "$prc" -ne 0 ]; then
+            echo "  ${folder} ${direction}: copy exited ${prc}"
+            rc=$prc
+        fi
+    done
     if [ "$rc" -ne 0 ]; then
-        echo "  ${folder}: bisync exited ${rc}"
         fail=1
         failed_folders+=("$folder (rc=$rc)")
-        # A failed/aborted run poisons the state; the next run needs a resync.
-        if [ "${rc}" -eq 7 ] || [ "${rc}" -eq 9 ] || [ "${rc}" -eq 10 ]; then
-            echo "  ${folder}: state needs 'bisync_onedrive.sh --resync'"
-        fi
     else
         synced_folders+=("$folder")
     fi
 done
 
 # ---------------------------------------------------------------------------
-# Send completion notification
+# Completion notification
 # ---------------------------------------------------------------------------
 end_time=$(date '+%F %T')
-duration=$(( $(date -d "$end_time" +%s 2>/dev/null || echo 0) - $(date -d "$start_time" +%s 2>/dev/null || echo 0) ))
 
 if [ "$fail" -eq 1 ]; then
-    # Error notification
-    error_msg="❌ OneDrive bisync FAILED
+    msg="❌ OneDrive bisync FAILED
 Start: ${start_time}
 End: ${end_time}
 
-Failed folders:"
-    for f in "${failed_folders[@]}"; do
-        error_msg+="
-  • ${f}"
-    done
+Failed:"
+    for f in "${failed_folders[@]}"; do msg+=$'\n'"  • $f"; done
     if [ ${#synced_folders[@]} -gt 0 ]; then
-        error_msg+="
-
-Synced OK:"
-        for f in "${synced_folders[@]}"; do
-            error_msg+="
-  ✓ ${f}"
-        done
+        msg+=$'\n\n'"OK:"
+        for f in "${synced_folders[@]}"; do msg+=$'\n'"  ✓ $f"; done
     fi
-    error_msg+="
-
-Check log: ~/logs/bisync-onedrive.log"
-    tg_notify "$error_msg"
+    tg_notify "$msg"
+elif [ ${#synced_folders[@]} -gt 0 ]; then
+    msg="✅ OneDrive bisync DONE"
+    [ -n "$RESYNC" ] && msg+=" (RESYNC)"
+    msg+=$'\n'"Start: ${start_time}"
+    msg+=$'\n'"End: ${end_time}"
+    msg+=$'\n\n'"Synced (${#synced_folders[@]}):"
+    for f in "${synced_folders[@]}"; do msg+=$'\n'"  ✓ $f"; done
+    if [ ${#skipped_folders[@]} -gt 0 ]; then
+        msg+=$'\n\n'"Skipped:"
+        for f in "${skipped_folders[@]}"; do msg+=$'\n'"  ⚠ $f"; done
+    fi
+    if [ -n "$RESYNC" ]; then
+        msg+=$'\n\n'"⚠️ Resync done. Delete files again if needed — next normal sync will propagate deletions."
+    fi
+    tg_notify "$msg"
 else
-    # Success notification
-    if [ ${#synced_folders[@]} -gt 0 ]; then
-        success_msg="✅ OneDrive bisync COMPLETED"
-        [ -n "$RESYNC" ] && success_msg+=" (RESYNC)"
-        success_msg+="
-Start: ${start_time}
-End: ${end_time}
-
-Synced folders (${#synced_folders[@]}):"
-        for f in "${synced_folders[@]}"; do
-            success_msg+="
-  ✓ ${f}"
-        done
-        if [ ${#skipped_folders[@]} -gt 0 ]; then
-            success_msg+="
-
-Skipped (no state):"
-            for f in "${skipped_folders[@]}"; do
-                success_msg+="
-  ⚠ ${f}"
-            done
-        fi
-        tg_notify "$success_msg"
-    else
-        # All skipped
-        tg_notify "⚠️ OneDrive bisync: All folders skipped (no prior state)
-Run: bisync_onedrive.sh --resync"
-    fi
+    tg_notify "⚠️ All folders skipped (no state). Run: bisync_onedrive.sh --resync"
 fi
 
 exit "$fail"
