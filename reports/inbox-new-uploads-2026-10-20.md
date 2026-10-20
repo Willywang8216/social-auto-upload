@@ -314,3 +314,30 @@ scripts, `archive-2026-10-17/` = the previous batch's), which is outside
 `SAU_INBOX` so the watcher no longer scans it. Kept in the inbox: `watch.py`,
 `thumb.py`, `manual_platforms.py`, `gen_title.py`, `state.json`, `.env`, the
 READMEs, `tests/`, the persona folders — exactly what a scan needs.
+
+## 11. Final state (verified 2026-10-20 22:00 CST)
+
+| check | result |
+| --- | --- |
+| campaigns 2967–2992 | 25 `publishing`; campaign 2975 (news, SW half) was still `preparing` at 22:25 — the 783 MB / 10.5 min source is re-encoded per profile and each container restart (watchtower/ci-watch, four of them today) killed the encode; it had re-reached the STT phase, and §11.1 says how to finish it if it lands in `needs_review`. |
+| Pride invitations after 2026-10-31 | **0** |
+| Pride invitations window | 2026-10-20 21:30 → 2026-10-30 23:05 Taipei |
+| `SAU-Inbox` video folders | empty (all published sources archived) |
+| watcher state | `ready=0 pending=0 quarantined=0` |
+| `tests/` (inbox watcher) | 28 pass |
+| `tests/` (repo) | 1816 pass, 1 skipped |
+| pending targets with audio/transcript as media | **0** |
+
+### What to watch tomorrow
+
+1. **X threads for the news episode.** `campaign_posts` for 2974 has 5 parts on
+   each X account because the clip is split for the 140 s cap; part 1 posts on
+   2026-10-22 (model_will), parts 2-5 sit in 2027. Nothing is broken at the API
+   level, but those fragments are meaningless alone — see §6.7b for the fix
+   direction (`threadFileRefs`).
+2. **2975** (news on the SW profile) — if it lands in `needs_review` with
+   "prep lease expired", reset `_prepAttempts` and status back to `preparing`;
+   the source is still in `videoFile/`.
+3. **Pride reminder.** Everything dated is now inside 10-30, but the operator
+   may still want a *fresh* reminder on 10-29/10-30 — the 光光 clip itself says
+   "十月三十號要來遊行" and posts 10-28 21:35.
