@@ -335,9 +335,27 @@ READMEs, `tests/`, the persona folders — exactly what a scan needs.
    2026-10-22 (model_will), parts 2-5 sit in 2027. Nothing is broken at the API
    level, but those fragments are meaningless alone — see §6.7b for the fix
    direction (`threadFileRefs`).
-2. **2975** (news on the SW profile) — if it lands in `needs_review` with
-   "prep lease expired", reset `_prepAttempts` and status back to `preparing`;
-   the source is still in `videoFile/`.
+2. **2975** (news on the SW profile) is the one casualty. Its prep takes ~30-60
+   min (783 MB source, split + watermark + STT + drafts for 11 accounts) and the
+   container was recreated **six** times today (watchtower hourly pull + two
+   ci-watch deploys from this session), each recreate killing the in-flight
+   encode. Attempts were reset three times; the lease/attempts are reset again
+   (`status=preparing`, `_prepAttempts=0`, no lease) so it retries.
+   If it lands in `needs_review` again, the one-liner is:
+
+   ```sql
+   UPDATE campaigns SET status='preparing', last_error=NULL,
+     metadata_json=json_remove(json_set(metadata_json,'$._prepAttempts',0),'$._prepLease')
+   WHERE id=2975;
+   ```
+
+   The structural fix is the one `wsgi.py` already documents: run the worker as
+   a **separate process/container** (`python -m myUtils.worker`) so a web-image
+   deploy does not decapitate a 30-minute ffmpeg run. The attempts also leave
+   extra part sets in `campaign_artifacts` (5-, 3- and 2-part plans); that is
+   harmless because `_select_videos_for_platform` keeps exactly one plan per
+   platform (largest parts that fit), but it is ~100 MB of dead files per
+   retry.
 3. **Pride reminder.** Everything dated is now inside 10-30, but the operator
    may still want a *fresh* reminder on 10-29/10-30 — the 光光 clip itself says
    "十月三十號要來遊行" and posts 10-28 21:35.
