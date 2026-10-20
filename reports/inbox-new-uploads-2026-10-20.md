@@ -319,7 +319,7 @@ READMEs, `tests/`, the persona folders — exactly what a scan needs.
 
 | check | result |
 | --- | --- |
-| campaigns 2967–2992 | 25 `publishing`; campaign 2975 (news, SW half) was still `preparing` at 22:25 — the 783 MB / 10.5 min source is re-encoded per profile and each container restart (watchtower/ci-watch, four of them today) killed the encode; it had re-reached the STT phase, and §11.1 says how to finish it if it lands in `needs_review`. |
+| campaigns 2967–2992 | **all 26 `publishing`** with live targets (2975 took four attempts; it finally prepared 23 jobs at 01:22 on 2026-10-21 — see §11.2). |
 | Pride invitations after 2026-10-31 | **0** |
 | Pride invitations window | 2026-10-20 21:30 → 2026-10-30 23:05 Taipei |
 | `SAU-Inbox` video folders | empty (all published sources archived) |
@@ -335,8 +335,8 @@ READMEs, `tests/`, the persona folders — exactly what a scan needs.
    2026-10-22 (model_will), parts 2-5 sit in 2027. Nothing is broken at the API
    level, but those fragments are meaningless alone — see §6.7b for the fix
    direction (`threadFileRefs`).
-2. **2975** (news on the SW profile) is the one casualty. Its prep takes ~30-60
-   min (783 MB source, split + watermark + STT + drafts for 11 accounts) and the
+2. **2975** (news on the SW profile) needed **four attempts** before it stuck.
+   Its prep takes ~30-60 min (783 MB source, split + watermark + STT + drafts for 11 accounts) and the
    container was recreated **six** times today (watchtower hourly pull + two
    ci-watch deploys from this session), each recreate killing the in-flight
    encode. Attempts were reset three times; the lease/attempts are reset again
@@ -349,6 +349,7 @@ READMEs, `tests/`, the persona folders — exactly what a scan needs.
    WHERE id=2975;
    ```
 
+   It did finish (23 jobs at 01:22) once a restart-free window appeared.
    The structural fix is the one `wsgi.py` already documents: run the worker as
    a **separate process/container** (`python -m myUtils.worker`) so a web-image
    deploy does not decapitate a 30-minute ffmpeg run. The attempts also leave
