@@ -674,6 +674,32 @@ DUE_SOON_SQL = """
            OR replace(t.schedule_at, 'T', ' ') <= ?)
 """
 
+# 0: campaigns whose async prep has not finished yet. They have NO targets
+#    until prep ends, so every target-driven guard below misses them and the
+#    offload happily moved their raw source away mid-prep:
+#
+#      2026-10-20 16:47:19  campaign 2973 claimed for prep
+#      2026-10-20 16:47:55  offload copied+unlinked
+#                          videoFile/Four years after I quit__sfw.mp4
+#      2026-10-20 16:53:04  prep failed: FileNotFoundError
+#                          (/app/videoFile/Four years after I quit__sfw.mp4)
+#
+#    The source path lives in metadata_json.prepRequest.mediaFilePaths until
+#    prep materialises the artifacts, so keep those files local.
+for (raw_metadata,) in conn.execute(
+    "SELECT metadata_json FROM campaigns WHERE status = 'preparing'"
+):
+    try:
+        metadata = json.loads(raw_metadata or "{}")
+    except Exception:
+        continue
+    if not isinstance(metadata, dict):
+        continue
+    prep_request = metadata.get("prepRequest") or {}
+    for path in (prep_request.get("mediaFilePaths") or []):
+        if isinstance(path, str) and path.strip():
+            emit_file_ref(path.strip())
+
 # 1 + 2: in-flight targets, and pending targets inside the claim-race window.
 emit_owed(
     """

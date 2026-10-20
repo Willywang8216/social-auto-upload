@@ -168,6 +168,42 @@ class ArtifactPartGroupsTests(unittest.TestCase):
         self.assertEqual([g[0]["id"] for g in groups], [10, 11])
         self.assertTrue(all(g[0].get("public_url") for g in groups))
 
+    def test_payload_never_contains_audio_or_transcript(self) -> None:
+        """Auto-STT adds context artifacts; they must never reach the uploader.
+
+        The audio WAV and the transcript .txt carry no ``metadata.role`` of
+        "video", so they used to be returned *before* the video in the
+        passthrough list and the worker handed them to the uploader first
+        (7 live targets posted as audio attachments on 2026-10-18/19).
+        """
+        artifacts = [
+            {
+                "id": 1,
+                "source_file_record_id": 7,
+                "artifact_kind": "audio",
+                "local_path": "/tmp/a-audio.wav",
+                "metadata": {},
+            },
+            {
+                "id": 2,
+                "source_file_record_id": 7,
+                "artifact_kind": "transcript",
+                "local_path": "/tmp/a-transcript.txt",
+                "metadata": {},
+            },
+            _video(3),
+        ]
+        for platform in ("bluesky", "telegram", "nw_sw_blog", "twitter", "tiktok"):
+            selected = sau_backend._artifact_payloads_for_platform(artifacts, platform)
+            kinds = [a["artifact_kind"] for a in selected]
+            self.assertNotIn("audio", kinds, platform)
+            self.assertNotIn("transcript", kinds, platform)
+            self.assertTrue(selected, platform)
+            self.assertTrue(
+                str(selected[0]["local_path"]).endswith(".mp4"),
+                f"{platform}: first artifact must be the video, got {selected[0]}",
+            )
+
     def test_payload_drops_raw_and_picks_videos_per_source(self) -> None:
         artifacts = [
             _video(1),

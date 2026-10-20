@@ -97,13 +97,28 @@ source (spec §2). Accepted names:
 My great title space separated_NSFW_20261015.txt           # stem.txt
 My great title space separated_NSFW_20261015.md            # stem.md
 My great title space separated_NSFW_20261015.content.txt   # stem.content.txt
+My great title space separated_NSFW_20261015.docx          # stem.docx (Word)
 ```
 
 * If the note exists, its text becomes the ready entry's `transcript` and seeds
   the copy.
+* `.docx` is accepted since **2026-10-20** — the operator writes hand
+  transcripts and episode notes in Word (`both/*.docx` since 2026-10-13,
+  `Nakedwill-news-20261016__sfw.docx` on 2026-10-17). Before that they were
+  silently ignored, every docx-backed clip fell back to auto-titling from the
+  filename, and the operator's links/resources never reached the copy. The
+  watcher extracts the text with stdlib `zipfile` + `ElementTree` (the cron
+  interpreter has no `python-docx`); a broken/legacy `.doc` yields an empty
+  note instead of failing the scan.
 * If it is **absent**, the **backend runs STT on the video audio**. Per spec §2:
   "there is no requirement for an agent to transcribe." A submitting agent should
   submit with transcription enabled and let the server do it.
+
+> Long clips: the backend STT sends the whole WAV through
+> `/v1/chat/completions` in one request, and a 10-minute clip (~5 MB base64)
+> regularly takes 5+ minutes or times out. For anything over ~2 minutes, chunk
+> it yourself (`ffmpeg -ss/-t` 120 s windows, one request per window) — that is
+> what `stt_local.py` did for the 2026-10-20 batch.
 
 ---
 
@@ -213,6 +228,37 @@ These match the scheduling policy in
 [`skills/sau-bulk-videos/SKILL.md`](../skills/sau-bulk-videos/SKILL.md) §5. A
 pinned `publishDate` is an **anchor** — only the time-of-day may be nudged into a
 preferred window; the date itself is not moved.
+
+### ⚠️ A pinned date is an anchor, not a promise — check the horizon
+
+The allocator never breaks the ≥30 min / ≤3-per-day rules, so it **walks forward**
+when an account is full. When the operator's queue is deep that walk is long:
+on **2026-10-20** the pending queue was ~5 000 targets and the per-account
+horizon was
+
+| account | pending | last slot |
+| --- | ---: | --- |
+| `NW TG 中文` (`account:127`) | 613 | 2027-09-10 |
+| `NW X (model_will)` (`account:123`) | 553 | 2027-04-15 |
+| `NW X (nudeweiwei)` (`account:124`) | 532 | 2027-04-11 |
+| `sexualwill` (`account:77`) | 220 | 2027-03-15 |
+
+So a fresh submission asking for `2026-10-22T21:00` really lands on Telegram/blog
+that evening but on X in **April 2027**. Two consequences:
+
+* **"Are new uploads scheduled right away?"** — no. They are *queued* instantly
+  (prep → `preparing` → `publishing`, targets get a slot), but the slot for a
+  saturated account is whatever the cap allows, which can be months out.
+* For anything **dated** (a Pride invitation, a news episode) do not trust the
+  returned `schedule_at`. Verify it, and if it is past the event, **swap** the
+  target with an evergreen target on the same account inside the window — a
+  permutation keeps every invariant (the account's set of booked minutes does
+  not change) while moving the dated copy earlier. That is what
+  `_work/fix_pride_schedule.py` did on 2026-10-20 (14 swaps across accounts 77,
+  103, 124; 0 Pride invitations left after 10-30).
+
+See [`reports/inbox-new-uploads-2026-10-20.md`](../reports/inbox-new-uploads-2026-10-20.md)
+for the full run.
 
 ---
 

@@ -2145,11 +2145,25 @@ def _campaign_payload(campaign: campaign_store.Campaign, *, db_path: Path) -> di
 
 def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> list[dict]:
     raw_kinds = {"raw_remote_upload", "raw_local"}
+    # Context artifacts created by the prep pipeline are NOT publishable media.
+    # The backend auto-transcribes whenever the submit carried no transcript, so
+    # ``audio`` (the extracted WAV) and ``transcript`` (the .txt) are present on
+    # most campaigns. They have no ``metadata.role == "video"``, so they used to
+    # land in ``passthrough`` *before* the video part, and the worker's
+    # ``_prepared_artifact_local_paths()`` hands the uploader every path in
+    # order — which published the WAV instead of the clip on bluesky/telegram/
+    # nw_sw_blog (7 targets succeeded that way on 2026-10-18/19 and 357 more
+    # were queued). Twitter raises "Unsupported prepared Twitter media type"
+    # instead, which is how it surfaced. Never publish them.
+    context_kinds = {"audio", "transcript"}
     if platform != profile_registry.PLATFORM_TIKTOK:
         # Drop the un-prepared raw artifacts and, for every video source, pick
         # the duration-safe cut(s) for this platform: the trimmed/split parts
         # when they exist, otherwise the full _pub.mp4.
-        cleaned = [a for a in artifacts if a.get("artifact_kind") not in raw_kinds]
+        cleaned = [
+            a for a in artifacts
+            if a.get("artifact_kind") not in raw_kinds | context_kinds
+        ]
         videos: dict[object, list[dict]] = {}
         passthrough: list[dict] = []
         for artifact in cleaned:
@@ -2168,6 +2182,8 @@ def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> lis
     passthrough: list[dict] = []
     for artifact in artifacts:
         kind = artifact.get("artifact_kind") or ""
+        if kind in context_kinds:
+            continue
         source_id = artifact.get("source_file_record_id")
         if kind in {"remote_upload", "raw_remote_upload", "local", "raw_local"} and source_id is not None:
             role = ((artifact.get("metadata") or {}).get("role"))

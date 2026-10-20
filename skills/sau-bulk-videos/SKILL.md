@@ -663,23 +663,24 @@ Put into that file: (1) the **polished transcript summary** from section 2b
 at least the shared brief), so the archive is the source of truth for "what was
 said and what was posted".
 
-On the **deploy host**, rclone lives in the container (the host shell has no
-config). Rename with `rclone moveto` (server-side, no re-upload, no delete), then
-upload the note beside it:
+On the **deploy host**, rclone lives in the container *and* on the host. The
+container's `/app/rclone-cache.conf` is the restricted cache config (it can
+print `Failed to save config ... permission denied` when it tries to persist a
+refreshed token — harmless, the operation still succeeds); the host has the
+operator's own config at `/home/will/.config/rclone/rclone.conf`, which also
+carries `GDrive-willywang8216:` and is the simpler path:
 
 ```bash
-# 1) Rename the archived video on Drive
-printf '%s' '' | docker exec -i social-auto-upload sh -c \
-  "RCLONE_CONFIG=/app/rclone-cache.conf rclone moveto \
-   'GDrive-willywang8216:sau/published/videoFile/<old name>' \
-   'GDrive-willywang8216:sau/published/videoFile/My Title_NSFW_20261015.mp4'"
-
+R="rclone --config /home/will/.config/rclone/rclone.conf"
+# 1) Rename the archived video on Drive (server-side, no re-upload, no delete)
+$R moveto 'GDrive-willywang8216:SAU-Inbox/<folder>/<old name>' \
+          'GDrive-willywang8216:sau/published/videoFile/My Title_NSFW_20261015.mp4'
 # 2) Write the same-name summary next to it
-docker exec -i social-auto-upload sh -c \
-  "RCLONE_CONFIG=/app/rclone-cache.conf rclone copyto - \
-   'GDrive-willywang8216:sau/published/videoFile/My Title_NSFW_20261015.txt'" \
-  < /path/to/summary.txt
+$R copyto /tmp/summary.txt \
+   'GDrive-willywang8216:sau/published/videoFile/My Title_NSFW_20261015.txt'
 ```
+
+In the container the same two calls with `RCLONE_CONFIG=/app/rclone-cache.conf`.
 
 Verify with `rclone lsf` and only call it done when **both** objects list back:
 the video under its new name and the `.txt` beside it.
