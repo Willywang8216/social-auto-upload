@@ -183,9 +183,27 @@ def _contains_cjk(text: str) -> bool:
     return False
 
 
+# STT diarization scaffolding: ``00:00-29.12 | Vlog博主Will及旁白: …`` or
+# ``SPEAKER_00: …``. The speaker label is metadata, not speech — but it is
+# written in Chinese by the gateway even for an English clip, so classifying on
+# the raw text made an English transcript look Chinese. Live effect (campaign
+# 2971, 2026-10-20): all six English-audience accounts of the SW profile were
+# dropped by language routing and the clip only reached its Chinese accounts.
+_STT_PREFIX_RE = re.compile(
+    r"(?m)^[ \t]*(?:\d{1,3}(?:[.:]\d{1,2}){1,2}[ \t]*[-–—][ \t]*"
+    r"\d{1,3}(?:[.:]\d{1,2}){1,2}[ \t]*\|[^\n:]{0,48}:\s*"
+    r"|SPEAKER_\d+\s*:\s*|說話者\d*\s*:\s*)"
+)
+
+
+def strip_stt_scaffolding(text: str | None) -> str:
+    """Drop diarization timestamps / speaker labels before language detection."""
+    return _STT_PREFIX_RE.sub("", str(text or ""))
+
+
 def detect_language(text: str | None) -> str:
     """Classify a transcript as ``zh`` (any CJK codepoint) else ``en``."""
-    return "zh" if _contains_cjk(str(text or "")) else "en"
+    return "zh" if _contains_cjk(strip_stt_scaffolding(text)) else "en"
 
 
 def _split_transcript_language(raw: str) -> tuple[str, str | None]:

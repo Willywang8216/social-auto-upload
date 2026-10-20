@@ -194,6 +194,28 @@ class ChatAudioSttTests(unittest.TestCase):
         self.assertEqual(llm_client.detect_language(""), "en")
         self.assertEqual(llm_client.detect_language(None), "en")
 
+    def test_detect_language_ignores_stt_speaker_labels(self) -> None:
+        """A Chinese diarization label must not make English audio look Chinese.
+
+        The gateway prefixes English transcripts with ``0.16-29.12 | Vlog博主…:``
+        and that label alone flipped the routing to zh, dropping every English
+        account of the SW profile (campaign 2971, 2026-10-20).
+        """
+        english = (
+            "0.16-29.12 | Vlog博主Will及旁白: Hey guys, it's me, Will. "
+            "This is the very first thing that happened to me in the morning."
+        )
+        self.assertEqual(llm_client.detect_language(english), "en")
+        self.assertEqual(
+            llm_client.detect_language("00:00-15.47 | SPEAKER_00: I love to be on camera."),
+            "en",
+        )
+        # …but genuine Chinese speech behind the same scaffolding stays zh.
+        self.assertEqual(
+            llm_client.detect_language("0.16-29.12 | Vlog博主Will及旁白: 今天天氣很好"),
+            "zh",
+        )
+
     def test_missing_audio_file_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):

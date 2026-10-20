@@ -700,6 +700,20 @@ for (raw_metadata,) in conn.execute(
         if isinstance(path, str) and path.strip():
             emit_file_ref(path.strip())
 
+# 0b: same hole for the artifacts a live prep is still writing. A preparing
+#     campaign has no targets until it finishes, so the guard above only covers
+#     the raw source - the half-hourly offload still moved
+#     campaign-2971/2972's watermarked parts out from under the running encode.
+for (local_path,) in conn.execute(
+    """
+    SELECT DISTINCT a.local_path
+    FROM campaign_artifacts a
+    JOIN campaigns c ON c.id = a.campaign_id
+    WHERE c.status = 'preparing' AND a.local_path IS NOT NULL AND a.local_path != ''
+    """
+):
+    emit_media_path(str(local_path))
+
 # 1 + 2: in-flight targets, and pending targets inside the claim-race window.
 emit_owed(
     """

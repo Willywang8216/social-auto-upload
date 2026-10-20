@@ -11,7 +11,7 @@ Session: `gdrive-pipeline-metadata` · 2026-10-20 (host TZ Asia/Taipei) · repo
 | Are new uploads scheduled right away? | **No.** Two reasons, both fixed below: (1) the inbox watcher was crash-looping since 2026-10-17, so nothing new reached `ready` at all; (2) even when it runs, a submission only gets the *next free slot per account*, and the queue is months deep (see §5). |
 | Is the Pride invitation before 10/30? | **Yes, now.** 14 Pride targets that had been queued for 10/31–11/24 were swapped back into 10/22–10/30, and the new 光光 parade clip lands 2026-10-28. Zero Pride invitations remain after 10-30. |
 | Transcribed + summarised + rich metadata? | **Yes** for all 5 new videos (chunked STT, human summary, per-platform copy generated from it) and 11 new photos (human-described frames). |
-| Bugs found? | 3 real pipeline bugs (PIL crash loop, `.docx` transcripts ignored, orphan noise) + 2 scheduling/queue defects (duplicate `campaign_posts` after a re-prep, queue horizon 11 months). Details in §6. |
+| Bugs found? | 8, two of them serious: **the pipeline was publishing the extracted STT audio instead of the clip** (7 posts already went out that way on 10-18/19, 357 more were queued), and the **inbox watcher had been crash-looping for three days** so nothing new was being queued at all. Plus `.docx` transcripts ignored, the offload deleting live-prep sources, duplicate `campaign_posts`, an 11-month queue horizon. Details in §6. |
 | Stale files purged? | 6 byte-identical duplicate photos moved out of the inbox, 60 duplicate targets cancelled, 22 stale `ready` entries cleared, scratch dirs cleaned. Nothing deleted; everything moved to `sau/purged/2026-10-20-duplicates/` (§7). |
 
 ## 1. What the Drive inbox actually contained
@@ -157,6 +157,31 @@ render).
 
 ## 6. Bugs / defects found
 
+0. **Publish payload published the STT audio instead of the clip (fixed, and it
+   already happened 7 times).** `sau_backend._artifact_payloads_for_platform()`
+   puts every artifact without `metadata.role == "video"` into a `passthrough`
+   list that comes **before** the video part, and the worker's
+   `_prepared_artifact_local_paths()` hands the uploader every path in order.
+   The prep pipeline auto-transcribes whenever the submit carried no transcript
+   — so the first path was the extracted `…-audio.wav` (and the
+   `…-transcript.txt` next).
+
+   * 7 targets **already succeeded** with `artifacts[0].artifact_kind = audio`:
+     bluesky/telegram/nw_sw_blog on 2026-10-18/10-19 (campaigns 2605, 2606,
+     2609, 2610 — the Pride invitations). Those posts went out as audio
+     attachments, not video.
+   * **357 pending targets** had the same shape.
+   * Twitter fails loudly instead (`Unsupported prepared Twitter media type:
+     .wav`), which is how the class was noticed.
+
+   Fixed in `_artifact_payloads_for_platform` (audio/transcript are context
+   artifacts, never publishable) with a regression test covering every
+   platform, and the 358 already-queued job payloads were repaired in place
+   (`sau-work/current/strip_audio_artifacts.py`, DB snapshot first). Nothing is
+   left in the queue that could publish a WAV. Note the fix only ships to the
+   container on the next image build; the DB repair is what protects today's
+   queue.
+
 1. **nsfw thumbnail crash loop (fixed).** `watch.py::build_thumb` — unguarded
    `thumb.make_titlecard()` aborted the scan before `save_state()`. Now guarded,
    and the call site is wrapped so *no* thumbnail failure can lose a ready item.
@@ -197,6 +222,22 @@ render).
    objects with the same path; the watcher's dedupe is path-keyed, so the second
    copy is never ingested and never cleaned (`sw/img/截圖1-12` each exist twice).
    Harmless today (the first copy is already scheduled) but it accumulates.
+7b. **A long clip's split parts are separate posts, not a thread.** There are
+   920 queued jobs with `partCount > 1` and **zero** jobs using
+   `threadFileRefs` — but `worker._run_platform_upload` explicitly supports a
+   reply chain (`TwitterThreadVideo(file_paths=[...])`). So a 10-minute clip
+   becomes N independent posts, each 30 minutes apart and subject to the 3/day
+   cap. Usually the parts land on the same day (only 5 of 322 part-groups are
+   spread over 7 days), but on the saturated X accounts they fragment across
+   months: campaign 2974 (the news episode, 5 parts) has part 1 on 2026-10-22
+   and parts 2-5 on `NW X (model_will)` in **February 2027**, and all five parts
+   on `NW X (nudeweiwei)` land in **March–April 2027**. Those fragments are
+   meaningless posted alone. Fix direction: emit one twitter target carrying
+   `threadFileRefs` (the worker already handles it) instead of N part targets,
+   or teach the allocator that parts of one submit are a single unit. Not fixed
+   here — it needs the prep/enqueue path changed, and the queue repair would be
+   a large re-time.
+
 8. **The offload cron deleted a source out from under a live prep (fixed).**
    `offload_to_drive.sh` protects files that a *target* still needs (running,
    retrying, due-soon, or pending without a restore mapping) — but an
@@ -210,6 +251,12 @@ render).
    `metadata_json.prepRequest.mediaFilePaths` from the offload move (verified:
    the exclude list now contains all six staged sources); the three files were
    restored from `sau/inbox/videoFile/` and the failed campaign re-queued.
+   The same hole existed one level down: a preparing campaign's *generated*
+   artifacts (`campaign_artifacts.local_path`) are equally unreferenced by any
+   target, so the 17:47 offload moved campaign 2971/2972's watermarked parts to
+   Drive mid-encode. Both are now excluded too (verified: 379 kept-local
+   entries including `campaigns/campaign-2971/…-watermarked_video.mp4`), and the
+   files were copied back so the in-flight preps could finish.
 
 ## 7. Purge / cleanup (nothing deleted)
 
@@ -235,5 +282,35 @@ render).
 
 ## 9. Archive
 
-`_work/archive_batch.py` (server-side `rclone moveto` + same-name `.txt` holding
-the summary, the transcript and the per-platform copy actually queued).
+Server-side `rclone moveto` (never a re-encode, never a delete) into
+`sau/published/videoFile/`, each with a same-name `.txt` that holds the summary,
+the brief and **the exact per-platform copy that was queued** (pulled from
+`campaign_posts.draft_json`), e.g.
+
+```
+Marble doesnt breathe_NSFW_20261022.mp4      + .txt (23.7 KB)
+Marble doesnt breathe_SFW_20261023.mp4       + .txt (28.2 KB)
+Four years after I quit_SFW_20261024.mp4     + .txt (43.9 KB)
+Nakedwill News Ep.006 …_SFW_20261021.mp4     + .txt (31.0 KB) + the operator's .docx
+光光邀你十月三十號一起來遊行_NSFW_20261021.mp4  + .txt
+Night boardwalk, full body_NSFW_20261102.jpg + .txt
+… 10 more photo archives, same pattern
+```
+
+Drive's server-side move is rate-limited (`rateLimitExceeded` → rclone reports
+the confusing "directory not found"): the archive helper now runs rclone with
+`--tpslimit 2 --retries 8 --low-level-retries 20`, and the video moves were
+re-run individually with the same pacing.
+
+`SAU-Inbox/both/video/` and `sw/video/` are now empty of today's uploads; the
+6 duplicate photos are in `sau/purged/2026-10-20-duplicates/` with a README.
+
+## 10. Files moved out of the watched inbox
+
+The inbox root had accumulated a dozen one-off scripts, 839 MB of leftover
+audio/video in `.stt-tmp/`, an old transcripts tree and the 10-17 batch plans.
+All of it is now under `/home/will/sau-work/` (`current/` = this session's
+scripts, `archive-2026-10-17/` = the previous batch's), which is outside
+`SAU_INBOX` so the watcher no longer scans it. Kept in the inbox: `watch.py`,
+`thumb.py`, `manual_platforms.py`, `gen_title.py`, `state.json`, `.env`, the
+READMEs, `tests/`, the persona folders — exactly what a scan needs.
