@@ -22,6 +22,7 @@ All alerts go to Telegram **@Notification_personalprojectbot**
 | --- | --- | --- | --- |
 | Inbox watcher | every minute | a scan **raises** (thumbnails, Drive listing, state write) — the exact 2026-10-17 failure | `sau-inbox/watch.py::report_scan_failure` |
 | Watcher watchdog | `*/10` | no **successful** scan in 15 min, or the health file is missing (cron died, run lock stuck, Drive unreachable) | `sau-inbox/inbox_monitor.py` |
+| Stuck-item reminder | `*/10` (same job) | a `ready`/`pending` item is older than 24 h — it arrived, was announced once, and nobody approved it | `sau-inbox/inbox_monitor.py` |
 | Pipeline monitor | `*/15` | app `/healthz` down · last offload `rc != 0` · publish targets **failed in the last 2 h** (excluding "disabled by the operator") · campaigns in `needs_review` (last 24 h) · targets **overdue > 45 min** · watcher heartbeat stale > 30 min | `myUtils/pipeline_monitor.py` |
 | Auto-archive | `*/15` | never alerts on success; on a failed Drive move it reports and leaves the file in place | `myUtils/inbox_archive.py` |
 | Worker / digest | in-process | account refresh failures, publish exceptions, the 09:00 daily digest | `myUtils/ops_alerts.py` |
