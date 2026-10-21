@@ -83,7 +83,11 @@ how `SAU-Inbox/` reached 404 objects — most of them published weeks earlier.
      only show media the pipeline has **not** picked up yet,
 4. writes the note (brief + the exact per-platform copy from
    `campaign_posts.draft_json`), then removes the queue entry and marks the
-   Drive path `processed`.
+   Drive path `processed`,
+5. records the object in `logs/inbox-archive-ledger.json` and, on a later run,
+   **rewrites the note once the campaign has actually published** — so the
+   archive ends up saying "published" rather than "scheduled" while the inbox
+   stays clean from the moment the pipeline takes the file.
 
 Nothing is deleted: a failed move leaves the file in the inbox and alerts.
 

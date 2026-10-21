@@ -44,6 +44,7 @@ from myUtils import content_rating
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_DB = Path(os.environ.get("SAU_DB_PATH") or (REPO / "db" / "database.db"))
 DEFAULT_STATE = Path(os.environ.get("SAU_WATCH_STATE") or "/home/will/sau-inbox/state.json")
+LEDGER = Path(os.environ.get("SAU_INBOX_ARCHIVE_LEDGER") or (REPO / "logs" / "inbox-archive-ledger.json"))
 REMOTE = os.environ.get("SAU_INBOX_DRIVE_REMOTE", "GDrive-willywang8216")
 INBOX_ROOT = os.environ.get("SAU_INBOX_DRIVE_ROOT", "SAU-Inbox").strip("/")
 ARCHIVE_DIR = f"{REMOTE}:sau/published/videoFile"
@@ -86,6 +87,21 @@ def _rclone(args: Iterable[str], *, timeout: int = 900) -> subprocess.CompletedP
     command = ["rclone", "--config", config, "--tpslimit", "2", "--tpslimit-burst", "2",
                "--retries", "6", "--low-level-retries", "20", *args]
     return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+
+
+def load_ledger() -> dict:
+    try:
+        data = json.loads(LEDGER.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_ledger(data: dict) -> None:
+    LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LEDGER.with_name(f"{LEDGER.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(LEDGER)
 
 
 def safe_name(text: str) -> str:
@@ -286,6 +302,7 @@ def plan_archives(db_path: Path, state_path: Path, *, from_drive: bool = False,
             archived, date_token = archive_name(remote_path, entry, campaign)
             plan.append({
                 "bucket": bucket,
+                "published": bool(campaign.get("published")),
                 "remote_path": remote_path,
                 "archived": archived,
                 "campaign_id": campaign["campaign_id"],
@@ -308,6 +325,7 @@ def plan_archives(db_path: Path, state_path: Path, *, from_drive: bool = False,
         archived, _ = archive_name(remote_path, {}, campaign)
         plan.append({
             "bucket": "drive",
+            "published": bool(campaign.get("published")),
             "remote_path": remote_path,
             "archived": archived,
             "campaign_id": campaign["campaign_id"],
@@ -349,12 +367,62 @@ def apply_archive(item: dict, state_path: Path, *, dry_run: bool = False) -> str
                 continue
             keep.append(entry)
         state[bucket] = keep
+    ledger = load_ledger()
+    ledger[item["remote_path"]] = {
+        "archived": item["archived"],
+        "campaign_id": item["campaign_id"],
+        "published_at_archive": bool(item.get("published")),
+        "archived_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"),
+    }
+    save_ledger(ledger)
     if removed:
         state.setdefault("processed", {})[f"drive:{item['remote_path']}"] = (
             datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
         )
         save_state(state_path, state)
     return None
+
+
+def refresh_published_notes(db_path: Path, *, dry_run: bool = False) -> list[str]:
+    """Rewrite the note of an already-archived item once its campaign published.
+
+    The cron archives as soon as the pipeline owns the media (``--include-scheduled``)
+    so the operator's drop box stays clean, which means the first note says
+    "scheduled, not published yet". When the campaign finishes, the note should
+    say so — and carry the final per-platform copy.
+    """
+    ledger = load_ledger()
+    if not ledger:
+        return []
+    published = published_media(db_path)  # strict: finished only
+    errors: list[str] = []
+    for remote_path, record in list(ledger.items()):
+        if record.get("published_at_archive"):
+            continue
+        campaign = published.get(Path(remote_path).name)
+        if campaign is None:
+            continue
+        archived = record.get("archived") or f"{Path(remote_path).stem}.txt"
+        note = build_note(remote_path, {}, campaign, archived, db_path)
+        if dry_run:
+            print(f"  would refresh note for {archived}")
+            continue
+        note_path = Path("/tmp") / f"sau-archive-refresh-{os.getpid()}-{abs(hash(archived))}.txt"
+        note_path.write_text(note, encoding="utf-8")
+        try:
+            copied = _rclone(["copyto", str(note_path), f"{ARCHIVE_DIR}/{archived}.txt"])
+            if copied.returncode != 0:
+                errors.append(f"{archived}: {copied.stderr.strip()[-200:]}")
+                continue
+        finally:
+            note_path.unlink(missing_ok=True)
+        record["published_at_archive"] = True
+        record["note_refreshed_at"] = datetime.now(timezone.utc).replace(
+            tzinfo=None).isoformat(timespec="seconds")
+        ledger[remote_path] = record
+        save_ledger(ledger)
+        print(f"  refreshed note for {archived} (campaign {record.get('campaign_id')} published)")
+    return errors
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -387,6 +455,8 @@ def main(argv: list[str] | None = None) -> int:
         if error:
             print(f"    ERROR: {error}", file=sys.stderr)
             errors.append(error)
+    refresh_errors = refresh_published_notes(args.db, dry_run=args.dry_run)
+    errors.extend(refresh_errors)
     if errors:
         _alert(errors)
         return 1
