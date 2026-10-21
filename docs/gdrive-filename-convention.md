@@ -340,6 +340,12 @@ Simplified) for `zh-Hant`.
 
 ## 10. Archive + metadata — rename the video, write the summary beside it
 
+> **Automated since 2026-10-21.** `python -m myUtils.inbox_archive` runs from
+> cron every 15 minutes and does this step for every inbox object whose campaign
+> exists (scheduled or published) — see
+> [`docs/pipeline-monitoring.md`](pipeline-monitoring.md) §2. The manual recipe
+> below is what it runs (and what you use to unstick something).
+
 After a clip is published (or an already-published inbox file is cleared out),
 the Drive archive must stay self-describing: the video keeps a human name and a
 **same-name summary/description file** sits beside it. This is the "rename +

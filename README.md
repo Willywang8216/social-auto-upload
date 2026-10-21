@@ -273,6 +273,7 @@ TikTok 使用 Content Posting API：
 - [API 速率限制與配額](./docs/api-rate-limits.md)
 - [平台發佈限制（2026）](./docs/platform-posting-limits.md)
 - [Drive 收件匣檔名慣例 / 轉錄 / 語系路由 / 歸檔 metadata](./docs/gdrive-filename-convention.md)
+- [Pipeline 監控與自動歸檔（告警、watchdog、Drive 收件匣）](./docs/pipeline-monitoring.md)
 - [2026-10-20 新上傳處理報告（排程深度、audio-artifact 事故、PIL 當機）](./reports/inbox-new-uploads-2026-10-20.md)
 - [Media storage pipeline（離線不變式）](./docs/media-storage-pipeline.md)
 

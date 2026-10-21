@@ -1,0 +1,123 @@
+# Pipeline monitoring & automatic inbox archiving
+
+Everything on this page exists because of one incident: from **2026-10-17 to
+2026-10-20** the Drive-inbox watcher crashed on every single cron tick
+(`ModuleNotFoundError: No module named 'PIL'`) and the only trace was 781 KB of
+traceback in `watch.log`. New uploads sat untouched for four days and nobody
+knew. **A log file is not a notification channel.**
+
+All alerts go to Telegram **@Notification_personalprojectbot**
+(chat `8633483147`). Credentials live in two files and are never committed:
+
+| file | keys |
+| --- | --- |
+| `~/social-auto-upload/.env` | `SAU_ALERT_TELEGRAM_BOT_TOKEN`, `SAU_ALERT_TELEGRAM_CHAT_ID` (container: worker / publish / digest) |
+| `~/sau-inbox/.env` | `SAU_WATCH_TG_BOT_TOKEN`, `SAU_WATCH_TG_CHAT_ID` (host: watcher + watchdog) |
+
+---
+
+## 1. What alerts, and when
+
+| piece | cron | fires when | module |
+| --- | --- | --- | --- |
+| Inbox watcher | every minute | a scan **raises** (thumbnails, Drive listing, state write) — the exact 2026-10-17 failure | `sau-inbox/watch.py::report_scan_failure` |
+| Watcher watchdog | `*/10` | no **successful** scan in 15 min, or the health file is missing (cron died, run lock stuck, Drive unreachable) | `sau-inbox/inbox_monitor.py` |
+| Pipeline monitor | `*/15` | app `/healthz` down · last offload `rc != 0` · publish targets **failed in the last 2 h** (excluding "disabled by the operator") · campaigns in `needs_review` (last 24 h) · targets **overdue > 45 min** · watcher heartbeat stale > 30 min | `myUtils/pipeline_monitor.py` |
+| Auto-archive | `*/15` | never alerts on success; on a failed Drive move it reports and leaves the file in place | `myUtils/inbox_archive.py` |
+| Worker / digest | in-process | account refresh failures, publish exceptions, the 09:00 daily digest | `myUtils/ops_alerts.py` |
+
+Every alert is deduplicated per signature (watcher 30 min, watchdog 60 min,
+pipeline monitor 60 min), so a permanent outage is one message per hour, not
+144 a day.
+
+### Manual checks (same code the cron runs)
+
+```bash
+cd ~/sau-inbox && /usr/bin/python3 inbox_monitor.py --status        # watcher health
+cd ~/social-auto-upload && .venv/bin/python -m myUtils.pipeline_monitor --status
+cd ~/social-auto-upload && .venv/bin/python -m myUtils.inbox_archive --dry-run --from-drive --include-scheduled
+```
+
+`--status` / `--dry-run` never send anything and never move anything.
+
+### Proving the channel works
+
+```bash
+cd ~/sau-inbox && /usr/bin/python3 -c "
+import importlib.util, pathlib
+spec = importlib.util.spec_from_file_location('w', 'watch.py')
+w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)
+try: raise RuntimeError('self-test')
+except Exception as e: w.report_scan_failure(e)
+"
+```
+
+or from the container:
+
+```bash
+docker exec social-auto-upload python3 -c "
+from myUtils import ops_alerts
+print(ops_alerts.send_ops_alert(subject='test', body='test'))"
+```
+
+---
+
+## 2. Automatic archiving (the Drive inbox stays clean)
+
+`docs/gdrive-filename-convention.md` §10 requires every inbox object to end up
+in `sau/published/videoFile/` as `<Title>_<SFW|NSFW>_<YYYYMMDD>.<ext>` with a
+same-name `.txt` beside it. Until 2026-10-21 that step was **manual**, which is
+how `SAU-Inbox/` reached 404 objects — most of them published weeks earlier.
+
+`python -m myUtils.inbox_archive` now does it on a 15-minute cron:
+
+1. reads the watcher queue (`/home/will/sau-inbox/state.json`), **and** with
+   `--from-drive` reconciles every object in `SAU-Inbox/` against the database
+   (so media whose queue entry was lost or hand-submitted is not stranded),
+2. matches the object to a campaign by filename (UUID-prefixed upload names from
+   the web UI are normalised first),
+3. archives it when the campaign has taken responsibility for it:
+   * default — **all** targets terminal and ≥ 1 succeeded (published), or
+   * `--include-scheduled` — the campaign exists and has targets (scheduled for
+     a future slot). This is what the cron uses: the operator's drop box should
+     only show media the pipeline has **not** picked up yet,
+4. writes the note (brief + the exact per-platform copy from
+   `campaign_posts.draft_json`), then removes the queue entry and marks the
+   Drive path `processed`.
+
+Nothing is deleted: a failed move leaves the file in the inbox and alerts.
+
+Run once for the backlog, then let cron handle the rest:
+
+```bash
+cd ~/social-auto-upload
+.venv/bin/python -m myUtils.inbox_archive --from-drive --include-scheduled --limit 400
+```
+
+**2026-10-21 result:** 374 objects archived (282 from the queue + 92 reconciled
+from Drive), leaving only the operator's 4 `.docx` transcripts and the inbox
+README.
+
+---
+
+## 3. Failure modes this is meant to catch
+
+| silent failure | caught by |
+| --- | --- |
+| watcher crashes every minute (missing dependency, Drive auth, disk full) | watcher alert (immediate) + watchdog (15 min) |
+| cron entry removed / machine rebooted without cron | watchdog (no heartbeat) |
+| scheduler thread stops draining | pipeline monitor (overdue targets) |
+| prep dies (artifact missing, ffmpeg OOM, container restart mid-encode) | pipeline monitor (`needs_review`) |
+| a platform starts rejecting posts | pipeline monitor (failed targets in 2 h) |
+| offload stops moving media out (disk fills) | pipeline monitor (`rc != 0`) |
+| app container down / bad image | pipeline monitor (`/healthz`) |
+| inbox fills with published media | auto-archive cron |
+
+## 4. Known gaps (deliberately not silenced)
+
+* A publish that fails **once** on a retryable platform is retried by the
+  worker; only permanent failures surface (the monitor reads `status='failed'`).
+* `needs_review` campaigns need a human: the alert tells you the id, and the
+  recovery is a `preparing` reset (see
+  `reports/inbox-new-uploads-2026-10-20.md` §11.2).
+* The monitor cannot see *wrong* content — only stuck or failed work.
