@@ -24,6 +24,7 @@ All alerts go to Telegram **@Notification_personalprojectbot**
 | Watcher watchdog | `*/10` | no **successful** scan in 15 min, or the health file is missing (cron died, run lock stuck, Drive unreachable) | `sau-inbox/inbox_monitor.py` |
 | Stuck-item reminder | `*/10` (same job) | a `ready`/`pending` item is older than 24 h — it arrived, was announced once, and nobody approved it | `sau-inbox/inbox_monitor.py` |
 | Pipeline monitor | `*/15` | app `/healthz` down · last offload `rc != 0` · publish targets **failed in the last 2 h** (excluding "disabled by the operator") · campaigns in `needs_review` (last 24 h) · targets **overdue > 45 min** · watcher heartbeat stale > 30 min | `myUtils/pipeline_monitor.py` |
+| Auto-publish | `*/10` | never alerts on success; a failed submit retries 3×, then reports | `myUtils/inbox_autopublish.py` |
 | Auto-archive | `*/15` | never alerts on success; on a failed Drive move it reports and leaves the file in place | `myUtils/inbox_archive.py` |
 | Worker / digest | in-process | account refresh failures, publish exceptions, the 09:00 daily digest | `myUtils/ops_alerts.py` |
 
@@ -63,7 +64,42 @@ print(ops_alerts.send_ops_alert(subject='test', body='test'))"
 
 ---
 
-## 2. Automatic archiving (the Drive inbox stays clean)
+## 2. Publish unless the operator objects (24-hour countdown)
+
+Operator rule (2026-10-21): *notify a day before; if I did nothing, publish as
+it is.*
+
+`myUtils/inbox_autopublish.py` (cron `*/10`) implements exactly that:
+
+1. the watcher stamps every new `ready` item with `autoPublishAt = createdAt +
+   SAU_INBOX_AUTOPUBLISH_HOURS` (default **24**) and the "已備好" Telegram message
+   states that deadline — that is the "a day before" notice;
+2. two hours before the deadline a reminder is sent (once);
+3. at the deadline the item is submitted through the same inbox route the UI
+   uses (`POST /api/inbox/items/<id>/publish`), so NSFW platform guards,
+   per-account language routing and per-account LLM copy all still apply. A
+   filename `publishDate` pins the date at 21:00 Taipei; otherwise the allocator
+   picks the next free slot;
+4. the item leaves `ready`, is marked `processed` (so the watcher never
+   re-adds it), and a "✅ 已自動排程發布" message lists the campaign ids.
+
+**Stopping it** — any of these, all of which simply remove the item from
+`ready` before the deadline:
+
+* reply in Telegram / reject in the web UI,
+* approve it yourself (it publishes immediately and leaves the queue),
+* edit the brief and re-submit,
+* or flip the global switch: `SAU_INBOX_AUTOPUBLISH=0` in the environment of the
+  cron job (`--disable` for a single run).
+
+The submit is claimed in `state.json` (`autoPublishState="publishing"`) under the
+watcher's own file lock before the HTTP call, so overlapping ticks cannot
+double-publish. Failures are retried, then reported (`autoPublishAttempts`,
+default 3).
+
+---
+
+## 3. Automatic archiving (the Drive inbox stays clean)
 
 `docs/gdrive-filename-convention.md` §10 requires every inbox object to end up
 in `sau/published/videoFile/` as `<Title>_<SFW|NSFW>_<YYYYMMDD>.<ext>` with a
@@ -105,7 +141,7 @@ README.
 
 ---
 
-## 3. Failure modes this is meant to catch
+## 4. Failure modes this is meant to catch
 
 | silent failure | caught by |
 | --- | --- |
@@ -118,7 +154,7 @@ README.
 | app container down / bad image | pipeline monitor (`/healthz`) |
 | inbox fills with published media | auto-archive cron |
 
-## 4. Known gaps (deliberately not silenced)
+## 5. Known gaps (deliberately not silenced)
 
 * A publish that fails **once** on a retryable platform is retried by the
   worker; only permanent failures surface (the monitor reads `status='failed'`).
