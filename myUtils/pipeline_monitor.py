@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -180,6 +181,13 @@ def _check_offload(repo: Path) -> list[str]:
     for line in reversed(lines):
         if "offload done" in line:
             if "rc=0" in line:
+                # A deferred file is safely still local and retried next run; it
+                # is only news when it keeps happening (the script pages itself
+                # after 3 consecutive deferrals) or when the backlog is large.
+                match = re.search(r"deferred=(\d+)", line)
+                deferred = int(match.group(1)) if match else 0
+                if deferred >= 5:
+                    return [f"last offload deferred {deferred} file(s): {line[-140:]}"]
                 return []
             return [f"last offload run failed: {line[-160:]}"]
     return ["no completed offload run found in offload.log"]

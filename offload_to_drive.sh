@@ -439,6 +439,58 @@ for tier in ("published", "inbox"):
 PY
 }
 
+# A freshly uploaded object can be readable but not yet carry its MD5 on Google
+# Drive, so a hash check seconds after the upload reports a difference that does
+# not exist. That produced 3 "remote copy is missing or differs" failures on
+# 2026-10-17/21/22 - each one paged the operator (rc=1), and each one verified
+# clean on the next run (campaign-2563: uploaded 21:25:54, "differs" at
+# 21:27:20, 0 differences at 21:37). Retry the hash check briefly, then accept a
+# size match, which is the check the header always claimed to use.
+verify_remote_copy() {
+  local source_root="$1" remote_root="$2" escaped="$3" relative="$4"
+  local attempt
+  local retry_sleep=${SAU_OFFLOAD_VERIFY_RETRY_SLEEP:-5}
+  for attempt in 1 2 3; do
+    if "${RC[@]}" check "$source_root" "$remote_root" --one-way \
+         --include "/$escaped" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$retry_sleep"
+  done
+  if "${RC[@]}" check "$source_root" "$remote_root" --one-way --size-only \
+       --include "/$escaped" >/dev/null 2>&1; then
+    echo "[$(ts)] note: $relative verified by size only (remote hash not available yet)"
+    return 0
+  fi
+  return 1
+}
+
+# Per-file deferral ledger: a file that keeps failing verification is a real
+# problem (quota, permissions, a permanently unreadable object) and must page;
+# one or two transient deferrals must not.
+DEFERRED_LEDGER="$SRC/logs/offload-deferred.txt"
+DEFERRED_COUNT=0
+DEFERRED_ALERT_AT=${SAU_OFFLOAD_DEFER_ALERT_AT:-3}
+# Start this run's ledger clean (a stale one from a crashed run must not carry
+# counts forward).
+: > "$DEFERRED_LEDGER.new" 2>/dev/null || true
+
+note_deferred() {
+  local relative="$1"
+  DEFERRED_COUNT=$((DEFERRED_COUNT + 1))
+  local previous=0
+  if [ -f "$DEFERRED_LEDGER" ]; then
+    previous=$(awk -F'\t' -v r="$relative" '$1==r {print $2}' "$DEFERRED_LEDGER" | tail -1)
+  fi
+  previous=$(( ${previous:-0} + 1 ))
+  printf '%s\t%s\n' "$relative" "$previous" >> "$DEFERRED_LEDGER.new"
+  if [ "$previous" -ge "$DEFERRED_ALERT_AT" ]; then
+    echo "[$(ts)] DEFERRED $previous times, needs attention: $relative"
+    return 1
+  fi
+  return 0
+}
+
 purge_verified_sources() {
   local source_root="$1"
   local remote_root="$2"
@@ -477,8 +529,7 @@ purge_verified_sources() {
     # Escaped includes make filename metacharacters literal; --one-way ignores
     # unrelated remote files without weakening verification of this source.
     escaped=$(escape_rclone_filter_path "$relative")
-    if "${RC[@]}" check "$source_root" "$remote_root" --one-way \
-         --include "/$escaped" >/dev/null 2>&1; then
+    if verify_remote_copy "$source_root" "$remote_root" "$escaped" "$relative"; then
       after_stat=$(stat -c '%d:%i:%s:%Y' -- "$source_file") || { failed=1; continue; }
       if [ "$before_stat" != "$after_stat" ]; then
         echo "[$(ts)] keeping $relative: source changed during remote verification"
@@ -494,8 +545,11 @@ purge_verified_sources() {
       fi
       sudo -n rm -- "$source_root/$relative" || { echo "[$(ts)] could not unlink verified source: $relative"; failed=1; }
     else
-      echo "[$(ts)] keeping $relative: remote copy is missing or differs"
-      failed=1
+      # Deferred, not lost: the source stays exactly where it is and the next
+      # run (30 min later) retries. Only a repeat offender fails the run.
+      if ! note_deferred "$relative"; then
+        failed=1
+      fi
     fi
   done <<< "$paths"
   return "$failed"
@@ -516,21 +570,37 @@ offload_previous_rc() {
 # operator chasing a run that had been clean for hours. The recovery line is
 # what closes that loop — one message, on the failing -> healthy transition
 # only, so it never becomes a heartbeat.
+# Alerts go through the app's own channel (SAU_ALERT_TELEGRAM_* in .env, now
+# @Notification_personalprojectbot) instead of the mailserver bot token, so the
+# operator has one place to look. Falls back to the old mailserver token when the
+# repo is unreachable, and stays silent (never fails the run) otherwise.
 notify() {
   local current_rc="$1"
   local previous_rc="$2"
-  [ -f "$TGENV" ] || return 0
-  local text=""
+  local subject="" body=""
   if [ "$current_rc" -ne 0 ]; then
-    text="SAU->Drive offload FAILED (rc=$current_rc) at $(ts) on $(hostname). Check $LOG"
+    subject="⚠️ SAU offload 失敗 (rc=$current_rc)"
+    body="$(ts) on $(hostname) - $DEFERRED_COUNT file(s) deferred this run. Log: $LOG"
   elif [ -n "$previous_rc" ] && [ "$previous_rc" -ne 0 ]; then
-    text="SAU->Drive offload RECOVERED (rc=0) at $(ts) on $(hostname) — the previous run (rc=$previous_rc) has cleared."
+    subject="✅ SAU offload 已恢復 (rc=0)"
+    body="$(ts) - 上一次 rc=$previous_rc 的問題已清掉。"
+  else
+    return 0
   fi
-  [ -n "$text" ] || return 0
+  if [ -x "$SRC/.venv/bin/python" ]; then
+    "$SRC/.venv/bin/python" -c "
+import sys
+sys.path.insert(0, '$SRC')
+from myUtils import ops_alerts
+sys.exit(0 if ops_alerts.send_ops_alert(subject=sys.argv[1], body=sys.argv[2]) else 1)
+" "$subject" "$body" >/dev/null 2>&1 && return 0
+  fi
+  [ -f "$TGENV" ] || return 0
   . "$TGENV"
   curl -s -m 20 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
     --data-urlencode "chat_id=${TG_CHAT}" \
-    --data-urlencode "text=$text" >/dev/null 2>&1
+    --data-urlencode "text=$subject
+$body" >/dev/null 2>&1
   return 0
 }
 
@@ -913,7 +983,15 @@ PY
     done
   fi
   rm -f "$EXCLUDES"
-  echo "[$(ts)] offload done rc=$rc local videoFile=$(find "$SRC/videoFile" -type f 2>/dev/null | wc -l) uploads=$(find "$SRC/uploads" -type f 2>/dev/null | wc -l)"
+  # Replace the ledger with this run's outcomes: files that copied cleanly are
+  # dropped (their streak resets), files that deferred again keep their count.
+  if [ -f "$DEFERRED_LEDGER.new" ]; then
+    sort -u "$DEFERRED_LEDGER.new" > "$DEFERRED_LEDGER" || true
+    rm -f "$DEFERRED_LEDGER.new"
+  else
+    : > "$DEFERRED_LEDGER"
+  fi
+  echo "[$(ts)] offload done rc=$rc deferred=$DEFERRED_COUNT local videoFile=$(find "$SRC/videoFile" -type f 2>/dev/null | wc -l) uploads=$(find "$SRC/uploads" -type f 2>/dev/null | wc -l)"
 } >> "$LOG" 2>&1
 notify "$rc" "$(offload_previous_rc)"
 exit "$rc"

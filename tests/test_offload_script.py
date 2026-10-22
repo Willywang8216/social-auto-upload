@@ -5,6 +5,41 @@ import unittest
 from pathlib import Path
 
 
+def _fn(source: str, name: str) -> str:
+    """Body of a shell function in offload_to_drive.sh (functions end at a bare `}`)."""
+    body = source.split(f"{name}() {{", 1)[1]
+    return body[: body.index("\n}")]
+
+
+def _purge_harness(source: str, *, ledger: Path | None = None) -> str:
+    """The purge helpers, wired the way the real script wires them."""
+    return r"""
+EXCLUDES="$TEST_EXCLUDES"
+CONF="$CONF"
+RCLONE_BIN="$RCLONE_BIN"
+RC=("${RCLONE_BIN}" --config "$CONF")
+DEFERRED_LEDGER="$TEST_LEDGER"
+DEFERRED_COUNT=0
+DEFERRED_ALERT_AT=${SAU_OFFLOAD_DEFER_ALERT_AT:-3}
+SAU_OFFLOAD_VERIFY_RETRY_SLEEP=0
+register_verified_source(){ return 0; }
+ts(){ printf 'test'; }
+escape_rclone_filter_path() {
+""" + _fn(source, "escape_rclone_filter_path") + r"""
+}
+verify_remote_copy() {
+""" + _fn(source, "verify_remote_copy") + r"""
+}
+note_deferred() {
+""" + _fn(source, "note_deferred") + r"""
+}
+purge_verified_sources() {
+""" + _fn(source, "purge_verified_sources") + r"""
+}
+purge_verified_sources "$TEST_SOURCE" "$TEST_DEST"
+"""
+
+
 class OffloadScriptTests(unittest.TestCase):
     def test_copy_verification_uses_rclone_check_before_privileged_delete(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -52,25 +87,10 @@ exit 0
                 "TEST_SOURCE": str(root / "videoFile"),
                 "TEST_DEST": "drive:sau/videoFile",
                 "TEST_CALLS": str(calls),
+                "TEST_LEDGER": str(root / "offload-deferred.txt"),
             }
             source = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
-            body = source.split("purge_verified_sources() {", 1)[1].split("\n}", 1)[0]
-            escape = source.split("escape_rclone_filter_path() {", 1)[1].split("\n}", 1)[0]
-            script = r'''
-EXCLUDES="$TEST_EXCLUDES"
-CONF="$CONF"
-RCLONE_BIN="$RCLONE_BIN"
-RC=("${RCLONE_BIN}" --config "$CONF")
-register_verified_source(){ return 0; }
-escape_rclone_filter_path() {
-''' + escape + r'''
-}
-ts(){ printf 'test'; }
-purge_verified_sources() {
-''' + body + r'''
-}
-purge_verified_sources "$TEST_SOURCE" "$TEST_DEST"
-'''
+            script = _purge_harness(source)
             result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             recorded = calls.read_text().splitlines()
@@ -121,25 +141,10 @@ esac
                 "TEST_SOURCE": str(root / "videoFile"),
                 "TEST_DEST": "drive:sau/videoFile",
                 "TEST_CALLS": str(calls),
+                "TEST_LEDGER": str(root / "offload-deferred.txt"),
             }
             source = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
-            body = source.split("purge_verified_sources() {", 1)[1].split("\n}", 1)[0]
-            escape = source.split("escape_rclone_filter_path() {", 1)[1].split("\n}", 1)[0]
-            script = r'''
-EXCLUDES="$TEST_EXCLUDES"
-CONF="$CONF"
-RCLONE_BIN="$RCLONE_BIN"
-RC=("${RCLONE_BIN}" --config "$CONF")
-register_verified_source(){ return 0; }
-escape_rclone_filter_path() {
-''' + escape + r'''
-}
-ts(){ printf 'test'; }
-purge_verified_sources() {
-''' + body + r'''
-}
-purge_verified_sources "$TEST_SOURCE" "$TEST_DEST"
-'''
+            script = _purge_harness(source)
             result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             recorded = calls.read_text().splitlines() if calls.exists() else []
@@ -191,34 +196,110 @@ exit 0
                 "TEST_SOURCE": str(root / "videoFile"),
                 "TEST_DEST": "drive:sau/videoFile",
                 "TEST_CALLS": str(calls),
+                "TEST_LEDGER": str(root / "offload-deferred.txt"),
             }
             source = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
-            body = source.split("purge_verified_sources() {", 1)[1].split("\n}", 1)[0]
-            escape = source.split("escape_rclone_filter_path() {", 1)[1].split("\n}", 1)[0]
-            script = r'''
-EXCLUDES="$TEST_EXCLUDES"
-CONF="$CONF"
-RCLONE_BIN="$RCLONE_BIN"
-RC=("${RCLONE_BIN}" --config "$CONF")
-register_verified_source(){ return 0; }
-escape_rclone_filter_path() {
-''' + escape + r'''
-}
-ts(){ printf 'test'; }
-purge_verified_sources() {
-''' + body + r'''
-}
-purge_verified_sources "$TEST_SOURCE" "$TEST_DEST"
-'''
+            script = _purge_harness(source)
             result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
-            # Non-zero so the operator still gets paged about the file that could
-            # not be verified...
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("keeping bad.mp4", result.stdout + result.stderr)
+            # A single unverifiable file is *deferred*, not lost: it stays local,
+            # the run stays green, and only a repeat offender (3 consecutive runs)
+            # fails and pages. One transient Drive hiccup must not page anyone.
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # note_deferred appends to the run's ledger; the main script rotates
+            # `.new` into place at the end of the run (see the done line).
+            ledger = (root / "offload-deferred.txt.new").read_text()
+            self.assertIn("bad.mp4\t1", ledger)
             recorded = calls.read_text().splitlines()
             removed = [line for line in recorded if line.startswith("rm ")]
             # ...but the verified sibling was still reclaimed.
             self.assertEqual(removed, [f"rm -- {root}/videoFile/good.mp4"])
+
+    def _deferral_harness(self, root: Path, *, hash_rc: int, size_rc: int):
+        """Run the purge with a stubbed rclone answering check / check --size-only."""
+        executable_dir = root / "bin"
+        executable_dir.mkdir(exist_ok=True)
+        calls = root / "calls"
+        fake_rclone = executable_dir / "rclone"
+        fake_rclone.write_text(f'''#!/usr/bin/env bash
+[ "$1" = "--config" ] || exit 90
+shift 2
+printf '%s\\n' "$*" >> "$TEST_CALLS"
+case " $* " in
+  *' lsf '*) printf 'clip.mp4\\n' ;;
+  *' check '*--size-only*) exit {size_rc} ;;
+  *' check '*) exit {hash_rc} ;;
+  *) exit 91 ;;
+esac
+''')
+        fake_sudo = executable_dir / "sudo"
+        fake_sudo.write_text(
+            "#!/usr/bin/env bash\n"
+            "[ \"$1\" = \"-n\" ] || exit 92\n"
+            "shift\n"
+            "exec \"$@\"\n"
+        )
+        fake_rm = executable_dir / "rm"
+        fake_rm.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'rm %s\\n' \"$*\" >> \"$TEST_CALLS\"\n"
+            "exit 0\n"
+        )
+        for path in (fake_rclone, fake_sudo, fake_rm):
+            path.chmod(0o755)
+        excludes = root / "excludes"
+        excludes.write_text("")
+        (root / "videoFile").mkdir(exist_ok=True)
+        (root / "videoFile" / "clip.mp4").write_bytes(b"data")
+        source = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
+        env = {
+            **os.environ,
+            "RCLONE_BIN": str(fake_rclone),
+            "PATH": f"{executable_dir}:{os.environ['PATH']}",
+            "CONF": str(root / "rclone.conf"),
+            "SRC": str(root),
+            "TEST_EXCLUDES": str(excludes),
+            "TEST_SOURCE": str(root / "videoFile"),
+            "TEST_DEST": "drive:sau/videoFile",
+            "TEST_CALLS": str(calls),
+            "TEST_LEDGER": str(root / "offload-deferred.txt"),
+        }
+        return _purge_harness(source), env, calls
+
+    def test_hash_lag_falls_back_to_a_size_check_instead_of_failing(self):
+        """Google Drive can serve an object before its MD5 is populated.
+
+        Campaign-2563 on 2026-10-22: uploaded 21:25:54, "remote copy is missing
+        or differs" at 21:27:20, verified clean at 21:37. That one race paged the
+        operator and left 49 MB on the VPS. A size match must be accepted.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script, env, calls = self._deferral_harness(root, hash_rc=1, size_rc=0)
+            result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            recorded = calls.read_text().splitlines()
+            self.assertTrue(any("--size-only" in line for line in recorded))
+            removed = [line for line in recorded if line.startswith("rm ")]
+            self.assertEqual(len(removed), 1)
+            self.assertTrue(removed[0].endswith("videoFile/clip.mp4"), removed)
+            self.assertIn("verified by size only", result.stdout)
+
+    def test_repeat_offender_pages_after_three_consecutive_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script, env, calls = self._deferral_harness(root, hash_rc=1, size_rc=1)
+            ledger = root / "offload-deferred.txt"
+            for run in (1, 2, 3):
+                pending = root / "offload-deferred.txt.new"
+                if pending.exists():
+                    ledger.write_text(pending.read_text())
+                result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
+                if run < 3:
+                    self.assertEqual(result.returncode, 0, f"run {run} must not page: {result.stderr}")
+                else:
+                    self.assertEqual(result.returncode, 1, "the third consecutive deferral must page")
+                    self.assertIn("DEFERRED 3 times", result.stdout)
+            self.assertFalse([line for line in calls.read_text().splitlines() if line.startswith("rm ")])
 
     def _notify_harness(self, root: Path, *, tg_env: bool = True):
         """Build a runnable shell around the script's notify() + previous-rc."""
@@ -238,18 +319,30 @@ exit 0
         else:
             env_file = root / "missing_env"
         source = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
-        previous = source.split("offload_previous_rc() {", 1)[1].split("\n}", 1)[0]
-        notify = source.split("notify() {", 1)[1].split("\n}", 1)[0]
+        # notify() now sends through the app's own channel (ops_alerts), with the
+        # mailserver curl only as a fallback. Point SRC at a fake tree holding a
+        # stub .venv/bin/python so the test can observe what would be sent.
+        fake_src = root / "fake-src"
+        (fake_src / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+        stub_python = fake_src / ".venv" / "bin" / "python"
+        stub_python.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'ops_alerts %s\\n' \"$*\" >> \"$TEST_CALLS\"\n"
+            "exit 0\n"
+        )
+        stub_python.chmod(0o755)
         harness = r'''
+SRC="$TEST_SRC"
 LOG="$TEST_LOG"
 TGENV="$TEST_TG_ENV"
+DEFERRED_COUNT=0
 ts(){ printf '2026-10-01T00:00:00Z'; }
 hostname(){ printf 'testhost'; }
 offload_previous_rc() {
-''' + previous + r'''
+''' + _fn(source, "offload_previous_rc") + r'''
 }
 notify() {
-''' + notify + r'''
+''' + _fn(source, "notify") + r'''
 }
 notify "$1" "$2"
 '''
@@ -259,6 +352,7 @@ notify "$1" "$2"
             "TEST_CALLS": str(calls),
             "TEST_LOG": str(log),
             "TEST_TG_ENV": str(env_file),
+            "TEST_SRC": str(fake_src),
         }
         return harness, env, calls, log
 
@@ -267,15 +361,15 @@ notify "$1" "$2"
             harness, env, calls, _log = self._notify_harness(Path(tmp))
             subprocess.run(["bash", "-c", harness, "_", "1", "0"], env=env, text=True, capture_output=True)
             sent = calls.read_text() if calls.exists() else ""
+            self.assertIn("ops_alerts", sent)
             # A timestamp is what makes a late delivery recognisable as old.
-            self.assertIn("FAILED", sent)
             self.assertIn("2026-10-01T00:00:00Z", sent)
 
     def test_notify_announces_recovery_exactly_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             harness, env, calls, _log = self._notify_harness(Path(tmp))
             subprocess.run(["bash", "-c", harness, "_", "0", "1"], env=env, text=True, capture_output=True)
-            self.assertIn("RECOVERED", calls.read_text())
+            self.assertIn("恢復", calls.read_text())
 
             # healthy -> healthy must stay silent, or it becomes a heartbeat.
             calls.unlink()
@@ -288,9 +382,22 @@ notify "$1" "$2"
             subprocess.run(["bash", "-c", harness, "_", "0", ""], env=env, text=True, capture_output=True)
             self.assertFalse(calls.exists())
 
-    def test_notify_noops_without_a_telegram_env(self):
+    def test_notify_falls_back_when_ops_alerts_is_unavailable(self):
+        """ops_alerts is primary; the mailserver curl is the fallback.
+
+        With no app checkout the fallback runs, and with no TG env either the
+        run still stays silent (alerting must never fail the offload).
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            harness, env, calls, _log = self._notify_harness(Path(tmp), tg_env=False)
+            root = Path(tmp)
+            harness, env, calls, _log = self._notify_harness(root, tg_env=True)
+            env.pop("TEST_SRC", None)  # no stub .venv -> the python branch is skipped
+            subprocess.run(["bash", "-c", harness, "_", "1", "0"], env=env, text=True, capture_output=True)
+            self.assertTrue(calls.exists(), "the mailserver fallback must still fire")
+
+            calls.unlink()
+            harness, env, calls, _log = self._notify_harness(root, tg_env=False)
+            env.pop("TEST_SRC", None)
             subprocess.run(["bash", "-c", harness, "_", "1", "0"], env=env, text=True, capture_output=True)
             self.assertFalse(calls.exists())
 

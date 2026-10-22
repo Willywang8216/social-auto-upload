@@ -4008,6 +4008,10 @@ def validate_patreon_config_live(config: dict[str, Any], *, session=None) -> dic
 
 # ---- Teaching Blog (GitHub Contents API) ----
 
+# A concurrent blog publish can win the branch race repeatedly; four
+# attempts with backoff (0s, 1s, 2s, 3s) covers the realistic window.
+BLOG_CONFLICT_ATTEMPTS = 4
+BLOG_CONFLICT_BACKOFF_SECONDS = 1.0
 GITHUB_API_ROOT = "https://api.github.com"
 
 
@@ -4478,6 +4482,14 @@ def publish_nw_sw_blog_sync(
         content_b64 = base64.b64encode(mdx.encode("utf-8")).decode("ascii")
 
         # Idempotent upsert: reuse the SHA probed above, then PUT.
+        #
+        # Two blog posts publishing at the same time race on the branch: GitHub
+        # answers the second PUT with 409 "is at <sha> but expected <sha>" and the
+        # post was lost (target 7469, 2026-10-22 13:40 — the only non-Reddit
+        # publish failure that day). One retry was not enough because the retry
+        # itself can lose the same race, so re-read the SHA and retry a few times
+        # with a short backoff, and treat "the file already contains exactly what
+        # we want" as success.
         get_url = f"{GITHUB_API_ROOT}/repos/{owner}/{repo}/contents/{file_path}"
         put_body: dict[str, Any] = {
             "message": f"publish: {slug} ({locale})",
@@ -4486,46 +4498,48 @@ def publish_nw_sw_blog_sync(
         }
         if existing_sha:
             put_body["sha"] = existing_sha
-        put_resp = http.put(get_url, headers=headers, json=put_body, timeout=30)
 
-        # Handle 409 Conflict: the file was modified between our GET and PUT.
-        # Re-read the file to get the latest SHA and retry. If the content is
-        # already what we want, treat it as success (idempotent).
-        if put_resp.status_code == 409:
+        put_resp = None
+        for attempt in range(1, BLOG_CONFLICT_ATTEMPTS + 1):
+            put_resp = http.put(get_url, headers=headers, json=put_body, timeout=30)
+            if put_resp.status_code != 409:
+                break
             logger.warning(
-                "nw_sw_blog 409 conflict for %s; re-reading and retrying",
+                "nw_sw_blog 409 conflict for %s (attempt %d/%d); re-reading the SHA",
                 file_path,
+                attempt,
+                BLOG_CONFLICT_ATTEMPTS,
             )
-            retry_resp = http.get(get_url, headers=headers, params={"ref": branch}, timeout=30)
-            if retry_resp.status_code == 200:
-                retry_sha = (retry_resp.json() or {}).get("sha")
-                # Check if the existing content matches what we want (idempotent).
-                existing_content = (retry_resp.json() or {}).get("content") or ""
-                if existing_content == content_b64:
-                    # Content already matches; treat as success.
-                    put_json = retry_resp.json() or {}
-                    results.append({
-                        "locale": locale,
-                        "path": file_path,
-                        "sha": (put_json.get("content") or {}).get("sha") or retry_sha,
-                        "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{file_path}",
-                        "persona": effective_persona,
-                        "idempotent": True,
-                    })
-                    continue
-                # Content differs; retry with the fresh SHA.
-                put_body["sha"] = retry_sha
-                put_resp = http.put(get_url, headers=headers, json=put_body, timeout=30)
+            fresh = http.get(get_url, headers=headers, params={"ref": branch}, timeout=30)
+            if fresh.status_code != 200:
+                time.sleep(BLOG_CONFLICT_BACKOFF_SECONDS * attempt)
+                continue
+            fresh_json = fresh.json() or {}
+            if (fresh_json.get("content") or "") == content_b64:
+                # Someone else already published this exact content.
+                results.append({
+                    "locale": locale,
+                    "path": file_path,
+                    "sha": fresh_json.get("sha"),
+                    "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{file_path}",
+                    "persona": effective_persona,
+                    "idempotent": True,
+                })
+                put_resp = None
+                break
+            put_body["sha"] = fresh_json.get("sha")
+            time.sleep(BLOG_CONFLICT_BACKOFF_SECONDS * attempt)
 
-        _raise_for_status(put_resp)
-        put_json = put_resp.json() if hasattr(put_resp, "json") else {}
-        results.append({
-            "locale": locale,
-            "path": file_path,
-            "sha": (put_json.get("content") or {}).get("sha") or put_json.get("commit", {}).get("sha"),
-            "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{file_path}",
-            "persona": effective_persona,
-        })
+        if put_resp is not None:
+            _raise_for_status(put_resp)
+            put_json = put_resp.json() if hasattr(put_resp, "json") else {}
+            results.append({
+                "locale": locale,
+                "path": file_path,
+                "sha": (put_json.get("content") or {}).get("sha") or put_json.get("commit", {}).get("sha"),
+                "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{file_path}",
+                "persona": effective_persona,
+            })
     return results
 
 

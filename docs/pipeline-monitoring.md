@@ -179,7 +179,39 @@ Fixes now in place:
 `SAU_CI_WATCH_KEEP_IMAGES` (default 3) bounds how many `commit-<sha>` images stay
 around for rollback.
 
-## 6. Known gaps (deliberately not silenced)
+## 6. Offload: the recurring rc=1 was a Google Drive race, not a real failure
+
+`offload_to_drive.sh` moves media to Drive and only unlinks a source after
+`rclone check` agrees the remote holds it. It reported `rc=1` three times
+(2026-10-17, 10-21, 10-22) with
+
+```
+keeping campaigns/campaign-2563/…-watermarked_video_part1of2_pub.mp4: remote copy is missing or differs
+```
+
+and each time the *same* file verified clean on the next run (campaign-2563:
+uploaded 21:25:54, "differs" at 21:27:20, `0 differences found` at 21:37).
+Cause: Google Drive can serve an object before its MD5 is populated, so a hash
+check seconds after the upload sees a difference that does not exist. The purge
+correctly refused to delete, then paged the operator for a non-event.
+
+What changed:
+
+* `verify_remote_copy()` retries the hash check three times (5 s apart), then
+  accepts a **size match** (`--size-only`) — the check the script header always
+  claimed to use. A note is logged when the fallback is what saved it.
+* A failed verification is now a **deferral**: the file stays local, the run
+  stays green (`rc=0 deferred=N`), and the next run retries it.
+* `logs/offload-deferred.txt` counts consecutive deferrals per file. After
+  `SAU_OFFLOAD_DEFER_ALERT_AT` (default **3**) consecutive failures the run
+  fails and pages — so a real problem (quota, permissions) still reaches you
+  while a one-off race does not.
+* Offload alerts now go through `myUtils.ops_alerts` (the app's channel,
+  @Notification_personalprojectbot) instead of the old mailserver bot token;
+  the mailserver token remains as a fallback.
+* `pipeline_monitor` treats `rc=0 deferred=N` as healthy unless N ≥ 5.
+
+## 7. Known gaps (deliberately not silenced)
 
 * A publish that fails **once** on a retryable platform is retried by the
   worker; only permanent failures surface (the monitor reads `status='failed'`).
