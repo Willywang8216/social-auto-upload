@@ -123,15 +123,28 @@ DRY_RUN="${CI_WATCH_DRY_RUN:-0}"
 FORCE="${CI_WATCH_FORCE:-0}"
 
 if [[ "$LAST" == "$TARGET" && "$FORCE" != "1" ]]; then
-  # State says done — but confirm the running container really is this image, so
+  # State says done — but confirm the running container really is this commit, so
   # a manual revert or a failed earlier deploy is corrected automatically.
+  #
+  # Compare the OCI revision first, NOT the image ID: the same commit has two
+  # legitimate images on this box — the GHCR build that Watchtower pulls and the
+  # one built here — and their IDs differ by construction. Comparing IDs made
+  # this script re-deploy every two minutes forever (119 occurrences), and each
+  # forced restart killed the in-flight campaign preps (7 campaigns stranded in
+  # needs_review on 2026-10-22). The ID comparison stays as the fallback for an
+  # image with no revision label.
+  running_rev="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$SERVICE" 2>/dev/null || true)"
+  if [[ -n "$running_rev" && "$running_rev" == "$TARGET" ]]; then
+    log "already deployed and running (revision ${SHORT}); nothing to do"
+    exit 0
+  fi
   running_id="$(docker inspect -f '{{.Image}}' "$SERVICE" 2>/dev/null || true)"
   target_id="$(docker image inspect -f '{{.Id}}' "$IMAGE_SHA" 2>/dev/null || true)"
   if [[ -n "$running_id" && "$running_id" == "$target_id" ]]; then
-    log "already deployed and running; nothing to do"
+    log "already deployed and running (image id); nothing to do"
     exit 0
   fi
-  log "state says deployed but the running container differs; re-deploying"
+  log "state says deployed but the running container differs (revision=${running_rev:-none}); re-deploying"
 fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
@@ -167,7 +180,10 @@ else
     exit 1
   fi
   log "building ${IMAGE_SHA} from clean worktree (log: ${BUILD_LOG})"
-  if ! docker build -f Dockerfile -t "$IMAGE_SHA" "$WORKTREE" >>"$BUILD_LOG" 2>&1; then
+  if ! docker build -f Dockerfile -t "$IMAGE_SHA" \
+       --build-arg GIT_SHA="$TARGET" \
+       --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+       "$WORKTREE" >>"$BUILD_LOG" 2>&1; then
     log "ERROR: docker build failed for ${SHORT} (log: ${BUILD_LOG})"
     notify_failure "SAU ci-watch: image build failed for ${SHORT}" \
       "docker build failed for ${SHORT} (${TARGET}). See ${BUILD_LOG}."
@@ -208,7 +224,7 @@ log "restarting ${SERVICE} (pull disabled so the local image is used)"
 # lose. Set SAU_CI_WATCH_MAX_WAIT_SECONDS to bound the wait (default 30 min);
 # when the bound is hit the deploy proceeds and says so, because a permanently
 # running target must not block security fixes forever.
-MAX_WAIT="${SAU_CI_WATCH_MAX_WAIT_SECONDS:-1800}"
+MAX_WAIT="${SAU_CI_WATCH_MAX_WAIT_SECONDS:-600}"
 if [[ "$MAX_WAIT" =~ ^[0-9]+$ ]] && (( MAX_WAIT > 0 )); then
   DB="${SAU_DB_PATH:-/home/will/social-auto-upload/db/database.db}"
   # A restart also kills an in-flight campaign PREP: the worker runs prep
@@ -231,9 +247,18 @@ if [[ "$MAX_WAIT" =~ ^[0-9]+$ ]] && (( MAX_WAIT > 0 )); then
     waited=$(( waited + 15 ))
   done
   if (( running != 0 || preparing != 0 )); then
-    log "WARNING: ${running} target(s) and ${preparing} active prep(s) still in flight after ${MAX_WAIT}s; deploying anyway"
-    notify_failure "SAU ci-watch: deploying over in-flight work" \
-      "Waited ${MAX_WAIT}s but ${running} target(s) and ${preparing} active prep(s) are still running. The restart will strand them; they will need a resubmit."
+    # Default: DEFER, do not kill work. A 2-minute cron will find an idle window
+    # soon; a forced restart orphans an ffmpeg/HTTP job that has already run for
+    # tens of minutes (and the campaign then needs a resubmit). Set
+    # SAU_CI_WATCH_FORCE_DEPLOY=1 for a security fix that must not wait.
+    if [[ "${SAU_CI_WATCH_FORCE_DEPLOY:-0}" == "1" ]]; then
+      log "WARNING: ${running} target(s) and ${preparing} active prep(s) still in flight after ${MAX_WAIT}s; deploying anyway (forced)"
+      notify_failure "SAU ci-watch: deploying over in-flight work" \
+        "Waited ${MAX_WAIT}s but ${running} target(s) and ${preparing} active prep(s) are still running. The restart will strand them; they will need a resubmit."
+    else
+      log "deferring deploy of ${SHORT}: ${running} target(s) and ${preparing} active prep(s) still in flight after ${MAX_WAIT}s; retrying on the next tick"
+      exit 0
+    fi
   else
     log "queue and prep drained; safe to restart"
   fi

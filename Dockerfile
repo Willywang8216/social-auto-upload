@@ -16,6 +16,18 @@ RUN npm run build
 
 FROM ghcr.io/willywang8216/sau-base:slim
 
+# The base image carries its own org.opencontainers.image.* labels, so an app
+# image built here *inherited the base's revision* (b746c0c, 2026-09-29) while
+# the GHCR build got the truth from docker/metadata-action. ci-watch compares the
+# running container's revision against origin/main to decide whether a deploy is
+# needed, so a stale label made every locally built image look wrong and the
+# script re-deployed in a loop (119 times), restarting the container and killing
+# in-flight campaign preps each time. Stamp the real values.
+ARG GIT_SHA=""
+ARG BUILD_DATE=""
+LABEL org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+
 WORKDIR /app
 
 # CJK fonts so ffmpeg drawtext + Pillow can render Chinese watermark/overlay
