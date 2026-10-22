@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -35,6 +36,15 @@ CAMPAIGN_POST_FAILED = "failed"
 PREP_REQUEST_KEY = "prepRequest"
 PREP_LEASE_KEY = "_prepLease"
 PREP_ATTEMPTS_KEY = "_prepAttempts"
+# Lease expiry means the *worker* died (deploy, OOM, kill), not that the content
+# is bad, so it must not burn the prep attempt budget. Deploys on this box
+# recreate the container roughly hourly and three of them in a row used to
+# strand a perfectly good campaign in needs_review ("prep lease expired after 3
+# attempt(s); worker died mid-prep" - 7 campaigns on 2026-10-22). Crashes are
+# counted separately and only stop after PREP_MAX_CRASHES, which still catches a
+# campaign whose content reliably kills the encoder.
+PREP_CRASHES_KEY = "_prepCrashes"
+PREP_MAX_CRASHES = int(os.environ.get("SAU_PREP_MAX_CRASHES", "8") or 8)
 
 # A prep may legitimately run for many minutes (ffmpeg). The lease window is
 # deliberately generous so it never fires on a slow-but-alive prep; it only
@@ -579,9 +589,14 @@ def requeue_stale_preparing(
                 if claimed_at and claimed_at >= cutoff:
                     continue  # still live
                 attempts = int(metadata.get(PREP_ATTEMPTS_KEY) or 0)
+                crashes = int(metadata.get(PREP_CRASHES_KEY) or 0) + 1
                 next_metadata = dict(metadata)
                 next_metadata.pop(PREP_LEASE_KEY, None)
-                if attempts >= int(max_attempts):
+                next_metadata[PREP_CRASHES_KEY] = crashes
+                # A dead worker is not a failed prep: hand the budget back so the
+                # next attempt starts clean, and judge give-up on crashes.
+                next_metadata[PREP_ATTEMPTS_KEY] = 0
+                if crashes > PREP_MAX_CRASHES:
                     # The same truth as the worker's prep-completion paths: a
                     # campaign that already has queued posts is scheduled, so a
                     # re-prep that died mid-run must not flip it to
@@ -618,8 +633,9 @@ def requeue_stale_preparing(
                             (
                                 CAMPAIGN_NEEDS_REVIEW,
                                 json.dumps(next_metadata, ensure_ascii=False),
-                                f"prep lease expired after {attempts} attempt(s); "
-                                "worker died mid-prep",
+                                f"prep lease expired {crashes} time(s); the worker "
+                                "died mid-prep (deploys/restarts) — set "
+                                "SAU_PREP_MAX_CRASHES higher to keep retrying",
                                 row["id"],
                                 CAMPAIGN_PREPARING,
                                 raw,

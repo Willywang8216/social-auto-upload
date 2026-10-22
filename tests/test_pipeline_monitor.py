@@ -113,6 +113,28 @@ class CollectorTests(unittest.TestCase):
         conn.close()
         self.assertNotIn("publish-failures", self._collect())
 
+    def test_full_disk_is_reported_before_it_breaks_publishing(self):
+        """A full disk breaks SQLite/ffmpeg silently, so it must alert early."""
+        from collections import namedtuple
+
+        Stats = namedtuple("Stats", "f_blocks f_frsize f_bavail")
+        with patch("os.statvfs", return_value=Stats(f_blocks=100 * 10**9 // 4096,
+                                                    f_frsize=4096,
+                                                    f_bavail=5 * 10**9 // 4096)):
+            problems = pipeline_monitor._check_disk(self.repo)
+        self.assertTrue(problems)
+        self.assertIn("95%", problems[0])
+        self.assertIn("failing", problems[0])
+
+    def test_healthy_disk_is_silent(self):
+        from collections import namedtuple
+
+        Stats = namedtuple("Stats", "f_blocks f_frsize f_bavail")
+        with patch("os.statvfs", return_value=Stats(f_blocks=100 * 10**9 // 4096,
+                                                    f_frsize=4096,
+                                                    f_bavail=50 * 10**9 // 4096)):
+            self.assertEqual(pipeline_monitor._check_disk(self.repo), [])
+
     def test_repeated_alert_is_deduped_by_cooldown(self):
         state_path = Path(self.tmp.name) / "monitor-state.json"
         sent = []

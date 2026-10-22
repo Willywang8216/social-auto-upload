@@ -129,11 +129,44 @@ class PrepQueuePersistenceTests(unittest.TestCase):
             campaigns.claim_next_preparing_campaign(owner="worker-b", db_path=self.db_path)
         )
 
-    def test_requeue_stale_preparing_fails_after_budget(self) -> None:
+    def test_requeue_stale_preparing_does_not_burn_the_attempt_budget(self) -> None:
+        """A dead worker is not a failed prep.
+
+        Deploys recreate the container roughly hourly on this box; three of them
+        in a row used to strand good campaigns in needs_review ("prep lease
+        expired after 3 attempt(s); worker died mid-prep" — 7 campaigns on
+        2026-10-22). The content budget is handed back and crashes are counted
+        separately.
+        """
         campaign = self._preparing_campaign()
         self._force_lease(
             campaign.id, owner="dead-worker", minutes_ago=999, attempts=3
         )
+        moved = campaigns.requeue_stale_preparing(
+            older_than_minutes=120, max_attempts=3, db_path=self.db_path
+        )
+        self.assertEqual(moved, 1)
+        refreshed = campaigns.get_campaign(campaign.id, db_path=self.db_path)
+        self.assertEqual(refreshed.status, campaigns.CAMPAIGN_PREPARING)
+        self.assertIsNone(refreshed.last_error)
+        self.assertEqual(refreshed.metadata[campaigns.PREP_ATTEMPTS_KEY], 0)
+        self.assertEqual(refreshed.metadata[campaigns.PREP_CRASHES_KEY], 1)
+
+    def test_requeue_stale_preparing_gives_up_after_many_crashes(self) -> None:
+        campaign = self._preparing_campaign()
+        self._force_lease(
+            campaign.id, owner="dead-worker", minutes_ago=999, attempts=0
+        )
+        # One crash short of the ceiling, then the deciding one.
+        campaign_row = campaigns.get_campaign(campaign.id, db_path=self.db_path)
+        metadata = dict(campaign_row.metadata or {})
+        metadata[campaigns.PREP_CRASHES_KEY] = campaigns.PREP_MAX_CRASHES
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE campaigns SET metadata_json = ? WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=False), campaign.id),
+            )
+            conn.commit()
         moved = campaigns.requeue_stale_preparing(
             older_than_minutes=120, max_attempts=3, db_path=self.db_path
         )
@@ -154,8 +187,17 @@ class PrepQueuePersistenceTests(unittest.TestCase):
             post.id, status=campaigns.CAMPAIGN_POST_QUEUED, db_path=self.db_path
         )
         self._force_lease(
-            campaign.id, owner="dead-worker", minutes_ago=999, attempts=3
+            campaign.id, owner="dead-worker", minutes_ago=999, attempts=0
         )
+        campaign_row = campaigns.get_campaign(campaign.id, db_path=self.db_path)
+        metadata = dict(campaign_row.metadata or {})
+        metadata[campaigns.PREP_CRASHES_KEY] = campaigns.PREP_MAX_CRASHES
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE campaigns SET metadata_json = ? WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=False), campaign.id),
+            )
+            conn.commit()
         moved = campaigns.requeue_stale_preparing(
             older_than_minutes=120, max_attempts=3, db_path=self.db_path
         )

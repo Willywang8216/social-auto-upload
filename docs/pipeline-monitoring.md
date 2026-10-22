@@ -23,7 +23,8 @@ All alerts go to Telegram **@Notification_personalprojectbot**
 | Inbox watcher | every minute | a scan **raises** (thumbnails, Drive listing, state write) — the exact 2026-10-17 failure | `sau-inbox/watch.py::report_scan_failure` |
 | Watcher watchdog | `*/10` | no **successful** scan in 15 min, or the health file is missing (cron died, run lock stuck, Drive unreachable) | `sau-inbox/inbox_monitor.py` |
 | Stuck-item reminder | `*/10` (same job) | a `ready`/`pending` item is older than 24 h — it arrived, was announced once, and nobody approved it | `sau-inbox/inbox_monitor.py` |
-| Pipeline monitor | `*/15` | app `/healthz` down · last offload `rc != 0` · publish targets **failed in the last 2 h** (excluding "disabled by the operator") · campaigns in `needs_review` (last 24 h) · targets **overdue > 45 min** · watcher heartbeat stale > 30 min | `myUtils/pipeline_monitor.py` |
+| Pipeline monitor | `*/15` | app `/healthz` down · **disk > 85 %** (warn) / **> 92 %** (critical) · last offload `rc != 0` · publish targets **failed in the last 2 h** (excluding "disabled by the operator") · campaigns in `needs_review` (last 24 h) · targets **overdue > 45 min** · watcher heartbeat stale > 30 min | `myUtils/pipeline_monitor.py` |
+| Disk reclaim | daily 04:30 | nothing (silent); bounds the Docker build cache and dangling layers | `scripts/disk-reclaim.sh` |
 | Auto-publish | `*/10` | never alerts on success; a failed submit retries 3×, then reports | `myUtils/inbox_autopublish.py` |
 | Auto-archive | `*/15` | never alerts on success; on a failed Drive move it reports and leaves the file in place | `myUtils/inbox_archive.py` |
 | Worker / digest | in-process | account refresh failures, publish exceptions, the 09:00 daily digest | `myUtils/ops_alerts.py` |
@@ -154,7 +155,31 @@ README.
 | app container down / bad image | pipeline monitor (`/healthz`) |
 | inbox fills with published media | auto-archive cron |
 
-## 5. Known gaps (deliberately not silenced)
+## 5. Disk: why it filled and what keeps it bounded
+
+On **2026-10-21** the 97 GB disk hit **99 %** (1.9 GB free). Accounting:
+
+| consumer | size | note |
+| --- | ---: | --- |
+| Docker **BuildKit build cache** | 15.7 GB | `docker image prune` does **not** touch it; every local `ci-watch` build added layers and nothing removed them |
+| Docker images | ~25 GB | 3.08 GB per `commit-<sha>` (ci-watch keeps 3 + `latest`), plus other services (browserless 3 GB, exam-scraper 2 GB, teamtime 1.6 GB, …) |
+| Docker volumes | 9.4 GB | mysql / engvoc / grok2api / sexualwill |
+| `/home` | 19 GB | repo 5.5 GB (generated 2.2 + videoFile 2.2 + db 0.7), obsidiansync 1.9, agent scratch 1.0 |
+| `/opt`, `/usr` | 10 GB | other services, OS |
+
+Fixes now in place:
+
+* `scripts/ci-watch.sh` runs `docker builder prune -f --keep-storage 3GB` after
+  every successful deploy (`SAU_CI_WATCH_BUILD_CACHE` to tune);
+* `scripts/disk-reclaim.sh` runs daily as a safety net for builds made outside
+  ci-watch;
+* `pipeline_monitor` alerts at 85 % and 92 %, so a full disk can never again be
+  discovered by accident.
+
+`SAU_CI_WATCH_KEEP_IMAGES` (default 3) bounds how many `commit-<sha>` images stay
+around for rollback.
+
+## 6. Known gaps (deliberately not silenced)
 
 * A publish that fails **once** on a retryable platform is retried by the
   worker; only permanent failures surface (the monitor reads `status='failed'`).

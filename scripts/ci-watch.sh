@@ -300,3 +300,13 @@ if [[ "$KEEP_IMAGES" =~ ^[0-9]+$ ]] && (( KEEP_IMAGES >= 1 )); then
   # Untagged intermediates from failed builds are always safe to drop.
   docker image prune -f --filter "dangling=true" >>"$LOG" 2>&1 || true
 fi
+
+# ---------------------------------------------------------------------------
+# Reclaim disk: bound the BuildKit build cache
+# ---------------------------------------------------------------------------
+# `docker image prune` does NOT touch the builder cache, so every local build
+# left its layers behind and nothing ever removed them. On 2026-10-21 the cache
+# had reached 15.7 GB and the 97 GB disk hit 99% (a full disk silently breaks
+# publishes and can corrupt SQLite), which is exactly the failure this box
+# cannot afford. Keep a small warm cache so the next rebuild is still fast.
+docker builder prune -f --keep-storage "${SAU_CI_WATCH_BUILD_CACHE:-3GB}" >>"$LOG" 2>&1 || true

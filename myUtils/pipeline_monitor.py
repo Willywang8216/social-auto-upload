@@ -148,6 +148,29 @@ def _check_overdue(conn: sqlite3.Connection, overdue_min: int) -> list[str]:
     return [f"{r['n']} overdue on {r['account_ref']} (oldest {r['oldest']})" for r in rows]
 
 
+def _check_disk(path: Path, *, warn_pct: float = 85.0, crit_pct: float = 92.0) -> list[str]:
+    """Warn before the disk fills: a full disk breaks publishing *silently*.
+
+    On 2026-10-21 the box hit 99% (Docker build cache + a dozen service images)
+    and nobody knew until an agent happened to look. SQLite writes fail, ffmpeg
+    writes fail, and the failures look like unrelated bugs.
+    """
+    try:
+        stats = os.statvfs(str(path))
+    except OSError as exc:
+        return [f"cannot stat {path}: {exc}"]
+    total = stats.f_blocks * stats.f_frsize
+    free = stats.f_bavail * stats.f_frsize
+    if total <= 0:
+        return []
+    used_pct = 100.0 * (total - free) / total
+    if used_pct >= crit_pct:
+        return [f"disk {used_pct:.0f}% full ({free/1e9:.1f} GB free) — publishing will start failing"]
+    if used_pct >= warn_pct:
+        return [f"disk {used_pct:.0f}% full ({free/1e9:.1f} GB free) — prune Docker build cache"]
+    return []
+
+
 def _check_offload(repo: Path) -> list[str]:
     log = repo / "logs" / "offload.log"
     try:
@@ -200,6 +223,9 @@ def collect_problems(db: Path, repo: Path, inbox: Path, *, overdue_min: int = 45
             problems["overdue"] = overdue
     finally:
         conn.close()
+    disk = _check_disk(repo)
+    if disk:
+        problems["disk"] = disk
     offload = _check_offload(repo)
     if offload:
         problems["offload"] = offload
@@ -231,6 +257,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--failed-minutes", type=int, default=120)
     ap.add_argument("--review-hours", type=int, default=24)
     ap.add_argument("--watch-stale-min", type=float, default=20)
+    ap.add_argument("--disk-warn", type=float, default=85.0)
+    ap.add_argument("--disk-crit", type=float, default=92.0)
     ap.add_argument("--cooldown", type=int, default=3600)
     ap.add_argument("--status", action="store_true", help="print, never alert")
     args = ap.parse_args(argv)
