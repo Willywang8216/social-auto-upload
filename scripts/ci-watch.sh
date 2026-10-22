@@ -237,7 +237,14 @@ if [[ "$MAX_WAIT" =~ ^[0-9]+$ ]] && (( MAX_WAIT > 0 )); then
   while (( waited < MAX_WAIT )); do
     running=$(sqlite3 "$DB" "SELECT COUNT(*) FROM publish_job_targets WHERE status IN ('running','retrying');" 2>/dev/null || echo 0)
     [[ "$running" =~ ^[0-9]+$ ]] || running=0
-    preparing=$(sqlite3 "$DB" "SELECT COUNT(*) FROM campaigns WHERE status='preparing' AND json_extract(metadata_json,'\$._prepLease.claimedAt') IS NOT NULL AND replace(json_extract(metadata_json,'\$._prepLease.claimedAt'),'T',' ') >= datetime('now','-30 minutes');" 2>/dev/null || echo 0)
+    # Window: a prep can legitimately run longer than 30 minutes (large source,
+    # split + watermark + STT + drafts), and a prep that is still running keeps
+    # its original claimedAt — so a 30-minute window made the longest encodes
+    # invisible and the restart killed exactly the work worth protecting. Dead
+    # leases are cleared by the worker's stale-lease sweep (45 min), so a wider
+    # window does not let a crashed prep block deploys forever.
+    prep_window="${SAU_CI_WATCH_PREP_WINDOW_MINUTES:-60}"
+    preparing=$(sqlite3 "$DB" "SELECT COUNT(*) FROM campaigns WHERE status='preparing' AND json_extract(metadata_json,'\$._prepLease.claimedAt') IS NOT NULL AND replace(json_extract(metadata_json,'\$._prepLease.claimedAt'),'T',' ') >= datetime('now','-${prep_window} minutes');" 2>/dev/null || echo 0)
     [[ "$preparing" =~ ^[0-9]+$ ]] || preparing=0
     (( running == 0 && preparing == 0 )) && break
     if (( waited % 60 == 0 )); then
@@ -256,8 +263,27 @@ if [[ "$MAX_WAIT" =~ ^[0-9]+$ ]] && (( MAX_WAIT > 0 )); then
       notify_failure "SAU ci-watch: deploying over in-flight work" \
         "Waited ${MAX_WAIT}s but ${running} target(s) and ${preparing} active prep(s) are still running. The restart will strand them; they will need a resubmit."
     else
-      log "deferring deploy of ${SHORT}: ${running} target(s) and ${preparing} active prep(s) still in flight after ${MAX_WAIT}s; retrying on the next tick"
-      exit 0
+      # Bound the patience: a queue that is busy for hours must not postpone a
+      # security fix indefinitely. After MAX_DEFER the deploy proceeds anyway
+      # (and says so loudly).
+      DEFER_STATE="$LOG_DIR/ci-watch-defer.state"
+      MAX_DEFER="${SAU_CI_WATCH_MAX_DEFER_SECONDS:-7200}"
+      now_epoch=$(date +%s)
+      first_defer=""
+      [[ -f "$DEFER_STATE" ]] && first_defer="$(cat "$DEFER_STATE" 2>/dev/null || true)"
+      if [[ ! "$first_defer" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$now_epoch" > "$DEFER_STATE"
+        first_defer="$now_epoch"
+      fi
+      deferred_for=$(( now_epoch - first_defer ))
+      if (( MAX_DEFER > 0 && deferred_for >= MAX_DEFER )); then
+        log "WARNING: deferring for ${deferred_for}s reached SAU_CI_WATCH_MAX_DEFER_SECONDS=${MAX_DEFER}; deploying anyway over ${running} target(s) and ${preparing} active prep(s)"
+        notify_failure "SAU ci-watch: deploy deferred too long for ${SHORT}" \
+          "Targets/preps stayed in flight for ${deferred_for}s. Deploying now; any in-flight work will be stranded and needs a resubmit."
+      else
+        log "deferring deploy of ${SHORT}: ${running} target(s) and ${preparing} active prep(s) still in flight after ${MAX_WAIT}s (deferred ${deferred_for}s of ${MAX_DEFER}s); retrying on the next tick"
+        exit 0
+      fi
     fi
   else
     log "queue and prep drained; safe to restart"
@@ -289,6 +315,7 @@ fi
 echo "$TARGET" > "$STATE"
 running="$(docker ps --filter "name=${SERVICE}" --format '{{.Status}}')"
 log "deployed ${SHORT} (healthz 200; container: ${running})"
+rm -f "$LOG_DIR/ci-watch-defer.state"
 
 # ---------------------------------------------------------------------------
 # Reclaim disk: drop older commit-* images

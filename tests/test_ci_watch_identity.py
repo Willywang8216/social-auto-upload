@@ -157,6 +157,18 @@ class CiWatchDeferralTests(unittest.TestCase):
         self.assertIn("ARG GIT_SHA", dockerfile)
         self.assertIn('org.opencontainers.image.revision="${GIT_SHA}"', dockerfile)
 
+    def test_deferral_is_bounded_so_a_busy_queue_cannot_block_deploys(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("SAU_CI_WATCH_MAX_DEFER_SECONDS", source)
+        self.assertIn("ci-watch-defer.state", source)
+        # the clock must be cleared when a deploy finally succeeds
+        self.assertIn('rm -f "$LOG_DIR/ci-watch-defer.state"', source)
+
+    def test_active_prep_window_covers_a_long_encode(self):
+        """A 30-minute window hid the longest preps from the guard."""
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("SAU_CI_WATCH_PREP_WINDOW_MINUTES:-60", source)
+
     def test_watchtower_is_opted_out_so_only_one_deployer_updates_the_container(self):
         compose = (REPO / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn('com.centurylinklabs.watchtower.enable: "false"', compose)
