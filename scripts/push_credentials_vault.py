@@ -217,6 +217,25 @@ def _rclone(remote: str, workdir: Path, *, dry_run: bool) -> int:
     return subprocess.call(command)
 
 
+def _read_remote_manifest(remote: str) -> dict:
+    """Best-effort read of the manifest already in the vault.
+
+    Used to carry forward the per-file provenance that was established by hand.
+    Any failure returns {}, so this can never stop the vault being refreshed.
+    """
+    try:
+        out = subprocess.run(
+            ["rclone", "cat", f"{remote}/_manifest.json"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if out.returncode != 0:
+            return {}
+        data = json.loads(out.stdout)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--remote", default=os.environ.get("SAU_VAULT_REMOTE", DEFAULT_REMOTE))
@@ -246,6 +265,34 @@ def main() -> int:
             "platform_accounts": sum(len(v) for v in platforms_vault["accounts"].values()),
             "cookie_files": cookie_files,
         }
+
+        # Carry forward the inventory this manifest used to lose.
+        #
+        # Until now the manifest was rebuilt from scratch every night, so the
+        # per-file record of where each credential came from (which staging
+        # directory, and which files could not be traced) survived less than a
+        # day. Keep what is already in the vault, and make sure every file this
+        # run generated is represented.
+        existing = _read_remote_manifest(args.remote)
+        cookie_names = {c.get("file") for c in cookie_files}
+        carried = [e for e in (existing.get("credential_files") or [])
+                   if isinstance(e, dict) and e.get("file")
+                   and e["file"] not in cookie_names]
+        listed = {e["file"] for e in carried}
+        # The two files this run regenerates are credentials in their own right,
+        # so record them even when the vault had no inventory to carry forward.
+        for name in ("sau-x-twitter-credentials.json",
+                     "sau-publish-platforms-credentials.json"):
+            if name not in listed and name not in cookie_names:
+                carried.append({"file": name,
+                                "source": "scripts/push_credentials_vault.py"})
+                listed.add(name)
+        if carried:
+            manifest["credential_files"] = carried
+            manifest["credential_file_count"] = len(carried)
+        if existing.get("retired"):
+            manifest["retired"] = existing["retired"]
+
         (workdir / "_manifest.json").write_text(
             json.dumps(manifest, indent=1, ensure_ascii=False), encoding="utf-8"
         )
