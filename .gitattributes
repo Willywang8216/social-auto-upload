@@ -1,0 +1,15 @@
+# Keep the working tree usable on both platforms.
+#
+# The repo has no line-ending policy, so a Windows checkout with the usual
+# `core.autocrlf=true` rewrites every LF file to CRLF and the next commit
+# claims the whole tree changed. Pinning the launcher scripts is the part
+# that actually breaks something: `cmd.exe` parses `.bat`/`.cmd` far more
+# reliably with CRLF, while the Python/Docker side must stay LF.
+
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Shell scripts are POSIX-only; keep them LF so the Linux host and the
+# container never receive a stray CR.
+*.sh   text eol=lf

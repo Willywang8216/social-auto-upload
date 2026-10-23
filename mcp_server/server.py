@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Any
 
 from fastmcp import FastMCP
@@ -59,6 +60,29 @@ def build_server() -> FastMCP:
     return mcp
 
 
+def _force_utf8_stdio() -> None:
+    """Force UTF-8 on the stdio pipes before any frame is written.
+
+    The stdio transport writes JSON-RPC frames to ``sys.stdout``. On Windows
+    the default text encoding is the ANSI code page (cp950 here, cp1252
+    elsewhere), *not* UTF-8, so the first payload containing a non-ASCII
+    account name, profile description or post body raises
+    ``UnicodeEncodeError`` inside the transport. The client then sees a dead
+    server rather than a useful error, which is the worst possible failure
+    mode for an agent.
+
+    Reconfiguring the streams here is the single place that covers every
+    tool. ``errors="replace"`` keeps one unmappable byte from ending the
+    session. Silently a no-op where the streams are already UTF-8, are not
+    real file objects, or cannot be reconfigured (e.g. pytest capture).
+    """
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> None:
     """Console-script entrypoint: ``sau-mcp``.
 
@@ -66,6 +90,7 @@ def main(argv: list[str] | None = None) -> None:
     ``http``, reads ``SAU_MCP_HOST`` / ``SAU_MCP_PORT`` (default
     ``127.0.0.1:8765``) and binds there.
     """
+    _force_utf8_stdio()
     transport = os.environ.get("SAU_MCP_TRANSPORT", "stdio").strip().lower()
     kwargs: dict[str, Any] = {}
     if transport in ("http", "streamable-http", "sse"):

@@ -6,11 +6,75 @@ The publish pipeline itself lives in ``tools/publish.py`` (orchestrator).
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
 
 from mcp_server._shared import error_payload, resolve_db_path
+
+
+def _platform_path_candidates(
+    *,
+    env_var: str,
+    relative: str,
+    posix_fallbacks: tuple[str, ...],
+) -> list[str]:
+    """Absolute paths to probe, portable across POSIX and Windows.
+
+    These probes used to be hardcoded ``/home/will/...`` and ``/app/...``
+    literals. On Windows neither exists, so ``jobs_system_health`` reported an
+    empty inbox and a null offload block with nothing to indicate the lookup
+    had simply missed — a silent wrong answer, which is worse than an error.
+
+    Order: an explicit environment override, then ``BASE_DIR``-relative (the
+    checkout root on either OS), then the historical POSIX locations so the
+    Linux and Docker deployments keep behaving byte-for-byte as before.
+    """
+    candidates: list[str] = []
+    override = str(os.environ.get(env_var, "") or "").strip()
+    if override:
+        candidates.append(override)
+    try:
+        from utils.conf_defaults import BASE_DIR
+
+        candidates.append(str(Path(BASE_DIR) / relative))
+    except Exception:  # noqa: BLE001 - a missing BASE_DIR must not break health
+        pass
+    candidates.extend(posix_fallbacks)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            unique.append(candidate)
+    return unique
+
+
+def _inbox_state_candidates() -> list[str]:
+    """State files for the phone-first SAU-Inbox queue.
+
+    ``SAU_WATCH_STATE`` is the same override ``myUtils/inbox_archive.py``
+    already honours, so pointing the watcher elsewhere also moves this probe.
+    """
+    return _platform_path_candidates(
+        env_var="SAU_WATCH_STATE",
+        relative=os.path.join("sau-inbox", "state.json"),
+        posix_fallbacks=("/home/will/sau-inbox/state.json", "/app/sau-inbox/state.json"),
+    )
+
+
+def _offload_log_candidates() -> list[str]:
+    """Logs written by the Drive offload pass (``offload_to_drive.sh``)."""
+    return _platform_path_candidates(
+        env_var="SAU_OFFLOAD_LOG",
+        relative=os.path.join("logs", "offload.log"),
+        posix_fallbacks=(
+            "/home/will/social-auto-upload/logs/offload.log",
+            "/app/logs/offload.log",
+        ),
+    )
 
 
 def _job_to_payload(job: Any) -> dict[str, Any]:
@@ -256,8 +320,7 @@ def register(mcp: FastMCP) -> None:
 
             inbox = {"ready": 0, "pending": 0, "quarantined": 0, "items": {}, "statePath": ""}
             offload = {"lastRun": None, "exitCode": None, "localFiles": None, "healthy": None}
-            for p in ("/home/will/sau-inbox", "/app/sau-inbox"):
-                sp = os.path.join(p, "state.json")
+            for sp in _inbox_state_candidates():
                 if os.path.exists(sp):
                     try:
                         raw = json.loads(open(sp, encoding="utf-8").read())
@@ -272,8 +335,7 @@ def register(mcp: FastMCP) -> None:
                         inbox = {"ready": 0, "pending": 0, "quarantined": 0,
                                  "items": {}, "statePath": sp, "error": "unreadable"}
                     break
-            for logp in ("/home/will/social-auto-upload/logs/offload.log",
-                         "/app/logs/offload.log"):
+            for logp in _offload_log_candidates():
                 if os.path.exists(logp):
                     for line in reversed(open(logp, encoding="utf-8", errors="replace").read().splitlines()):
                         if "offload done" in line and "local videoFile=" in line:
