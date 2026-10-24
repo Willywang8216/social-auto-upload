@@ -29,8 +29,10 @@ from pathlib import Path
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 
-FINISHED_UNPUBLISHED = "完成未發布"
-FINISHED_PUBLISHED = "完成已發布"
+# Must match the Notion option names exactly. Both databases use 發佈, not
+# 發布; the old spelling made every query fail with a 400 validation_error.
+FINISHED_UNPUBLISHED = "完成未發佈"
+FINISHED_PUBLISHED = "完成已發佈"
 
 _PUBLISH_PROPERTY_CANDIDATES = ("publish", "Publish", "發布", "狀態", "Status")
 

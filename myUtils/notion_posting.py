@@ -23,9 +23,12 @@ DEFAULT_HOUR_UTC = 13
 DEFAULT_STAGGER_MINUTES = 5
 DEFAULT_MIN_HOURS_AHEAD = 1
 
-STATUS_DRAFT = "草稿"
-STATUS_FINISHED_UNPUBLISHED = "完成未發布"
-STATUS_FINISHED_PUBLISHED = "完成已發布"
+# These must match the option names in the Notion databases exactly. Both
+# databases use 草搞 (not 草稿) and 發佈 (not 發布). The old spellings made every
+# query fail with a 400 validation_error, which the token's 404 was hiding.
+STATUS_DRAFT = "草搞"
+STATUS_FINISHED_UNPUBLISHED = "完成未發佈"
+STATUS_FINISHED_PUBLISHED = "完成已發佈"
 
 NW_DB_ID = "6cffcdc6586f82c79b85812a928b4286"
 SW_DB_ID = "8c7fcdc6586f8294a86a01e9074e9f1d"
