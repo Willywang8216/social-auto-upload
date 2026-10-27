@@ -29,6 +29,11 @@ from pathlib import Path
 # at a temp dir that pytest/tmp cleanup owns.
 _TEST_JOB_LOG_DIR = tempfile.mkdtemp(prefix="sau-test-jobs-")
 os.environ.setdefault("SAU_JOB_LOG_DIR", _TEST_JOB_LOG_DIR)
+# …and keep the per-module sinks (logs/worker.log, logs/twitter.log, …) out of the
+# operator's real files too: a test fixture line in worker.log is
+# indistinguishable from a production incident when it is read later.
+_TEST_LOG_DIR = tempfile.mkdtemp(prefix="sau-test-logs-")
+os.environ.setdefault("SAU_LOG_DIR", _TEST_LOG_DIR)
 
 # Same idea for the media-prep workspace root.
 _TEST_GENERATED_MEDIA_ROOT = os.path.join(

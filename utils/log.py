@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 from loguru import logger
@@ -30,6 +31,19 @@ def log_formatter(record: dict) -> str:
     return f"<fg #70acde>{{time:YYYY-MM-DD HH:mm:ss}}</fg #70acde> | <fg {color}>{{level}}</fg {color}>: <light-white>{{message}}</light-white>\n"
 
 
+def _log_dir() -> Path:
+    """Directory for the module log files.
+
+    ``SAU_LOG_DIR`` redirects every sink. The test suite sets it to a throwaway
+    directory: without it, worker tests wrote fixture lines such as
+    "sociamonials fallback held for approval (post_id=2)" and
+    "Account not found: id=999999" into the operator's real `logs/worker.log`,
+    which reads exactly like a production incident (and did, on 2026-10-27).
+    """
+    override = str(os.environ.get("SAU_LOG_DIR", "") or "").strip()
+    return Path(override) if override else BASE_DIR
+
+
 def create_logger(log_name: str, file_path: str):
     """
     Create custom logger for different business modules.
@@ -40,8 +54,9 @@ def create_logger(log_name: str, file_path: str):
     def filter_record(record):
         return record["extra"].get("business_name") == log_name
 
-    BASE_DIR.joinpath(file_path).parent.mkdir(exist_ok=True)
-    logger.add(BASE_DIR.joinpath(file_path), filter=filter_record, level="INFO", rotation="10 MB", retention="10 days", backtrace=True, diagnose=True)
+    target = _log_dir() / file_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    logger.add(target, filter=filter_record, level="INFO", rotation="10 MB", retention="10 days", backtrace=True, diagnose=True)
     return logger.bind(business_name=log_name)
 
 
