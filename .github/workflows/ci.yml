@@ -29,6 +29,9 @@ jobs:
       - name: Install Patchright browsers
         run: uv run patchright install chromium
 
+      - name: Check for undefined names (missing imports)
+        run: uv run python scripts/check_undefined_names.py myUtils sau_backend.py sau_app sau_cli.py scripts
+
       - name: Run backend tests
         run: uv run pytest tests/ --ignore=tests/test_security_http.py -q
 

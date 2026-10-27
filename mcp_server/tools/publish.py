@@ -118,6 +118,7 @@ def register(mcp: FastMCP) -> None:
         brief: str,
         options: dict[str, Any] | None = None,
         selected_account_ids: list[int] | None = None,
+        media_file_paths: list[str] | None = None,
         db_path: str | None = None,
     ) -> dict[str, Any]:
         from sau_backend import (
@@ -128,6 +129,7 @@ def register(mcp: FastMCP) -> None:
             _publish_center_load_profile,
             _publish_center_preview_payload,
         )
+        from myUtils import content_rating
         from myUtils import profiles as profile_registry
 
         resolved = resolve_db_path(db_path)
@@ -138,13 +140,33 @@ def register(mcp: FastMCP) -> None:
             )
             media_context = _build_preview_media_context(brief or "")
             options = options or {}
+            
+            # Calculate content rating from media files (or default to NSFW if no files provided)
+            sfw_flag = options.get("sfwFlag")
+            rating = content_rating.rating_for_media(media_file_paths or [], explicit=sfw_flag) if media_file_paths else content_rating.RATING_NSFW
+            
             for raw_pid in profile_ids:
                 profile = _publish_center_load_profile(int(raw_pid), db_path=resolved)
-                accounts = _publish_center_load_accounts(
+                all_accounts = _publish_center_load_accounts(
                     profile.id,
                     [int(v) for v in selected_account_ids] if selected_account_ids else None,
                     db_path=resolved,
                 )
+                
+                # Apply content rating restrictions
+                try:
+                    accounts = content_rating.restrict_accounts(all_accounts, rating)
+                except ValueError:
+                    # All accounts would be dropped - still show them but mark as dropped
+                    accounts = []
+                
+                # Track which accounts were dropped
+                kept_ids = {a.id for a in accounts}
+                dropped_accounts = [
+                    {"accountId": a.id, "accountName": a.account_name, "platform": a.platform, "reason": "nsfw_platform_restriction"}
+                    for a in all_accounts if a.id not in kept_ids
+                ]
+                
                 request_data = publish_orchestrator._request_data_for_options(
                     brief=brief or "", options=options, profile=profile
                 )
@@ -167,7 +189,8 @@ def register(mcp: FastMCP) -> None:
                     drafts_by_account[account.id] = dict(draft)
                 results.append(
                     _publish_center_preview_payload(
-                        profile=profile, accounts=accounts, drafts_by_account=drafts_by_account
+                        profile=profile, accounts=accounts, drafts_by_account=drafts_by_account,
+                        content_rating=rating, dropped_accounts=dropped_accounts
                     )
                 )
             return {"profiles": results}

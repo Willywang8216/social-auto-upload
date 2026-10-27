@@ -6895,13 +6895,15 @@ def sse_stream(status_queue, login_id=None, idle_timeout=SSE_IDLE_TIMEOUT_SECOND
 # Publish Center — preview / regenerate / submit + template CRUD
 # ---------------------------------------------------------------------------
 
-def _publish_center_preview_payload(*, profile, accounts, drafts_by_account):
+def _publish_center_preview_payload(*, profile, accounts, drafts_by_account, content_rating=None, dropped_accounts=None):
     profile_payload = {
         "profileId": profile.id,
         "profileName": profile.name,
         "profileSlug": profile.slug,
+        "contentRating": content_rating,
         "accounts": [],
     }
+    dropped_account_ids = {a["accountId"] for a in (dropped_accounts or [])}
     for account in accounts:
         draft = drafts_by_account.get(account.id) or {}
         try:
@@ -6924,6 +6926,13 @@ def _publish_center_preview_payload(*, profile, accounts, drafts_by_account):
             ),
             "configChatTitles": (account.config or {}).get("telegramChatTitles", []) if account.platform == "telegram" else [],
         })
+    # Add platform-level summary
+    all_platforms = list({a.platform for a in accounts})
+    dropped_platforms = list({a["platform"] for a in (dropped_accounts or [])})
+    allowed_platforms = [p for p in all_platforms if p not in dropped_platforms]
+    profile_payload["allowedPlatforms"] = allowed_platforms
+    profile_payload["droppedPlatforms"] = dropped_platforms
+    profile_payload["droppedAccounts"] = dropped_accounts or []
     return profile_payload
 
 
@@ -6987,15 +6996,35 @@ def publish_center_preview():
         selected_account_ids = data.get("selectedAccountIds") or None
         brief = str(data.get("brief", "") or "")
         options = data.get("options") or {}
+        media_file_paths = data.get("mediaFilePaths") or []
+
+        # Calculate content rating from media files (or default to NSFW if no files provided)
+        sfw_flag = options.get("sfwFlag")
+        rating = content_rating.rating_for_media(media_file_paths, explicit=sfw_flag) if media_file_paths else content_rating.RATING_NSFW
 
         results = []
         media_group_stub = _preview_media_group_stub(name=brief[:50] or "publish-center-preview")
         media_context = _build_preview_media_context(brief)
         for profile_id in profile_ids:
             profile = _publish_center_load_profile(profile_id, db_path=db_path)
-            accounts = _publish_center_load_accounts(
+            all_accounts = _publish_center_load_accounts(
                 profile.id, selected_account_ids, db_path=db_path
             )
+            
+            # Apply content rating restrictions
+            try:
+                accounts = content_rating.restrict_accounts(all_accounts, rating)
+            except ValueError:
+                # All accounts would be dropped - still show them but mark as dropped
+                accounts = []
+            
+            # Track which accounts were dropped
+            kept_ids = {a.id for a in accounts}
+            dropped_accounts = [
+                {"accountId": a.id, "accountName": a.account_name, "platform": a.platform, "reason": "nsfw_platform_restriction"}
+                for a in all_accounts if a.id not in kept_ids
+            ]
+            
             request_data = publish_orchestrator._request_data_for_options(
                 brief=brief, options=options, profile=profile
             )
@@ -7024,7 +7053,8 @@ def publish_center_preview():
 
             results.append(
                 _publish_center_preview_payload(
-                    profile=profile, accounts=accounts, drafts_by_account=drafts_by_account
+                    profile=profile, accounts=accounts, drafts_by_account=drafts_by_account,
+                    content_rating=rating, dropped_accounts=dropped_accounts
                 )
             )
     except LookupError as exc:

@@ -44,8 +44,10 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -192,6 +194,9 @@ def plan(state: dict, now: datetime, *, grace_hours: float, remind_hours: float,
             continue  # claimed by an earlier run
         attempts = int(entry.get("autoPublishAttempts") or 0)
         if deadline <= now:
+            # A local failure (bad URL, connection refused, the app restarting) is
+            # not the item's fault: only retry up to max_attempts, but let the
+            # operator's next `--reset-failures` run or a fresh deploy revive it.
             if attempts >= max_attempts:
                 gave_up.append(entry)
             else:
@@ -220,7 +225,11 @@ def _fmt_local(value: datetime) -> str:
 # --------------------------------------------------------------------------
 def submit(item_id: str, start_at: str, *, timeout: float = 120.0) -> tuple[bool, str]:
     payload = json.dumps({"schedule": {"publishNow": False, "startAt": start_at}}).encode("utf-8")
-    url = API_URL.format(item_id=item_id)
+    # Item ids are "<persona>:<topic>:<timestamp>" and the topic is the operator's
+    # filename, so it contains spaces and non-ASCII. Interpolated raw, urllib
+    # refused the request outright ("URL can't contain control characters") and
+    # two overdue items burned their whole attempt budget on it (2026-10-26/27).
+    url = API_URL.format(item_id=quote(str(item_id), safe=""))
     request = urllib.request.Request(
         url, data=payload, method="POST",
         headers={"Authorization": f"Bearer {_api_token()}", "Content-Type": "application/json"},
@@ -228,11 +237,43 @@ def submit(item_id: str, start_at: str, *, timeout: float = 120.0) -> tuple[bool
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", "replace")
-            return response.status == 200 and '"code": 200' in body.replace("'", '"'), body
+            # Parse, never string-match: flask's jsonify emits `{"code":200}`
+            # without a space, so `'"code": 200' in body` reported a *successful*
+            # submit as a failure. The item then stayed in `ready` and was
+            # submitted again on the next tick — two campaigns for one upload
+            # (3001/3002, 2026-10-27).
+            try:
+                payload = json.loads(body)
+            except ValueError:
+                return False, f"unparseable response: {body[:200]}"
+            return bool(isinstance(payload, dict) and payload.get("code") == 200), body
     except urllib.error.HTTPError as exc:
         return False, f"HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:400]}"
     except Exception as exc:  # noqa: BLE001
         return False, f"{type(exc).__name__}: {exc}"
+
+
+def reset_failures(state_path: Path) -> int:
+    """Clear autoPublishAttempts/autoPublishLastError so overdue items retry.
+
+    Used after fixing a bug that consumed the budget (the URL-encoding bug
+    retired two real uploads), and by the operator as a "try again" switch.
+    """
+    handle = _state_lock(state_path)
+    try:
+        state = load_state(state_path)
+        reset = 0
+        for entry in state.get("ready", []):
+            if entry.get("autoPublishAttempts") or entry.get("autoPublishLastError"):
+                entry.pop("autoPublishAttempts", None)
+                entry.pop("autoPublishLastError", None)
+                entry.pop("autoPublishState", None)
+                reset += 1
+        if reset:
+            save_state(state_path, state)
+        return reset
+    finally:
+        handle.close()
 
 
 def run(state_path: Path, *, grace_hours: float, remind_hours: float, max_attempts: int,
@@ -304,7 +345,12 @@ def run(state_path: Path, *, grace_hours: float, remind_hours: float, max_attemp
 
         for entry in buckets["gave_up"]:
             results["gave_up"] += 1
-            print(f"gave up on {entry.get('remotePath')}: {entry.get('autoPublishLastError')}")
+            print(
+                f"gave up on {entry.get('remotePath')} after "
+                f"{entry.get('autoPublishAttempts')} attempt(s): "
+                f"{entry.get('autoPublishLastError')} "
+                f"(run with --reset-failures to retry)"
+            )
 
         save_state(state_path, state)
     finally:
@@ -324,6 +370,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-attempts", type=int, default=3)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--disable", action="store_true", help="no-op (kill switch)")
+    ap.add_argument("--reset-failures", action="store_true",
+                    help="clear the retry counters so overdue items publish now")
     args = ap.parse_args(argv)
 
     if args.disable or str(os.environ.get("SAU_INBOX_AUTOPUBLISH", "1")).strip().lower() in {
@@ -331,6 +379,9 @@ def main(argv: list[str] | None = None) -> int:
     }:
         print("auto-publish disabled")
         return 0
+    if args.reset_failures:
+        reset = reset_failures(args.state)
+        print(f"reset {reset} item(s); they will publish on the next run")
     return run(args.state, grace_hours=args.hours, remind_hours=args.remind_hours,
                max_attempts=args.max_attempts, dry_run=args.dry_run)
 

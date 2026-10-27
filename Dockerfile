@@ -55,6 +55,12 @@ COPY . .
 RUN python3 -m compileall -q -x '(node_modules|sau_frontend)' . \
     || (echo "FATAL: python syntax check failed" && exit 1)
 
+# …and catch names that are *used but never defined*, which compileall cannot:
+# a missing `timedelta` import in the inbox watcher crashed its scan loop every
+# minute for days and silently stopped new uploads from being queued.
+RUN python3 scripts/check_undefined_names.py myUtils sau_backend.py sau_app sau_cli.py scripts \
+    || (echo "FATAL: undefined name (missing import?)" && exit 1)
+
 # Copy the built SPA into the exact path Flask prefers first.
 COPY --from=builder /app/dist /app/sau_frontend/dist
 

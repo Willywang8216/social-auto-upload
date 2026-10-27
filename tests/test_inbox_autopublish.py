@@ -87,6 +87,85 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(len(result["gave_up"]), 1)
 
 
+class SubmitTests(unittest.TestCase):
+    """The API response contract, and the id encoding that broke it."""
+
+    def test_item_ids_with_spaces_are_url_encoded(self):
+        """Ids are "<persona>:<topic>:<timestamp>" and topics have spaces.
+
+        Raw interpolation made urllib refuse the request ("URL can't contain
+        control characters") and two overdue uploads burned their whole retry
+        budget on it (2026-10-26/27).
+        """
+        from urllib.parse import quote
+
+        item_id = "both:Pride Parade this year_sfw:2026-10-26T03:44:01+00:00"
+        url = ap.API_URL.format(item_id=quote(item_id, safe=""))
+        self.assertNotIn(" ", url)
+        self.assertIn("Pride%20Parade%20this%20year_sfw", url)
+        self.assertIn("%3A", url)  # the colons are encoded too
+
+    def test_a_successful_submit_is_reported_as_success(self):
+        """flask emits `{"code":200}` with no space; string-matching missed it.
+
+        The false negative left the item in `ready` and submitted it again next
+        tick — two campaigns (3001/3002) for one upload.
+        """
+        import json as _json
+
+        class _Resp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return _json.dumps({"code": 200, "msg": "queued",
+                                    "data": {"campaignIds": [3001]}}).encode()
+
+        with patch.object(ap.urllib.request, "urlopen", return_value=_Resp()):
+            ok, body = ap.submit("sw/img/x__nsfw.jpg", "2026-10-27T21:00:00")
+        self.assertTrue(ok, body)
+
+    def test_an_error_payload_is_reported_as_failure(self):
+        import json as _json
+
+        class _Resp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return _json.dumps({"code": 400, "msg": "no"}).encode()
+
+        with patch.object(ap.urllib.request, "urlopen", return_value=_Resp()):
+            ok, _body = ap.submit("x", "2026-10-27T21:00:00")
+        self.assertFalse(ok)
+
+    def test_reset_failures_clears_the_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            state_path.write_text(json.dumps({
+                "version": 1, "processed": {},
+                "ready": [{"id": "a", "remotePath": "x__sfw.jpg",
+                           "autoPublishAttempts": 3, "autoPublishLastError": "boom",
+                           "autoPublishState": "publishing"}],
+                "pending": [], "quarantined": [],
+            }), encoding="utf-8")
+            self.assertEqual(ap.reset_failures(state_path), 1)
+            entry = json.loads(state_path.read_text())["ready"][0]
+            self.assertNotIn("autoPublishAttempts", entry)
+            self.assertNotIn("autoPublishLastError", entry)
+            self.assertNotIn("autoPublishState", entry)
+
+
 class StartAtTests(unittest.TestCase):
     def test_publish_date_pins_the_day_at_2100_taipei(self):
         now = datetime(2026, 10, 21, 4, 0, tzinfo=timezone.utc)  # 12:00 Taipei
