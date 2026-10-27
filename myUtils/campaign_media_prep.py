@@ -420,6 +420,12 @@ def prepare_campaign_media_artifacts(
         # (below) overwrites it with the model's declared language.
         "language": None,
     }
+    # A transcript that is really the gateway's refusal must not seed the copy
+    # prompt or the language routing (35 such rows existed on 2026-10-27, and
+    # they are what put English media on the Chinese accounts and vice versa).
+    artifacts_context["transcriptText"] = llm_client.usable_transcript(
+        artifacts_context["transcriptText"]
+    )
     _supplied_language = str(request_data.get("language", "") or "").strip().lower()
     if artifacts_context["transcriptText"]:
         artifacts_context["language"] = (

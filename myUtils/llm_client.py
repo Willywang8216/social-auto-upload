@@ -167,6 +167,49 @@ _LANGUAGE_LINE_RE = re.compile(
 _THINK_TAG_RE = re.compile(r"(?is)</?think>")
 
 
+# The STT gateway answers HTTP 200 with a *sentence* when it refuses or fails:
+# "The request was rejected because it was considered high risk", "这段音频纯为器乐
+# 演奏，没有任何人类说话的声音。因此，无法进行语音转录。LANGUAGE=en", … Those were
+# stored as the transcript, then used for two things they must never influence:
+#   * language routing (an English refusal on Chinese content made it look English
+#     and vice versa — the operator saw English videos landing on Chinese
+#     accounts), and
+#   * the copy prompt (the model was told the "transcript" was a refusal).
+# 35 such artifacts were in the database on 2026-10-27.
+_TRANSCRIPTION_FAILURE_MARKERS = (
+    "request was rejected",
+    "considered high risk",
+    "无法进行语音转录",
+    "無法進行語音轉錄",
+    "没有任何人类说话",
+    "沒有任何人類說話",
+    "no human speech",
+    "no speech detected",
+    "pure instrumental",
+    "纯为器乐",
+    "純為器樂",
+    "unable to transcribe",
+    "cannot transcribe",
+    "failed to transcribe",
+    "stt failed",
+    "high risk",
+)
+
+
+def is_transcription_failure(text: str | None) -> bool:
+    """True when ``text`` is the gateway's refusal/empty-audio message, not speech."""
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    return any(marker in lowered for marker in _TRANSCRIPTION_FAILURE_MARKERS)
+
+
+def usable_transcript(text: str | None) -> str:
+    """``text`` when it is real speech, else an empty string."""
+    value = str(text or "").strip()
+    return "" if is_transcription_failure(value) else value
+
+
 def _contains_cjk(text: str) -> bool:
     """True when ``text`` has a CJK ideograph / punctuation codepoint."""
     for char in str(text or ""):
@@ -202,8 +245,17 @@ def strip_stt_scaffolding(text: str | None) -> str:
 
 
 def detect_language(text: str | None) -> str:
-    """Classify a transcript as ``zh`` (any CJK codepoint) else ``en``."""
-    return "zh" if _contains_cjk(strip_stt_scaffolding(text)) else "en"
+    """Classify a transcript as ``zh`` (any CJK codepoint) else ``en``.
+
+    A refusal/empty-audio sentence is not content: returning ``en`` for an
+    English refusal made Chinese media look English (and the reverse), which is
+    how English videos reached the operator's Chinese accounts. Callers that need
+    "unknown" should check :func:`is_transcription_failure` first.
+    """
+    cleaned = strip_stt_scaffolding(text)
+    if is_transcription_failure(cleaned):
+        return "en"
+    return "zh" if _contains_cjk(cleaned) else "en"
 
 
 def _split_transcript_language(raw: str) -> tuple[str, str | None]:
@@ -689,5 +741,10 @@ def transcribe_audio_via_chat(
     reasoning = _extract_message_content(message.get("reasoning_content", "")).strip()
     raw = content or reasoning
     text, declared_language = _split_transcript_language(raw)
+    if is_transcription_failure(text):
+        # Treat a refusal exactly like a failed request: the caller already
+        # handles that (transcription is optional context) and, crucially, does
+        # not then classify the content's language from a refusal sentence.
+        raise RuntimeError(f"transcription refused by the gateway: {text[:120]}")
     language = declared_language or detect_language(text or title or "")
     return TranscriptionResult(text=text, payload=response_payload, language=language)

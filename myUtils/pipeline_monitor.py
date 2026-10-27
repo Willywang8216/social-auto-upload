@@ -172,6 +172,32 @@ def _check_disk(path: Path, *, warn_pct: float = 85.0, crit_pct: float = 92.0) -
     return []
 
 
+def _check_routing(conn: sqlite3.Connection, *, limit: int = 5) -> list[str]:
+    """Content that is queued for an audience whose language does not match.
+
+    Invisible in the draft (the copy is localised per account), so the operator
+    only notices when an English video shows up on a Chinese account — which is
+    exactly what happened on 2026-10-27 (83 queued targets, 8 already published).
+    """
+    try:
+        from myUtils import routing_audit
+
+        violations = routing_audit.pending_violations(conn)
+    except Exception as exc:  # noqa: BLE001 — a broken audit must not hide other alerts
+        return [f"routing audit failed: {type(exc).__name__}: {exc}"]
+    if not violations:
+        return []
+    videos = [v for v in violations if v["media_kind"] == "video"]
+    detail = ", ".join(
+        f"{v['account_name']} gets {v['content_language']} {v['media_kind']}"
+        for v in violations[:limit]
+    )
+    return [
+        f"{len(violations)} pending target(s) route content to the wrong audience "
+        f"({len(videos)} video): {detail} — run scripts/audit_language_routing.py --apply"
+    ]
+
+
 def _check_offload(repo: Path) -> list[str]:
     log = repo / "logs" / "offload.log"
     try:
@@ -229,6 +255,9 @@ def collect_problems(db: Path, repo: Path, inbox: Path, *, overdue_min: int = 45
         overdue = _check_overdue(conn, overdue_min)
         if overdue:
             problems["overdue"] = overdue
+        routing = _check_routing(conn)
+        if routing:
+            problems["language-routing"] = routing
     finally:
         conn.close()
     disk = _check_disk(repo)

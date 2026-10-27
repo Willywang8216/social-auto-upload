@@ -303,6 +303,17 @@ teaching_blog `MSL Blog` · youtube `Willy Dev tutor`.
 
 **Routing policy (backend-enforced).** Content language selects the accounts:
 
+> **Strict by default.** English content goes to English-audience accounts only.
+> `includeZhForEnglish` is an explicit opt-in and was *not* wanted on 2026-10-27:
+> 83 queued targets (English videos on 光光 / NW X (nudeweiwei) / NW Bluesky ZH /
+> NW TG 中文 / SW Bluesky ZH / SW TG 中文) were cancelled, and 8 had already
+> published. Two things caused it — that opt-in, and STT *refusal* text being
+> stored as a transcript, which made the router see English on Chinese media and
+> vice versa (`myUtils/llm_client.is_transcription_failure` now drops it).
+> `scripts/audit_language_routing.py` lists/cancels violations, and
+> `myUtils.pipeline_monitor` alerts on any that appear, so the next misroute is
+> reported instead of published.
+
 * **Chinese** content goes **only** to Chinese (`zh`/`zh-Hant`) accounts.
 * **English** content goes to English (`en`) accounts by default. To also send
   it to the Chinese accounts, pass `options.includeZhForEnglish: true` in the

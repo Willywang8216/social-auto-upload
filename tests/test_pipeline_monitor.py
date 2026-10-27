@@ -24,10 +24,21 @@ def _db(path: Path) -> None:
     conn.executescript(
         """
         CREATE TABLE campaigns (id INTEGER PRIMARY KEY, profile_id INTEGER, status TEXT,
-                                last_error TEXT, created_at TEXT, prepared_at TEXT);
+                                last_error TEXT, created_at TEXT, prepared_at TEXT,
+                                metadata_json TEXT);
         CREATE TABLE publish_job_targets (id INTEGER PRIMARY KEY, job_id INTEGER, account_ref TEXT,
                                           file_ref TEXT, status TEXT, schedule_at TEXT,
                                           finished_at TEXT, last_error TEXT);
+        -- The language-routing audit reads these; a partial schema made the audit
+        -- fail and the monitor report a phantom problem on a healthy box.
+        CREATE TABLE accounts (id INTEGER PRIMARY KEY, account_name TEXT, platform TEXT,
+                               config_json TEXT);
+        CREATE TABLE file_records (id INTEGER PRIMARY KEY, filename TEXT);
+        CREATE TABLE media_groups (id INTEGER PRIMARY KEY);
+        CREATE TABLE media_group_items (media_group_id INTEGER, file_record_id INTEGER);
+        CREATE TABLE campaign_artifacts (id INTEGER PRIMARY KEY, campaign_id INTEGER,
+                                         artifact_kind TEXT, local_path TEXT, metadata_json TEXT);
+        CREATE TABLE campaign_posts (id INTEGER PRIMARY KEY, campaign_id INTEGER, draft_json TEXT);
         """
     )
     conn.commit()
