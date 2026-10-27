@@ -172,6 +172,63 @@ def _check_disk(path: Path, *, warn_pct: float = 85.0, crit_pct: float = 92.0) -
     return []
 
 
+def _check_stt(*, timeout: float = 60.0) -> list[str]:
+    """Is the speech-to-text gateway actually usable?
+
+    It is the one dependency whose failure is invisible: transcription is
+    best-effort, so a dead gateway just means every new upload gets a generic,
+    content-free brief instead of an error. On 2026-10-27 it answered
+    401 "invalid token" / 503 "No available channel for model mimo-v2.6-flash"
+    for hours. One 1-second silent WAV per run is enough to tell.
+    """
+    import base64
+    import struct
+    import urllib.request
+
+    base = (os.environ.get("SAU_STT_BASE_URL") or "").strip()
+    key = (os.environ.get("SAU_STT_API_KEY") or "").strip()
+    model = (os.environ.get("SAU_STT_MODEL") or "mimo-v2.6-flash").strip()
+    if not base or not key:
+        return []  # not configured: nothing to check
+    # 1 s of 16 kHz mono silence
+    samples = 16000
+    wav = (b"RIFF" + struct.pack("<I", 36 + samples * 2) + b"WAVEfmt "
+           + struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16)
+           + b"data" + struct.pack("<I", samples * 2) + b"\x00\x00" * samples)
+    body = json.dumps({
+        "model": model,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": [
+            {"type": "input_audio",
+             "input_audio": {"data": base64.b64encode(wav).decode(), "format": "wav"}},
+            {"type": "text", "text": "Reply with the single word: ok"},
+        ]}],
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base.rstrip('/')}/v1/chat/completions", data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {key}",
+            "User-Agent": "claude-cli/1.0.0 (external, cli)",
+            "x-app": "cli",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response.read(200)
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:160]
+        except Exception:  # noqa: BLE001
+            pass
+        return [f"STT gateway {base} rejected the probe: HTTP {exc.code} {detail} "
+                f"— new uploads will get generic copy until this is fixed"]
+    except Exception as exc:  # noqa: BLE001
+        return [f"STT gateway {base} unreachable: {type(exc).__name__}: {exc}"]
+    return []
+
+
 def _check_routing(conn: sqlite3.Connection, *, limit: int = 5) -> list[str]:
     """Content that is queued for an audience whose language does not match.
 
@@ -263,6 +320,9 @@ def collect_problems(db: Path, repo: Path, inbox: Path, *, overdue_min: int = 45
     disk = _check_disk(repo)
     if disk:
         problems["disk"] = disk
+    stt = _check_stt()
+    if stt:
+        problems["stt"] = stt
     offload = _check_offload(repo)
     if offload:
         problems["offload"] = offload
