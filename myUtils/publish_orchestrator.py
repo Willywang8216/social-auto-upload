@@ -57,6 +57,65 @@ MAX_POSTS_PER_ACCOUNT_PER_DAY = int(
 )
 
 
+# Provider-side identity behind an account row. The operator deliberately shares
+# ONE SFW set across profiles ("they are the same as NW since it's all SFW"), so
+# two account rows (profile 1 and profile 3) point at the same Facebook page /
+# Instagram user / Threads user. The queue guard keys on the internal account id,
+# which let the same media be queued through both rows and posted twice to one
+# page — 10+ media groups were in that state on 2026-10-28.
+_META_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
+    "facebook": ("pageId",),
+    "instagram": ("igUserId",),
+    "threads": ("threadUserId", "userId"),
+}
+
+
+def _external_account_identity(account) -> tuple[str, str] | None:
+    """``(platform, provider_id)`` for a Meta account row, else ``None``."""
+    platform = str(getattr(account, "platform", "") or "").strip().lower()
+    fields = _META_IDENTITY_FIELDS.get(platform)
+    if not fields:
+        return None
+    config = getattr(account, "config", None) or {}
+    for field in fields:
+        value = str(config.get(field) or "").strip()
+        if value:
+            return platform, value
+    return None
+
+
+def _account_ids_with_identity(platform: str, value: str, *, db_path: Path) -> list[int]:
+    """Every enabled account row whose Meta identity is ``(platform, value)``."""
+    fields = _META_IDENTITY_FIELDS.get(platform, ())
+    ids: list[int] = []
+    try:
+        with sqlite3.connect(db_path) as conn:
+            for field in fields:  # fixed whitelist, never caller input
+                rows = conn.execute(
+                    f"SELECT id FROM accounts WHERE platform = ? "
+                    f"AND json_extract(config_json, '$.{field}') = ?",
+                    (platform, value),
+                ).fetchall()
+                ids.extend(int(row[0]) for row in rows)
+    except Exception:  # noqa: BLE001 - a lookup miss must never block a publish
+        return []
+    return sorted(set(ids))
+
+
+def _shared_identity_already_queued(account, media_group_id: int, *, db_path: Path) -> bool:
+    """True when the same provider account is already queued via another profile."""
+    identity = _external_account_identity(account)
+    if identity is None:
+        return False
+    platform, value = identity
+    for other_id in _account_ids_with_identity(platform, value, db_path=db_path):
+        if other_id == int(getattr(account, "id", -1)):
+            continue
+        if _already_queued_for_media(other_id, media_group_id, db_path=db_path):
+            return True
+    return False
+
+
 def _already_queued_for_media(
     account_id: int, media_group_id: int, *, db_path: Path
 ) -> bool:
@@ -602,13 +661,17 @@ def submit_publish(
                 # than silently piling on more scheduled sends.
                 if _already_queued_for_media(
                     account.id, media_group.id, db_path=db_path
+                ) or _shared_identity_already_queued(
+                    account, media_group.id, db_path=db_path
                 ):
                     skipped.append({
                         "profileId": profile_id,
                         "accountId": account.id,
                         "accountName": account.nickname or account.account_name,
                         "platform": account.platform,
-                        "reason": "this media is already queued for this account",
+                        "reason": "this media is already queued for this account "
+                                  "(directly, or through another profile's row for "
+                                  "the same provider account)",
                     })
                     continue
                 routing_skip = language_routing_skip_reason(

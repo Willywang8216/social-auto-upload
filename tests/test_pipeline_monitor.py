@@ -8,7 +8,9 @@ dedupe that stops a permanent outage from becoming 96 messages a day.
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -66,13 +68,52 @@ class CollectorTests(unittest.TestCase):
         _db(self.db)
 
     def _collect(self, **kwargs):
-        with patch.object(pipeline_monitor, "_check_healthz", return_value=None):
+        # The health and STT checks both hit the network. A test must not depend
+        # on a live gateway: when the STT provider really is down (it was, for
+        # days in October 2026) the "healthy box" test failed for a reason that
+        # had nothing to do with the code under test.
+        with patch.object(pipeline_monitor, "_check_healthz", return_value=None), \
+             patch.object(pipeline_monitor, "_check_stt", return_value=[]):
             return pipeline_monitor.collect_problems(
                 self.db, self.repo, self.inbox, **kwargs
             )
 
     def test_healthy_box_reports_nothing(self):
         self.assertEqual(self._collect(), {})
+
+    def test_stt_probe_is_silent_when_unconfigured(self):
+        with patch.dict(os.environ, {"SAU_STT_BASE_URL": "", "SAU_STT_API_KEY": ""}):
+            self.assertEqual(pipeline_monitor._check_stt(), [])
+
+    def test_stt_probe_reports_a_rejected_gateway(self):
+        import urllib.error
+
+        error = urllib.error.HTTPError(
+            "https://stt.example/v1/chat/completions", 503, "Service Unavailable", None,
+            io.BytesIO(b'{"error":{"code":"model_not_found"}}'),
+        )
+        with patch.dict(os.environ, {"SAU_STT_BASE_URL": "https://stt.example",
+                                     "SAU_STT_API_KEY": "k",
+                                     "SAU_STT_MODEL": "mimo-v2.6-flash"}), \
+             patch("urllib.request.urlopen", side_effect=error):
+            problems = pipeline_monitor._check_stt()
+        self.assertEqual(len(problems), 1)
+        self.assertIn("503", problems[0])
+        self.assertIn("model_not_found", problems[0])
+
+    def test_stt_probe_is_silent_on_success(self):
+        class _Response:
+            def read(self, _n=-1):
+                return b'{"choices":[]}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *_exc):
+                return False
+
+        with patch.dict(os.environ, {"SAU_STT_BASE_URL": "https://stt.example",
+                                     "SAU_STT_API_KEY": "k"}), \
+             patch("urllib.request.urlopen", return_value=_Response()):
+            self.assertEqual(pipeline_monitor._check_stt(), [])
 
     def test_stale_watcher_heartbeat_is_reported(self):
         (self.inbox / ".watch-health.json").write_text(json.dumps({
@@ -161,6 +202,7 @@ class CollectorTests(unittest.TestCase):
 
         with patch.object(pipeline_monitor, "STATE_PATH", state_path), \
              patch.object(pipeline_monitor, "_check_healthz", return_value=None), \
+             patch.object(pipeline_monitor, "_check_stt", return_value=[]), \
              patch("myUtils.ops_alerts.send_ops_alert",
                    side_effect=lambda **kw: sent.append(kw) or True):
             argv = ["--db", str(self.db), "--repo", str(self.repo),
