@@ -1040,7 +1040,73 @@ def process_paths(state: dict) -> dict:
     return {"ready": new_ready, "pending": new_pending, "orphans": new_orphans}
 
 
+#: Jobs the pipeline depends on, by a stable substring of their crontab line. The
+#: watcher runs from ``/etc/cron.d/sau-inbox-watch`` (a *different* scheduler), so
+#: it is the one process that can still notice when the operator's own crontab is
+#: emptied — which is exactly what happened on 2026-10-28: the whole file was
+#: replaced with a single bisync line, taking the monitors, the deployer, the
+#: Drive offload and the daily backups with it. Nothing noticed for a day and a
+#: half, because every one of those jobs was itself the thing that would have
+#: raised the alarm.
+CRON_GUARD_MARKERS = (
+    ("ci-watch", "scripts/ci-watch.sh"),
+    ("offload", "offload_to_drive.sh"),
+    ("pipeline monitor", "myUtils.pipeline_monitor"),
+    ("auto-archive", "myUtils.inbox_archive"),
+    ("auto-publish", "myUtils.inbox_autopublish"),
+    ("watcher watchdog", "inbox_monitor.py"),
+    ("disk reclaim", "scripts/disk-reclaim.sh"),
+    ("publish digest", "myUtils.publish_digest"),
+)
+CRON_GUARD_INTERVAL_SEC = float(os.environ.get("SAU_WATCH_CRON_GUARD_SEC", "1800"))
+
+
+def check_cron_guard(*, runner=None) -> list[str]:
+    """Alert when the operator's crontab no longer schedules the pipeline.
+
+    Returns the labels that are missing (empty = healthy). Runs at most once per
+    ``SAU_WATCH_CRON_GUARD_SEC``; a host without ``crontab`` at all is left alone
+    (some deployments schedule everything externally).
+    """
+    health = _load_health()
+    now = time.time()
+    if now - float(health.get("cron_guard_at") or 0) < CRON_GUARD_INTERVAL_SEC:
+        return []
+    write_health(cron_guard_at=now)
+    run = runner or subprocess.run
+    try:
+        result = run(["crontab", "-l"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
+        LOG.info("cron guard: 讀不到 crontab，跳過（%s）", exc)
+        return []
+    if getattr(result, "returncode", 1) != 0:
+        LOG.info("cron guard: crontab -l 失敗，跳過")
+        return []
+    text = result.stdout or ""
+    active = [
+        line for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    missing = [label for label, marker in CRON_GUARD_MARKERS if not any(marker in l for l in active)]
+    write_health(cron_guard_missing=missing)
+    if missing:
+        alert_once(
+            "cron-guard",
+            "🚨 排程不見了（SAU crontab）",
+            "以下工作已不在 crontab 內：\n"
+            + "\n".join(f"• {m}" for m in missing)
+            + f"\n\n目前 crontab 只剩 {len(active)} 行。"
+            "排程被清空時，監控、部署、offload、備份都會一起停掉，"
+            "而且沒有東西會通知你。備份在 ~/.config/crontab-keep/。",
+        )
+    return missing
+
+
 def scan_once() -> int:
+    try:
+        check_cron_guard()
+    except Exception as exc:  # noqa: BLE001 - the guard must never break a scan
+        LOG.warning("cron guard 失敗: %s", exc)
     # Serialize cron invocations for scan-temp ownership, while keeping the JSON
     # state lock short so approvals/rejections can happen during Drive transfer.
     try:
