@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Sequence
 
+from myUtils import rclone_config
+
 RCLONE_COMMAND = "rclone"
 DEFAULT_REMOTE_ENV = "SAU_DEFAULT_RCLONE_REMOTE"
 DEFAULT_PATH_ENV = "SAU_DEFAULT_RCLONE_PATH"
@@ -32,7 +34,9 @@ class RemoteArtifact:
 
 
 def run_subprocess(command: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.run(command, check=True, **kwargs)
+    # rclone rewrites its config when it refreshes a token; see myUtils.rclone_config
+    # for why the mounted config's directory makes that fail.
+    return subprocess.run(rclone_config.with_writable_config(list(command)), check=True, **kwargs)
 
 
 def _resolve_remote_name(remote_name: str | None) -> str:

@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 
 from utils.conf_defaults import BASE_DIR
+from myUtils import rclone_config
 
 DEFAULT_REMOTE = "GDrive-willywang8216"
 DEFAULT_ROOT = "SAU-Inbox"
@@ -82,7 +83,7 @@ def stage_remote_media(remote_path: str, *, runner=None) -> str:
     run = runner or subprocess.run
     try:
         result = run(
-            ["rclone", "copyto", spec, str(destination)],
+            rclone_config.rclone_argv("copyto", spec, str(destination)),
             check=True,
             capture_output=True,
             text=True,
