@@ -1,4 +1,36 @@
 services:
+  # Local STT + spoken-language detection. Deliberately its own service:
+  # ci-watch only ever recreates `social-auto-upload`, so this one keeps its
+  # warm whisper model across deploys, and its CPU cannot be starved by the
+  # app's ffmpeg transcodes (nor the other way round). The app reaches it by
+  # name on the shared network; it is not published to the host, because the
+  # host firewall drops bridge->host traffic anyway.
+  stt:
+    image: sau-stt:local
+    build:
+      context: .
+      dockerfile: docker/stt/Dockerfile
+      args:
+        STT_MODEL: ${SAU_STT_LOCAL_MODEL:-tiny}
+        SAU_UID: ${SAU_UID:-1000}
+        SAU_GID: ${SAU_GID:-1000}
+    container_name: sau-stt
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - SAU_STT_LOCAL_THREADS=${SAU_STT_LOCAL_THREADS:-3}
+      - SAU_STT_LOCAL_PORT=9099
+      - SAU_STT_LOCAL_CACHE=/cache
+    volumes:
+      - sau-stt-cache:/cache
+    # Published on loopback so host-run tooling (the language backfill, the test
+    # suite) can reach it too; the app container uses the service name.
+    ports:
+      - "127.0.0.1:9099:9099"
+    networks:
+      - 1panel-network
+
   social-auto-upload:
     # Pull the published image rather than building it locally so Watchtower
     # can actually update it (the previous `build: .` produced
@@ -160,6 +192,7 @@ services:
 
 volumes:
   sau_pgdata:
+  sau-stt-cache:
 
 networks:
   1panel-network:

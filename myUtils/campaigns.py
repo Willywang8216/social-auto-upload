@@ -349,6 +349,56 @@ def campaign_has_queued_posts(
     return row is not None
 
 
+def record_content_language(
+    campaign_id: int,
+    language: str | None,
+    source: str | None,
+    *,
+    db_path: Path | None = None,
+) -> None:
+    """Merge the campaign's content language into its metadata.
+
+    ``update_campaign`` replaces metadata wholesale, so every caller that wanted
+    to add one key had to read-modify-write and risked dropping ``prepRequest``.
+    This does the merge in one place. The value is what routing decisions and
+    ``myUtils.routing_audit`` read, so it must survive the request that detected
+    it — deriving it again later is exactly how English media ended up queued to
+    Chinese accounts after STT died.
+    """
+    from myUtils import content_language
+
+    current = get_campaign(campaign_id, db_path=db_path)
+    metadata = dict(current.metadata or {})
+    metadata[content_language.CONTENT_LANGUAGE_KEY] = language
+    metadata[content_language.CONTENT_LANGUAGE_SOURCE_KEY] = source
+    update_campaign(campaign_id, metadata=metadata, db_path=db_path)
+
+
+def record_content_language(
+    campaign_id: int,
+    language: str | None,
+    source: str | None,
+    *,
+    db_path: Path | None = None,
+) -> None:
+    """Merge the campaign's content language into its metadata.
+
+    ``update_campaign`` replaces metadata wholesale, so every caller that wanted
+    to add one key had to read-modify-write and risked dropping ``prepRequest``.
+    This does the merge in one place. The value is what routing decisions and
+    ``myUtils.routing_audit`` read, so it must survive the request that detected
+    it — deriving it again later is exactly how English media ended up queued to
+    Chinese accounts after STT died.
+    """
+    from myUtils import content_language
+
+    current = get_campaign(campaign_id, db_path=db_path)
+    metadata = dict(current.metadata or {})
+    metadata[content_language.CONTENT_LANGUAGE_KEY] = language
+    metadata[content_language.CONTENT_LANGUAGE_SOURCE_KEY] = source
+    update_campaign(campaign_id, metadata=metadata, db_path=db_path)
+
+
 def update_campaign(
     campaign_id: int,
     *,

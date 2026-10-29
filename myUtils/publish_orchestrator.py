@@ -32,6 +32,7 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 from myUtils import campaigns as campaign_store
+from myUtils import content_language
 from myUtils import content_rating
 from myUtils import content_rules
 from myUtils import jobs as job_runtime
@@ -410,13 +411,18 @@ def _account_language_tokens(account, profile) -> set[str]:
     return {token for token in raw.split() if token}
 
 
-def _content_language(media_context, request_data) -> str | None:
-    """The prepared content's language (``zh``/``en``), or None when unknown."""
-    for source in (media_context or {}, request_data or {}):
-        language = str(source.get("language") or "").strip().lower()
-        if language in {"zh", "en"}:
-            return language
-    return None
+def _content_language(media_context, request_data, metadata=None) -> str | None:
+    """The prepared content's language (``zh``/``en``), or None when unknown.
+
+    Delegates to :mod:`myUtils.content_language`, which ranks the evidence and
+    refuses to call a language-neutral filename "English". The campaign's stored
+    language is consulted too, so a target created later (or a re-prep) still
+    knows what the media actually is.
+    """
+    language, _source = content_language.resolve(
+        metadata=metadata, media_context=media_context, request_data=request_data
+    )
+    return language
 
 
 def language_routing_skip_reason(
@@ -629,6 +635,18 @@ def submit_publish(
             )
             skipped.append({"profileId": profile.id, "reason": f"artifact prep failed: {exc}"})
             continue
+        # Persist what the media actually is, so routing (now and on any later
+        # re-prep) does not have to guess from a generated title.
+        _language, _language_source = content_language.resolve(
+            media_context=media_context, request_data=request_data
+        )
+        try:
+            campaign_store.record_content_language(
+                campaign.id, _language, _language_source, db_path=db_path
+            )
+        except Exception:  # noqa: BLE001 - bookkeeping must not block a publish
+            _logger.warning("could not record content language for campaign %s",
+                            campaign.id, exc_info=True)
 
         # group accounts by platform so each platform gets its own
         # campaign_posts/job spec
@@ -675,7 +693,7 @@ def submit_publish(
                     })
                     continue
                 routing_skip = language_routing_skip_reason(
-                    _content_language(media_context, request_data),
+                    _content_language(media_context, request_data, campaign.metadata),
                     account,
                     profile,
                     include_zh_for_english=bool((options or {}).get("includeZhForEnglish")),

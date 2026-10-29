@@ -21,7 +21,7 @@ from pathlib import Path
 from utils.conf_defaults import BASE_DIR
 
 from myUtils import campaigns as campaign_store
-from myUtils import llm_client
+from myUtils import content_language, llm_client
 from myUtils import media_pipeline
 from myUtils import media_prep
 from myUtils import media_remote_storage
@@ -426,19 +426,36 @@ def prepare_campaign_media_artifacts(
     artifacts_context["transcriptText"] = llm_client.usable_transcript(
         artifacts_context["transcriptText"]
     )
-    _supplied_language = str(request_data.get("language", "") or "").strip().lower()
+    _supplied_language = content_language.normalise(request_data.get("language"))
     if artifacts_context["transcriptText"]:
         artifacts_context["language"] = (
             _supplied_language
-            if _supplied_language in {"zh", "en"}
+            if _supplied_language
             else llm_client.detect_language(artifacts_context["transcriptText"])
         )
-    elif _supplied_language in {"zh", "en"}:
+        artifacts_context["languageSource"] = "supplied" if _supplied_language else "transcript"
+    elif _supplied_language:
         artifacts_context["language"] = _supplied_language
-    elif str(request_data.get("title", "") or "").strip():
-        artifacts_context["language"] = llm_client.detect_language(
-            str(request_data.get("title"))
+        artifacts_context["languageSource"] = "supplied"
+    else:
+        # No transcript yet (STT may still be about to run). Classify the
+        # *media* from its name/brief rather than from the title: the title is
+        # generated in the target account's language, so using it here made the
+        # routing comparison a tautology. A language-neutral name (a timestamp,
+        # a tweet id) yields None, which the router treats as unknown.
+        _guess, _guess_source = content_language.detect_from_evidence(
+            filenames=[str(item.get("filename") or "") for item in media_files],
+            brief=str(request_data.get("brief") or ""),
+            title="",
+            has_video=any(
+                str(item.get("role") or "") == "video"
+                or str(item.get("filename") or "").lower().endswith((".mp4", ".mov", ".webm", ".mkv", ".m4v", ".avi"))
+                for item in media_files
+            ),
         )
+        if _guess:
+            artifacts_context["language"] = _guess
+            artifacts_context["languageSource"] = _guess_source
 
     screenshots_spec = request_data.get("screenshots") if isinstance(request_data.get("screenshots"), dict) else {}
     screenshots_enabled = bool(screenshots_spec.get("enabled"))
@@ -924,9 +941,15 @@ def prepare_campaign_media_artifacts(
             )
             transcript_path.write_text(transcript.text, encoding="utf-8")
             artifacts_context["transcriptText"] = transcript.text
-            artifacts_context["language"] = transcript.language or artifacts_context.get(
-                "language"
-            )
+            # The video's own audio is the authority. Only a *real* transcript
+            # may claim the "transcript" source; a supplied language or a
+            # filename guess must not masquerade as one.
+            if transcript.language:
+                artifacts_context["language"] = transcript.language
+                artifacts_context["languageSource"] = "transcript"
+            elif not artifacts_context.get("language"):
+                artifacts_context["language"] = None
+                artifacts_context["languageSource"] = None
             campaign_store.add_campaign_artifact(
                 campaign_id,
                 source_file_record_id=primary_video["file_record_id"],

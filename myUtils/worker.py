@@ -1033,6 +1033,17 @@ class PublishWorker:
                     # A disabled account must not publish either; the same
                     # window (queued, then the operator disables it) applies.
                     routing_error = _account_unpublishable(account)
+                if routing_error is None:
+                    # Last line of defence for language routing. The check at
+                    # queue time can only be as good as the language known then;
+                    # these rows were created while STT was down and the language
+                    # was "unknown", which the router does not filter. The
+                    # operator asked for English videos to stop appearing on the
+                    # Chinese channels, so the check is repeated here against the
+                    # language now stored on the campaign.
+                    routing_error = _language_routing_error(
+                        target, account, db_path=self._db_path
+                    )
         except Exception:  # noqa: BLE001 — logging must not block publishing
             pass
         log = bind_job_logger(
@@ -2103,6 +2114,75 @@ def _account_profile_mismatch(target, account, job=None) -> str | None:
         f"account {getattr(account, 'id', '?')} belongs to profile "
         f"{account_profile}, but this job is for profile {job_profile}; refusing "
         "to publish across profiles"
+    )
+
+
+def _language_routing_error(target, account, *, db_path) -> str | None:
+    """Reason this target must not publish on language grounds, or ``None``.
+
+    Repeats the queue-time routing decision at publish time. Queue-time is not
+    enough on its own: the language may have been unknown when the target was
+    created (that is exactly what happened while the STT gateway was down for
+    days, leaving ~1 900 English targets aimed at Chinese accounts), and a
+    campaign can also be re-prepped with different media afterwards.
+
+    A campaign whose language is still unknown is allowed through — refusing
+    everything unclassified would stop the pipeline — but the audit reports
+    those separately so they can be reviewed.
+    """
+    import sqlite3
+
+    from myUtils import content_language, jobs as _jobs
+    from myUtils import publish_orchestrator
+
+    file_ref = str(getattr(target, "file_ref", "") or "")
+    if not file_ref.startswith("campaign_post:"):
+        return None
+    try:
+        post_id = int(file_ref.split(":", 1)[1])
+    except (IndexError, ValueError):
+        return None
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT c.id, c.metadata_json FROM campaign_posts cp "
+                "JOIN campaigns c ON c.id = cp.campaign_id WHERE cp.id = ?",
+                (post_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    language, source = content_language.from_metadata(row[1])
+    if language is None:
+        return None
+    profile = getattr(account, "profile", None)
+    if profile is None:
+        # ``_resolve_structured_account`` returns the account row without its
+        # profile; the profile only supplies ``default_language`` as a fallback,
+        # so a miss here just means the account's own tag decides.
+        try:
+            from myUtils import profiles as _profiles
+
+            profile_id = getattr(account, "profile_id", None)
+            if profile_id is None:
+                with sqlite3.connect(db_path) as conn:
+                    found = conn.execute(
+                        "SELECT profile_id FROM accounts WHERE id = ?",
+                        (getattr(account, "id", -1),),
+                    ).fetchone()
+                profile_id = found[0] if found else None
+            profile = _profiles.get_profile(profile_id, db_path=db_path) if profile_id else None
+        except Exception:  # noqa: BLE001
+            profile = None
+    reason = publish_orchestrator.language_routing_skip_reason(
+        language, account, profile, include_zh_for_english=False
+    )
+    if not reason:
+        return None
+    return (
+        f"{reason} (campaign {row[0]} content language {language!r} via {source or 'unknown'}) "
+        "— refusing to publish; re-tag the account or move the content."
     )
 
 

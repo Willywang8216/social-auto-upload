@@ -76,6 +76,7 @@ from myUtils import patreon_auth
 from myUtils import watermark_service
 from myUtils import media_asset_service
 from myUtils import content_generator
+from myUtils import humanize
 from myUtils import sheet_export_service
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.login import reddit_cookie_gen, twitter_cookie_gen, twitter_cookie_gen_legacy
@@ -3778,13 +3779,26 @@ def _generate_account_draft(
     ]
     extended_data["_accountContext"] = "\n".join(account_context_lines) + nonce_suffix
     extended_data["_accountLanguage"] = _account_audience_language(account, profile)
-    return _generate_platform_draft(
+    draft = _generate_platform_draft(
         account.platform,
         profile,
         media_group,
         extended_data,
         media_context,
     )
+    # Pass 2: the humanizer skills' deterministic check plus one bounded rewrite.
+    # A draft that fails to improve is returned untouched — this must never block
+    # a publish.
+    try:
+        humanize.humanize_fields(
+            draft,
+            language=_account_audience_language(account, profile),
+        )
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "humanize pass failed for account %s", getattr(account, "id", "?"), exc_info=True
+        )
+    return draft
 
 
 def _default_sheet_title(profile: profile_registry.Profile) -> str:
@@ -9909,6 +9923,10 @@ def api_campaign_generate(campaign_id):
         system_prompt, user_prompt = content_generator.build_generation_context(
             profile_dict, media_info, acc.platform, context
         )
+        # Pass 1 of the operator's humanizer rules: ask for human-sounding copy
+        # up front. Pass 2 (myUtils.humanize.humanize_fields) repairs whatever
+        # still comes out machine-flavoured.
+        user_prompt = user_prompt + humanize.HUMANIZE_INSTRUCTION
 
         try:
             result = llm_client.generate_chat_completion(

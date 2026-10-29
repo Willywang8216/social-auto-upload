@@ -351,6 +351,7 @@ def _load_pool() -> list[dict]:
                             "api_key": str(item["api_key"]).strip(),
                             "model": (str(item["model"]).strip() if item.get("model") else None),
                             "headers": item.get("headers") if isinstance(item.get("headers"), dict) else None,
+                            "protocol": _normalise_protocol(item.get("protocol")),
                         }
                     )
     if entries:
@@ -365,6 +366,7 @@ def _load_pool() -> list[dict]:
                 "api_key": key,
                 "model": os.environ.get("SAU_LLM_MODEL", "").strip() or None,
                 "headers": None,
+                "protocol": "openai",
             }
         ]
     return []
@@ -374,13 +376,111 @@ def _resolve_endpoints(api_base_url: str | None, api_key: str | None, model: str
     # An explicit endpoint (e.g. injected by a caller or test) is used as-is and
     # never rotated — this preserves the original single-shot contract.
     if api_base_url or api_key:
-        return [{"base_url": api_base_url, "api_key": api_key, "model": model, "headers": None}]
+        return [{"base_url": api_base_url, "api_key": api_key, "model": model,
+                 "headers": None, "protocol": "openai"}]
     pool = _load_pool()
     if pool:
         return pool
     # No configuration anywhere: keep one entry so _normalise raises the
     # canonical "No LLM API base URL configured" error.
-    return [{"base_url": None, "api_key": None, "model": model, "headers": None}]
+    return [{"base_url": None, "api_key": None, "model": model, "headers": None,
+             "protocol": "openai"}]
+
+
+_PROTOCOLS = ("openai", "anthropic")
+
+
+def _normalise_protocol(value) -> str:
+    """Map a pool entry's ``protocol`` onto a supported wire format.
+
+    AgentRouter (and every Claude-Code-style gateway) rejects
+    ``/v1/chat/completions`` outright — "模型 gpt-6.1-sol 不支持
+    /v1/chat/completions 接口，请改用 /v1/messages" — and only speaks the
+    Anthropic Messages API. Without this, 12 working AgentRouter accounts
+    serving ``gpt-6.1-sol`` were unusable because the pool assumed OpenAI.
+    """
+    text = str(value or "").strip().lower()
+    if text in {"anthropic", "messages", "claude"}:
+        return "anthropic"
+    return "openai"
+
+
+def _anthropic_image_part(source):
+    """The same image as an Anthropic content block."""
+    part = _image_content_part(source)
+    if part is None:
+        return None
+    url = part["image_url"]["url"]
+    if url.startswith("data:"):
+        header, _, data = url.partition(",")
+        media_type = header[5:].split(";", 1)[0] or "image/jpeg"
+        return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+    return {"type": "image", "source": {"type": "url", "url": url}}
+
+
+def _anthropic_content(payload: dict) -> str:
+    blocks = payload.get("content")
+    if isinstance(blocks, str):
+        return blocks
+    if not isinstance(blocks, list):
+        return ""
+    out = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "text":
+            out.append(str(block.get("text") or ""))
+    return "".join(out)
+
+
+def _anthropic_chat(
+    http,
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    user_content,
+    temperature: float,
+    response_json: bool,
+    timeout_seconds: int,
+    extra_headers: dict | None,
+    max_tokens: int = 4096,
+):
+    """POST to an Anthropic Messages endpoint and return the text."""
+    headers = {
+        **_headers(api_key),
+        "x-api-key": api_key,
+        "Content-Type": "application/json",
+    }
+    headers.pop("Authorization", None)
+    if isinstance(extra_headers, dict):
+        headers.update({str(k): str(v) for k, v in extra_headers.items()})
+    if isinstance(user_content, list):
+        content = [
+            {"type": "text", "text": part["text"]} if isinstance(part, dict) and "text" in part
+            else _anthropic_image_part(part.get("image_url", {}).get("url")) if isinstance(part, dict)
+            else None
+            for part in user_content
+        ]
+        content = [part for part in content if part is not None]
+    else:
+        content = user_content
+    payload = {
+        "model": model,
+        "max_tokens": max_tokens,
+        # No ``temperature``: gpt-6.1-sol on AgentRouter rejects anything but the
+        # default and answers 400 "does not support 0.3 with this model. Only the
+        # default (1) value is supported." Omitting it is the portable choice.
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": content}],
+    }
+    if response_json:
+        # The Messages API has no response_format; asking in the system prompt is
+        # the documented equivalent and is what every Claude gateway honours.
+        payload["system"] = f"{system_prompt}\n\nReply with a single JSON object and nothing else."
+    _pace_request()
+    response = http.post(f"{base_url}/messages", headers=headers, json=payload, timeout=timeout_seconds)
+    response.raise_for_status()
+    return _anthropic_content(response.json()).strip()
 
 
 def _image_content_part(source):
@@ -537,6 +637,26 @@ def generate_chat_completion(
             }
             if response_json:
                 payload["response_format"] = {"type": "json_object"}
+            if entry.get("protocol") == "anthropic":
+                content = _anthropic_chat(
+                    http,
+                    base_url=base_url,
+                    api_key=resolved_api_key,
+                    model=entry.get("model") or model,
+                    system_prompt=system_prompt,
+                    user_content=user_content,
+                    temperature=temperature,
+                    response_json=response_json,
+                    timeout_seconds=timeout_seconds,
+                    extra_headers=extra_headers,
+                )
+                parsed_json = None
+                if response_json and content:
+                    try:
+                        parsed_json = json.loads(content)
+                    except ValueError:
+                        parsed_json = coerce_json_object(content)
+                return ChatCompletionResult(content=content, payload={}, parsed_json=parsed_json)
             _pace_request()
             response = http.post(
                 f"{base_url}/chat/completions",

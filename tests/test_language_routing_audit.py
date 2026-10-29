@@ -117,9 +117,15 @@ class RoutingAuditTests(unittest.TestCase):
         self.assertEqual(routing_audit.pending_violations(self.conn), [])
 
     def test_a_refusal_transcript_does_not_create_a_false_violation(self):
-        """The refusal is English text; the title says the media is Chinese."""
+        """The refusal is English text; the title says the media is Chinese.
+
+        The filename is deliberately language-neutral (a date): a *real* word in
+        the name is stronger evidence than the generated title and would decide
+        instead. What is under test is that the refusal text is not read as a
+        transcript at all.
+        """
         self._campaign(
-            12, filename="clip__nsfw.mp4",
+            12, filename="20260901__nsfw.mp4",
             transcript="The request was rejected because it was considered high risk",
             title="月底遊行邀請",
         )
@@ -134,7 +140,8 @@ class RoutingAuditTests(unittest.TestCase):
         self.assertEqual(violations[0]["content_language"], "zh")
 
     def test_unknown_language_is_never_a_violation(self):
-        self._campaign(14, filename="clip__sfw.mp4", transcript="", title="")
+        # A timestamp is not a language: nothing here says what the media is.
+        self._campaign(14, filename="20260901__sfw.mp4", transcript="", title="")
         self._target(5, 14, account=1)
         self.assertEqual(routing_audit.pending_violations(self.conn), [])
 
