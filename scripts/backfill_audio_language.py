@@ -289,11 +289,32 @@ def main() -> int:
     ap.add_argument("--cancel-violations", action="store_true",
                     help="after recording, cancel the violating pending targets")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--no-drive", action="store_true",
+                    help="skip the slow Drive fetch; only probe local files and public URLs")
+    ap.add_argument("--zh-accounts-only", action="store_true",
+                    help="only campaigns whose pending targets include a Chinese-audience account "
+                         "(where an English video is the operator's actual complaint)")
     args = ap.parse_args()
 
     conn = sqlite3.connect(args.db, timeout=60)
     conn.row_factory = sqlite3.Row
     candidates = _candidates(conn)
+    if args.zh_accounts_only:
+        risky: set[int] = set()
+        for row in conn.execute(
+            """SELECT DISTINCT cp.campaign_id, a.config_json
+               FROM publish_job_targets jt
+               JOIN campaign_posts cp ON cp.id = CAST(substr(jt.file_ref, 15) AS INTEGER)
+               JOIN accounts a ON 'account:' || a.id = jt.account_ref
+               WHERE jt.status = 'pending'"""
+        ):
+            try:
+                lang = str(json.loads(row[1] or "{}").get("audience_language") or "").lower()
+            except ValueError:
+                lang = ""
+            if lang.startswith("zh"):
+                risky.add(int(row[0]))
+        candidates = [c for c in candidates if c["campaign_id"] in risky]
     if args.limit:
         candidates = candidates[: args.limit]
     todo = [c for c in candidates if args.redo or c["stored"][1] not in cl.STRONG_SOURCES]
@@ -319,6 +340,10 @@ def main() -> int:
         source = _locate_source(conn, campaign_id, entry["videos"])
         url = None if source is not None else _locate_url(conn, campaign_id)
         fetch_dir: Path | None = None
+        if source is None and url is None and args.no_drive:
+            unreadable += 1
+            print(f"  [{index}/{len(todo)}] camp {campaign_id}: no URL and --no-drive, skipped")
+            continue
         if source is None and url is None:
             fetch_dir = Path(tempfile.mkdtemp(prefix="sau-lang-"))
             source = _fetch_from_drive(campaign_id, fetch_dir)
