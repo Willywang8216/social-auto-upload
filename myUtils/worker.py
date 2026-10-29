@@ -45,6 +45,8 @@ from myUtils import prepared_publishers
 from myUtils import content_rules
 from myUtils import sociamonials_fallback
 from myUtils import sociamonials_reclaim
+from myUtils import failure_classification as _fc
+from myUtils import pre_flight
 from myUtils.job_logging import (
     bind_job_logger,
     close_job_sink,
@@ -1074,6 +1076,23 @@ class PublishWorker:
             self._maybe_close_job_sink(target.job_id)
             return
 
+        # Pre-flight validation: catch doomed targets before they burn retry
+        # budget or hold a concurrency slot. A failing check marks the target
+        # as failed immediately with a clear reason, no executor invocation.
+        pre_flight_result = pre_flight.run_pre_flight(
+            account_ref=target.account_ref,
+            job_id=target.job_id,
+            platform=job.platform,
+            payload=payload_state["payload"],
+            db_path=self._db_path,
+        )
+        if not pre_flight_result.ok:
+            log.error(f"pre-flight check failed: {pre_flight_result.reason}")
+            if jobs.mark_target_failed(target.id, pre_flight_result.reason, db_path=self._db_path):
+                self._alert_publish_failure(target, pre_flight_result.reason)
+            self._maybe_close_job_sink(target.job_id)
+            return
+
         try:
             async with self._concurrency.slot(target.account_ref):
                 # Inject db_path into payload so executors can resolve remote files
@@ -1266,13 +1285,30 @@ class PublishWorker:
         if isinstance(error_details, dict) and error_details:
             message += f" | details={json.dumps(error_details, ensure_ascii=False, separators=(',', ':'))}"
         attempts = target.attempts  # already incremented when claimed
+
+        # Use the new failure classification to decide behavior.
+        # This replaces the old _is_credential_failure check with a more
+        # comprehensive taxonomy that distinguishes TRANSIENT (retry),
+        # PERMANENT (fail immediately), and RECOVERABLE (fix and retry).
+        classified = _fc.classify_failure(exc, message=message, platform=job_platform)
+        failure_category = classified.category
+
+        # Legacy compatibility: also check the old credential regex and the
+        # retryable flag, so existing publishers that don't use ClassifiedFailure
+        # still get correct behavior.
         credential_failure = _is_credential_failure(message)
         if credential_failure:
             message = (
                 f"{message} | credential rejected (revoked/expired): "
                 "re-authorise this account before retrying"
             )
-        if credential_failure or getattr(exc, "retryable", True) is False:
+            # Upgrade to PERMANENT if the old regex caught it but the new
+            # classifier didn't (defensive — they should agree).
+            if failure_category is not _fc.PERMANENT:
+                failure_category = _fc.PERMANENT
+
+        # PERMANENT failures: fail immediately, no retry, optionally try fallback.
+        if failure_category is _fc.PERMANENT or getattr(exc, "retryable", True) is False:
             # A permanent failure means the direct path cannot be retried: the
             # subreddit banned us, the media is gone, the credential is dead.
             # Re-routing that to a different Sociamonials account does not fix
@@ -1319,6 +1355,23 @@ class PublishWorker:
                 self._alert_publish_failure(target, message)
             self._maybe_close_job_sink(target.job_id)
             return
+
+        # RECOVERABLE failures: attempt automated recovery, then retry.
+        # Currently the only recoverable case is media restore failure, which
+        # the executor already handles by raising MediaRestoreError. The worker
+        # treats it as a transient retry with a longer backoff.
+        if failure_category is _fc.RECOVERABLE:
+            # Give recovery more time before retrying (the restore might be slow).
+            delay = min(30.0, self._config.retry.backoff_for(attempts) * 2)
+            log.warning(
+                f"target failed (recoverable) on attempt {attempts}; "
+                f"retrying in {delay:.1f}s: {message}"
+            )
+            await asyncio.sleep(delay)
+            jobs.mark_target_retry(target.id, message, db_path=self._db_path)
+            return
+
+        # TRANSIENT failures: retry with normal backoff, up to max_attempts.
         if attempts >= self._config.retry.max_attempts:
             # The retry budget is exhausted. Before declaring the target dead,
             # hand it to Sociamonials, which already holds OAuth connections for

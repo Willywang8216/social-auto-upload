@@ -4,6 +4,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 
+# Upper bound on how long a single browser-upload publish attempt may run.
+# The old code had ``while True: ... except: sleep(0.5)`` loops that would
+# spin forever when the page entered an unrecoverable state. This cap ensures
+# every browser publish either succeeds or fails within a known window,
+# letting the worker's retry/fallback logic take over.
+BROWSER_PUBLISH_TIMEOUT_SECONDS = 600  # 10 minutes
+
+
 class BaseVideoUploader:
     SUPPORTED_VIDEO_EXTENSIONS = {
         ".mp4",

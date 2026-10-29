@@ -526,7 +526,9 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         await page.wait_for_url(publish_url)
         await page.locator("div[class^='upload-content'] input[class='upload-input']").set_input_files(self.file_path)
 
-        while True:
+        # Bounded upload wait: max 10 minutes (300 * 2s).
+        _upload_wait_max = 300
+        for _upload_wait_i in range(_upload_wait_max):
             try:
                 upload_input = await page.wait_for_selector('input.upload-input', timeout=3000)
                 preview_new = await upload_input.query_selector(
@@ -548,6 +550,8 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
             except Exception as e:
                 xiaohongshu_logger.debug(_msg("😵", f"上传状态还没稳定下来，小人继续观察: {e}"))
             await asyncio.sleep(2)
+        else:
+            raise RuntimeError(f"小红书视频上传超时 (waited {_upload_wait_max * 2}s)")
 
         xiaohongshu_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
         await self.fill_meta(page)
@@ -559,7 +563,9 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time_xiaohongshu(page, self.publish_date)
 
-        while True:
+        # Bounded publish retry: max 60 attempts (30s at 0.5s intervals).
+        _publish_retry_max = 60
+        for _publish_retry_i in range(_publish_retry_max):
             try:
                 if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED:
                     await page.locator('button:has-text("定时发布")').click()
@@ -576,6 +582,8 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
                 if self.debug:
                     await page.screenshot(full_page=True)
                 await asyncio.sleep(0.5)
+        else:
+            raise RuntimeError(f"小红书发布超时 (retried {_publish_retry_max} times)")
 
     async def upload(self, playwright: Playwright) -> None:
         xiaohongshu_logger.info(_msg("🧍", "小人先检查 cookie、视频文件、封面和发布时间"))
@@ -664,7 +672,9 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         xiaohongshu_logger.info(_msg("📤", "小人正在上传图片"))
         await upload_input.set_input_files(self.image_paths)
 
-        while True:
+        # Bounded image upload wait: max 5 minutes (300 * 1s).
+        _img_wait_max = 300
+        for _img_wait_i in range(_img_wait_max):
             try:
                 title_container = page.locator('input[placeholder*="填写标题"]').first
                 await title_container.wait_for(state="visible", timeout=3000)
@@ -673,6 +683,8 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
             except Exception:
                 xiaohongshu_logger.debug(_msg("🧍", "图文素材还在上传，小人继续等一会"))
                 await asyncio.sleep(1)
+        else:
+            raise RuntimeError(f"小红书图片上传超时 (waited {_img_wait_max}s)")
 
         xiaohongshu_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
         await self.fill_meta(page)
@@ -680,7 +692,9 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time_xiaohongshu(page, self.publish_date)
 
-        while True:
+        # Bounded publish retry: max 60 attempts (30s at 0.5s intervals).
+        _publish_retry_max = 60
+        for _publish_retry_i in range(_publish_retry_max):
             try:
                 if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED:
                     await page.locator('button:has-text("定时发布")').click()
@@ -697,6 +711,8 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
                 if self.debug:
                     await page.screenshot(full_page=True)
                 await asyncio.sleep(0.5)
+        else:
+            raise RuntimeError(f"小红书发布超时 (retried {_publish_retry_max} times)")
 
     async def upload(self, playwright: Playwright) -> None:
         xiaohongshu_logger.info(_msg("🧍", "小人先检查 cookie、图片和发布时间"))

@@ -11086,5 +11086,23 @@ def system_health():
     return jsonify({"code": 200, "msg": "ok", "data": data}), 200
 
 
+@app.route("/api/publish/health", methods=["GET"])
+def publish_health():
+    """Publish pipeline health snapshot.
+
+    Returns per-platform success rates, recent failures grouped by error
+    pattern, stale targets, and accounts needing reconnect. Designed for the
+    operator dashboard and the alert digest.
+    """
+    from myUtils import publish_health as _ph
+
+    try:
+        db_path = _current_db_path()
+        snapshot = _ph.publish_health_snapshot(db_path)
+        return jsonify({"code": 200, "msg": "ok", "data": snapshot.to_dict()}), 200
+    except Exception as exc:
+        return jsonify({"code": 500, "msg": f"health check failed: {exc}"}), 500
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5409, threaded=True)

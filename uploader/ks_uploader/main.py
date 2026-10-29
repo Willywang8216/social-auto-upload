@@ -535,7 +535,9 @@ class KSVideo(KSBaseUploader):
             if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
                 await self.set_schedule_time(page, self.publish_date)
 
-            while True:
+            # Bounded publish retry: max 60 attempts (60s at 1s intervals).
+            _publish_retry_max = 60
+            for _publish_retry_i in range(_publish_retry_max):
                 try:
                     publish_button = page.get_by_text("发布", exact=True)
                     if await publish_button.count() > 0:
@@ -554,6 +556,8 @@ class KSVideo(KSBaseUploader):
                     if self.debug:
                         await page.screenshot(full_page=True)
                     await asyncio.sleep(1)
+            else:
+                raise RuntimeError(f"快手视频发布超时 (retried {_publish_retry_max} times)")
 
             upload_success = True
         finally:
@@ -674,7 +678,9 @@ class KSNote(KSBaseUploader):
         if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time(page, self.publish_date)
 
-        while True:
+        # Bounded publish retry: max 60 attempts (60s at 1s intervals).
+        _publish_retry_max = 60
+        for _publish_retry_i in range(_publish_retry_max):
             try:
                 publish_button = page.get_by_text("发布", exact=True)
                 if await publish_button.count() > 0:
@@ -693,6 +699,8 @@ class KSNote(KSBaseUploader):
                 if self.debug:
                     await page.screenshot(full_page=True)
                 await asyncio.sleep(1)
+        else:
+            raise RuntimeError(f"快手图文发布超时 (retried {_publish_retry_max} times)")
 
     async def upload(self, playwright: Playwright) -> None:
         kuaishou_logger.info(_msg("🧍", "小人先检查 cookie、图片和发布时间"))
