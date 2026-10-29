@@ -177,11 +177,11 @@ def _cache_key(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:32]
 
 
-def analyse(wav_path: Path) -> dict:
+def analyse(wav_path: Path, *, language_only: bool = False) -> dict:
     data = wav_path.read_bytes()
     key = _cache_key(data)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cached = CACHE_DIR / f"{key}.json"
+    cached = CACHE_DIR / f"{key}{'-lang' if language_only else ''}.json"
     if cached.is_file():
         try:
             payload = json.loads(cached.read_text(encoding="utf-8"))
@@ -193,7 +193,10 @@ def analyse(wav_path: Path) -> dict:
     audio = _read_wav(wav_path)
     duration = len(audio) / 16000
     language, confidence, votes = _detect_language(audio)
-    text = _transcribe(audio, language)
+    # ``purpose=language`` skips the transcript. Language detection is ~5 s
+    # (five short windows); transcribing the same probe is ~35 s, and the queue
+    # sweep only needs to know which language the video is in.
+    text = "" if language_only else _transcribe(audio, language)
     payload = {
         "language": language,
         "language_confidence": round(confidence, 3),
@@ -271,6 +274,7 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         path = self.path.split("?")[0].rstrip("/")
+        language_only = "purpose=language" in (self.path.split("?", 1)[1] if "?" in self.path else "")
         try:
             if path.endswith("/chat/completions"):
                 payload = json.loads(raw.decode("utf-8"))
@@ -289,7 +293,7 @@ class Handler(BaseHTTPRequestHandler):
                     handle.write(base64.b64decode(encoded))
                     temp = Path(handle.name)
                 try:
-                    result = analyse(temp)
+                    result = analyse(temp, language_only=language_only)
                 finally:
                     temp.unlink(missing_ok=True)
                 # Match the hosted model's contract: transcript, then LANGUAGE=.
@@ -314,7 +318,7 @@ class Handler(BaseHTTPRequestHandler):
                     handle.write(audio)
                     temp = Path(handle.name)
                 try:
-                    result = analyse(temp)
+                    result = analyse(temp, language_only=language_only)
                 finally:
                     temp.unlink(missing_ok=True)
                 self._send(200, result)

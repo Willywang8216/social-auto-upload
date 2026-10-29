@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -144,7 +145,74 @@ def _fetch_from_drive(campaign_id: int, destination_dir: Path) -> Path | None:
     return None
 
 
-def _duration(path: Path) -> float:
+def _locate_url(conn: sqlite3.Connection, campaign_id: int) -> str | None:
+    """A public URL for the campaign's video, when one is recorded.
+
+    Most campaigns have their media on R2 with a public URL, and R2 honours
+    range requests — so ffmpeg can seek to a timestamp and fetch only the bytes
+    around it. That turns a ~120 s Drive download into a ~2 s read, which is the
+    difference between probing the queue in an hour and in a day.
+    """
+    for row in conn.execute(
+        """SELECT public_url FROM campaign_artifacts
+           WHERE campaign_id=? AND public_url LIKE 'http%'
+             AND (artifact_kind LIKE '%video%' OR local_path LIKE '%.mp4')
+           ORDER BY id DESC""",
+        (campaign_id,),
+    ):
+        url = str(row[0] or "").strip()
+        if url and not url.startswith("http://localhost"):
+            return url
+    return None
+
+
+def _probe_wav_seeking(source: str, destination: Path) -> bool:
+    """Three windows via *input* seeking, concatenated.
+
+    Works for a local file and an HTTP URL alike, and — unlike the filter-based
+    version — only reads the bytes it needs, which is what makes probing over
+    the network viable.
+    """
+    duration = _duration(source)
+    if duration <= 0:
+        return False
+    spans = [max(0.0, duration * fraction - PROBE_SECONDS / 2) for fraction in PROBE_WINDOWS]
+    if duration < PROBE_SECONDS * len(PROBE_WINDOWS):
+        spans = [0.0]
+    pieces = []
+    try:
+        for index, start in enumerate(spans):
+            piece = destination.with_name(f"{destination.stem}.{index}.wav")
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-y", "-ss", f"{start:.2f}", "-t", str(PROBE_SECONDS),
+                 "-i", source, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(piece)],
+                capture_output=True, text=True, timeout=600, check=True,
+            )
+            if piece.is_file() and piece.stat().st_size > 44:
+                pieces.append(piece)
+        if not pieces:
+            return False
+        if len(pieces) == 1:
+            pieces[0].replace(destination)
+            return True
+        listing = destination.with_suffix(".txt")
+        listing.write_text("".join(f"file '{piece}'\n" for piece in pieces), encoding="utf-8")
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
+             "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(destination)],
+            capture_output=True, text=True, timeout=300, check=True,
+        )
+        return destination.is_file() and destination.stat().st_size > 44
+    except Exception as exc:  # noqa: BLE001
+        print(f"    seek probe failed: {str(exc)[:110]}")
+        return False
+    finally:
+        for piece in pieces:
+            piece.unlink(missing_ok=True)
+        destination.with_suffix(".txt").unlink(missing_ok=True)
+
+
+def _duration(path) -> float:
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
@@ -153,6 +221,36 @@ def _duration(path: Path) -> float:
         return float(out)
     except Exception:  # noqa: BLE001
         return 0.0
+
+
+def _probe_language(wav: Path) -> str | None:
+    """Ask the local STT sidecar for the language only (no transcript)."""
+    import base64
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    base = (os.environ.get("SAU_STT_BASE_URL") or "http://127.0.0.1:9099").rstrip("/")
+    key = (os.environ.get("SAU_STT_API_KEY") or "").strip()
+    body = _json.dumps({
+        "model": os.environ.get("SAU_STT_MODEL") or "local-whisper-tiny",
+        "messages": [{"role": "user", "content": [
+            {"type": "input_audio",
+             "input_audio": {"data": base64.b64encode(wav.read_bytes()).decode(), "format": "wav"}},
+            {"type": "text", "text": "language only"},
+        ]}],
+    }).encode()
+    request = urllib.request.Request(
+        f"{base}/v1/chat/completions?purpose=language", data=body,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                 "User-Agent": "claude-cli/2.0.30 (external, cli)", "x-app": "cli"},
+    )
+    with urllib.request.urlopen(request, timeout=600) as response:
+        payload = _json.loads(response.read())
+    content = str(((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+    match = re.search(r"LANGUAGE=([A-Za-z-]+)", content)
+    value = (match.group(1).lower() if match else "")
+    return value if value in {"zh", "en"} else None
 
 
 def _probe_wav(source: Path, destination: Path) -> bool:
@@ -193,7 +291,7 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
 
-    conn = sqlite3.connect(args.db)
+    conn = sqlite3.connect(args.db, timeout=60)
     conn.row_factory = sqlite3.Row
     candidates = _candidates(conn)
     if args.limit:
@@ -219,34 +317,46 @@ def main() -> int:
     for index, entry in enumerate(todo, 1):
         campaign_id = entry["campaign_id"]
         source = _locate_source(conn, campaign_id, entry["videos"])
+        url = None if source is not None else _locate_url(conn, campaign_id)
         fetch_dir: Path | None = None
-        if source is None:
+        if source is None and url is None:
             fetch_dir = Path(tempfile.mkdtemp(prefix="sau-lang-"))
             source = _fetch_from_drive(campaign_id, fetch_dir)
-        if source is None:
+        if source is None and url is None:
             unreadable += 1
             print(f"  [{index}/{len(todo)}] camp {campaign_id}: source not retrievable, skipped")
             continue
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
             probe = Path(handle.name)
         try:
-            if not _probe_wav(source, probe):
+            probed_ok = (_probe_wav_seeking(url, probe) if url
+                         else _probe_wav(source, probe))
+            if not probed_ok:
                 unreadable += 1
                 continue
-            result = llm_client.transcribe_audio_via_chat(probe)
+            language = _probe_language(probe)
             probed += 1
-            language = result.language if result.language in {"zh", "en"} else None
             if language is None:
                 unknown += 1
-            campaign_store.record_content_language(
-                campaign_id, language, "audio" if language else None, db_path=args.db
-            )
+            # The app and the worker write this DB continuously; a plain write
+            # can lose the lock race, so retry rather than abandon the campaign.
+            for attempt in range(4):
+                try:
+                    campaign_store.record_content_language(
+                        campaign_id, language, "audio" if language else None, db_path=args.db
+                    )
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc) or attempt == 3:
+                        raise
+                    time.sleep(2 * (attempt + 1))
             recorded += 1
             elapsed = time.time() - started
             rate = elapsed / max(1, probed)
             remaining = (len(todo) - index) * rate
+            label = (source.name if source is not None else (url or "?")[-40:])
             print(f"  [{index}/{len(todo)}] camp {campaign_id:5d} -> {language or 'unknown':8s} "
-                  f"({source.name[:40]}) ~{remaining / 60:.0f} min left")
+                  f"({label[:40]}) ~{remaining / 60:.0f} min left")
         except Exception as exc:  # noqa: BLE001
             print(f"  [{index}/{len(todo)}] camp {campaign_id}: {type(exc).__name__}: {str(exc)[:90]}")
         finally:
