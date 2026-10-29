@@ -642,7 +642,12 @@ def apply_video_watermark(
             str(output),
         ]
 
-    runner(*_run_with_filter_script(command), capture_output=True, text=True)
+    argv, filter_script = _run_with_filter_script(command)
+    try:
+        runner(argv, capture_output=True, text=True)
+    finally:
+        if filter_script:
+            Path(filter_script).unlink(missing_ok=True)
     return VideoWatermarkPlan(output_path=output, timeline=timeline, command=command)
 
 
