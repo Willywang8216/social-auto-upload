@@ -656,8 +656,27 @@ def _extract_media(payload: dict) -> dict[str, list[dict[str, str]]]:
         kind = item.get("artifact_kind", "")
         if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"} or "image" in kind:
             images.append(item)
-        elif suffix in {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"} or "video" in kind:
+            continue
+        if suffix in {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"} or "video" in kind:
             videos.append(item)
+            continue
+        # Neither the suffix nor the kind says. An upload with no extension at
+        # all lands here (the operator put "...__sfw" on the Drive inbox), and
+        # the old code dropped it, so the platform got "artifacts were supplied
+        # but none is a supported image/video" for every target of the campaign.
+        # Ask the file itself rather than discarding a 400 MB video.
+        local = item.get("local_path")
+        if local:
+            try:
+                from myUtils.campaign_media_prep import probe_media_kind
+
+                probed = probe_media_kind(local)
+            except Exception:  # noqa: BLE001 - a probe failure must not break publishing
+                probed = None
+            if probed == "image":
+                images.append(item)
+            elif probed == "video":
+                videos.append(item)
     return {"images": images, "videos": videos}
 
 

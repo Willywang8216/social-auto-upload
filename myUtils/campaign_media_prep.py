@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import subprocess
 import urllib.parse as _urlparse
 from pathlib import Path
 
@@ -198,12 +199,63 @@ def _download_file_from_storage(file_path: str, *, db_path: Path) -> Path | None
     return None
 
 
+#: Codecs that mean "still image" when ffprobe reports them as a video stream.
+_IMAGE_CODECS = {"mjpeg", "png", "bmp", "gif", "webp", "tiff", "apng", "jpeg"}
+_PROBE_CACHE: dict[tuple[str, float], str] = {}
+
+
+def probe_media_kind(path: str | Path) -> str | None:
+    """``"video"`` / ``"image"`` / ``None``, from the file's *content*.
+
+    The suffix is not always there. The operator uploaded
+    ``The Anatomy of Connection – Episode 2: The Overlap Myth__sfw`` to the Drive
+    inbox with no extension at all, and the suffix-only classifier called it
+    neither a video nor an image — so prep produced no publishable artifact, the
+    campaign was still marked ``publishing``, and all seven of its queued
+    targets failed with "media artifacts were supplied but none is a supported
+    image/video". Asking ffprobe what the bytes actually are fixes that, and
+    costs one probe per file (cached by path+mtime).
+    """
+    candidate = Path(str(path))
+    try:
+        stat = candidate.stat()
+    except OSError:
+        return None
+    key = (str(candidate), stat.st_mtime)
+    if key in _PROBE_CACHE:
+        return _PROBE_CACHE[key]
+    kind: str | None = None
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(candidate)],
+            capture_output=True, text=True, timeout=60,
+        )
+        codecs = {
+            line.strip().split(",")[0].lower()
+            for line in (result.stdout or "").splitlines()
+            if line.strip()
+        }
+        if codecs:
+            kind = "image" if codecs <= _IMAGE_CODECS else "video"
+    except Exception:  # noqa: BLE001 - an unprobeable file simply stays unknown
+        kind = None
+    _PROBE_CACHE[key] = kind
+    return kind
+
+
 def _is_image_file(path: str | Path) -> bool:
-    return Path(path).suffix.lower() in IMAGE_SUFFIXES
+    if Path(path).suffix.lower() in IMAGE_SUFFIXES:
+        return True
+    return probe_media_kind(path) == "image" 
 
 
 def _is_video_file(path: str | Path) -> bool:
-    return Path(path).suffix.lower() in VIDEO_SUFFIXES
+    if Path(path).suffix.lower() in VIDEO_SUFFIXES:
+        return True
+    # An extensionless (or oddly named) file still needs to be published as
+    # whatever it actually is.
+    return probe_media_kind(path) == "video"
 
 
 def _shrink_for_publish(
