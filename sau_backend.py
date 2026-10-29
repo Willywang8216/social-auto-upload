@@ -3635,7 +3635,7 @@ def _build_generation_prompt(
     user_lines.append(
         "Return JSON with keys: message, title, summary, description, altText, "
         "hashtags, firstComment, contactDetails, cta. Every text field must follow "
-        "the language and humanizer rules above."
+        "the language rules above and the writing rules that follow."
     )
     return system_prompt, "\n".join(user_lines)
 
