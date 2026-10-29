@@ -601,6 +601,51 @@ def claim_next_preparing_campaign(
     return get_campaign(claimed_id, db_path=db_path)
 
 
+def renew_campaign_prep_lease(
+    campaign_id: int, owner: str, *, db_path: Path | None = None
+) -> bool:
+    """Refresh a claimed prep's lease while the work is genuinely running.
+
+    Without this the lease is a stopwatch, not a liveness signal: a prep that
+    takes longer than ``SAU_PREP_LEASE_MINUTES`` looks identical to a dead
+    worker, so the stale sweep reclaims it and the worker that eventually
+    finishes throws its result away ("prep finished but its lease was lost to
+    another worker"). Campaign 3004 did exactly that every 45 minutes for hours
+    on 2026-10-29 — each cycle re-transcoding a multi-part video for nine
+    platforms — and its targets sat overdue the whole time.
+
+    Returns ``False`` when the lease is gone or held by someone else, which is
+    the signal for the caller to stop working.
+    """
+    with _connect(db_path) as conn:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT metadata_json FROM campaigns WHERE id = ?", (campaign_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            metadata = _parse_metadata(row["metadata_json"] or "{}")
+            lease = metadata.get(PREP_LEASE_KEY)
+            if not isinstance(lease, dict) or str(lease.get("owner") or "") != str(owner):
+                return False
+            lease = dict(lease)
+            lease["renewedAt"] = datetime.now(tz=timezone.utc).replace(
+                tzinfo=None
+            ).isoformat(timespec="seconds")
+            metadata[PREP_LEASE_KEY] = lease
+            conn.execute(
+                "UPDATE campaigns SET metadata_json = ? WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=False), campaign_id),
+            )
+            conn.execute("COMMIT")
+            return True
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
 def requeue_stale_preparing(
     *,
     older_than_minutes: int = DEFAULT_PREP_LEASE_MINUTES,
@@ -635,7 +680,9 @@ def requeue_stale_preparing(
                 lease = metadata.get(PREP_LEASE_KEY)
                 if not isinstance(lease, dict):
                     continue
-                claimed_at = str(lease.get("claimedAt") or "")
+                # ``renewedAt`` is the heartbeat a long prep writes; the claim
+                # time alone would call a healthy 60-minute prep dead.
+                claimed_at = str(lease.get("renewedAt") or lease.get("claimedAt") or "")
                 if claimed_at and claimed_at >= cutoff:
                     continue  # still live
                 attempts = int(metadata.get(PREP_ATTEMPTS_KEY) or 0)

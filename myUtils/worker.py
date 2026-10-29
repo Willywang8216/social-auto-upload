@@ -20,10 +20,12 @@ delayed by exponential backoff capped at ``max_backoff_seconds``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -932,11 +934,17 @@ class PublishWorker:
             # ffmpeg is blocking; keep it off the event loop. A runner may also
             # be an async callable, in which case to_thread returns the
             # coroutine and we await it here.
-            result = await asyncio.to_thread(
-                self._prep_runner, campaign, self._db_path
-            )
-            if inspect.isawaitable(result):
-                result = await result
+            with _prep_lease_heartbeat(
+                campaign.id,
+                self._prep_owner,
+                lease_minutes=self._config.prep_lease_minutes,
+                db_path=self._db_path,
+            ):
+                result = await asyncio.to_thread(
+                    self._prep_runner, campaign, self._db_path
+                )
+                if inspect.isawaitable(result):
+                    result = await result
             result = result or {}
             jobs = result.get("jobs") or []
             now = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(
@@ -2184,6 +2192,47 @@ def _language_routing_error(target, account, *, db_path) -> str | None:
         f"{reason} (campaign {row[0]} content language {language!r} via {source or 'unknown'}) "
         "— refusing to publish; re-tag the account or move the content."
     )
+
+
+@contextlib.contextmanager
+def _prep_lease_heartbeat(campaign_id: int, owner: str, *, lease_minutes: int, db_path,
+                          min_interval: float = 60.0):
+    """Keep a long prep's lease fresh so the stale sweep leaves it alone.
+
+    Renews at a third of the lease window, so up to two renewals may fail before
+    the campaign is considered abandoned — a hiccup must not cost an hour of
+    transcoding, but a dead worker must still be recovered promptly.
+    """
+    interval = max(float(min_interval), float(lease_minutes) * 60 / 3)
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(interval):
+            try:
+                still_ours = campaign_store.renew_campaign_prep_lease(
+                    campaign_id, owner, db_path=db_path
+                )
+                if not still_ours:
+                    _logger.warning(
+                        f"campaign {campaign_id} prep lease is no longer ours; "
+                        "the work will be discarded when it finishes"
+                    )
+                    return
+            except Exception:  # noqa: BLE001 - a heartbeat must never break prep
+                _logger.warning(
+                    f"campaign {campaign_id} prep lease renewal failed",
+                    exc_info=True,
+                )
+
+    thread = threading.Thread(
+        target=beat, name=f"prep-heartbeat-{campaign_id}", daemon=True
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=5)
 
 
 def _account_unpublishable(account) -> str | None:
