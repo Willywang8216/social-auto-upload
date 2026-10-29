@@ -162,6 +162,16 @@ def _chunk(values: Sequence[int], size: int = 400) -> Iterator[Sequence[int]]:
         yield values[start:start + size]
 
 
+#: Campaign states in which the media is not ready to be published. A target
+#: belonging to one of these must not be claimed: its artifacts may not exist
+#: yet, so the publish fails with "media artifacts were supplied but none is a
+#: supported image" and burns one of its three attempts. That is what happened
+#: to 11 targets on 2026-10-29 — the auto-publisher creates the campaign and
+#: queues targets immediately, while prep still runs in the background, and the
+#: first scheduled slot was already in the past.
+_NOT_READY_CAMPAIGN_STATES = ("preparing", "needs_review", "draft")
+
+
 def _claimable_clause(now: str) -> tuple[str, list]:
     """SQL fragment + params selecting targets that may be claimed *now*.
 
@@ -169,10 +179,20 @@ def _claimable_clause(now: str) -> tuple[str, list]:
     is empty or already due. ``schedule_at`` is stored as a tz-naive UTC ISO
     string (see ``publish_orchestrator._resolve_base_time``), the same shape
     ``_now_iso`` produces, so a plain string comparison is chronological.
+
+    A target whose campaign is still preparing is **not** claimable: the media
+    it needs may not exist yet. Legacy targets whose ``file_ref`` is a path
+    rather than ``campaign_post:<id>`` match no campaign row and stay claimable.
     """
+    placeholders = ", ".join("?" * len(_NOT_READY_CAMPAIGN_STATES))
     return (
-        "status IN (?, ?) AND (schedule_at IS NULL OR schedule_at = '' OR schedule_at <= ?)",
-        [TARGET_PENDING, TARGET_RETRYING, now],
+        "status IN (?, ?) AND (schedule_at IS NULL OR schedule_at = '' OR schedule_at <= ?) "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM campaign_posts cp JOIN campaigns c ON c.id = cp.campaign_id"
+        "  WHERE ('campaign_post:' || cp.id) = publish_job_targets.file_ref"
+        f"    AND c.status IN ({placeholders})"
+        ")",
+        [TARGET_PENDING, TARGET_RETRYING, now, *_NOT_READY_CAMPAIGN_STATES],
     )
 
 

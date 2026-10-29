@@ -770,7 +770,53 @@ def transcribe_audio(
     return TranscriptionResult(text=str(payload.get("text", "")).strip(), payload=payload)
 
 
+def _transcribe_with_fallback(audio_path, *, model, api_base_url, api_key, session,
+                              timeout_seconds, title) -> TranscriptionResult:
+    """Try the configured STT endpoint, then ``SAU_STT_FALLBACK_*``.
+
+    The hosted gateway died for days and every upload silently got a
+    content-free brief (and no content language) in the meantime. The local
+    sidecar is the primary now, and this keeps the hosted one as a backup rather
+    than a single point of failure in either direction.
+    """
+    try:
+        return _transcribe_via_chat_once(
+            audio_path, model=model, api_base_url=api_base_url, api_key=api_key,
+            session=session, timeout_seconds=timeout_seconds, title=title,
+        )
+    except Exception as primary_error:  # noqa: BLE001
+        fallback_base = (os.environ.get("SAU_STT_FALLBACK_BASE_URL") or "").strip()
+        if not fallback_base or api_base_url:
+            raise
+        logger.warning("STT primary failed (%s); trying %s", primary_error, fallback_base)
+        return _transcribe_via_chat_once(
+            audio_path,
+            model=os.environ.get("SAU_STT_FALLBACK_MODEL") or None,
+            api_base_url=fallback_base,
+            api_key=os.environ.get("SAU_STT_FALLBACK_API_KEY") or None,
+            session=session,
+            timeout_seconds=timeout_seconds,
+            title=title,
+        )
+
+
 def transcribe_audio_via_chat(
+    audio_path: str | Path,
+    *,
+    model: str | None = None,
+    api_base_url: str | None = None,
+    api_key: str | None = None,
+    session=None,
+    timeout_seconds: int = 600,
+    title: str | None = None,
+) -> TranscriptionResult:
+    return _transcribe_with_fallback(
+        audio_path, model=model, api_base_url=api_base_url, api_key=api_key,
+        session=session, timeout_seconds=timeout_seconds, title=title,
+    )
+
+
+def _transcribe_via_chat_once(
     audio_path: str | Path,
     *,
     model: str | None = None,

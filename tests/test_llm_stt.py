@@ -179,9 +179,14 @@ class ChatAudioSttTests(unittest.TestCase):
         self.assertEqual(session.calls[0]["json"]["model"], "mimo-v2.6-flash")
 
     def test_missing_api_key_raises(self) -> None:
+        # The fallback vars are cleared too: this is the "nothing configured at
+        # all" case, and a deployment in that state must still say so rather
+        # than quietly posting to whichever gateway happens to be in .env.
         session = _FakeSession({"choices": [{"message": {"content": "hi"}}]})
         with tempfile.TemporaryDirectory() as tmp, _env(
-            SAU_STT_BASE_URL="", SAU_STT_MODEL="", SAU_STT_API_KEY=""
+            SAU_STT_BASE_URL="", SAU_STT_MODEL="", SAU_STT_API_KEY="",
+            SAU_STT_FALLBACK_BASE_URL="", SAU_STT_FALLBACK_MODEL="",
+            SAU_STT_FALLBACK_API_KEY="",
         ):
             audio = _write_wav(tmp)
             with self.assertRaises(ValueError):

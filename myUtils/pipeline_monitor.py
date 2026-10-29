@@ -185,7 +185,11 @@ def _check_stt(*, timeout: float = 60.0) -> list[str]:
     import struct
     import urllib.request
 
-    base = (os.environ.get("SAU_STT_BASE_URL") or "").strip()
+    # The app container reaches the STT sidecar by service name; the monitor runs
+    # on the host (cron), where that name does not resolve — it needs the
+    # loopback port the sidecar also publishes. SAU_STT_HOST_BASE_URL says so
+    # explicitly rather than guessing.
+    base = (os.environ.get("SAU_STT_HOST_BASE_URL") or os.environ.get("SAU_STT_BASE_URL") or "").strip()
     key = (os.environ.get("SAU_STT_API_KEY") or "").strip()
     model = (os.environ.get("SAU_STT_MODEL") or "mimo-v2.6-flash").strip()
     if not base or not key:
