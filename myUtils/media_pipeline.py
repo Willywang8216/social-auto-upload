@@ -92,10 +92,31 @@ def run_subprocess(command: Sequence[str], **kwargs) -> subprocess.CompletedProc
     from myUtils import media_prep
 
     exe = PurePath(str(command[0])).name if command else ""
+
+    def _run() -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(command, check=True, **kwargs)
+        except subprocess.CalledProcessError as exc:
+            # ``capture_output=True`` means ffmpeg's own diagnosis never reaches
+            # the log — the traceback showed only the argv (truncated) and a bare
+            # "returned non-zero exit status 234" for campaign 3005 on
+            # 2026-10-29. Re-raise with the tail of stderr attached so the next
+            # failure is readable.
+            stderr = exc.stderr if isinstance(exc.stderr, str) else (
+                exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else ""
+            )
+            tail = "\n".join(stderr.strip().splitlines()[-12:])
+            raise subprocess.CalledProcessError(
+                exc.returncode,
+                exc.cmd,
+                output=exc.output,
+                stderr=f"{stderr}\n--- ffmpeg stderr (tail) ---\n{tail}" if tail else stderr,
+            ) from None
+
     if exe.startswith("ffmpeg"):
         with media_prep.encode_slot():
-            return subprocess.run(command, check=True, **kwargs)
-    return subprocess.run(command, check=True, **kwargs)
+            return _run()
+    return _run()
 
 
 def build_campaign_workspace(
@@ -124,6 +145,15 @@ def prepare_campaign_artifact_path(
     ext = suffix if suffix is not None else source.suffix
     if ext and not ext.startswith("."):
         ext = f".{ext}"
+    if not ext:
+        # An upload with no extension (the operator put
+        # "...Episode 2: The Overlap Myth__sfw" on the Drive inbox) produced an
+        # extensionless *output* path, and ffmpeg then refused to run at all:
+        #   Unable to choose an output format for '...-watermarked_video';
+        #   use a standard extension for the filename or specify the format manually.
+        # That is exit 234, which is how campaign 3005's prep died on 2026-10-29.
+        # Give the artifact the extension its own kind implies.
+        ext = ".jpg" if "image" in str(artifact_kind) else ".mp4"
     return artifact_dir / f"{source.stem}-{artifact_kind}{ext}"
 
 
