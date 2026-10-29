@@ -642,8 +642,49 @@ def apply_video_watermark(
             str(output),
         ]
 
-    runner(command, capture_output=True, text=True)
+    runner(*_run_with_filter_script(command), capture_output=True, text=True)
     return VideoWatermarkPlan(output_path=output, timeline=timeline, command=command)
+
+
+#: Linux caps a single argv element (and the whole argv) at MAX_ARG_STRLEN
+#: (128 KiB) / ARG_MAX. A watermark timeline emits one ``drawtext=`` per window,
+#: so a 93-minute video produced a filter graph longer than that and ffmpeg died
+#: with ``OSError: [Errno 7] Argument list too long`` — campaign 3007's prep
+#: failed that way on 2026-10-29 and the campaign went to needs_review.
+#:
+#: ffmpeg has a first-class answer: keep the graph in a file. Both ``-vf`` and
+#: ``-filter_complex`` have a ``*_script`` form that reads the same syntax from a
+#: path, which removes the size limit entirely.
+_FILTER_SCRIPT_THRESHOLD = 32_000
+
+
+def _run_with_filter_script(command: list[str]) -> tuple[list[str], str | None]:
+    """``(argv, script_path)`` — moves a long filter graph out of argv.
+
+    Returns the command unchanged (and ``None``) when the graph is small, so the
+    common case keeps exactly the argv the tests and logs already expect.
+    """
+    for index, token in enumerate(command):
+        if token in {"-vf", "-filter:v", "-filter_complex"}:
+            break
+    else:
+        return command, None
+    if index + 1 >= len(command):
+        return command, None
+    graph = command[index + 1]
+    if len(graph) <= _FILTER_SCRIPT_THRESHOLD:
+        return command, None
+
+    import tempfile
+
+    handle = tempfile.NamedTemporaryFile(
+        "w", suffix=".ffgraph", prefix="sau-filter-", delete=False, encoding="utf-8"
+    )
+    with handle:
+        handle.write(graph)
+    script_flag = "-filter_complex_script" if token == "-filter_complex" else "-filter_script:v"
+    rewritten = [*command[:index], script_flag, handle.name, *command[index + 2:]]
+    return rewritten, handle.name
 
 
 def apply_image_watermark(
