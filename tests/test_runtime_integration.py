@@ -248,7 +248,12 @@ def test_real_orphaned_child_is_killed(tmp_path, monkeypatch):
     pid = int(pidfile.read_text())
     for _ in range(30):
         stat = Path(f"/proc/{pid}/stat")
-        if not stat.exists() or stat.read_text().split()[2] == "Z":
+        try:
+            state = stat.read_text().split()[2]
+        except FileNotFoundError:
+            # Reaping can remove /proc between any separate exists/read calls.
+            break
+        if state == "Z":
             break
         time.sleep(0.05)
     else:
