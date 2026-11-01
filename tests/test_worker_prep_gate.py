@@ -19,23 +19,9 @@ from myUtils import jobs
 
 
 def _db(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        """
-        CREATE TABLE campaigns (id INTEGER PRIMARY KEY, status TEXT);
-        CREATE TABLE campaign_posts (id INTEGER PRIMARY KEY, campaign_id INTEGER);
-        CREATE TABLE publish_jobs (id INTEGER PRIMARY KEY, status TEXT, started_at TEXT,
-                                   total_targets INTEGER, completed_targets INTEGER,
-                                   failed_targets INTEGER, idempotency_key TEXT,
-                                   profile_id INTEGER, platform TEXT, payload_json TEXT,
-                                   created_at TEXT, finished_at TEXT);
-        CREATE TABLE publish_job_targets (id INTEGER PRIMARY KEY, job_id INTEGER,
-                                          account_ref TEXT, file_ref TEXT, status TEXT,
-                                          schedule_at TEXT, attempts INTEGER DEFAULT 0,
-                                          started_at TEXT, finished_at TEXT, last_error TEXT);
-        """
-    )
-    return conn
+    from db.createTable import bootstrap
+    bootstrap(path)
+    return sqlite3.connect(path)
 
 
 class PrepGateTests(unittest.TestCase):
@@ -44,19 +30,22 @@ class PrepGateTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.db = Path(self.tmp.name) / "db.sqlite"
         conn = _db(self.db)
-        conn.execute("INSERT INTO publish_jobs VALUES (1,'pending',NULL,1,0,0,'k',1,'facebook','{}','2026-10-01',NULL)")
+        conn.execute("INSERT INTO profiles (id,name,slug) VALUES (1,'fixture','fixture')")
+        conn.execute("INSERT INTO media_groups (id,name) VALUES (1,'fixture')")
+        conn.execute("INSERT INTO publish_jobs (id,status,total_targets,idempotency_key,profile_id,platform,payload_json,created_at) "
+                     "VALUES (1,'pending',4,'k',1,'facebook','{}','2020-01-01')")
         for campaign_id, status in ((10, "preparing"), (11, "publishing"), (12, "needs_review")):
-            conn.execute("INSERT INTO campaigns VALUES (?,?)", (campaign_id, status))
-            conn.execute("INSERT INTO campaign_posts VALUES (?,?)", (campaign_id, campaign_id))
+            conn.execute("INSERT INTO campaigns (id,profile_id,media_group_id,status) VALUES (?,1,1,?)", (campaign_id, status))
+            conn.execute("INSERT INTO campaign_posts (id,campaign_id,platform) VALUES (?,?,'facebook')", (campaign_id, campaign_id))
             conn.execute(
                 "INSERT INTO publish_job_targets (id, job_id, account_ref, file_ref, status, schedule_at)"
-                " VALUES (?,1,'account:1',?,'pending','2020-01-01T00:00:00')",
-                (campaign_id, f"campaign_post:{campaign_id}"),
+                " VALUES (?,1,?,?,'pending','2020-01-01T00:00:00')",
+                (campaign_id, f"cookie-{campaign_id}.json", f"campaign_post:{campaign_id}"),
             )
         # a legacy target: file_ref is a path, not a campaign post
         conn.execute(
             "INSERT INTO publish_job_targets (id, job_id, account_ref, file_ref, status, schedule_at)"
-            " VALUES (99,1,'account:1','videoFile/old.mp4','pending','2020-01-01T00:00:00')"
+            " VALUES (99,1,'cookie-99.json','videoFile/old.mp4','pending','2020-01-01T00:00:00')"
         )
         conn.commit()
         conn.close()

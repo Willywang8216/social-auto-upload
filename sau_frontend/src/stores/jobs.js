@@ -1,41 +1,30 @@
 import { defineStore } from 'pinia'
-import { computed, reactive, ref } from 'vue'
+import { computed, onScopeDispose, reactive, ref } from 'vue'
 
 import { jobsApi } from '@/api/jobs'
 
-// Job lifecycle states. Kept as a plain object rather than an enum so
-// templates can reference JOB_STATUS.SUCCEEDED directly.
-export const JOB_STATUS = Object.freeze({
-  PENDING: 'pending',
-  RUNNING: 'running',
-  SUCCEEDED: 'succeeded',
-  FAILED: 'failed',
-  CANCELLED: 'cancelled'
-})
+import { createPoller, invalidResponse } from '@/utils/polling'
+import { JOB_STATUS, TARGET_STATUS, canRetryTarget, isTerminalJobStatus, needsPublishAction, normalizeTarget } from '@/utils/publish-status'
 
-export const TARGET_STATUS = Object.freeze({
-  PENDING: 'pending',
-  RUNNING: 'running',
-  RETRYING: 'retrying',
-  SUCCEEDED: 'succeeded',
-  FAILED: 'failed',
-  CANCELLED: 'cancelled'
-})
+export { JOB_STATUS, TARGET_STATUS }
 
-const JOB_TERMINAL = new Set([
-  JOB_STATUS.SUCCEEDED,
-  JOB_STATUS.FAILED,
-  JOB_STATUS.CANCELLED
-])
-
-const DEFAULT_POLL_INTERVAL = 1500
+function jobSnapshot(response, jobId) {
+  const job = response?.data
+  if (!job || job.id == null || (jobId != null && String(job.id) !== String(jobId)) || typeof job.status !== 'string') {
+    throw invalidResponse()
+  }
+  if (job.targets != null && (!Array.isArray(job.targets)
+    || !job.targets.every((target) => target && typeof target.status === 'string'))) throw invalidResponse()
+  return job
+}
 
 export const useJobsStore = defineStore('jobs', () => {
   // jobsById holds the most recent server snapshot of each job we know
   // about. Targets are kept on the same object when /jobs/<id> is fetched.
   const jobsById = reactive({})
-  // Per-job polling timers so we don't double-poll the same job.
-  const pollers = reactive({})
+  // Runtime handles stay private; only serializable status is exposed to the UI.
+  const pollers = new Map()
+  const pollingByJobId = reactive({})
   const recentJobIds = ref([])
 
   const jobs = computed(() =>
@@ -53,7 +42,7 @@ export const useJobsStore = defineStore('jobs', () => {
     const merged = {
       ...previous,
       ...job,
-      targets: job.targets ?? previous.targets ?? []
+      targets: (job.targets ?? previous.targets ?? []).map(normalizeTarget)
     }
     jobsById[job.id] = merged
     if (!recentJobIds.value.includes(job.id)) {
@@ -64,7 +53,8 @@ export const useJobsStore = defineStore('jobs', () => {
 
   async function refreshList({ status, platform, limit = 50, offset = 0 } = {}) {
     const response = await jobsApi.list({ status, platform, limit, offset })
-    const data = response?.data || []
+    const data = response?.data
+    if (!Array.isArray(data)) throw invalidResponse()
     const previousIds = [...recentJobIds.value]
     data.forEach((job) => _store(job))
     if (offset === 0) {
@@ -75,15 +65,15 @@ export const useJobsStore = defineStore('jobs', () => {
     return { items: data, hasMore: data.length === limit }
   }
 
-  async function fetchJob(jobId) {
-    const response = await jobsApi.get(jobId)
-    return _store(response?.data)
+  async function fetchJob(jobId, config = {}) {
+    const response = await jobsApi.get(jobId, config)
+    return _store(jobSnapshot(response, jobId))
   }
 
   async function createJob(payload) {
     const response = await jobsApi.create(payload)
-    const job = _store(response?.data)
-    if (job && !JOB_TERMINAL.has(job.status)) {
+    const job = _store(jobSnapshot(response))
+    if (job && !isTerminalJobStatus(job.status)) {
       startPolling(job.id)
     }
     return job
@@ -91,7 +81,9 @@ export const useJobsStore = defineStore('jobs', () => {
 
   async function cancelJob(jobId) {
     const response = await jobsApi.cancel(jobId)
-    return _store(response?.data)
+    const job = _store(jobSnapshot(response, jobId))
+    if (isTerminalJobStatus(job.status)) stopPolling(jobId)
+    return job
   }
 
   async function refreshEntities(params = {}, config = {}) {
@@ -135,6 +127,12 @@ export const useJobsStore = defineStore('jobs', () => {
   }
 
   async function resubmitTarget(targetId, parentJobId) {
+    // Re-read before retrying: a stale failed row may now require reconciliation.
+    const job = parentJobId != null ? await fetchJob(parentJobId) : null
+    const target = job?.targets?.find((item) => String(item.id) === String(targetId))
+    if (!canRetryTarget(target)) {
+      throw new Error('無法安全重試；請先更新任務並至平台確認交付結果。')
+    }
     const response = await jobsApi.resubmitTarget(targetId)
     if (parentJobId != null) {
       await fetchJob(parentJobId)
@@ -142,47 +140,42 @@ export const useJobsStore = defineStore('jobs', () => {
     return response?.data
   }
 
-  // Drives a single job to completion via repeated /jobs/<id> calls.
-  // The poller stops itself once the job reaches a terminal status, or
-  // when the caller explicitly cancels via stopPolling.
-  function startPolling(jobId, { interval = DEFAULT_POLL_INTERVAL } = {}) {
-    if (pollers[jobId]) return // already polling
-
-    const tick = async () => {
-      try {
-        const job = await fetchJob(jobId)
-        if (job && JOB_TERMINAL.has(job.status)) {
-          stopPolling(jobId)
+  function startPolling(jobId, options = {}) {
+    const key = String(jobId)
+    if (!pollers.has(key)) {
+      pollers.set(key, createPoller(
+        (signal) => jobsApi.get(jobId, { signal, silentError: true }),
+        {
+          ...options,
+          onState: (state) => { pollingByJobId[key] = state },
+          onResult: (response) => {
+            const job = _store(jobSnapshot(response, jobId))
+            if (isTerminalJobStatus(job.status)) return 'completed'
+            // These are action states, not success/failure and not blind retries.
+            if (needsPublishAction(job.status)) return 'paused'
+          },
         }
-      } catch (error) {
-        // Stop polling on persistent errors so we don't spam the backend.
-        // The user can re-trigger via the UI.
-        console.error(`Failed to poll job ${jobId}:`, error)
-        stopPolling(jobId)
-      }
+      ))
     }
-
-    // Fire once immediately so the UI shows fresh state without a delay.
-    tick()
-    pollers[jobId] = window.setInterval(tick, interval)
+    pollers.get(key).start()
   }
 
   function stopPolling(jobId) {
-    if (pollers[jobId]) {
-      window.clearInterval(pollers[jobId])
-      delete pollers[jobId]
-    }
+    pollers.get(String(jobId))?.stop()
   }
 
   function stopAllPolling() {
-    Object.keys(pollers).forEach((jobId) => stopPolling(jobId))
+    pollers.forEach((poller) => poller.stop())
   }
+
+  onScopeDispose(stopAllPolling)
 
   return {
     JOB_STATUS,
     TARGET_STATUS,
     jobs,
     jobsById,
+    pollingByJobId,
     createJob,
     cancelJob,
     fetchJob,

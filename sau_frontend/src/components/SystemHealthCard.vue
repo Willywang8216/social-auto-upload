@@ -24,6 +24,9 @@
         >
           失敗 {{ publishCounts.failed }}
         </el-tag>
+        <el-tag v-for="status in ['blocked', 'awaiting_delivery', 'needs_review'].filter(s => Number(publishCounts[s]) > 0)" :key="status" :type="publishStatusType(status)" effect="plain" size="small">
+          {{ publishStatusLabel(status) }} {{ publishCounts[status] }}
+        </el-tag>
       </div>
       <div class="spacer" />
       <span class="sh-time">{{ offload.lastRun || '—' }}</span>
@@ -37,12 +40,21 @@
       <span class="dot">·</span>
       <span>每日摘要：{{ digest.lastSent || '—' }}</span>
     </div>
+    <div v-if="publishHealth" class="sh-detail">
+      <span>發佈成功率：{{ successRate }}</span>
+      <span>停滯任務：{{ publishHealth.staleTargets?.length ?? 0 }}</span>
+      <span>需重新連線帳號：{{ publishHealth.accountsNeedingReconnect?.length ?? 0 }}</span>
+      <span>近期錯誤群組：{{ publishHealth.recentFailures?.length ?? 0 }}</span>
+      <span>{{ publishHealth.timestamp || '' }}</span>
+    </div>
+    <div v-else-if="publishHealthUnavailable" class="sh-detail" role="status">發佈健康摘要暫不可用；不影響既有功能。</div>
   </el-card>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { http } from '@/utils/request'
+import { publishStatusLabel, publishStatusType } from '@/utils/publish-status'
 
 const loading = ref(false)
 const offload = ref({})
@@ -50,7 +62,14 @@ const inbox = ref({})
 const digest = ref({})
 const publish = ref({})
 
-const publishCounts = computed(() => publish.value.targetsByStatus || {})
+const publishHealth = ref(null)
+const publishHealthUnavailable = ref(false)
+let controller = null
+const publishCounts = computed(() => publishHealth.value?.totals || publish.value.targetsByStatus || {})
+const successRate = computed(() => {
+  const rate = publishHealth.value?.totals?.overallSuccessRate
+  return typeof rate === 'number' && Number.isFinite(rate) ? `${Math.round(rate * 100)}%` : '—'
+})
 
 const offloadLabel = computed(() => {
   if (offload.value.healthy === true) return '正常'
@@ -65,22 +84,31 @@ const offloadTagType = computed(() => {
 })
 
 async function load() {
+  if (loading.value) return
   loading.value = true
-  try {
-    const res = await http.get('/api/system/health')
-    const data = res?.data || {}
+  controller = new AbortController()
+  const signal = controller.signal
+  const config = { silentError: true, signal, timeout: 10000 }
+  const [systemResult, publishResult] = await Promise.allSettled([
+    http.get('/api/system/health', undefined, config),
+    http.get('/api/publish/health', undefined, config),
+  ])
+  if (signal.aborted) return
+  if (systemResult.status === 'fulfilled') {
+    const data = systemResult.value?.data || {}
     offload.value = data.offload || {}
     inbox.value = data.inbox || {}
     digest.value = data.digest || {}
     publish.value = data.publish || {}
-  } catch {
-    // health panel is informational — never block the inbox view
-  } finally {
-    loading.value = false
   }
+  const snapshot = publishResult.status === 'fulfilled' ? publishResult.value?.data : null
+  publishHealth.value = snapshot?.totals && typeof snapshot.totals === 'object' && !Array.isArray(snapshot.totals) ? snapshot : null
+  publishHealthUnavailable.value = !publishHealth.value
+  loading.value = false
 }
 
 onMounted(load)
+onBeforeUnmount(() => controller?.abort())
 </script>
 
 <style scoped>

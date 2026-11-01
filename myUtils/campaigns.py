@@ -70,7 +70,10 @@ class Campaign:
     last_error: str | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        result = asdict(self)
+        if isinstance(result.get("metadata"), dict):
+            result["metadata"].pop(PREP_LEASE_KEY, None)
+        return result
 
 
 @dataclass(slots=True)
@@ -105,7 +108,7 @@ class CampaignPost:
     updated_at: str | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        return {**asdict(self), "jobId": self.last_published_job_id}
 
 
 def _resolve_db_path(db_path: Path | None) -> Path:
@@ -808,6 +811,9 @@ def finish_campaign_prep(
             "WHERE id = ? AND status = ? AND metadata_json = ?",
             params,
         )
+        if cursor.rowcount == 1:
+            from myUtils.campaign_delivery import sync_campaign_delivery
+            sync_campaign_delivery(conn, campaign_id)
         conn.commit()
         return cursor.rowcount == 1
 
@@ -838,6 +844,8 @@ def add_campaign_artifact(
     metadata: dict | None = None,
     db_path: Path | None = None,
 ) -> CampaignArtifact:
+    from myUtils.media_integrity import artifact_metadata
+    metadata = artifact_metadata(local_path, metadata)
     with _connect(db_path) as conn:
         # Every artifact that has bytes on local disk must also have a
         # file_records row. The offload cron moves published media to Drive and

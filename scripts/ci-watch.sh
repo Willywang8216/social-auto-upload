@@ -1,364 +1,130 @@
 #!/usr/bin/env bash
-# Local CI watcher — build + deploy origin/main whenever it moves.
-#
-# Why this exists
-# ---------------
-# This repository is a FORK (of dreammis/social-auto-upload). GitHub disabled
-# Actions on this specific fork after 495 runs — its own Actions page says:
-#
-#   "Workflows aren't being run on this fork because of its GitHub Actions
-#    usage. A repository maintainer can re-enable them."
-#
-# Every push after commit d1319216 produces zero runs, dispatch returns
-# HTTP 422 "Actions has been disabled for this repository", and the documented
-# REST re-enable (PUT /actions/permissions enabled=true) returns 204 but does
-# not clear it. It is repository-specific: sibling repos on the same account and
-# other forks of the same parent still run Actions. See
-# reports/ci-actions-reenable.md.
-#
-# Until a maintainer re-enables Actions in the GitHub UI, this cron job is the
-# GitHub-independent replacement: it notices when origin/main changes, builds the
-# app image from a clean checkout of that exact commit, and deploys it using the
-# same procedure as scripts/deploy-local.sh.
-#
-# Safety properties
-# -----------------
-#   * Single-flight: flock(1) on logs/ci-watch.lock; an overlapping run exits
-#     immediately, so two cron ticks can never race.
-#   * Idempotent: if the image for the target commit already exists and the
-#     running container already uses it, the watcher does nothing. If the image
-#     exists but the container is not running it, it skips the (slow) build and
-#     only redeploys.
-#   * Dirty-worktree tolerant: it builds from a throwaway `git worktree` checked
-#     out at origin/main, so uncommitted local changes are never shipped and
-#     never block it.
-#   * Read-only with respect to history: it only fetches and reads origin/main;
-#     it never commits, checks out, resets, or rewrites anything.
-#   * Verified: it checks the built image runs, waits for /healthz == 200, and
-#     only then records the commit as deployed.
-#   * Alerts Telegram on failure (best effort; creds read from .env).
-#
-# Usage:
-#   scripts/ci-watch.sh                     # normal cron entry point
-#   CI_WATCH_FORCE=1 scripts/ci-watch.sh    # ignore the deployed-state marker
-#   CI_WATCH_DRY_RUN=1 scripts/ci-watch.sh  # report what would happen; change nothing
-#   CI_WATCH_TEST_ALERT=1 scripts/ci-watch.sh # send one test alert, then exit
-#
+# Sole production deployer: keep the existing */2 cron and flock path.
+# Build/test exact origin/main, then call THAT candidate's guarded deploy helper.
+# GitHub Actions only tests/publishes images; Watchtower stays disabled.
 set -euo pipefail
-
+umask 077
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
-
 LOG_DIR="$REPO_ROOT/logs"
 mkdir -p "$LOG_DIR"
 LOG="${CI_WATCH_LOG:-$LOG_DIR/ci-watch.log}"
 LOCK="$LOG_DIR/ci-watch.lock"
 STATE="$LOG_DIR/ci-watch.state"
-
+PYTHON="${SAU_RELEASE_PYTHON:-python3}"
 IMAGE_BASE="ghcr.io/willywang8216/social-auto-upload"
-SERVICE="social-auto-upload"
-HEALTH_URL="http://localhost:5409/healthz"
-
+SERVICE=social-auto-upload
+WORKER=social-auto-upload-worker
 log() { printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$LOG"; }
 
-# Send a Telegram failure alert if creds are present in .env. Never secrets are
-# echoed; best effort by design — alerting must not mask the real failure.
+# Existing best-effort Telegram behavior. No token/chat/config value is logged.
 notify_failure() {
-  local subject="$1" body="$2"
-  local token chat
-  token="$(sed -n 's/^SAU_ALERT_TELEGRAM_BOT_TOKEN=//p' "$REPO_ROOT/.env" 2>/dev/null | tail -1 | tr -d '"'\''')"
-  chat="$(sed -n 's/^SAU_ALERT_TELEGRAM_CHAT_ID=//p' "$REPO_ROOT/.env" 2>/dev/null | tail -1 | tr -d '"'\''')"
+  local subject="$1" body="$2" token chat
+  token="$(sed -n 's/^SAU_ALERT_TELEGRAM_BOT_TOKEN=//p' "$REPO_ROOT/.env" 2>/dev/null | tail -1 | tr -d '\"'\''')"
+  chat="$(sed -n 's/^SAU_ALERT_TELEGRAM_CHAT_ID=//p' "$REPO_ROOT/.env" 2>/dev/null | tail -1 | tr -d '\"'\''')"
   chat="${chat%%,*}"
   if [[ -z "$token" || -z "$chat" ]]; then
-    log "  (no Telegram creds in .env; failure recorded in this log only)"
+    log '  (no Telegram creds; failure recorded in this log only)'
     return 0
   fi
   if curl -fsS -m 20 -X POST "https://api.telegram.org/bot${token}/sendMessage" \
-       --data-urlencode "chat_id=${chat}" \
-       --data-urlencode "text=${subject}
+       --data-urlencode "chat_id=${chat}" --data-urlencode "text=${subject}
 
 ${body}" >/dev/null 2>&1; then
-    log "  failure alert delivered"
+    log '  failure alert delivered'
   else
-    log "  failure alert delivery failed"
+    log '  failure alert delivery failed'
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Single-flight
-# ---------------------------------------------------------------------------
 exec 9>"$LOCK"
-if ! flock -n 9; then
-  log "another ci-watch run holds the lock; exiting"
+if ! flock -n 9; then log 'another watcher/deploy/restore holds the lock; exiting'; exit 0; fi
+export SAU_RELEASE_LOCK_FD=9
+if [[ "${CI_WATCH_TEST_ALERT:-0}" == 1 ]]; then
+  notify_failure 'SAU ci-watch: test alert (no action needed)' 'One-off channel verification; no deployment.'
   exit 0
 fi
-
-# Optional one-shot self-test of the alert channel (not used by cron).
-if [[ "${CI_WATCH_TEST_ALERT:-0}" == "1" ]]; then
-  log "sending a test alert (no action needed)"
-  notify_failure "SAU ci-watch: test alert (no action needed)" \
-    "One-off verification that ci-watch can reach the alert channel. Nothing is wrong."
-  exit 0
+# Dirty files and unpublished local history are blockers, not permission to
+# silently ship origin/main over an operator's unknown local configuration/code.
+if ! LOCAL_HEAD="$("$PYTHON" scripts/release_checks.py clean)"; then
+  log 'local work is dirty/unknown; preserving it and deferring deployment'
+  exit 1
 fi
-
-# ---------------------------------------------------------------------------
-# Resolve origin/main
-# ---------------------------------------------------------------------------
-if ! GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new}" \
-       git fetch --quiet origin main 2>>"$LOG"; then
-  # Transient network failure: log but do not alert every two minutes.
-  log "git fetch failed; will retry on the next tick"
-  exit 0
+if [[ "${CI_WATCH_DRY_RUN:-0}" != 1 ]]; then
+  if ! GIT_TERMINAL_PROMPT=0 git fetch --quiet origin main 2>>"$LOG"; then
+    log 'git fetch failed; retrying next tick'
+    exit 0
+  fi
 fi
-
 TARGET="$(git rev-parse origin/main)"
-SHORT="${TARGET:0:7}"
-IMAGE_SHA="${IMAGE_BASE}:commit-${SHORT}"
-LAST=""
-[[ -f "$STATE" ]] && LAST="$(cat "$STATE")"
-
-log "origin/main=${SHORT} last_deployed=${LAST:0:7}"
-
-DRY_RUN="${CI_WATCH_DRY_RUN:-0}"
-FORCE="${CI_WATCH_FORCE:-0}"
-
-if [[ "$LAST" == "$TARGET" && "$FORCE" != "1" ]]; then
-  # State says done — but confirm the running container really is this commit, so
-  # a manual revert or a failed earlier deploy is corrected automatically.
-  #
-  # Compare the OCI revision first, NOT the image ID: the same commit has two
-  # legitimate images on this box — the GHCR build that Watchtower pulls and the
-  # one built here — and their IDs differ by construction. Comparing IDs made
-  # this script re-deploy every two minutes forever (119 occurrences), and each
-  # forced restart killed the in-flight campaign preps (7 campaigns stranded in
-  # needs_review on 2026-10-22). The ID comparison stays as the fallback for an
-  # image with no revision label.
-  running_rev="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$SERVICE" 2>/dev/null || true)"
-  if [[ -n "$running_rev" && "$running_rev" == "$TARGET" ]]; then
-    log "already deployed and running (revision ${SHORT}); nothing to do"
-    exit 0
-  fi
-  running_id="$(docker inspect -f '{{.Image}}' "$SERVICE" 2>/dev/null || true)"
-  target_id="$(docker image inspect -f '{{.Id}}' "$IMAGE_SHA" 2>/dev/null || true)"
-  if [[ -n "$running_id" && "$running_id" == "$target_id" ]]; then
-    log "already deployed and running (image id); nothing to do"
-    exit 0
-  fi
-  log "state says deployed but the running container differs (revision=${running_rev:-none}); re-deploying"
+SHORT="${TARGET:0:12}"
+[[ "$TARGET" =~ ^[0-9a-f]{40}$ ]] || exit 1
+if ! git merge-base --is-ancestor "$LOCAL_HEAD" "$TARGET"; then
+  log 'local HEAD has unpublished/divergent history; refusing to overwrite it'
+  exit 1
 fi
-
-if [[ "$DRY_RUN" == "1" ]]; then
-  if docker image inspect "$IMAGE_SHA" >/dev/null 2>&1; then
-    log "DRY RUN: image ${IMAGE_SHA} exists; would skip build and (re)deploy"
-  else
-    log "DRY RUN: would build ${IMAGE_SHA} and deploy"
-  fi
+LAST=""
+[[ ! -f "$STATE" ]] || LAST="$(cat "$STATE")"
+log "origin/main=${SHORT} last_deployed=${LAST:0:12}"
+if [[ "${CI_WATCH_DRY_RUN:-0}" == 1 ]]; then
+  log 'DRY RUN: would require clean exact-commit gates/image receipt, pause/drain, snapshot, migrate and verify both roles'
   exit 0
 fi
-
-# ---------------------------------------------------------------------------
-# Build (only when the image for this commit does not already exist)
-# ---------------------------------------------------------------------------
+if [[ -e "$REPO_ROOT/db/publish.pause" || -e "$LOG_DIR/release-staged.json" ]]; then
+  log 'claims paused/staged: operator verification or recovery required; watcher will not release the pause'
+  exit 0
+fi
+already_healthy() {
+  local web_image worker_image
+  web_image="$(docker inspect -f '{{.Image}}' "$SERVICE")" || return 1
+  worker_image="$(docker inspect -f '{{.Image}}' "$WORKER")" || return 1
+  [[ "$web_image" == "$worker_image" ]] || return 1
+  "$PYTHON" scripts/release_checks.py verify --revision "$TARGET" \
+    --receipts "$LOG_DIR/releases/gates/$TARGET" --image-id "$web_image" || return 1
+  for name in "$SERVICE" "$WORKER"; do
+    [[ "$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name")" == "$TARGET" ]] || return 1
+    [[ "$(docker inspect -f '{{.State.Health.Status}}' "$name")" == healthy ]] || return 1
+  done
+  docker exec "$SERVICE" python scripts/release_probe.py web --revision "$TARGET" || return 1
+  docker exec "$WORKER" python scripts/release_probe.py worker --revision "$TARGET"
+}
+if [[ "$LAST" == "$TARGET" && "${CI_WATCH_FORCE:-0}" != 1 ]] && already_healthy >>"$LOG" 2>&1; then
+  log 'recorded revision and both healthy running roles agree; nothing to do'
+  exit 0
+fi
 BUILD_LOG="$LOG_DIR/ci-watch-build-${SHORT}.log"
-WORKTREE=""
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/sau-ci-watch.XXXXXX")"
+WORKTREE="$SCRATCH/source"
 cleanup() {
-  if [[ -n "$WORKTREE" && -d "$WORKTREE" ]]; then
-    git worktree remove --force "$WORKTREE" >/dev/null 2>&1 || rm -rf "$WORKTREE"
-  fi
+  git -C "$REPO_ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
+  rm -rf "$SCRATCH"  # this invocation's own disposable checkout only
 }
 trap cleanup EXIT
-
-if docker image inspect "$IMAGE_SHA" >/dev/null 2>&1 && [[ "$FORCE" != "1" ]]; then
-  log "image ${IMAGE_SHA} already exists; skipping build"
-else
-  git worktree prune >/dev/null 2>&1 || true
-  WORKTREE="$(mktemp -d "${TMPDIR:-/tmp}/sau-ci-watch.XXXXXX")"
-  if ! git worktree add --detach --quiet "$WORKTREE" "$TARGET" >>"$LOG" 2>&1; then
-    log "ERROR: could not create a clean worktree for ${SHORT}"
-    notify_failure "SAU ci-watch: worktree checkout failed for ${SHORT}" \
-      "Could not check out ${TARGET} into a worktree. See ${LOG}."
-    exit 1
-  fi
-  log "building ${IMAGE_SHA} from clean worktree (log: ${BUILD_LOG})"
-  if ! docker build -f Dockerfile -t "$IMAGE_SHA" \
-       --build-arg GIT_SHA="$TARGET" \
-       --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-       "$WORKTREE" >>"$BUILD_LOG" 2>&1; then
-    log "ERROR: docker build failed for ${SHORT} (log: ${BUILD_LOG})"
-    notify_failure "SAU ci-watch: image build failed for ${SHORT}" \
-      "docker build failed for ${SHORT} (${TARGET}). See ${BUILD_LOG}."
-    exit 1
-  fi
-  log "build finished for ${SHORT}"
-fi
-
-# ---------------------------------------------------------------------------
-# Deploy
-# ---------------------------------------------------------------------------
-echo "==> tagging ${IMAGE_BASE}:latest" >>"$LOG"
-docker tag "$IMAGE_SHA" "${IMAGE_BASE}:latest"
-
-log "verifying the image runs"
-if ! docker run --rm --entrypoint python "$IMAGE_SHA" -c \
-     "import sys; sys.path.insert(0,'/app'); from myUtils import platform_limits as pl; print('    threads cap =', pl.media_max_mb('threads'))" \
-     >>"$LOG" 2>&1; then
-  log "ERROR: built image ${IMAGE_SHA} does not run"
-  notify_failure "SAU ci-watch: built image for ${SHORT} is broken" \
-    "The image built for ${SHORT} failed its import check. See ${LOG}."
+git worktree add --detach --quiet "$WORKTREE" "$TARGET"
+log "gating/building/deploying exact ${SHORT} (details: ${BUILD_LOG})"
+if ! bash "$WORKTREE/scripts/deploy-local.sh" --runtime-root "$REPO_ROOT" --revision "$TARGET" >>"$BUILD_LOG" 2>&1; then
+  log "candidate ${SHORT} failed; previous successful marker is unchanged"
+  notify_failure "SAU ci-watch: release failed for ${SHORT}" \
+    "Gates/build/drain/verification failed. Claims may be paused; inspect ${BUILD_LOG} and logs/releases before recovery. No database rollback was attempted."
   exit 1
 fi
+# deploy-local writes this same marker only AFTER activation is verified.
+[[ "$(cat "$STATE")" == "$TARGET" ]] || { log 'successful revision marker mismatch'; exit 1; }
+log "deployed ${SHORT}; both roles verified"
 
-log "restarting ${SERVICE} (pull disabled so the local image is used)"
-
-# ---------------------------------------------------------------------------
-# Do not restart on top of in-flight publishes
-# ---------------------------------------------------------------------------
-# A restart kills the worker's running targets: the container is recreated, the
-# in-flight ffmpeg/HTTP work is orphaned, and the rows stay 'running' forever
-# because nothing is left to finish them. That is exactly what happened on
-# 2026-10-10 when this script re-deployed at 10:42 and stranded six Sociamonials
-# publishes for an hour.
-#
-# So wait for the queue to drain first. The lease/sweep will eventually recover a
-# truly stuck target, but a publish in progress is far cheaper to wait for than to
-# lose. Set SAU_CI_WATCH_MAX_WAIT_SECONDS to bound the wait (default 30 min);
-# when the bound is hit the deploy proceeds and says so, because a permanently
-# running target must not block security fixes forever.
-MAX_WAIT="${SAU_CI_WATCH_MAX_WAIT_SECONDS:-600}"
-if [[ "$MAX_WAIT" =~ ^[0-9]+$ ]] && (( MAX_WAIT > 0 )); then
-  DB="${SAU_DB_PATH:-/home/will/social-auto-upload/db/database.db}"
-  # A restart also kills an in-flight campaign PREP: the worker runs prep
-  # in-process, so the `preparing` row's lease goes stale and the campaign is
-  # not recovered until the stale-lease sweep (up to ~2h). Wait for active
-  # preps too - a `preparing` campaign whose lease was refreshed in the last 30
-  # minutes. Dead leases are ignored so a stranded campaign cannot block deploys
-  # forever.
-  waited=0
-  while (( waited < MAX_WAIT )); do
-    running=$(sqlite3 "$DB" "SELECT COUNT(*) FROM publish_job_targets WHERE status IN ('running','retrying');" 2>/dev/null || echo 0)
-    [[ "$running" =~ ^[0-9]+$ ]] || running=0
-    # Window: a prep can legitimately run longer than 30 minutes (large source,
-    # split + watermark + STT + drafts), and a prep that is still running keeps
-    # its original claimedAt — so a 30-minute window made the longest encodes
-    # invisible and the restart killed exactly the work worth protecting. Dead
-    # leases are cleared by the worker's stale-lease sweep (45 min), so a wider
-    # window does not let a crashed prep block deploys forever.
-    prep_window="${SAU_CI_WATCH_PREP_WINDOW_MINUTES:-60}"
-    preparing=$(sqlite3 "$DB" "SELECT COUNT(*) FROM campaigns WHERE status='preparing' AND json_extract(metadata_json,'\$._prepLease.claimedAt') IS NOT NULL AND replace(json_extract(metadata_json,'\$._prepLease.claimedAt'),'T',' ') >= datetime('now','-${prep_window} minutes');" 2>/dev/null || echo 0)
-    [[ "$preparing" =~ ^[0-9]+$ ]] || preparing=0
-    (( running == 0 && preparing == 0 )) && break
-    if (( waited % 60 == 0 )); then
-      log "waiting for ${running} in-flight target(s) and ${preparing} active prep(s) before restart (${waited}s of ${MAX_WAIT}s)"
-    fi
-    sleep 15
-    waited=$(( waited + 15 ))
-  done
-  if (( running != 0 || preparing != 0 )); then
-    # Default: DEFER, do not kill work. A 2-minute cron will find an idle window
-    # soon; a forced restart orphans an ffmpeg/HTTP job that has already run for
-    # tens of minutes (and the campaign then needs a resubmit). Set
-    # SAU_CI_WATCH_FORCE_DEPLOY=1 for a security fix that must not wait.
-    if [[ "${SAU_CI_WATCH_FORCE_DEPLOY:-0}" == "1" ]]; then
-      log "WARNING: ${running} target(s) and ${preparing} active prep(s) still in flight after ${MAX_WAIT}s; deploying anyway (forced)"
-      notify_failure "SAU ci-watch: deploying over in-flight work" \
-        "Waited ${MAX_WAIT}s but ${running} target(s) and ${preparing} active prep(s) are still running. The restart will strand them; they will need a resubmit."
-    else
-      # Bound the patience: a queue that is busy for hours must not postpone a
-      # security fix indefinitely. After MAX_DEFER the deploy proceeds anyway
-      # (and says so loudly).
-      DEFER_STATE="$LOG_DIR/ci-watch-defer.state"
-      MAX_DEFER="${SAU_CI_WATCH_MAX_DEFER_SECONDS:-7200}"
-      now_epoch=$(date +%s)
-      first_defer=""
-      [[ -f "$DEFER_STATE" ]] && first_defer="$(cat "$DEFER_STATE" 2>/dev/null || true)"
-      if [[ ! "$first_defer" =~ ^[0-9]+$ ]]; then
-        printf '%s' "$now_epoch" > "$DEFER_STATE"
-        first_defer="$now_epoch"
-      fi
-      deferred_for=$(( now_epoch - first_defer ))
-      if (( MAX_DEFER > 0 && deferred_for >= MAX_DEFER )); then
-        log "WARNING: deferring for ${deferred_for}s reached SAU_CI_WATCH_MAX_DEFER_SECONDS=${MAX_DEFER}; deploying anyway over ${running} target(s) and ${preparing} active prep(s)"
-        notify_failure "SAU ci-watch: deploy deferred too long for ${SHORT}" \
-          "Targets/preps stayed in flight for ${deferred_for}s. Deploying now; any in-flight work will be stranded and needs a resubmit."
-      else
-        log "deferring deploy of ${SHORT}: ${running} target(s) and ${preparing} active prep(s) still in flight after ${MAX_WAIT}s (deferred ${deferred_for}s of ${MAX_DEFER}s); retrying on the next tick"
-        exit 0
-      fi
-    fi
-  else
-    log "queue and prep drained; safe to restart"
-  fi
-fi
-
-if ! docker compose up -d --force-recreate --pull never "$SERVICE" >>"$LOG" 2>&1; then
-  log "ERROR: docker compose up failed for ${SHORT}"
-  notify_failure "SAU ci-watch: deploy command failed for ${SHORT}" \
-    "docker compose up failed for ${SHORT}. See ${LOG}."
-  exit 1
-fi
-
-log "waiting for ${HEALTH_URL}"
-code=""
-for _ in $(seq 1 30); do
-  code="$(curl -s -o /dev/null -w '%{http_code}' "$HEALTH_URL" || true)"
-  [[ "$code" == "200" ]] && break
-  sleep 2
-done
-
-if [[ "$code" != "200" ]]; then
-  log "ERROR: healthz did not return 200 for ${SHORT} (last: ${code:-none})"
-  notify_failure "SAU ci-watch: deploy unhealthy for ${SHORT}" \
-    "healthz did not return 200 after deploying ${SHORT} (last: ${code:-none}). See ${LOG}."
-  exit 1
-fi
-
-echo "$TARGET" > "$STATE"
-running="$(docker ps --filter "name=${SERVICE}" --format '{{.Status}}')"
-log "deployed ${SHORT} (healthz 200; container: ${running})"
-rm -f "$LOG_DIR/ci-watch-defer.state"
-
-# ---------------------------------------------------------------------------
-# Reclaim disk: drop older commit-* images
-# ---------------------------------------------------------------------------
-# Every build produces a ~3 GB image tagged commit-<sha>, and nothing ever
-# removed them, so the list grew without bound (11 images after one day). Layers
-# are shared, but the newest layers are not, so this is a real leak on a 97 GB
-# disk that also hosts a dozen other services.
-#
-# Keep the running image plus the newest KEEP_IMAGES commit tags so a rollback is
-# one `docker tag` away, and delete the rest. Only tags produced by this script
-# are touched: no other repo's images, no containers, no volumes. Failures are
-# logged and ignored - cleanup must never turn a healthy deploy into a failure.
+# Preserve the existing image/cache retention policy. The deploy helper keeps
+# :previous as an explicit rollback reference; never delete other repositories.
 KEEP_IMAGES="${SAU_CI_WATCH_KEEP_IMAGES:-3}"
 if [[ "$KEEP_IMAGES" =~ ^[0-9]+$ ]] && (( KEEP_IMAGES >= 1 )); then
-  # Newest first; skip the first KEEP_IMAGES entries and remove the remainders.
   mapfile -t stale_tags < <(
-    docker images "${IMAGE_BASE}" --format '{{.Tag}} {{.CreatedAt}}' \
-      | grep -E '^commit-' \
-      | sort -k2 -r \
-      | awk '{print $1}' \
+    docker images "$IMAGE_BASE" --format '{{.Tag}} {{.CreatedAt}}' \
+      | grep -E '^commit-' | sort -k2 -r | awk '{print $1}' \
       | tail -n +$((KEEP_IMAGES + 1))
   )
   for tag in "${stale_tags[@]:-}"; do
-    [[ -z "$tag" ]] && continue
-    # Never remove the tag the current commit resolves to.
-    [[ "$tag" == "commit-${SHORT}" ]] && continue
-    if docker rmi "${IMAGE_BASE}:${tag}" >>"$LOG" 2>&1; then
-      log "pruned old image ${IMAGE_BASE}:${tag}"
-    else
-      log "could not prune ${IMAGE_BASE}:${tag} (in use?); leaving it"
-    fi
+    [[ -n "$tag" && "$tag" != "commit-${TARGET}" ]] || continue
+    docker rmi "${IMAGE_BASE}:${tag}" >>"$LOG" 2>&1 || log "could not prune ${tag}; leaving it"
   done
-  # Untagged intermediates from failed builds are always safe to drop.
-  docker image prune -f --filter "dangling=true" >>"$LOG" 2>&1 || true
+  docker image prune -f --filter 'dangling=true' >>"$LOG" 2>&1 || true
 fi
-
-# ---------------------------------------------------------------------------
-# Reclaim disk: bound the BuildKit build cache
-# ---------------------------------------------------------------------------
-# `docker image prune` does NOT touch the builder cache, so every local build
-# left its layers behind and nothing ever removed them. On 2026-10-21 the cache
-# had reached 15.7 GB and the 97 GB disk hit 99% (a full disk silently breaks
-# publishes and can corrupt SQLite), which is exactly the failure this box
-# cannot afford. Keep a small warm cache so the next rebuild is still fast.
 docker builder prune -f --keep-storage "${SAU_CI_WATCH_BUILD_CACHE:-3GB}" >>"$LOG" 2>&1 || true

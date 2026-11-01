@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session as DbSession
 
 from ..config import AppConfig
 from ..db.identity_models import Session as SessionRow
+from .access import google_access_allowed
 
 CSRF_HEADER = "X-CSRF-Token"
 
@@ -75,6 +76,19 @@ class SessionStore:
             return None
         row.last_seen_at = now
         self.db.flush()
+        return row
+
+    def get_authorized(self, session_id: str | None, *, config: AppConfig) -> SessionRow | None:
+        """Resolve a live session and recheck operator/tenant authorization.
+
+        Authentication consumers must use this, not the lifetime-only
+        ``get_active``. Removed operators and disabled users/workspaces lose
+        existing sessions immediately; callers commit the revocation.
+        """
+        row = self.get_active(session_id, idle_seconds=config.session_idle_seconds)
+        if row is not None and not google_access_allowed(config, self.db, session=row):
+            self.revoke(row.id)
+            return None
         return row
 
     def revoke(self, session_id: str) -> None:

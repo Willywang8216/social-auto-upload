@@ -17,6 +17,7 @@ SAU_API_TOKENS), matching the pattern in ``test_security_http.py``.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import tempfile
 import types
@@ -52,23 +53,21 @@ class AccountsApiTests(unittest.TestCase):
         self.prof = prof
         self.sau_backend = sau_backend
 
-        # Isolated DB so each test starts from a clean slate. We place the file
-        # at the *legacy* path (<tmp>/db/database.db) so that the Flask request
-        # handlers — which resolve via _current_db_path() → _get_legacy_db_path()
-        # → <BASE_DIR>/db/database.db — read the same file the seeding code
-        # writes to. We then point BASE_DIR at <tmp> so the legacy resolver and
-        # the seed code agree on the same on-disk file.
+        # Requests and seed helpers must use the same synthetic DB even when
+        # the suite-wide SAU_DB_PATH safety override is present.
         self._tmp = tempfile.TemporaryDirectory()
         self._tmp_path = Path(self._tmp.name)
         self.db_path = self._tmp_path / "db" / "database.db"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_env = patch.dict(os.environ, {"SAU_DB_PATH": str(self.db_path)})
+        db_env.start()
+        self.addCleanup(db_env.stop)
         create_table.bootstrap(self.db_path)
 
         # The jobs module owns its own DB_PATH; patch it too.
         self._job_patch = patch.object(job_runtime, "DB_PATH", self.db_path)
         self._job_patch.start()
-        # Repoint BASE_DIR at <tmp>; the legacy resolver then returns
-        # <tmp>/db/database.db, which is exactly self.db_path.
+        # Keep media/cookie resolution inside this fixture as well.
         self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", str(self._tmp_path))
         self._base_dir_patch.start()
 

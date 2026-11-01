@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import inspect
 import json
 import os
@@ -47,6 +48,9 @@ from myUtils import sociamonials_fallback
 from myUtils import sociamonials_reclaim
 from myUtils import failure_classification as _fc
 from myUtils import pre_flight
+from myUtils import delivery
+from myUtils import runtime
+from myUtils.sqlite_utils import connect as _db_connection
 from myUtils.job_logging import (
     bind_job_logger,
     close_job_sink,
@@ -178,7 +182,32 @@ def _scrub_secrets(text: str) -> str:
     cleaned = str(text or "")
     for pattern, replacement in _ALERT_REDACT_PATTERNS:
         cleaned = pattern.sub(replacement, cleaned)
-    return cleaned
+    from myUtils.secret_redaction import redact_text
+    return redact_text(cleaned)
+
+
+def _ambiguous_transport_error(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}"
+    return isinstance(exc, TimeoutError) or bool(re.search(
+        r"timeout|timed out|connection (?:aborted|reset)|HTTP 5\d\d|ConnectionError",
+        text, re.IGNORECASE))
+
+
+def _retry_after_seconds(exc: BaseException) -> float:
+    from email.utils import parsedate_to_datetime
+    import math
+    details = getattr(exc, "details", None) or {}
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    value = details.get("retryAfter", headers.get("Retry-After", 0)) if isinstance(details, dict) else 0
+    try:
+        seconds = float(value)
+    except (ValueError, TypeError):
+        try:
+            seconds = parsedate_to_datetime(str(value)).timestamp() - time.time()
+        except (ValueError, TypeError, OverflowError):
+            return 0.0
+    return min(3600.0, max(0.0, seconds)) if math.isfinite(seconds) else 0.0
 
 
 # A target executor takes (platform, payload, target) and returns an awaitable
@@ -315,6 +344,11 @@ class PublishWorker:
         # campaign's ``_prepLease`` so a terminal transition can verify it
         # still owns the claim.
         self._prep_owner = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        self._claimed: dict[int, jobs.Target] = {}
+        self._task_by_target: dict[int, asyncio.Task] = {}
+        self._payloads: dict[int, dict] = {}
+        self._heartbeat_at = 0.0
+        self._dispatch_ready = False
 
     def stop(self) -> None:
         self._stop.set()
@@ -342,7 +376,11 @@ class PublishWorker:
         """Long-running variant for a real worker process."""
 
         while not self._stop.is_set():
-            await self._tick()
+            try:
+                await self._tick()
+            except Exception as exc:
+                _logger.error(f"worker tick failed; retrying safely: {_scrub_secrets(str(exc))}")
+                await asyncio.sleep(min(5.0, max(0.1, self._config.poll_interval)))
             await asyncio.sleep(self._config.poll_interval)
         await self._finish_shutdown()
 
@@ -360,13 +398,30 @@ class PublishWorker:
         while self._tasks or self._prep_tasks:
             pending = tuple(self._tasks | self._prep_tasks)
             if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+                self._heartbeat()
+                await asyncio.wait(pending, timeout=1.0)
             self._tasks.difference_update(
                 {task for task in self._tasks if task.done()}
             )
             self._prep_tasks.difference_update(
                 {task for task in self._prep_tasks if task.done()}
             )
+
+    def _heartbeat(self, *, force: bool = False) -> None:
+        if not force and time.monotonic() - self._heartbeat_at < 15:
+            return
+        # A live process whose dispatch scan is failing must not pass readiness.
+        role = "publisher" if self._dispatch_ready else "publisher_unready"
+        jobs.heartbeat_worker(self._prep_owner, role=role,
+                              draining=self._stop.is_set() or runtime.claims_paused(self._db_path),
+                              db_path=self._db_path)
+        for target in tuple(self._claimed.values()):
+            if not jobs.renew_target_lease(target.id, target.lease_token,
+                                          lease_seconds=180, db_path=self._db_path):
+                task = self._task_by_target.get(target.id)
+                if task is not None and not task.done():
+                    task.cancel()
+        self._heartbeat_at = time.monotonic()
 
 
     def _has_pending(self) -> bool:
@@ -809,13 +864,27 @@ class PublishWorker:
             await loop.run_in_executor(None, self._refresh_account, account)
 
     async def _tick(self) -> None:
+        was_ready = self._dispatch_ready
+        try:
+            await self._dispatch_tick()
+        except BaseException:
+            self._dispatch_ready = False
+            try:
+                self._heartbeat(force=True)
+            except Exception:
+                _logger.error("Worker could not record failed dispatch readiness")
+            raise
+        self._dispatch_ready = True
+        self._heartbeat(force=not was_ready)
+
+    async def _dispatch_tick(self) -> None:
         # Reap finished tasks first so their account_refs free up.
         done = {task for task in self._tasks if task.done()}
         for task in done:
             self._tasks.discard(task)
             # Surface unhandled task errors in the log; the target itself has
             # already been transitioned by the task body.
-            exc = task.exception()
+            exc = None if task.cancelled() else task.exception()
             if exc is not None:
                 _logger.error(f"worker task crashed: {exc!r}")
 
@@ -824,7 +893,7 @@ class PublishWorker:
         done_preps = {task for task in self._prep_tasks if task.done()}
         for task in done_preps:
             self._prep_tasks.discard(task)
-            exc = task.exception()
+            exc = None if task.cancelled() else task.exception()
             if exc is not None:
                 _logger.error(f"campaign prep task crashed: {exc!r}")
 
@@ -867,6 +936,9 @@ class PublishWorker:
             except Exception:
                 _logger.exception("stale-running sweep failed")
 
+        if self._stop.is_set() or runtime.claims_paused(self._db_path):
+            return
+
         # Prep queue: claim campaigns still in ``preparing`` and run their
         # artifact prep + draft/enqueue off the request path.
         if self._prep_runner is not None:
@@ -881,10 +953,14 @@ class PublishWorker:
             limit=min(self._config.batch_size, slots_free),
             excluded_accounts=in_flight,
             db_path=self._db_path,
+            owner=self._prep_owner,
+            lease_seconds=180,
         )
         for target in claimed:
+            self._claimed[target.id] = target
             task = asyncio.create_task(self._run_target(target))
             self._tasks.add(task)
+            self._task_by_target[target.id] = task
 
     async def _prep_tick(self) -> None:
         """Claim and prepare campaigns left in ``preparing``.
@@ -929,6 +1005,12 @@ class PublishWorker:
         self, campaign: "campaign_store.Campaign"
     ) -> None:
         """Run one claimed campaign's prep + finalize, then record the outcome."""
+        if (os.environ.get("SAU_TARGET_CHILD") != "1" and os.environ.get("SAU_TESTING") != "1"
+                and getattr(self._prep_runner, "__module__", "") == "myUtils.campaign_prep"):
+            from myUtils.target_runner import run_isolated_prep
+            await run_isolated_prep(self, campaign,
+                timeout=float(os.environ.get("SAU_PREP_TIMEOUT_SECONDS", "3600")))
+            return
         _logger.info(
             f"campaign {campaign.id} claimed for prep (owner={self._prep_owner})"
         )
@@ -974,7 +1056,7 @@ class PublishWorker:
                     else campaign_store.CAMPAIGN_NEEDS_REVIEW
                 ),
                 prepared_at=now,
-                published_at=now if succeeded else None,
+                published_at=None,
                 last_error=(
                     None
                     if succeeded
@@ -1025,632 +1107,261 @@ class PublishWorker:
                     f"campaign {campaign.id} could not record its prep failure"
                 )
 
+    def _transition(self, target, transition, *args, **kwargs) -> bool:
+        return transition(target.id, *args, lease_token=getattr(target, "lease_token", None),
+                          db_path=self._db_path, **kwargs)
+
+    def _target_payload(self, target, job) -> dict:
+        payload = copy.deepcopy(job.payload or {})
+        checkpoint = copy.deepcopy(getattr(target, "checkpoint", None) or {})
+        payload.update(checkpoint.get("payload") or {})
+        payload.update(_db_path=str(self._db_path), _telegramDeliveryKey=str(target.id),
+                       _delivery=checkpoint)
+
+        def persist(state):
+            if not jobs.save_target_checkpoint(target.id, state,
+                    lease_token=getattr(target, "lease_token", None), db_path=self._db_path):
+                raise delivery.LeaseLost("Target ownership was lost; publishing stopped")
+
+        payload["_save_checkpoint"] = persist
+        return payload
+
     async def _run_target(self, target: jobs.Target) -> None:
-        job = jobs.get_job(target.job_id, db_path=self._db_path)
-        payload_state = {"payload": dict(job.payload)}
-        account_name = ""
-        routing_error: str | None = None
         try:
+            if (self._executor is default_executor and os.environ.get("SAU_TARGET_CHILD") != "1"
+                    and os.environ.get("SAU_TESTING") != "1"):
+                from myUtils.target_runner import run_isolated_target
+                await run_isolated_target(self, target, timeout=TARGET_EXECUTION_TIMEOUT_SECONDS)
+            else:
+                await self._run_target_inline(target)
+        finally:
+            self._claimed.pop(target.id, None)
+            self._task_by_target.pop(target.id, None)
+            self._payloads.pop(target.id, None)
+            self._maybe_close_job_sink(target.job_id)
+
+    async def _run_target_inline(self, target: jobs.Target) -> None:
+        log = bind_job_logger(job_id=target.job_id, target_id=target.id,
+                              platform="unknown", account_ref=target.account_ref,
+                              attempt=target.attempts)
+        payload = {}
+        try:
+            job = jobs.get_job(target.job_id, db_path=self._db_path)
+            payload = self._target_payload(target, job)
+            self._payloads[target.id] = payload
+            fallback_only = job.platform == "twitter" and not _x_direct_publish_enabled()
+            check = pre_flight.run_pre_flight(
+                account_ref=target.account_ref, job_id=job.id, platform=job.platform,
+                payload=payload, db_path=self._db_path, validate_credentials=not fallback_only)
+            if not check.ok:
+                transition = jobs.mark_target_failed if check.category == "permanent" else jobs.mark_target_blocked
+                if self._transition(target, transition, check.reason):
+                    log.warning(f"pre-flight blocked target: {check.reason}")
+                    self._alert_publish_failure(target, check.reason)
+                return
             account = _resolve_structured_account(target.account_ref, db_path=self._db_path)
+            log = bind_job_logger(job_id=job.id, target_id=target.id, platform=job.platform,
+                                  account_ref=target.account_ref, attempt=target.attempts,
+                                  account_name=(account.nickname or account.account_name) if account else None)
             if account is not None:
-                account_name = str(account.nickname or account.account_name or "").strip()
-                # Refuse to publish across profiles. A target stores only
-                # ``account:<id>``, and the account is re-resolved here, so an
-                # account moved to another profile after this job was queued
-                # would otherwise be handed the wrong profile's campaign.
-                routing_error = _account_profile_mismatch(target, account, job)
-                if routing_error is None:
-                    # A disabled account must not publish either; the same
-                    # window (queued, then the operator disables it) applies.
-                    routing_error = _account_unpublishable(account)
-                if routing_error is None:
-                    # Last line of defence for language routing. The check at
-                    # queue time can only be as good as the language known then;
-                    # these rows were created while STT was down and the language
-                    # was "unknown", which the router does not filter. The
-                    # operator asked for English videos to stop appearing on the
-                    # Chinese channels, so the check is repeated here against the
-                    # language now stored on the campaign.
-                    routing_error = _language_routing_error(
-                        target, account, db_path=self._db_path
-                    )
-        except Exception:  # noqa: BLE001 — logging must not block publishing
-            pass
-        log = bind_job_logger(
-            job_id=target.job_id,
-            target_id=target.id,
-            platform=job.platform,
-            account_ref=target.account_ref,
-            account_name=account_name or None,
-            attempt=target.attempts,
-        )
-        log.info("target claimed; starting execution")
-
-        if routing_error:
-            # Permanent and not retryable: the account/profile pairing cannot
-            # become valid by trying again, and a retry would publish the wrong
-            # profile's content if the account were moved back mid-flight.
-            log.error(f"refusing to publish: {routing_error}")
-            if jobs.mark_target_failed(target.id, routing_error, db_path=self._db_path):
-                self._alert_publish_failure(target, routing_error)
-            self._maybe_close_job_sink(target.job_id)
-            return
-
-        # Pre-flight validation: catch doomed targets before they burn retry
-        # budget or hold a concurrency slot. A failing check marks the target
-        # as failed immediately with a clear reason, no executor invocation.
-        pre_flight_result = pre_flight.run_pre_flight(
-            account_ref=target.account_ref,
-            job_id=target.job_id,
-            platform=job.platform,
-            payload=payload_state["payload"],
-            db_path=self._db_path,
-        )
-        if not pre_flight_result.ok:
-            log.error(f"pre-flight check failed: {pre_flight_result.reason}")
-            if jobs.mark_target_failed(target.id, pre_flight_result.reason, db_path=self._db_path):
-                self._alert_publish_failure(target, pre_flight_result.reason)
-            self._maybe_close_job_sink(target.job_id)
-            return
-
-        try:
+                routing_error = (_account_profile_mismatch(target, account, job)
+                                 or _account_unpublishable(account)
+                                 or _language_routing_error(target, account, db_path=self._db_path))
+                if routing_error:
+                    if self._transition(target, jobs.mark_target_blocked, routing_error):
+                        self._alert_publish_failure(target, routing_error)
+                    return
             async with self._concurrency.slot(target.account_ref):
-                # Inject db_path into payload so executors can resolve remote files
-                payload = {
-                    **payload_state["payload"],
-                    "_db_path": str(self._db_path),
-                    "_telegramDeliveryKey": str(target.id),
-                }
-                # Stored artifact URLs predate the upload-side percent-encoding
-                # fix, so some rows still carry raw spaces (e.g.
-                # ".../SFW 20260821094430455_pub_pub.mp4"). A raw space is not a
-                # valid URI: URL-fetching platforms and the fallback reject it
-                # while the encoded form serves 200. Normalise once here, at the
-                # single point the payload is assembled, so every platform path
-                # and the fallback see a valid URL regardless of the row's age.
-                if isinstance(payload.get("artifacts"), list):
-                    for artifact in payload["artifacts"]:
-                        if not isinstance(artifact, dict):
-                            continue
-                        url = artifact.get("public_url")
-                        if url:
-                            artifact["public_url"] = _normalise_artifact_url(
-                                str(url)
-                            )
-                    # A URL-fetch platform (Threads, Instagram, Facebook, TikTok)
-                    # needs a public URL, and the payload can be missing one even
-                    # though the campaign has it. Two ways that happened here:
-                    #
-                    #   * the payload was built from a snapshot taken before the
-                    #     remote upload finished, so it carries only the
-                    #     watermarked local copy (public_url: null) while a
-                    #     sibling ``remote_upload`` row for the same source holds
-                    #     the URL - this is what failed Threads job #5626 with
-                    #     "Threads video publish requires a public_url",
-                    #   * an older row predates remote upload entirely.
-                    #
-                    # The campaign artifacts are the authority, so recover a
-                    # missing URL from a sibling of the same source file rather
-                    # than failing a publish whose media is already hosted.
+                for artifact in payload.get("artifacts") or []:
+                    if isinstance(artifact, dict) and artifact.get("public_url"):
+                        artifact["public_url"] = _normalise_artifact_url(str(artifact["public_url"]))
+                if payload.get("artifacts"):
                     _backfill_artifact_public_urls(payload["artifacts"], self._db_path)
                 guard_error = _content_guard_error(payload, target, self._db_path)
                 if guard_error:
                     reason = f"[content-guard] {guard_error}"
-                    log.error(f"refusing to publish: {reason}")
-                    if jobs.mark_target_failed(target.id, reason, db_path=self._db_path):
+                    if self._transition(target, jobs.mark_target_failed, reason):
                         self._alert_publish_failure(target, reason)
-                    self._maybe_close_job_sink(target.job_id)
                     return
-                if job.platform == "twitter" and not _x_direct_publish_enabled():
-                    # X is carried by Sociamonials (its own OAuth connection),
-                    # and the direct path is currently guaranteed to fail (out
-                    # of API credits) or to hang (cookie browser). Go straight
-                    # to the fallback instead of burning the retry budget.
-                    log.info(
-                        "X direct publish disabled; using Sociamonials fallback"
-                    )
-                    if await self._try_sociamonials_fallback(
-                        target, "X direct publish disabled", log
-                    ):
-                        self._maybe_close_job_sink(target.job_id)
+                receipt = delivery.state(payload).get("provider_receipt") or {}
+                if receipt.get("status") == "delivered":
+                    self._transition(target, jobs.mark_target_success)
+                    return
+                if receipt.get("provider") == "sociamonials" or fallback_only:
+                    if await self._try_sociamonials_fallback(target, "Configured Sociamonials route", log):
                         return
-                    message = (
-                        "X direct publish disabled and the Sociamonials fallback "
-                        "failed"
-                    )
-                    if jobs.mark_target_failed(
-                        target.id, message, db_path=self._db_path
-                    ):
-                        log.error(f"target failed: {message}")
-                        self._alert_publish_failure(target, message)
-                    self._maybe_close_job_sink(target.job_id)
-                    return
+                    raise _fc.ClassifiedFailure("Sociamonials route is not configured", _fc.PERMANENT)
                 if job.platform == "reddit" and not _reddit_publishing_enabled():
-                    message = (
-                        "Reddit publishing is disabled by the operator "
-                        "(SAU_REDDIT_ENABLED=0)"
-                    )
-                    log.info(message)
-                    jobs.mark_target_failed(target.id, message, db_path=self._db_path)
-                    self._maybe_close_job_sink(target.job_id)
+                    self._transition(target, jobs.mark_target_blocked, "Reddit publishing is disabled by the operator")
                     return
                 if job.platform == "reddit" and not _reddit_direct_publish_enabled():
-                    # Reddit revoked the API credentials for both accounts, so the
-                    # direct path is a guaranteed 401. bundle.social holds its own
-                    # Reddit OAuth app for the same account, so go straight there.
-                    log.info(
-                        "Reddit direct publish disabled; using bundle.social fallback"
-                    )
-                    if await self._try_bundle_social_fallback(
-                        target, "Reddit direct publish disabled", log
-                    ):
-                        self._maybe_close_job_sink(target.job_id)
+                    if await self._try_bundle_social_fallback(target, "Configured bundle.social route", log):
                         return
-                    message = (
-                        "Reddit direct publish disabled and the bundle.social "
-                        "fallback failed"
-                    )
-                    if jobs.mark_target_failed(
-                        target.id, message, db_path=self._db_path
-                    ):
-                        log.error(f"target failed: {message}")
-                        self._alert_publish_failure(target, message)
-                    self._maybe_close_job_sink(target.job_id)
-                    return
+                    raise _fc.ClassifiedFailure("bundle.social route is unavailable", _fc.PERMANENT)
+                log.info("target claimed; starting execution")
                 result = self._executor(job.platform, payload, target)
                 if inspect.isawaitable(result):
-                    outcome = await asyncio.wait_for(
-                        result, timeout=TARGET_EXECUTION_TIMEOUT_SECONDS
-                    )
+                    # Real publishers run in an owned child process. A coroutine
+                    # timeout would leave their blocking thread running and permit
+                    # duplicate delivery; the parent enforces the hard deadline.
+                    outcome = await result if self._executor is default_executor else await asyncio.wait_for(
+                        result, timeout=TARGET_EXECUTION_TIMEOUT_SECONDS)
                 else:
                     outcome = result
-                updated_payload = {
-                    key: value for key, value in payload.items()
-                    if key not in {"_db_path", "_telegramDeliveryKey"}
-                }
-                if updated_payload != job.payload:
-                    payload_state["payload"] = updated_payload
-                    jobs.update_job_payload(
-                        target.job_id, updated_payload, db_path=self._db_path
-                    )
+                delivery.save_payload_progress(payload)
+                if isinstance(outcome, dict) and outcome.get("retryableFailure"):
+                    raise prepared_publishers.PreparedPublishError(
+                        str(outcome.get("error") or "Partial delivery"),
+                        details=outcome.get("details"), retryable=True)
+                if self._transition(target, jobs.mark_target_success):
+                    log.success("target succeeded")
+        except delivery.LeaseLost:
+            log.warning("Target lease lost; obsolete completion discarded")
         except asyncio.CancelledError:
-            log.warning("target cancelled mid-run; queued for retry")
-            jobs.mark_target_retry(
-                target.id,
-                "cancelled mid-run; will retry",
-                db_path=self._db_path,
-            )
-            self._maybe_close_job_sink(target.job_id)
-            raise
-        except Exception as exc:  # noqa: BLE001 — we want the message regardless
-            if "payload" in locals():
-                updated_payload = {
-                    key: value for key, value in payload.items()
-                    if key not in {"_db_path", "_telegramDeliveryKey"}
-                }
-                if updated_payload != job.payload:
-                    payload_state["payload"] = updated_payload
-                    try:
-                        jobs.update_job_payload(
-                            target.job_id, updated_payload, db_path=self._db_path
-                        )
-                    except Exception:
-                        log.exception("could not persist target recovery state")
-            await self._handle_failure(target, exc, log)
-        else:
-            outcome = locals().get("outcome")
-            if isinstance(outcome, dict) and outcome.get("retryableFailure"):
-                error = str(outcome.get("error") or "publisher reported partial delivery")
-                jobs.update_job_payload(
-                    target.job_id, payload_state["payload"], db_path=self._db_path
-                )
-                await self._handle_failure(
-                    target,
-                    prepared_publishers.PreparedPublishError(
-                        error,
-                        details=outcome.get("details") if isinstance(outcome.get("details"), dict) else None,
-                        retryable=True,
-                    ),
-                    log,
-                )
-                return
-            transitioned = jobs.mark_target_success(
-                target.id, db_path=self._db_path
-            )
-            if transitioned:
-                log.success("target succeeded")
+            current = delivery.state(payload)
+            if current.get("submission_started"):
+                self._transition(target, jobs.mark_target_needs_review,
+                                 "Execution interrupted after submission began; verify delivery before retrying")
             else:
-                # The success was a no-op because the target was cancelled
-                # while we were running. Record the fact at INFO so a human
-                # auditing the per-job log can see the race resolution.
-                log.info(
-                    "target finished after the parent job was cancelled; "
-                    "executor result discarded"
-                )
-            self._maybe_close_job_sink(target.job_id)
+                self._transition(target, jobs.mark_target_retry, "Cancelled before submission", delay_seconds=5)
+            raise
+        except Exception as exc:
+            if payload:
+                try:
+                    delivery.save_payload_progress(payload)
+                except delivery.LeaseLost:
+                    return
+            await self._handle_failure(target, exc, log)
 
-    async def _handle_failure(
-        self, target: jobs.Target, exc: BaseException, log
-    ) -> None:
-        message = f"{type(exc).__name__}: {exc}"
-        # The platform decides whether a permanent failure may be re-routed.
-        job_platform = ""
-        try:
-            failed_job = jobs.get_job(target.job_id, db_path=self._db_path)
-            if failed_job is not None:
-                job_platform = str(failed_job.platform or "")
-        except Exception:  # noqa: BLE001 - routing detail must not mask the error
-            job_platform = ""
+    async def _handle_failure(self, target: jobs.Target, exc: BaseException, log,
+                              *, allow_fallback: bool = True) -> None:
+        message = _scrub_secrets(f"{type(exc).__name__}: {exc}")
         error_details = getattr(exc, "details", None)
         if isinstance(error_details, dict) and error_details:
-            message += f" | details={json.dumps(error_details, ensure_ascii=False, separators=(',', ':'))}"
-        attempts = target.attempts  # already incremented when claimed
-
-        # Use the new failure classification to decide behavior.
-        # This replaces the old _is_credential_failure check with a more
-        # comprehensive taxonomy that distinguishes TRANSIENT (retry),
-        # PERMANENT (fail immediately), and RECOVERABLE (fix and retry).
-        classified = _fc.classify_failure(exc, message=message, platform=job_platform)
-        failure_category = classified.category
-
-        # Legacy compatibility: also check the old credential regex and the
-        # retryable flag, so existing publishers that don't use ClassifiedFailure
-        # still get correct behavior.
-        credential_failure = _is_credential_failure(message)
-        if credential_failure:
-            message = (
-                f"{message} | credential rejected (revoked/expired): "
-                "re-authorise this account before retrying"
-            )
-            # Upgrade to PERMANENT if the old regex caught it but the new
-            # classifier didn't (defensive — they should agree).
-            if failure_category is not _fc.PERMANENT:
-                failure_category = _fc.PERMANENT
-
-        # PERMANENT failures: fail immediately, no retry, optionally try fallback.
-        if failure_category is _fc.PERMANENT or getattr(exc, "retryable", True) is False:
-            # A permanent failure means the direct path cannot be retried: the
-            # subreddit banned us, the media is gone, the credential is dead.
-            # Re-routing that to a different Sociamonials account does not fix
-            # the cause, so the module's own guard refuses it
-            # (should_attempt_fallback, documented at sociamonials_fallback.py:23).
-            #
-            # X is the one exception, and only because Sociamonials holds its OWN
-            # X OAuth connection: a dead or out-of-credits X credential is
-            # permanent for us yet perfectly deliverable there. That case is
-            # already routed to the fallback before the executor runs (see the
-            # X-skip shortcut in _run_target), so it never reaches this branch.
-            if (
-                job_platform != "twitter"
-                and not sociamonials_fallback.should_attempt_fallback(
-                    retryable=False,
-                    attempts=attempts,
-                    max_attempts=self._config.retry.max_attempts,
-                )
-            ):
-                log.info(
-                    f"permanent failure on {job_platform}; not re-routing to the "
-                    "Sociamonials fallback"
-                )
-            elif True:
-                try:
-                    _fallback_ok = await self._try_sociamonials_fallback(
-                        target, message, log
-                    )
-                except MediaRestoreError as exc:
-                    # The fallback needs the local media; a missed restore is
-                    # handled by the retry loop above, not treated as a crash.
-                    log.warning(
-                        f"sociamonials fallback media not materialised: {exc}"
-                    )
-                    _fallback_ok = False
-                if _fallback_ok:
-                    self._maybe_close_job_sink(target.job_id)
-                    return
-            transitioned = jobs.mark_target_failed(
-                target.id, message, db_path=self._db_path
-            )
-            if transitioned:
+            message += " | details=" + _scrub_secrets(json.dumps(error_details, ensure_ascii=False, default=str))
+        payload = self._payloads.get(target.id, {})
+        checkpoint = delivery.state(payload) or getattr(target, "checkpoint", None) or {}
+        if isinstance(exc, delivery.DeliveryPending):
+            self._transition(target, jobs.mark_target_awaiting_delivery, checkpoint,
+                             delay_seconds=max(30, _retry_after_seconds(exc)))
+            log.info("Provider accepted the post; awaiting confirmed delivery")
+            return
+        if isinstance(exc, delivery.DeliveryUnknown):
+            if self._transition(target, jobs.mark_target_needs_review, message):
+                self._alert_publish_failure(target, message)
+            return
+        # Transport failure after an irreversible request may hide acceptance.
+        # Never turn it into a second publish without a durable receipt.
+        ambiguous = (_ambiguous_transport_error(exc)
+                     or str(checkpoint.get("operation") or "").startswith("browser-publish:")
+                     or (isinstance(error_details, dict) and error_details.get("retrySafe") is False))
+        if checkpoint.get("submission_started") and ambiguous:
+            try:
+                delivery.pending_or_unknown({"_delivery": checkpoint}, message)
+            except delivery.DeliveryPending:
+                self._transition(target, jobs.mark_target_awaiting_delivery, checkpoint,
+                                 delay_seconds=max(30, _retry_after_seconds(exc)))
+            except delivery.DeliveryUnknown:
+                if self._transition(target, jobs.mark_target_needs_review, message):
+                    self._alert_publish_failure(target, message)
+            return
+        category = _fc.classify_failure(exc, message=message).category
+        if category is _fc.PERMANENT:
+            if self._transition(target, jobs.mark_target_failed, message):
                 log.error(f"target failed without retry: {message}")
                 self._alert_publish_failure(target, message)
-            self._maybe_close_job_sink(target.job_id)
             return
-
-        # RECOVERABLE failures: attempt automated recovery, then retry.
-        # Currently the only recoverable case is media restore failure, which
-        # the executor already handles by raising MediaRestoreError. The worker
-        # treats it as a transient retry with a longer backoff.
-        if failure_category is _fc.RECOVERABLE:
-            # Give recovery more time before retrying (the restore might be slow).
-            delay = min(30.0, self._config.retry.backoff_for(attempts) * 2)
-            log.warning(
-                f"target failed (recoverable) on attempt {attempts}; "
-                f"retrying in {delay:.1f}s: {message}"
-            )
-            await asyncio.sleep(delay)
-            jobs.mark_target_retry(target.id, message, db_path=self._db_path)
-            return
-
-        # TRANSIENT failures: retry with normal backoff, up to max_attempts.
-        if attempts >= self._config.retry.max_attempts:
-            # The retry budget is exhausted. Before declaring the target dead,
-            # hand it to Sociamonials, which already holds OAuth connections for
-            # most of the same brand accounts. This is what turns the recurring
-            # deterministic failures (X media-upload 402 / needs-reconnect,
-            # Bluesky 413) into delivered posts instead of permanent failures.
-            # Opt-in via SAU_SOCIAMONIALS_FALLBACK; see sociamonials_fallback.
-            try:
-                _fallback_ok = await self._try_sociamonials_fallback(
-                    target, message, log
-                )
-            except MediaRestoreError as exc:
-                log.warning(f"sociamonials fallback media not materialised: {exc}")
-                _fallback_ok = False
-            if _fallback_ok:
-                self._maybe_close_job_sink(target.job_id)
-                return
-            transitioned = jobs.mark_target_failed(
-                target.id, message, db_path=self._db_path
-            )
-            if transitioned:
-                log.error(
-                    f"target failed permanently after {attempts} attempts: {message}"
-                )
-                # Only a genuine permanent transition alerts. ``transitioned``
-                # is False when the parent job was cancelled mid-run, and the
-                # retry branch below is deliberately silent — operators should
-                # only hear about targets that will never go out on their own.
+        # The same finite budget applies to transient AND recoverable failures.
+        if target.attempts >= self._config.retry.max_attempts:
+            if allow_fallback and not checkpoint.get("submission_started") and not payload.get("_fallback_attempted"):
+                try:
+                    if await self._try_sociamonials_fallback(target, message, log):
+                        return
+                except Exception as fallback_error:
+                    await self._handle_failure(target, fallback_error, log, allow_fallback=False)
+                    return
+            if self._transition(target, jobs.mark_target_failed, message):
+                log.error(f"retry budget exhausted: {message}")
                 self._alert_publish_failure(target, message)
-            else:
-                log.info(
-                    f"target failed permanently but parent job was already "
-                    f"cancelled; transition skipped: {message}"
-                )
-            self._maybe_close_job_sink(target.job_id)
             return
-
-        delay = self._config.retry.backoff_for(attempts)
-        log.warning(
-            f"target failed on attempt {attempts}; retrying in {delay:.1f}s: {message}"
-        )
-        # Sleep BEFORE flipping back to retrying so the worker can't pick the
-        # row up again immediately on the next tick.
-        await asyncio.sleep(delay)
-        jobs.mark_target_retry(target.id, message, db_path=self._db_path)
+        delay = self._config.retry.backoff_for(target.attempts)
+        if category is _fc.RECOVERABLE:
+            delay = min(self._config.retry.max_backoff_seconds, delay * 2)
+        delay = max(delay, _retry_after_seconds(exc))
+        # Persist eligibility and release the slot instead of sleeping while
+        # holding a target in running state. Restarts retain this deadline.
+        self._transition(target, jobs.mark_target_retry, message,
+                         delay_seconds=delay, error_category=category.value)
+        log.warning(f"target will retry in {delay:.1f}s: {message}")
 
     async def _try_sociamonials_fallback(
         self, target: jobs.Target, message: str, log, *, only_platform: str | None = None
     ) -> bool:
-        """Publish an exhausted target through Sociamonials. Best-effort.
+        """Attempt the configured route; only confirmed delivery is success.
 
-        Returns ``True`` only when the fallback actually delivered the post and
-        the target was transitioned to succeeded. Every other outcome — flag
-        off, no mapped profile, media unavailable, API error — returns ``False``
-        so the caller falls through to the normal permanent-failure path. This
-        method must never raise into the worker loop.
-
-        ``only_platform`` restricts the attempt to one platform; the caller
-        uses it to let a permanently-failed X target fall back while leaving
-        permanent content failures on other platforms alone.
+        Errors propagate to the finite retry handler. A saved receipt resumes
+        status polling, bypassing upload and create-post entirely.
         """
-
         if not sociamonials_fallback.is_enabled():
             return False
-
-        try:
-            job = jobs.get_job(target.job_id, db_path=self._db_path)
-        except Exception:  # noqa: BLE001 — a missing job only costs context
+        job = jobs.get_job(target.job_id, db_path=self._db_path)
+        if only_platform and job.platform != only_platform:
             return False
-        if only_platform and str(job.platform or "").strip().lower() != only_platform:
-            return False
-        payload = dict(job.payload or {})
-        payload["_db_path"] = str(self._db_path)
-
-        # ``_resolve_structured_account`` raises LookupError for an account row
-        # that no longer exists (a deleted account whose targets are still
-        # queued). That is a "cannot fall back", not a crash: the caller must
-        # still be allowed to mark the target permanently failed.
         try:
-            account = _resolve_structured_account(
-                target.account_ref, db_path=self._db_path
-            )
-        except Exception as exc:  # noqa: BLE001 — never raise into the loop
-            log.info(
-                f"sociamonials fallback skipped: account lookup failed for "
-                f"{target.account_ref} ({_scrub_secrets(str(exc))})"
-            )
+            account = _resolve_structured_account(target.account_ref, db_path=self._db_path)
+        except LookupError:
             return False
         if account is None:
-            log.info("sociamonials fallback skipped: account could not be resolved")
             return False
-
-        profile_settings = None
-        try:
-            if job.profile_id is not None:
-                profile_settings = profile_registry.get_profile(
-                    job.profile_id, db_path=self._db_path
-                ).settings
-        except Exception:  # noqa: BLE001 — settings are optional
-            profile_settings = None
-
-        # Restore any offloaded artifacts before handing them to the fallback.
-        # The direct path normally does this in ``default_executor``, but the
-        # X-skip shortcut in ``_run_target`` never runs the executor, and a
-        # target whose direct path failed may have had only a partial restore.
-        # Without this the fallback dies with "local media missing" even though
-        # the bytes are one rclone call away.
-        restore_error: Exception | None = None
-        try:
-            await asyncio.to_thread(
-                _ensure_artifact_paths_local, payload, db_path=self._db_path
-            )
-        except Exception as exc:  # noqa: BLE001 — a restore miss is not a crash
-            restore_error = exc
-            log.info(
-                "sociamonials fallback media restore failed: "
-                f"{_scrub_secrets(str(exc))}"
-            )
-        if restore_error is not None:
-            # A declared local artifact is still missing. Submitting the
-            # payload's public URL instead is how a transient restore miss
-            # became a permanent failure: the URL (a stale /getFile or R2 link)
-            # was not fetchable by Sociamonials and the post died. Retry the
-            # whole target so the restore can be re-attempted.
-            still_missing = [
-                str(a.get("local_path"))
-                for a in (payload.get("artifacts") or [])
-                if isinstance(a, dict)
-                and a.get("local_path")
-                and not _resolve_media_path(str(a["local_path"])).exists()
-            ]
-            if still_missing:
-                raise MediaRestoreError(
-                    "sociamonials fallback could not materialise local media "
-                    f"({len(still_missing)} file(s)); retrying",
-                    retryable=True,
-                ) from restore_error
-
-        # Normalise every artifact URL in the payload BEFORE the fallback reads
-        # it. _fallback_media_paths() normalises its own output, but
-        # sociamonials_fallback.collect_media() also reads
-        # payload["artifacts"][*]["public_url"] directly, so a raw space in a
-        # stored URL reached the platform unencoded and it reported "Video URL
-        # not accessible after retries" for a URL that serves 206 when encoded.
-        # The rest of the publish path normalises in _run_target; the fallback is
-        # reached from branches that skip it, so it is normalised here too.
-        for _artifact in payload.get("artifacts") or []:
-            if isinstance(_artifact, dict) and _artifact.get("public_url"):
-                _artifact["public_url"] = _normalise_artifact_url(
-                    str(_artifact["public_url"])
-                )
-        media_paths = _fallback_media_paths(payload)
-
+        payload = self._payloads.get(target.id)
+        if payload is None:
+            payload = self._target_payload(target, job)
+            self._payloads[target.id] = payload
+        payload["_fallback_attempted"] = True
+        settings = profile_registry.get_profile(job.profile_id, db_path=self._db_path).settings if job.profile_id else None
+        if delivery.receipt_for(payload, "sociamonials") is None:
+            await asyncio.to_thread(_ensure_artifact_paths_local, payload, db_path=self._db_path)
+        for artifact in payload.get("artifacts") or []:
+            if isinstance(artifact, dict) and artifact.get("public_url"):
+                artifact["public_url"] = _normalise_artifact_url(str(artifact["public_url"]))
         try:
             result = await asyncio.to_thread(
                 sociamonials_fallback.publish_via_sociamonials,
-                platform=job.platform,
-                account=account,
-                payload=payload,
-                media_paths=media_paths,
-                target_id=target.id,
-                settings=profile_settings,
-                # A retry must create a NEW Sociamonials post; the same key
-                # would return the previously-failed one forever.
-                idempotency_suffix=(
-                    f"a{target.attempts}-"
-                    f"{(target.started_at or 'x').replace(':', '').replace('-', '').replace('T', '')}"
-                ),
+                platform=job.platform, account=account, payload=payload,
+                media_paths=_fallback_media_paths(payload), target_id=target.id,
+                settings=settings, idempotency_suffix=None,
             )
-        except sociamonials_fallback.SociamonialsNotConfigured as exc:
-            log.info(f"sociamonials fallback unavailable: {exc}")
+        except sociamonials_fallback.SociamonialsNotConfigured:
             return False
-        except Exception as exc:  # noqa: BLE001 — never raise into the loop
-            log.warning(
-                f"sociamonials fallback failed; the target will be marked "
-                f"permanently failed. original error: {message} | "
-                f"fallback error: {_scrub_secrets(str(exc))}"
-            )
-            return False
-
-        delivery_state = str(result.get("delivery_state") or "").strip().lower()
-        if delivery_state == "failed":
-            # Sociamonials accepted the post and then failed to deliver it (its
-            # own platform hand-off could not fetch the media). Treating the
-            # submit as success hid that the post never landed, so record the
-            # failure. The target is still ``running`` here, which is the state
-            # mark_target_failed requires.
-            reason = str(result.get("delivery_error") or "").strip()
-            message = (
-                "Sociamonials accepted the post but delivery failed"
-                + (f": {reason}" if reason else "")
-            )
-            transitioned = jobs.mark_target_failed(
-                target.id, message, db_path=self._db_path
-            )
-            if transitioned:
-                log.error(
-                    f"sociamonials fallback delivered nothing (post_id="
-                    f"{result.get('post_id')}, network={result.get('network')}); "
-                    f"marked failed: {_scrub_secrets(message)}"
-                )
-                self._alert_publish_failure(target, message)
+        prior = delivery.receipt_for(payload, "sociamonials") or {}
+        post_id = result.get("post_id") or prior.get("id")
+        if isinstance(post_id, bool) or not isinstance(post_id, (str, int)) or not str(post_id).strip():
+            raise delivery.DeliveryUnknown("Sociamonials returned no usable post receipt; acceptance is unknown")
+        if post_id and delivery.receipt_for(payload, "sociamonials") is None:
+            delivery.accepted(payload, provider="sociamonials", receipt_id=str(post_id),
+                              network=result.get("network"), workspace_id=result.get("workspace_id"),
+                              used_assets=result.get("used_assets") or [])
+        state = str(result.get("delivery_state") or "unknown").lower()
+        if result.get("requires_approval") or state == "requires_approval":
+            raise delivery.DeliveryUnknown("Sociamonials is holding this post for approval; release it at the provider")
+        if state == "failed":
+            reason = "Sociamonials delivery failed: " + _scrub_secrets(str(result.get("delivery_error") or "provider rejected post"))
+            if self._transition(target, jobs.mark_target_failed, reason):
+                self._alert_publish_failure(target, reason)
             return True
-
-        # "Accepted" is not "delivered", but the two unconfirmed cases differ and
-        # must not be collapsed:
-        #
-        #   pending  - still queued when the polling budget ran out. It may
-        #              deliver moments later and the idempotency key prevents a
-        #              duplicate, so failing it would be wrong and would discard
-        #              a post that is about to land.
-        #   held for approval - a human at Sociamonials must release it. It will
-        #              NOT deliver on its own, so reporting success would tell
-        #              the operator a post is live when nobody can see it. That is
-        #              the exact "200 but nothing landed" failure this fallback
-        #              was reported for.
-        #
-        # So only the approval case is a failure; pending succeeds but says so.
-        held_for_approval = bool(result.get("requires_approval")) or (
-            delivery_state == "requires_approval"
-        )
-        if held_for_approval:
-            message = (
-                "Sociamonials accepted the post but is holding it for approval; "
-                "it will not deliver until a human releases it"
-            )
-            transitioned = jobs.mark_target_failed(
-                target.id, message, db_path=self._db_path
-            )
-            if transitioned:
-                log.error(
-                    f"sociamonials fallback held for approval (post_id="
-                    f"{result.get('post_id')}); marked failed so it is not read as "
-                    "published"
-                )
-                self._alert_publish_failure(target, message)
-            return True
-
-        transitioned = jobs.mark_target_success(target.id, db_path=self._db_path)
+        if state != "delivered" and result.get("delivered") is not True:
+            delivery.pending_or_unknown(payload, "Sociamonials delivery is still unconfirmed")
+        delivery.confirmed(payload, provider="sociamonials", receipt_id=str(post_id))
+        transitioned = self._transition(target, jobs.mark_target_success)
         if transitioned:
-            note = (
-                "" if delivery_state in {"delivered", ""}
-                else f" (delivery {delivery_state or 'unconfirmed'})"
-            )
-            log.info(
-                f"delivered via Sociamonials fallback (post_id={result.get('post_id')}, "
-                f"network={result.get('network')}, status={result.get('status')}){note}; "
-                f"the direct publish had failed with: {message}"
-            )
-            # Record which library assets this delivery used, so the reclaim
-            # policy can later free them without guessing from filenames. This
-            # is the "record enough to know the asset can be reclaimed" half of
-            # the progressive-upload policy (see myUtils/sociamonials_reclaim.py).
+            log.info(f"Confirmed Sociamonials delivery (post_id={post_id})")
             try:
-                recorded = sociamonials_reclaim.record_delivered_assets(
-                    self._db_path,
-                    result.get("used_assets"),
-                    workspace_id=result.get("workspace_id"),
-                    job_id=target.job_id,
-                    target_id=target.id,
-                    post_id=result.get("post_id"),
-                    network=str(result.get("network") or ""),
-                )
-                if recorded:
-                    log.info(
-                        f"recorded {recorded} delivered Sociamonials asset(s) for "
-                        f"target {target.id}; they are reclaimable once no live "
-                        "target needs them"
-                    )
-            except Exception as exc:  # noqa: BLE001 — the post is already delivered
-                log.warning(
-                    f"could not record delivered Sociamonials assets for target "
-                    f"{target.id}: {_scrub_secrets(str(exc))}"
-                )
-        else:
-            log.info(
-                "sociamonials fallback delivered, but the target was already "
-                "transitioned (cancel race); counters left untouched"
-            )
+                sociamonials_reclaim.record_delivered_assets(
+                    self._db_path, result.get("used_assets"), workspace_id=result.get("workspace_id"),
+                    job_id=target.job_id, target_id=target.id, post_id=post_id,
+                    network=str(result.get("network") or ""))
+            except Exception as exc:
+                log.warning(f"Could not record asset receipt: {_scrub_secrets(str(exc))}")
         return transitioned
 
     async def _try_bundle_social_fallback(
@@ -1854,7 +1565,7 @@ class PublishWorker:
                 )
             return False
 
-        transitioned = jobs.mark_target_success(target.id, db_path=self._db_path)
+        transitioned = self._transition(target, jobs.mark_target_success)
         if transitioned:
             log.info(
                 "delivered via bundle.social fallback (post_ids="
@@ -2204,7 +1915,7 @@ def _language_routing_error(target, account, *, db_path) -> str | None:
     except (IndexError, ValueError):
         return None
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             row = conn.execute(
                 "SELECT c.id, c.metadata_json FROM campaign_posts cp "
                 "JOIN campaigns c ON c.id = cp.campaign_id WHERE cp.id = ?",
@@ -2227,7 +1938,7 @@ def _language_routing_error(target, account, *, db_path) -> str | None:
 
             profile_id = getattr(account, "profile_id", None)
             if profile_id is None:
-                with sqlite3.connect(db_path) as conn:
+                with _db_connection(db_path) as conn:
                     found = conn.execute(
                         "SELECT profile_id FROM accounts WHERE id = ?",
                         (getattr(account, "id", -1),),
@@ -2365,7 +2076,7 @@ def _resolve_media_path(value: str | Path) -> Path:
     if not text:
         return Path(text)
     candidate = Path(text)
-    if not candidate.is_absolute():
+    if not candidate.is_absolute() and not candidate.root:
         return candidate
     base_dir = Path(BASE_DIR)
     for alias in _base_dir_aliases():
@@ -2379,14 +2090,14 @@ def _resolve_media_path(value: str | Path) -> Path:
     return candidate
 
 
-def _resolve_account_path(account_ref: str) -> Path:
+def _resolve_account_path(account_ref: str, *, db_path: Path | None = None) -> Path:
     """Map an ``account_ref`` to a concrete cookie file path.
 
     The Flask backend stores cookie filenames relative to ``cookiesFile/``.
     The CLI / Profile path stores absolute paths. We accept both.
     """
 
-    structured = _resolve_structured_account(account_ref)
+    structured = _resolve_structured_account(account_ref, db_path=db_path)
     if structured is not None:
         return _resolve_media_path(structured.cookie_path)
 
@@ -2443,6 +2154,25 @@ def _looks_like_media(path: Path, name: str) -> bool:
     return any(head.startswith(signature) for signature in signatures)
 
 
+def _verify_artifact(path: Path, artifact: dict) -> None:
+    """Verify recorded integrity facts on both cached and restored artifacts."""
+    import hashlib
+    metadata = artifact.get("metadata") or {}
+    expected = artifact.get("checksum") or metadata.get("sha256")
+    expected_size = metadata.get("size_bytes")
+    if expected_size is not None and path.stat().st_size != int(expected_size):
+        raise MediaRestoreError("Artifact byte count does not match its registered metadata", retryable=False)
+    if expected and not re.fullmatch(r"[0-9a-fA-F]{64}", str(expected)):
+        raise MediaRestoreError("Artifact checksum metadata is invalid", retryable=False)
+    if expected:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != str(expected).lower():
+            raise MediaRestoreError("Artifact checksum mismatch; refusing substituted media", retryable=False)
+
+
 def _download_atomically(destination: Path, download: Callable[[Path], Any]) -> None:
     """Download into a sibling temporary file and publish it only when complete."""
     import tempfile
@@ -2488,7 +2218,7 @@ def _resolve_file_path(file_ref: str, *, db_path: Path | None = None) -> Path:
     # host-side tooling). Map it onto this process's BASE_DIR before any
     # filesystem check or remote restore.
     resolved = _resolve_media_path(file_ref)
-    text = str(resolved)
+    text = resolved.as_posix()
     if resolved.is_absolute() and resolved.is_file():
         return resolved
 
@@ -2517,18 +2247,22 @@ def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
     # The ref may be repo-relative ("clip.mp4", "videoFile/x", "uploads/x") or
     # an absolute container/host path. file_records.file_path is always
     # repo-relative, so derive the lookup refs from whichever shape arrives.
-    text = str(file_ref or "").strip()
+    candidate = _resolve_media_path(file_ref)
+    if candidate.anchor:
+        try:
+            candidate = candidate.relative_to(Path(BASE_DIR))
+        except ValueError:
+            return None  # unrelated absolute paths are not this repo's media
+    text = candidate.as_posix()
+    if ".." in candidate.parts:
+        return None
     if text.startswith("uploads/"):
         lookup_refs = (text,)
     else:
-        relative = text
-        for marker in ("/videoFile/", "videoFile/"):
-            if marker in relative:
-                relative = relative.split(marker, 1)[1]
-                break
+        relative = text.removeprefix("videoFile/")
         lookup_refs = (relative, "videoFile/" + relative)
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row
             row = None
             for lookup_ref in lookup_refs:
@@ -2540,7 +2274,7 @@ def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
                     break
         if not row:
             return None
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row
             backend = conn.execute(
                 "SELECT * FROM storage_backends WHERE id = ?", (row["storage_backend_id"],)
@@ -2601,18 +2335,6 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
     """
     import sqlite3
 
-    def _generated_record_by_name(path: Path) -> sqlite3.Row | None:
-        """Find one unambiguous generated mapping from older offload records."""
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT storage_key,storage_backend_id,storage_cdn_url,file_path "
-                "FROM file_records WHERE filename=? AND storage_key IS NOT NULL "
-                "AND storage_backend_id IS NOT NULL",
-                (path.name,),
-            ).fetchall()
-        mappings = {(row["storage_key"], row["storage_backend_id"]) for row in rows}
-        return rows[0] if len(mappings) == 1 else None
 
     def _record_for(artifact: dict, path: Path, *, stored: str | None = None) -> sqlite3.Row | None:
         source_id = artifact.get("source_id") or artifact.get("source_file_record_id")
@@ -2625,9 +2347,9 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
         # this way).
         _kind = str(artifact.get("artifact_kind") or "").strip().lower()
         _derived = _kind in {"watermarked_video", "watermarked_image", "generated"}
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row
-            raw = str(path).replace("\\\\", "/")
+            raw = str(path).replace("\\", "/")
             # Generated artifacts have their own Drive object and mapping; that
             # exact artifact record must win over the original source record.
             for marker in ("/generated/", "generated/"):
@@ -2678,6 +2400,20 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
                             break
                     if campaign_row:
                         return campaign_row
+                    # Older offload rows may use a legacy local path, but the
+                    # full object key inside a declared generated-media root is
+                    # still an exact identity. Never infer it from a basename.
+                    legacy_rows = conn.execute(
+                        "SELECT f.storage_key, f.storage_backend_id, '' AS storage_cdn_url, "
+                        "f.file_path, b.endpoint FROM file_records f "
+                        "JOIN storage_backends b ON b.id=f.storage_backend_id "
+                        "WHERE f.storage_key=? AND b.provider='rclone'", (rel,),
+                    ).fetchall()
+                    legacy_rows = [row for row in legacy_rows
+                                   if str(row["endpoint"] or "").replace("\\", "/").rstrip("/").split("/")[-1] == "generated"]
+                    identities = {(row["storage_backend_id"], row["storage_key"]) for row in legacy_rows}
+                    if len(identities) == 1:
+                        return legacy_rows[0]
                     # Never substitute original source bytes into a generated target.
                     return None
             if source_id and not _derived:
@@ -2690,7 +2426,7 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             # No usable source id: fall back to the path convention shared
             # with offload_to_drive.sh — the segment after /videoFile/ or
             # /uploads/ is file_records.file_path.
-            raw = str(path)
+            raw = path.as_posix()
             for marker in ("/videoFile/", "/uploads/"):
                 if marker in raw:
                     rel = raw.split(marker, 1)[1]
@@ -2734,6 +2470,7 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             # Rewrite to the resolved path: a publisher in another process
             # (e.g. the host worker, where ``/app/...`` is not a real path)
             # must read this file, not fall back to a dead public URL.
+            _verify_artifact(p, artifact)
             artifact["local_path"] = str(p)
             continue
         generated_root = media_pipeline.GENERATED_MEDIA_ROOT.resolve()
@@ -2760,8 +2497,6 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             is_generated_artifact = True
         try:
             row = _record_for(artifact, p, stored=local_path)
-            if row is None and is_generated_artifact:
-                row = _generated_record_by_name(p)
         except Exception as exc:
             raise MediaRestoreError(
                 f"Could not find artifact source record for {local_path}: {exc}",
@@ -2783,7 +2518,7 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             # Try 1: Download via the backend that stored it (S3 or rclone)
             if row["storage_key"] and row["storage_backend_id"]:
                 try:
-                    with sqlite3.connect(db_path) as conn:
+                    with _db_connection(db_path) as conn:
                         conn.row_factory = sqlite3.Row
                         backend = conn.execute(
                             "SELECT * FROM storage_backends WHERE id = ?", (row["storage_backend_id"],)
@@ -2838,14 +2573,16 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             # Try 3: Check media_assets table for R2 public_url
             if not downloaded:
                 try:
-                    with sqlite3.connect(db_path) as conn:
+                    with _db_connection(db_path) as conn:
                         conn.row_factory = sqlite3.Row
-                        asset = conn.execute(
-                            "SELECT public_url FROM media_assets WHERE local_original_path LIKE ? AND public_url IS NOT NULL",
-                            (f"%{p.name}%",),
-                        ).fetchone()
-                    if asset and asset["public_url"]:
-                        _download_public_artifact(asset["public_url"], p)
+                        field = "local_processed_path" if is_generated_artifact else "local_original_path"
+                        rows = conn.execute(
+                            f"SELECT public_url FROM media_assets WHERE {field} IN (?, ?) AND public_url IS NOT NULL",
+                            (str(p), str(local_path)),
+                        ).fetchall()
+                    urls = {row["public_url"] for row in rows if row["public_url"]}
+                    if len(urls) == 1:
+                        _download_public_artifact(next(iter(urls)), p)
                         downloaded = True
                 except Exception as exc:
                     last_error = exc
@@ -2873,6 +2610,7 @@ def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
             # The bytes are local now; hand the resolved absolute path to the
             # publisher so it does not re-derive ``/app/...`` in a process
             # (the host worker) where that path does not exist.
+            _verify_artifact(p, artifact)
             artifact["local_path"] = str(p)
 
         except MediaRestoreError:
@@ -3084,16 +2822,18 @@ async def _publish_prepared_twitter(
         config, getattr(account, "auth_type", None), "twitter"
     ) or "cookie"
     artifacts = payload.get("artifacts") or []
-    if payload.get("campaignId") and not artifacts:
-        raise ValueError("Prepared Twitter campaign has no media artifacts")
+    reconciling = twitter_auth_type != "cookie" and bool(delivery.receipt_for(payload, "twitter"))
     file_paths = _prepared_artifact_local_paths(payload)
-    if (payload.get("campaignId") or artifacts) and not file_paths:
-        raise ValueError("Prepared Twitter media artifacts have no usable local paths")
-    for path in file_paths:
-        if not path.is_file() or path.stat().st_size <= 0:
-            raise FileNotFoundError(f"Prepared Twitter media file is missing or empty: {path}")
-        if path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}:
-            raise ValueError(f"Unsupported prepared Twitter media type: {path.suffix}")
+    if not reconciling:
+        if payload.get("campaignId") and not artifacts:
+            raise ValueError("Prepared Twitter campaign has no media artifacts")
+        if (payload.get("campaignId") or artifacts) and not file_paths:
+            raise ValueError("Prepared Twitter media artifacts have no usable local paths")
+        for path in file_paths:
+            if not path.is_file() or path.stat().st_size <= 0:
+                raise FileNotFoundError(f"Prepared Twitter media file is missing or empty: {path}")
+            if path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}:
+                raise ValueError(f"Unsupported prepared Twitter media type: {path.suffix}")
 
     if twitter_auth_type == "cookie":
         if any(not artifact.get("local_path") for artifact in artifacts):
@@ -3106,6 +2846,7 @@ async def _publish_prepared_twitter(
             return
         from myUtils.browser_helper import local_browser
         with local_browser():
+            delivery.starting(payload, operation="browser-publish:twitter")
             await _run_platform_upload(
                 "twitter",
                 {
@@ -3120,15 +2861,14 @@ async def _publish_prepared_twitter(
     else:
         if account is None:
             raise ValueError("Prepared Twitter API publish requires a structured account")
-        if payload.get("campaignId") and not artifacts:
-            raise ValueError("Prepared Twitter campaign has no media artifacts")
-        if any(not artifact.get("local_path") for artifact in artifacts):
+        if not reconciling and any(not artifact.get("local_path") for artifact in artifacts):
             raise ValueError("Prepared Twitter media artifacts are missing local paths")
         result = await asyncio.to_thread(
             prepared_publishers.publish_twitter_sync, account, payload
         )
         updated_config = result.get('updated_config') if isinstance(result, dict) else None
         _persist_rotated_config(account, updated_config, payload=payload)
+        return result
 
 
 async def _publish_prepared_telegram(
@@ -3141,7 +2881,7 @@ async def _publish_prepared_telegram(
 ) -> None:
     if account is None:
         raise ValueError("Prepared Telegram publish requires a structured account")
-    await asyncio.to_thread(prepared_publishers.publish_telegram_sync, account, payload)
+    return await asyncio.to_thread(prepared_publishers.publish_telegram_sync, account, payload)
 
 
 async def _publish_prepared_reddit(
@@ -3215,124 +2955,54 @@ async def _publish_prepared_youtube(
 ) -> None:
     if account is None:
         raise ValueError("Prepared YouTube publish requires a structured account")
-    await asyncio.to_thread(prepared_publishers.publish_youtube_sync, account, payload)
+    return await asyncio.to_thread(prepared_publishers.publish_youtube_sync, account, payload)
 
 
-async def _publish_prepared_tiktok(
-    platform: str,
-    payload: dict,
-    target: jobs.Target,
-    *,
-    account,
-    account_file: Path | None,
-) -> None:
+async def _publish_prepared_tiktok(platform, payload, target, *, account, account_file):
     if account is None:
         raise ValueError("Prepared TikTok publish requires a structured account")
-    result = await asyncio.to_thread(prepared_publishers.publish_tiktok_sync, account, payload)
-    updated_config = result.get('updated_config') if isinstance(result, dict) else None
-    _persist_rotated_config(account, updated_config, payload=payload)
-
-    # Seed analytics so the video appears in the dashboard immediately.
-    # Private-account videos never show up in /v2/video/list/, so without
-    # this the analytics table stays empty for private TikTok accounts.
-    publish_data = (result.get('publish') or {}).get('data') or {}
-    publish_id = str(publish_data.get('publish_id') or '').strip()
-    if publish_id:
-        try:
-            from datetime import datetime, timezone
-            from myUtils import analytics_store
-            now = datetime.now(timezone.utc).isoformat()
-            title = str((payload.get('title') or payload.get('message') or '')[:200])
-            video_id = f"pub:{publish_id}"
-            analytics_store.upsert_video(
-                account_id=account.id,
-                platform='tiktok',
-                platform_video_id=video_id,
-                title=title,
-                published_at=now,
-            )
-            analytics_store.record_snapshot(
-                account_id=account.id,
-                platform='tiktok',
-                platform_video_id=video_id,
-                views=0, likes=0, comments=0, shares=0,
-                watch_time_seconds=0, engagement_rate=0.0,
-                title=title,
-                published_at=now,
-            )
-        except Exception:
-            pass  # non-critical, don't fail the publish
-
-    # Poll TikTok publish status until terminal or timeout. A terminal
-    # ``failed`` status MUST raise: returning normally marked the target
-    # succeeded even though TikTok definitively rejected the post.
-    access_token = result.get('access_token') if isinstance(result, dict) else None
-    if publish_id and access_token:
-        _TIKTOK_POLL_INTERVAL = 15  # seconds
-        _TIKTOK_POLL_ATTEMPTS = 20  # 20 × 15s = 5 min max
-
-        def _record(status_val, *, fail_reason=None, post_id=None, platform_url=None):
-            # Status bookkeeping is best-effort; it must never mask the
-            # publish outcome.
-            try:
-                jobs.upsert_tiktok_publish_status(
-                    publish_id,
-                    job_id=str(target.job_id),
-                    account_id=str(account.id),
-                    status=status_val,
-                    fail_reason=fail_reason,
-                    post_id=post_id,
-                    platform_url=platform_url,
-                )
-            except Exception:
-                _logger.debug("tiktok status persistence failed", exc_info=True)
-
-        _record('processing')
-        terminal_failure: str | None = None
-        for _ in range(_TIKTOK_POLL_ATTEMPTS):
-            await asyncio.sleep(_TIKTOK_POLL_INTERVAL)
-            try:
-                status_resp = await asyncio.to_thread(
-                    prepared_publishers.fetch_tiktok_publish_status,
-                    access_token, publish_id,
-                )
-            except Exception:
-                continue  # transient network error, keep polling
-            status_data = (status_resp.get('data') or {})
-            status_val = str(status_data.get('status') or 'processing').lower()
-            fail_reason = str(status_data.get('fail_reason') or '').strip() or None
-            post_id = str(
-                status_data.get('publicaly_available_post_id')
-                or status_data.get('post_id') or ''
-            ).strip() or None
-            platform_url = str(status_data.get('platform_url') or '').strip() or None
-            _record(
-                status_val,
-                fail_reason=fail_reason,
-                post_id=post_id,
-                platform_url=platform_url,
-            )
-            if status_val == 'publish_complete':
-                return
-            if status_val == 'failed':
-                terminal_failure = fail_reason or 'TikTok rejected the post'
-                break
-
-        if terminal_failure is not None:
-            # TikTok explicitly rejected the post. Re-sending the identical
-            # payload is not expected to help and risks a duplicate, so this
-            # is terminal — the operator gets the failure alert instead.
-            raise prepared_publishers.PreparedPublishError(
-                f"TikTok publish failed: {terminal_failure}",
-                retryable=False,
-            )
-        # The poll budget ran out before a terminal status. The post may still
-        # be processing, so the outcome is unknown: do NOT report success.
-        raise prepared_publishers.PreparedPublishError(
-            "TikTok publish status did not reach a terminal state within the "
-            "polling window; delivery outcome is unknown",
-            retryable=True,
-        )
+    receipt = delivery.receipt_for(payload, "tiktok")
+    if receipt is None:
+        result = await asyncio.to_thread(prepared_publishers.publish_tiktok_sync, account, payload)
+        _persist_rotated_config(account, result.get("updated_config"), payload=payload)
+        publish_id = str(((result.get("publish") or {}).get("data") or {}).get("publish_id") or "")
+        if not publish_id:
+            raise delivery.DeliveryUnknown("TikTok returned no publish receipt")
+        if delivery.receipt_for(payload, "tiktok") is None:
+            delivery.accepted(payload, provider="tiktok", receipt_id=publish_id)
+        access_token = result.get("access_token")
+    else:
+        publish_id = receipt["id"]
+        access_token, updated = await asyncio.to_thread(
+            prepared_publishers._ensure_tiktok_access_token, dict(account.config or {}))
+        _persist_rotated_config(account, updated, payload=payload)
+    if not access_token:
+        raise delivery.DeliveryUnknown("TikTok receipt exists but its credential is unavailable")
+    try:
+        response = await asyncio.to_thread(prepared_publishers.fetch_tiktok_publish_status, access_token, publish_id)
+    except (delivery.LeaseLost, delivery.DeliveryPending, delivery.DeliveryUnknown):
+        raise
+    except prepared_publishers.PreparedPublishError as exc:
+        if not exc.retryable:
+            raise
+        delivery.pending_or_unknown(payload, "TikTok receipt status is temporarily unavailable",
+                                    retry_after=_retry_after_seconds(exc))
+    except Exception:
+        delivery.pending_or_unknown(payload, "TikTok receipt status is temporarily unavailable")
+    data = response.get("data") or {}
+    status = str(data.get("status") or "processing").lower()
+    reason = str(data.get("fail_reason") or "")
+    db_path = Path(payload["_db_path"]) if payload.get("_db_path") else None
+    jobs.upsert_tiktok_publish_status(publish_id, job_id=str(target.job_id), account_id=str(account.id),
+        status=status, fail_reason=reason or None,
+        post_id=str(data.get("publicaly_available_post_id") or data.get("post_id") or "") or None,
+        platform_url=data.get("platform_url"), db_path=db_path)
+    if status == "publish_complete":
+        delivery.confirmed(payload, provider="tiktok", receipt_id=publish_id)
+        return
+    if status == "failed":
+        raise prepared_publishers.PreparedPublishError(f"TikTok publish failed: {reason}", retryable=False)
+    delivery.pending_or_unknown(payload, "TikTok is still processing the stored publish receipt")
 
 
 async def _publish_prepared_facebook(
@@ -3348,6 +3018,7 @@ async def _publish_prepared_facebook(
     result = await asyncio.to_thread(prepared_publishers.publish_facebook_sync, account, payload)
     updated_config = result.get('updated_config') if isinstance(result, dict) else None
     _persist_rotated_config(account, updated_config, payload=payload)
+    return result
 
 
 async def _publish_prepared_instagram(
@@ -3363,6 +3034,7 @@ async def _publish_prepared_instagram(
     result = await asyncio.to_thread(prepared_publishers.publish_instagram_sync, account, payload)
     updated_config = result.get('updated_config') if isinstance(result, dict) else None
     _persist_rotated_config(account, updated_config, payload=payload)
+    return result
 
 
 async def _publish_prepared_threads(
@@ -3378,6 +3050,7 @@ async def _publish_prepared_threads(
     result = await asyncio.to_thread(prepared_publishers.publish_threads_sync, account, payload)
     updated_config = result.get('updated_config') if isinstance(result, dict) else None
     _persist_rotated_config(account, updated_config, payload=payload)
+    return result
 
 
 async def _publish_prepared_discord(
@@ -3390,7 +3063,7 @@ async def _publish_prepared_discord(
 ) -> None:
     if account is None:
         raise ValueError("Prepared Discord publish requires a structured account")
-    await asyncio.to_thread(prepared_publishers.publish_discord_sync, account, payload)
+    return await asyncio.to_thread(prepared_publishers.publish_discord_sync, account, payload)
 
 
 async def _publish_prepared_patreon(
@@ -3448,7 +3121,8 @@ async def _publish_prepared_patreon(
             tier_name=tier_name,
             publish_strategy=publish_strategy,
         )
-        await app.publish()
+        delivery.starting(payload, operation="browser-publish:patreon")
+        return await app.publish()
     finally:
         os.unlink(body_file)
 
@@ -3463,7 +3137,7 @@ async def _publish_prepared_teaching_blog(
 ) -> None:
     if account is None:
         raise ValueError("Prepared Teaching Blog publish requires a structured account")
-    await asyncio.to_thread(prepared_publishers.publish_teaching_blog_sync, account, payload)
+    return await asyncio.to_thread(prepared_publishers.publish_teaching_blog_sync, account, payload)
 
 
 async def _publish_prepared_nw_sw_blog(
@@ -3476,7 +3150,7 @@ async def _publish_prepared_nw_sw_blog(
 ) -> None:
     if account is None:
         raise ValueError("Prepared NW/SW Blog publish requires a structured account")
-    await asyncio.to_thread(prepared_publishers.publish_nw_sw_blog_sync, account, payload)
+    return await asyncio.to_thread(prepared_publishers.publish_nw_sw_blog_sync, account, payload)
 
 
 async def _publish_prepared_bluesky(
@@ -3489,7 +3163,7 @@ async def _publish_prepared_bluesky(
 ) -> None:
     if account is None:
         raise ValueError("Prepared Bluesky publish requires a structured account")
-    await asyncio.to_thread(prepared_publishers.publish_bluesky_sync, account, payload)
+    return await asyncio.to_thread(prepared_publishers.publish_bluesky_sync, account, payload)
 
 
 async def _publish_prepared_not_implemented(
@@ -3539,6 +3213,7 @@ async def _run_prepared_campaign_upload(
     # by the Publish Center's single-media split), filter the artifact
     # list before handing off to the platform publisher so it doesn't
     # accidentally upload media items the post intentionally excluded.
+    original_artifacts = payload.get("artifacts")
     file_record_ids = payload.get("fileRecordIds")
     if isinstance(file_record_ids, list) and file_record_ids:
         allowed = {int(v) for v in file_record_ids if v is not None}
@@ -3548,10 +3223,19 @@ async def _run_prepared_campaign_upload(
             source_id = artifact.get("source_file_record_id")
             if source_id is None or int(source_id) in allowed:
                 kept.append(artifact)
-        payload = {**payload, "artifacts": kept}
-    if payload.get("campaignId") and not (payload.get("artifacts") or []):
-        raise ValueError(f"Prepared {platform} campaign has no media artifacts")
-    await publisher(platform=platform, payload=payload, target=target, account=account, account_file=account_file)
+        payload["artifacts"] = kept
+    try:
+        if (payload.get("campaignId") and not payload.get("artifacts")
+                and platform in {"tiktok", "youtube", "instagram", "twitter"}
+                and not delivery.state(payload).get("provider_receipt")):
+            raise ValueError(f"Prepared {platform} campaign has no media artifacts")
+        return await publisher(platform=platform, payload=payload, target=target, account=account, account_file=account_file)
+    finally:
+        updated_config = payload.pop("_updated_config", None)
+        if account is not None and updated_config:
+            _persist_rotated_config(account, updated_config, payload=payload)
+        if original_artifacts is not None:
+            payload["artifacts"] = original_artifacts
 
 
 def _public_https_url(value: str) -> bool:
@@ -3653,17 +3337,17 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
     # Thumbnails offload like any other asset — restore before the uploader
     # opens the path, otherwise a scheduled post fails on a missing cover.
     if db_path is not None:
-        _restore_optional_thumbnail(payload, db_path=db_path)
+        await asyncio.to_thread(_restore_optional_thumbnail, payload, db_path=db_path)
 
-    structured_account = _resolve_structured_account(target.account_ref)
-    canonical_account_file = _resolve_account_path(target.account_ref)
+    structured_account = _resolve_structured_account(target.account_ref, db_path=db_path)
+    canonical_account_file = _resolve_account_path(target.account_ref, db_path=db_path)
     if payload.get("campaignId") and payload.get("campaignPostId"):
         # Ensure artifact files are available locally
-        if db_path:
-            _ensure_artifact_paths_local(payload, db_path=db_path)
+        if db_path and not delivery.state(payload).get("provider_receipt"):
+            await asyncio.to_thread(_ensure_artifact_paths_local, payload, db_path=db_path)
         if structured_account is not None and structured_account.cookie_path:
             with decrypted_storage_state(canonical_account_file) as plain_path:
-                await _run_prepared_campaign_upload(
+                return await _run_prepared_campaign_upload(
                     platform,
                     payload,
                     target,
@@ -3671,7 +3355,7 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
                     account_file=plain_path,
                 )
         else:
-            await _run_prepared_campaign_upload(
+            return await _run_prepared_campaign_upload(
                 platform,
                 payload,
                 target,
@@ -3684,6 +3368,7 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
         thread_file_refs = payload.get("threadFileRefs") or [target.file_ref]
         thread_file_paths = [_resolve_file_path(file_ref, db_path=db_path) for file_ref in thread_file_refs]
         with decrypted_storage_state(canonical_account_file) as plain_path:
+            delivery.starting(payload, operation=f"browser-publish:{platform}")
             await _run_platform_upload(
                 platform,
                 payload,
@@ -3695,6 +3380,7 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
 
     file_path = _resolve_file_path(target.file_ref, db_path=db_path)
     with decrypted_storage_state(canonical_account_file) as plain_path:
+        delivery.starting(payload, operation=f"browser-publish:{platform}")
         await _run_platform_upload(
             platform,
             payload,
@@ -3840,6 +3526,7 @@ async def _serve(worker: PublishWorker, *, run_once: bool) -> None:
 def _cli(argv: list[str] | None = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
+    os.environ["SAU_PROCESS_ROLE"] = "worker"
 
     config = WorkerConfig(
         poll_interval=args.poll_interval,
@@ -3853,6 +3540,7 @@ def _cli(argv: list[str] | None = None) -> int:
         db_path=args.db_path,
         prep_runner=campaign_prep.make_default_prep_runner(),
     )
+    runtime.start_worker_maintenance(worker._db_path)
 
     mode = "once" if args.once else "forever"
     _logger.info(

@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sqlite3
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -44,6 +46,9 @@ class PublishEntitiesApiTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.base_dir = Path(self._tmp.name)
         self.db_path = self.base_dir / "db" / "database.db"
+        db_env = patch.dict(os.environ, {"SAU_DB_PATH": str(self.db_path)})
+        db_env.start()
+        self.addCleanup(db_env.stop)
         create_table.bootstrap(self.db_path)
 
         self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
@@ -66,7 +71,7 @@ class PublishEntitiesApiTests(unittest.TestCase):
             self._tmp.cleanup()
 
     def _insert_file_record(self, filename: str, file_path: str) -> int:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             cursor = conn.execute(
                 "INSERT INTO file_records (filename, filesize, file_path) VALUES (?, ?, ?)",
                 (filename, 1.0, file_path),
@@ -260,7 +265,7 @@ class PublishEntitiesApiTests(unittest.TestCase):
         profile_id = self._profile()
         account_id = self._account(profile_id)
         seeded = self._seed_campaign_entity(account_id=account_id, profile_id=profile_id)
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "UPDATE publish_job_targets SET schedule_at=? WHERE job_id=?",
                 ("2026-10-12T14:00:00", seeded["job_id"]),
@@ -278,7 +283,7 @@ class PublishEntitiesApiTests(unittest.TestCase):
         profile_id = self._profile()
         account_id = self._account(profile_id)
         seeded = self._seed_campaign_entity(account_id=account_id, profile_id=profile_id)
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "INSERT INTO publish_jobs (idempotency_key, profile_id, platform, payload_json, status, total_targets) VALUES (?, ?, ?, ?, ?, ?)",
                 ("later-target-job", profile_id, "twitter", json.dumps({"campaignId": seeded["campaign_id"], "campaignPostId": seeded["post_id"], "message": "hello world"}), "pending", 1),

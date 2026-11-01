@@ -22,29 +22,18 @@ from myUtils import pipeline_monitor
 
 
 def _db(path: Path) -> None:
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        """
-        CREATE TABLE campaigns (id INTEGER PRIMARY KEY, profile_id INTEGER, status TEXT,
-                                last_error TEXT, created_at TEXT, prepared_at TEXT,
-                                metadata_json TEXT);
-        CREATE TABLE publish_job_targets (id INTEGER PRIMARY KEY, job_id INTEGER, account_ref TEXT,
-                                          file_ref TEXT, status TEXT, schedule_at TEXT,
-                                          finished_at TEXT, last_error TEXT);
-        -- The language-routing audit reads these; a partial schema made the audit
-        -- fail and the monitor report a phantom problem on a healthy box.
-        CREATE TABLE accounts (id INTEGER PRIMARY KEY, account_name TEXT, platform TEXT,
-                               config_json TEXT);
-        CREATE TABLE file_records (id INTEGER PRIMARY KEY, filename TEXT);
-        CREATE TABLE media_groups (id INTEGER PRIMARY KEY);
-        CREATE TABLE media_group_items (media_group_id INTEGER, file_record_id INTEGER);
-        CREATE TABLE campaign_artifacts (id INTEGER PRIMARY KEY, campaign_id INTEGER,
-                                         artifact_kind TEXT, local_path TEXT, metadata_json TEXT);
-        CREATE TABLE campaign_posts (id INTEGER PRIMARY KEY, campaign_id INTEGER, draft_json TEXT);
-        """
-    )
-    conn.commit()
-    conn.close()
+    from db.createTable import bootstrap
+    from myUtils import jobs
+    from myUtils.sqlite_utils import connect
+    bootstrap(path)
+    with connect(path) as conn:
+        conn.execute("INSERT INTO profiles (id,name,slug) VALUES (1,'fixture','fixture')")
+        conn.execute("INSERT INTO media_groups (id,name) VALUES (1,'fixture')")
+        conn.execute("INSERT INTO accounts (id,profile_id,platform,account_name,cookie_path,auth_type,status) "
+                     "VALUES (11,1,'telegram','fixture','','api',1)")
+        conn.execute("INSERT INTO publish_jobs (id,idempotency_key,platform,payload_json,status,created_at) "
+                     "VALUES (1,'monitor','telegram','{}','pending','2020-01-01')")
+    jobs.heartbeat_worker("fixture-publisher", db_path=path)
 
 
 class CollectorTests(unittest.TestCase):
@@ -73,7 +62,8 @@ class CollectorTests(unittest.TestCase):
         # days in October 2026) the "healthy box" test failed for a reason that
         # had nothing to do with the code under test.
         with patch.object(pipeline_monitor, "_check_healthz", return_value=None), \
-             patch.object(pipeline_monitor, "_check_stt", return_value=[]):
+             patch.object(pipeline_monitor, "_check_stt", return_value=[]), \
+             patch.object(pipeline_monitor, "_check_disk", return_value=[]):
             return pipeline_monitor.collect_problems(
                 self.db, self.repo, self.inbox, **kwargs
             )
@@ -132,8 +122,8 @@ class CollectorTests(unittest.TestCase):
         now = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
         conn = sqlite3.connect(self.db)
         conn.execute(
-            "INSERT INTO campaigns (id, profile_id, status, last_error, created_at) "
-            "VALUES (42, 1, 'needs_review', 'prep failed: boom', ?)", (now,))
+            "INSERT INTO campaigns (id, profile_id, media_group_id, status, last_error, created_at) "
+            "VALUES (42, 1, 1, 'needs_review', 'prep failed: boom', ?)", (now,))
         conn.commit()
         conn.close()
         problems = self._collect()
@@ -170,7 +160,7 @@ class CollectorTests(unittest.TestCase):
         from collections import namedtuple
 
         Stats = namedtuple("Stats", "f_blocks f_frsize f_bavail")
-        with patch("os.statvfs", return_value=Stats(f_blocks=100 * 10**9 // 4096,
+        with patch("os.statvfs", create=True, return_value=Stats(f_blocks=100 * 10**9 // 4096,
                                                     f_frsize=4096,
                                                     f_bavail=5 * 10**9 // 4096)):
             problems = pipeline_monitor._check_disk(self.repo)
@@ -182,7 +172,7 @@ class CollectorTests(unittest.TestCase):
         from collections import namedtuple
 
         Stats = namedtuple("Stats", "f_blocks f_frsize f_bavail")
-        with patch("os.statvfs", return_value=Stats(f_blocks=100 * 10**9 // 4096,
+        with patch("os.statvfs", create=True, return_value=Stats(f_blocks=100 * 10**9 // 4096,
                                                     f_frsize=4096,
                                                     f_bavail=50 * 10**9 // 4096)):
             self.assertEqual(pipeline_monitor._check_disk(self.repo), [])
@@ -195,14 +185,15 @@ class CollectorTests(unittest.TestCase):
         stamp = datetime.fromtimestamp(past).isoformat(timespec="seconds")
         conn = sqlite3.connect(self.db)
         conn.execute(
-            "INSERT INTO campaigns (id, profile_id, status, last_error, created_at) "
-            "VALUES (77, 1, 'needs_review', 'prep failed', ?)", (stamp,))
+            "INSERT INTO campaigns (id, profile_id, media_group_id, status, last_error, created_at) "
+            "VALUES (77, 1, 1, 'needs_review', 'prep failed', ?)", (stamp,))
         conn.commit()
         conn.close()
 
         with patch.object(pipeline_monitor, "STATE_PATH", state_path), \
              patch.object(pipeline_monitor, "_check_healthz", return_value=None), \
              patch.object(pipeline_monitor, "_check_stt", return_value=[]), \
+             patch.object(pipeline_monitor, "_check_disk", return_value=[]), \
              patch("myUtils.ops_alerts.send_ops_alert",
                    side_effect=lambda **kw: sent.append(kw) or True):
             argv = ["--db", str(self.db), "--repo", str(self.repo),

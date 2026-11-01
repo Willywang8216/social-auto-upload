@@ -25,15 +25,35 @@ import tempfile
 import sys
 from pathlib import Path
 
+# Never load the operator's .env or start background work while collecting tests.
+os.environ["SAU_TESTING"] = "1"
+os.environ["APP_ENV"] = "testing"
+os.environ["SAU_PROCESS_ROLE"] = "web"
+os.environ["SAU_GOOGLE_LOGIN_ENABLED"] = "0"
+os.environ["SAU_AUTH_MODE"] = "legacy"
+os.environ["SAU_SOCIAMONIALS_FALLBACK"] = "0"
+os.environ["SAU_ACCOUNT_MAINTENANCE_INTERVAL_SECONDS"] = "0"
+os.environ["SAU_PUBLISH_SCHEDULER_INTERVAL_SECONDS"] = "0"
+os.environ["SAU_TG_REVIEW_POLL_SECONDS"] = "0"
+os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
+for _database_url_key in ("SAU_DB_URL", "DATABASE_URL", "TEST_DATABASE_URL"):
+    os.environ.pop(_database_url_key, None)
+
+# Refuse collection in a checkout carrying production runtime configuration.
+# Release checks run in a source-only tree/container, never the live bind mount.
+_SOURCE_ROOT = Path(__file__).resolve().parents[1]
+if any((_SOURCE_ROOT / name).exists() for name in (".env", ".env.production", ".env.local", "db/database.db")):
+    raise RuntimeError("Run tests in a source-only checkout without production configuration or database")
+
 # Resolve once, before any test imports the worker, and point the per-job sink
 # at a temp dir that pytest/tmp cleanup owns.
 _TEST_JOB_LOG_DIR = tempfile.mkdtemp(prefix="sau-test-jobs-")
-os.environ.setdefault("SAU_JOB_LOG_DIR", _TEST_JOB_LOG_DIR)
+os.environ["SAU_JOB_LOG_DIR"] = _TEST_JOB_LOG_DIR
 # …and keep the per-module sinks (logs/worker.log, logs/twitter.log, …) out of the
 # operator's real files too: a test fixture line in worker.log is
 # indistinguishable from a production incident when it is read later.
 _TEST_LOG_DIR = tempfile.mkdtemp(prefix="sau-test-logs-")
-os.environ.setdefault("SAU_LOG_DIR", _TEST_LOG_DIR)
+os.environ["SAU_LOG_DIR"] = _TEST_LOG_DIR
 
 # Same idea for the media-prep workspace root.
 _TEST_GENERATED_MEDIA_ROOT = os.path.join(
@@ -115,3 +135,46 @@ for _module_name in (
     if _module is not None and hasattr(_module, "DB_PATH"):
         _module.DB_PATH = Path(os.environ["SAU_DB_PATH"])
 os.environ["SAU_LLM_MIN_INTERVAL_SECONDS"] = "0"  # tests must not sleep on LLM pacing
+
+
+import ipaddress
+import socket
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_external_network(monkeypatch):
+    """Provider contracts must be mocked; only local fixture servers may run."""
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    original_getaddrinfo = socket.getaddrinfo
+
+    def check_host(host):
+        if isinstance(host, bytes):
+            host = host.decode("ascii")
+        if host in {None, "", "localhost"}:
+            return
+        try:
+            if ipaddress.ip_address(host).is_loopback:
+                return
+        except ValueError:
+            pass
+        raise RuntimeError("External network disabled in tests; mock the provider")
+
+    def guarded_connect(sock, address):
+        if isinstance(address, tuple):
+            check_host(address[0])
+        return original_connect(sock, address)
+
+    def guarded_connect_ex(sock, address):
+        if isinstance(address, tuple):
+            check_host(address[0])
+        return original_connect_ex(sock, address)
+
+    def guarded_resolve(host, *args, **kwargs):
+        check_host(host)
+        return original_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_resolve)

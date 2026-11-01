@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from contextlib import closing
 
 import db.createTable as create_table
 
@@ -18,7 +19,7 @@ flask_available = importlib.util.find_spec("flask") is not None
 
 
 def _seed_account(db_path: Path, *, file_path: str = "alice.json") -> int:
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         cur = conn.execute(
             "INSERT INTO user_info (type, filePath, userName, status) VALUES (?, ?, ?, ?)",
             (3, file_path, "alice", 1),
@@ -30,7 +31,6 @@ def _seed_account(db_path: Path, *, file_path: str = "alice.json") -> int:
 @unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
 class AuthGateTests(unittest.TestCase):
     def setUp(self) -> None:
-        from conf import BASE_DIR
         from myUtils import jobs as job_runtime
         from myUtils.security import SecurityPolicy
         from sau_backend import app
@@ -41,12 +41,8 @@ class AuthGateTests(unittest.TestCase):
         self._patch = patch.object(job_runtime, "DB_PATH", self.db_path)
         self._patch.start()
 
-        # /getAccounts and friends still read from the legacy DB at
-        # BASE_DIR/db/database.db. Make sure that file exists with the
-        # expected schema so post-auth requests don't 500.
-        self._legacy_db = Path(BASE_DIR) / "db" / "database.db"
-        self._legacy_db.parent.mkdir(parents=True, exist_ok=True)
-        create_table.bootstrap(self._legacy_db)
+        self._env = patch.dict("os.environ", {"SAU_DB_PATH": str(self.db_path)})
+        self._env.start()
 
         self._previous_policy = app.config["SECURITY_POLICY"]
         app.config["SECURITY_POLICY"] = SecurityPolicy(
@@ -59,6 +55,7 @@ class AuthGateTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._patch.stop()
+        self._env.stop()
         self.app.config["SECURITY_POLICY"] = self._previous_policy
         self._tmp.cleanup()
 
@@ -143,21 +140,16 @@ class UploadCookieValidationTests(unittest.TestCase):
         create_table.bootstrap(self.db_path)
         self._patch = patch.object(job_runtime, "DB_PATH", self.db_path)
         self._patch.start()
-        # The /uploadCookie endpoint reads the legacy DB at BASE_DIR/db,
-        # which is shared across tests. We seed an account row so the
-        # endpoint can locate the destination path. A test-only base dir
-        # would be cleaner; this is the smallest patch.
-        from conf import BASE_DIR
-        self.base_dir = Path(BASE_DIR)
-        self.legacy_db = self.base_dir / "db" / "database.db"
-        self.legacy_db.parent.mkdir(parents=True, exist_ok=True)
-        create_table.bootstrap(self.legacy_db)
+        import sau_backend
+        self.base_dir = Path(self._tmp.name)
+        self.legacy_db = self.db_path
+        self._env = patch.dict("os.environ", {"SAU_DB_PATH": str(self.db_path)})
+        self._env.start()
+        self._base = patch.object(sau_backend, "BASE_DIR", self.base_dir)
+        self._base.start()
         self.account_id = _seed_account(self.legacy_db, file_path="alice.json")
-        # Make sure the cookie destination doesn't survive between tests.
         self.cookie_target = self.base_dir / "cookiesFile" / "alice.json"
         self.cookie_target.parent.mkdir(parents=True, exist_ok=True)
-        if self.cookie_target.exists():
-            self.cookie_target.unlink()
 
         self._previous_policy = app.config["SECURITY_POLICY"]
         app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
@@ -166,13 +158,15 @@ class UploadCookieValidationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._patch.stop()
+        self._env.stop()
+        self._base.stop()
         if hasattr(self, "_previous_policy"):
             from sau_backend import app
             app.config["SECURITY_POLICY"] = self._previous_policy
         if self.cookie_target.exists():
             self.cookie_target.unlink()
         # Clean up the seeded row.
-        with sqlite3.connect(self.legacy_db) as conn:
+        with closing(sqlite3.connect(self.legacy_db)) as conn, conn:
             conn.execute("DELETE FROM user_info WHERE id = ?", (self.account_id,))
             conn.commit()
         self._tmp.cleanup()

@@ -8,13 +8,16 @@ The application is built by ``sau_app.create_app()``, which wraps the existing
 ``sau_backend`` monolith with the Phase 1 factory extensions (request IDs,
 health endpoints, config validation, standard error schema).
 
-Note: until the worker is split out (Phase 9), the app still starts its
-in-process publishing/maintenance threads, so production should run a **single**
-Gunicorn worker (``--workers 1``) and rely on ``--threads`` for concurrency, to
-avoid multiple processes draining the job queue at once.
+Publishing and maintenance belong exclusively to the standalone worker service.
+This entrypoint always selects the web role before importing the application,
+even if an old local environment requested embedded background work.
 """
 
 from __future__ import annotations
+
+import os
+
+os.environ["SAU_PROCESS_ROLE"] = "web"
 
 from sau_app import create_app
 

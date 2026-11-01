@@ -16,13 +16,14 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, quote_plus, unquote, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, quote_plus, unquote, urlencode, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
 from myUtils import media_pipeline
 from myUtils import platform_limits
 from myUtils import tiktok_auth
+from myUtils import delivery, generic_delivery
 
 try:
     import requests
@@ -284,12 +285,14 @@ def _raise_for_status(response) -> None:
             and 400 <= status < 500
             and status not in {408, 425, 429}
         )
+        retry_after = (getattr(response, "headers", None) or {}).get("Retry-After")
+        details = {"retryAfter": str(retry_after)[:128]} if retry_after is not None else {}
         if detail:
             raise PreparedPublishError(
-                f"HTTP {status}: {detail}", retryable=retryable
+                f"HTTP {status}: {detail}", retryable=retryable, details=details
             ) from None
         raise PreparedPublishError(
-            _redact_tokens(str(exc)), retryable=retryable
+            _redact_tokens(str(exc)), retryable=retryable, details=details
         ) from None
 
 
@@ -814,6 +817,7 @@ def _publish_telegram_to_one(
     disable_preview: str,
     media: dict[str, list[dict[str, str]]],
     completed_operations: set[str] | None = None,
+    on_checkpoint=None,
 ) -> dict[str, Any]:
     """Send the given payload to a single Telegram chat and return a status dict.
 
@@ -836,6 +840,9 @@ def _publish_telegram_to_one(
             )
         if operation_key in completed:
             return None
+        completed.add(f"ambiguous:{operation_key}")
+        if on_checkpoint:
+            on_checkpoint(completed)
         try:
             response = http.post(TELEGRAM_API_ROOT.format(token=token, method=method), **kwargs)
         except Exception:
@@ -846,6 +853,10 @@ def _publish_telegram_to_one(
             _raise_for_status(response)
         except PreparedPublishError as exc:
             status = int(getattr(response, "status_code", 0) or 0)
+            if 400 <= status < 500:
+                completed.discard(f"ambiguous:{operation_key}")
+                if on_checkpoint:
+                    on_checkpoint(completed)
             if status >= 500 or status == 0:
                 retry_safe = False
                 completed.add(f"ambiguous:{operation_key}")
@@ -873,6 +884,9 @@ def _publish_telegram_to_one(
             pass
         responses.append(response)
         completed.add(operation_key)
+        completed.discard(f"ambiguous:{operation_key}")
+        if on_checkpoint:
+            on_checkpoint(completed)
         return response
 
     try:
@@ -1063,6 +1077,7 @@ def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
             disable_preview=disable_preview,
             media=media,
             completed_operations=set(completed),
+            on_checkpoint=lambda operations, chat=chat_id: _telegram_checkpoint(payload, delivery_key, completed_by_chat, chat, operations),
         )
         results.append(result)
         completed_by_chat[chat_id] = sorted(
@@ -1136,6 +1151,7 @@ def _publish_telegram_mtproto_one(
     silent: bool,
     media: dict[str, list[dict[str, str]]],
     completed_operations: set[str] | None = None,
+    on_checkpoint=None,
 ) -> dict[str, Any]:
     """Send the payload to a single chat over MTProto (as the user account).
 
@@ -1149,6 +1165,20 @@ def _publish_telegram_mtproto_one(
     retry_safe = True
     completed = completed_operations if completed_operations is not None else set()
 
+    def before(operation):
+        nonlocal retry_safe
+        if f"ambiguous:{operation}" in completed:
+            retry_safe = False
+            raise PreparedPublishError("Telegram operation may already have been accepted; verify before retrying", retryable=False)
+        completed.add(f"ambiguous:{operation}")
+        if on_checkpoint:
+            on_checkpoint(completed)
+
+    def after(operation):
+        completed.discard(f"ambiguous:{operation}")
+        if on_checkpoint:
+            on_checkpoint(completed)
+
     async def _send():
         nonlocal retry_safe
         peer = await client.get_input_entity(chat_id)
@@ -1156,15 +1186,19 @@ def _publish_telegram_mtproto_one(
             text = message if not caption or caption == message else caption
             if "message" not in completed:
                 try:
+                    before("message")
                     await client.send_message(peer, text, silent=silent)
                     completed.add("message")
+                    after("message")
                 except Exception:
                     retry_safe = False
                     raise
             if overflow_message and overflow_message != text and "overflow" not in completed:
                 try:
+                    before("overflow")
                     await client.send_message(peer, overflow_message, silent=silent)
                     completed.add("overflow")
+                    after("overflow")
                 except Exception:
                     retry_safe = False
                     raise
@@ -1177,6 +1211,7 @@ def _publish_telegram_mtproto_one(
             return
         if "media" not in completed:
             try:
+                before("media")
                 remaining = attachments[1:]
                 if len(attachments) == 1:
                     await client.send_file(peer, first_path, caption=caption or None, silent=silent)
@@ -1190,13 +1225,16 @@ def _publish_telegram_mtproto_one(
                         if item_path:
                             await client.send_file(peer, item_path, silent=silent)
                 completed.add("media")
+                after("media")
             except Exception:
                 retry_safe = False
                 raise
         if overflow_message and "overflow" not in completed:
             try:
+                before("overflow")
                 await client.send_message(peer, overflow_message, silent=silent)
                 completed.add("overflow")
+                after("overflow")
             except Exception:
                 retry_safe = False
                 raise
@@ -1274,6 +1312,7 @@ def _publish_telegram_mtproto_sync(account, payload: dict, *, session=None) -> l
                 silent=silent,
                 media=media,
                 completed_operations=set(completed),
+                on_checkpoint=lambda operations, chat=chat_id: _telegram_checkpoint(payload, delivery_key, completed_by_chat, chat, operations),
             )
             results.append(result)
             completed_by_chat[chat_id] = sorted(set(completed) | set(result.get("completedOperations", [])))
@@ -1312,10 +1351,21 @@ def validate_discord_config_live(config: dict[str, Any], *, session=None) -> dic
 
 
 def publish_discord_sync(account, payload: dict, *, session=None) -> list[Any]:
+    operations = generic_delivery.Operations(payload, "discord")
+    operations.plan(["message"])
+    prior = operations.get("message")
+    if prior:
+        operations.finish()
+        return [{"id": prior["id"]}]
     config = account.config or {}
     webhook_url = str(_config_value(config, "webhookUrl") or "").strip()
     if not webhook_url:
         raise PreparedPublishError("Discord publish requires webhookUrl or webhookUrlEnv")
+    # Discord otherwise defaults to 204/no receipt. Force a final message body.
+    webhook_parts = urlparse(webhook_url)
+    query = dict(parse_qsl(webhook_parts.query, keep_blank_values=True))
+    query["wait"] = "true"
+    webhook_url = webhook_parts._replace(query=urlencode(query)).geturl()
 
     artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
@@ -1353,16 +1403,19 @@ def publish_discord_sync(account, payload: dict, *, session=None) -> list[Any]:
         if embeds:
             payload_json["embeds"] = embeds
         if files:
-            response = _get_session(session).post(
+            response = operations.request("message", lambda: _get_session(session).post(
                 webhook_url,
                 data={"payload_json": json.dumps(payload_json, ensure_ascii=False)},
                 files=files,
                 timeout=600,
-            )
+            ))
         else:
-            response = _get_session(session).post(webhook_url, json=payload_json, timeout=120)
-        _raise_for_status(response)
-        return [_response_payload(response)]
+            response = operations.request("message", lambda: _get_session(session).post(
+                webhook_url, json=payload_json, timeout=120))
+        body = _response_payload(response) or {}
+        operations.record("message", body.get("id") if isinstance(body, dict) else None)
+        operations.finish()
+        return [body]
     finally:
         for handle in open_files:
             handle.close()
@@ -1553,17 +1606,14 @@ def _maybe_refresh_instagram_token(config: dict[str, Any], *, session=None) -> d
 
 
 def publish_facebook_sync(account, payload: dict, *, session=None) -> dict[str, Any]:
+    operations = generic_delivery.Operations(payload, "facebook")
     config = dict(account.config or {})
     prior_user_token = str(config.get("metaUserAccessToken") or "").strip()
     prior_page_token = str(config.get("accessToken") or "").strip()
     config = _maybe_refresh_facebook_token(config, session=session)
-    # Re-derive page-level access_token when:
-    #   (a) the user token rotated, or
-    #   (b) the page token is missing/empty (e.g. from a partial OAuth callback).
-    # Page tokens inherit the user token's lifecycle, so without this publishing
-    # silently breaks ~60 days after connect.
     if (config.get("metaUserAccessToken") != prior_user_token) or not prior_page_token:
         config = _rederive_meta_page_token(config, "facebook", session=session)
+    payload["_updated_config"] = config  # transient; the worker persists credentials separately
     _check_meta_token_not_expired(config, "Facebook")
     page_id = str(config.get("pageId") or "").strip()
     access_token = str(_config_value(config, "accessToken") or "").strip()
@@ -1575,105 +1625,100 @@ def publish_facebook_sync(account, payload: dict, *, session=None) -> dict[str, 
     http = _get_session(session)
     message = _enforce_message_limit(_payload_message(payload), "facebook")
     title = _message_title(payload)
-    artifacts = payload.get("artifacts") or []
-    media = _extract_media(payload)
-    if artifacts and not (media["videos"] or media["images"]):
-        raise PreparedPublishError("Facebook media artifacts were supplied but none is a supported image/video")
-    if len(media["videos"]) > 1:
-        raise PreparedPublishError("Facebook publishing supports one video per post")
-    if media["videos"]:
-        _enforce_video_limits(str(media["videos"][0].get("local_path") or ""), "facebook")
-    if len(media["images"]) > 10:
-        raise PreparedPublishError("Facebook photo attachments support at most ten images per post")
+    first_comment = _first_comment_text(payload)
+    # Completed photo uploads can also be attached without their local files.
+    saved_photos = [name for name in operations.progress.get("plan", []) if name.startswith("photo:")]
+    resuming = (operations.get("video") or operations.get("post")
+                or (saved_photos and all(operations.get(name) for name in saved_photos)))
+    media = {"images": [], "videos": []} if resuming else _extract_media(payload)
+    if not resuming:
+        if payload.get("artifacts") and not (media["videos"] or media["images"]):
+            raise PreparedPublishError("Facebook media artifacts were supplied but none is a supported image/video")
+        if len(media["videos"]) > 1:
+            raise PreparedPublishError("Facebook publishing supports one video per post")
+        if media["videos"]:
+            _enforce_video_limits(str(media["videos"][0].get("local_path") or ""), "facebook")
+        if len(media["images"]) > 10:
+            raise PreparedPublishError("Facebook photo attachments support at most ten images per post")
+    plan = operations.progress.get("plan")
+    if plan is None:
+        if media["videos"]:
+            plan = ["video"]
+        elif len(media["images"]) > 1:
+            plan = [f"photo:{index}" for index in range(len(media["images"]))] + ["post"]
+        else:
+            plan = ["post"]
+            if not media["images"] and first_comment:
+                plan.append("comment")
+    operations.plan(plan)
+    photo_operations = [name for name in plan if name.startswith("photo:")]
 
     def _do_post():
         results = []
-        def _post(edge: str, *, data: dict, files=None, timeout=120):
-            response = http.post(
-                f"{FACEBOOK_GRAPH_ROOT}/{page_id}/{edge}",
-                data=data,
-                files=files,
-                timeout=timeout,
-            )
-            _raise_for_status(response)
-            body = _response_payload(response)
+
+        def _post(edge: str, operation: str, *, data: dict, files=None, timeout=120, node_id=None):
+            prior = operations.get(operation)
+            if prior:
+                body = {"id": prior["id"]}
+                if prior.get("post_id"):
+                    body["post_id"] = prior["post_id"]
+            else:
+                response = operations.request(operation, lambda: http.post(
+                    f"{FACEBOOK_GRAPH_ROOT}/{node_id or page_id}/{edge}",
+                    data=data, files=files, timeout=timeout))
+                body = _response_payload(response) or {}
+                if not isinstance(body, dict):
+                    body = {}
+                operations.record(operation, body.get("id") or body.get("post_id"),
+                                  status="processing" if operation == "video" else "complete",
+                                  post_id=str(body.get("post_id") or ""), stage=operation)
             results.append(body)
             return body
 
-        if media["videos"]:
-            item = media["videos"][0]
-            data = {"access_token": access_token, "description": message, "title": title}
-            local_path = item.get("local_path")
+        def _upload(edge, operation, item, data):
+            if operations.get(operation):
+                return _post(edge, operation, data=data)
             public_url = item.get("public_url")
+            local_path = item.get("local_path")
             if public_url:
-                data["file_url"] = public_url
-                _post("videos", data=data, timeout=600)
-            elif local_path:
+                data["file_url" if edge == "videos" else "url"] = public_url
+                return _post(edge, operation, data=data, timeout=600)
+            if local_path:
                 with Path(local_path).open("rb") as handle:
-                    _post("videos", data=data, files={"source": (Path(local_path).name, handle)}, timeout=1800)
-            else:
-                raise PreparedPublishError("Facebook video publish requires a public_url or local_path")
+                    return _post(edge, operation, data=data,
+                                 files={"source": (Path(local_path).name, handle)}, timeout=1800)
+            raise PreparedPublishError("Facebook media publish requires a public_url or local_path")
+
+        if "video" in plan:
+            body = _upload("videos", "video", (media["videos"] or [{}])[0],
+                           {"access_token": access_token, "description": message, "title": title})
+            if operations.get("video")["status"] != "complete":
+                generic_delivery.poll_facebook_video(http, payload, access_token, str(body["id"]))
+                operations.record("video", body["id"], stage="video")
             return results
 
-        if len(media["images"]) > 1:
+        if operations.get("post"):
+            for operation in plan:
+                if operation.startswith("photo:"):
+                    results.append({"id": operations.get(operation)["id"]})
+            body = _post("feed", "post", data={})
+        elif photo_operations:
             attached_media = []
-            for item in media["images"][:10]:
-                data = {"access_token": access_token, "published": "false"}
-                local_path = item.get("local_path")
-                public_url = item.get("public_url")
-                if public_url:
-                    data["url"] = public_url
-                    body = _post("photos", data=data)
-                elif local_path:
-                    with Path(local_path).open("rb") as handle:
-                        body = _post("photos", data=data, files={"source": (Path(local_path).name, handle)}, timeout=600)
-                else:
-                    raise PreparedPublishError("Facebook image publish requires a public_url or local_path")
-                media_id = body.get("id")
-                if not media_id:
-                    raise PreparedPublishError("Facebook photo upload did not return an id")
-                attached_media.append({"media_fbid": media_id})
-
-            _post(
-                "feed",
-                data={
-                    "access_token": access_token,
-                    "message": message,
-                    "attached_media": json.dumps(attached_media, ensure_ascii=False),
-                },
-            )
-            return results
-
-        if media["images"]:
-            item = media["images"][0]
-            data = {"access_token": access_token, "caption": message}
-            local_path = item.get("local_path")
-            public_url = item.get("public_url")
-            if public_url:
-                data["url"] = public_url
-                _post("photos", data=data)
-            elif local_path:
-                with Path(local_path).open("rb") as handle:
-                    _post("photos", data=data, files={"source": (Path(local_path).name, handle)}, timeout=600)
-            else:
-                raise PreparedPublishError("Facebook image publish requires a public_url or local_path")
-            return results
-
-        _post("feed", data={"access_token": access_token, "message": message})
-        first_comment = _first_comment_text(payload)
-        if first_comment:
-            last = results[-1] if results else {}
-            post_id = last.get("post_id") or last.get("id")
-
-            def _poster(pid, text):
-                response = http.post(
-                    f"{FACEBOOK_GRAPH_ROOT}/{pid}/comments",
-                    data={"access_token": access_token, "message": text},
-                    timeout=60,
-                )
-                _raise_for_status(response)
-                results.append(_response_payload(response))
-            _try_post_first_comment(platform="facebook", post_id=post_id, text=first_comment, poster=_poster)
+            for index, operation in enumerate(photo_operations):
+                item = media["images"][index] if index < len(media["images"]) else {}
+                photo = _upload("photos", operation, item,
+                                {"access_token": access_token, "published": "false"})
+                attached_media.append({"media_fbid": photo["id"]})
+            body = _post("feed", "post", data={"access_token": access_token, "message": message,
+                         "attached_media": json.dumps(attached_media, ensure_ascii=False)})
+        elif media["images"]:
+            body = _upload("photos", "post", media["images"][0],
+                           {"access_token": access_token, "caption": message})
+        else:
+            body = _post("feed", "post", data={"access_token": access_token, "message": message})
+        if "comment" in plan:
+            _post("comments", "comment", node_id=body.get("post_id") or body["id"],
+                  data={"access_token": access_token, "message": first_comment}, timeout=60)
         return results
 
     try:
@@ -1681,27 +1726,21 @@ def publish_facebook_sync(account, payload: dict, *, session=None) -> dict[str, 
     except PreparedPublishError as exc:
         if not _is_recoverable_oauth_error(exc):
             raise
-        # Single retry: force a user-token + page-token rotation then try again.
+        # A definite OAuth rejection can retry, reusing every completed photo/post.
         config = _maybe_refresh_facebook_token(config, session=session)
         config = _rederive_meta_page_token(config, "facebook", session=session)
+        payload["_updated_config"] = config
         access_token = str(config.get("accessToken") or access_token).strip()
         results = _do_post()
-
+    operations.finish(receipt_id=operations.get("video" if "video" in plan else "post")["id"])
     return {"results": results, "updated_config": config}
 
 
-def _instagram_create_container(http, ig_user_id: str, access_token: str, data: dict) -> str:
-    response = http.post(
-        f"{FACEBOOK_GRAPH_ROOT}/{ig_user_id}/media",
-        data={**data, "access_token": access_token},
-        timeout=120,
-    )
-    _raise_for_status(response)
-    payload = _response_payload(response)
-    container_id = payload.get("id")
-    if not container_id:
-        raise PreparedPublishError("Instagram media creation did not return an id")
-    return str(container_id)
+def _instagram_create_container(http, ig_user_id: str, access_token: str, data: dict,
+                                *, payload=None, operation="container") -> str:
+    from myUtils.meta_delivery import create_container
+    return create_container(http, platform="instagram", user_id=ig_user_id, access_token=access_token,
+                            payload=payload if payload is not None else {}, data=data, operation=operation)
 
 
 def _wait_for_container_status(
@@ -1749,7 +1788,7 @@ def _wait_for_container_status(
         status = str(body.get(field) or body.get("status") or "").upper()
         last_status = status
         if status in ("FINISHED", "PUBLISHED"):
-            return
+            return status
         if status in ("ERROR", "EXPIRED", "FAILED"):
             # Meta only returns a field when it is requested, so the poll asks
             # for ``error_message`` explicitly (see _container_status_field).
@@ -1766,7 +1805,7 @@ def _wait_for_container_status(
                     "check the media against the platform's duration/size limits"
                 )
             raise PreparedPublishError(
-                f"{platform.title()} container {container_id} failed to process: {detail}"
+                f"{platform.title()} container {container_id} failed to process: {detail}", retryable=False
             )
         # Never sleep past the deadline; cap the nap to the time remaining.
         sleep_for = min(interval, max(0.0, deadline - time.monotonic()))
@@ -1813,12 +1852,16 @@ def validate_instagram_config_live(config: dict[str, Any], *, session=None) -> d
 
 
 def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
+    from myUtils import delivery as delivery_state
+    from myUtils.meta_delivery import finish_container
+    generic_delivery.Operations(payload, "instagram", allow_receipt=True)
     config = dict(account.config or {})
     prior_user_token = str(config.get("metaUserAccessToken") or "").strip()
     prior_page_token = str(config.get("accessToken") or "").strip()
     config = _maybe_refresh_instagram_token(config, session=session)
     if (config.get("metaUserAccessToken") != prior_user_token) or not prior_page_token:
         config = _rederive_meta_page_token(config, "instagram", session=session)
+    payload["_updated_config"] = config
     _check_meta_token_not_expired(config, "Instagram")
     ig_user_id = str(config.get("igUserId") or "").strip()
     access_token = str(_config_value(config, "accessToken") or "").strip()
@@ -1829,18 +1872,25 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
 
     http = _get_session(session)
     message = _enforce_message_limit(_payload_message(payload), "instagram")
-    artifacts = payload.get("artifacts") or []
-    media = _extract_media(payload)
-    if artifacts and not (media["videos"] or media["images"]):
-        raise PreparedPublishError("Instagram media artifacts were supplied but none is a supported image/video")
-    if len(media["videos"]) > 1:
-        raise PreparedPublishError("Instagram publish accepts one video per post")
-    if len(media["images"]) > 10:
-        raise PreparedPublishError("Instagram carousel accepts at most ten images")
-    if media["videos"]:
-        _enforce_video_limits(str(media["videos"][0].get("local_path") or ""), "instagram")
+    first_comment = _first_comment_text(payload)
 
     def _do_post():
+        prior = delivery_state.receipt_for(payload, "instagram")
+        if prior is not None:
+            return finish_container(http, platform="instagram", user_id=ig_user_id,
+                                    access_token=access_token, payload=payload, container_id=prior["id"],
+                                    finalize=not bool(first_comment))
+        # A saved container bypasses all local-media validation above this point.
+        artifacts = payload.get("artifacts") or []
+        media = _extract_media(payload)
+        if artifacts and not (media["videos"] or media["images"]):
+            raise PreparedPublishError("Instagram media artifacts were supplied but none is a supported image/video")
+        if len(media["videos"]) > 1:
+            raise PreparedPublishError("Instagram publish accepts one video per post")
+        if len(media["images"]) > 10:
+            raise PreparedPublishError("Instagram carousel accepts at most ten images")
+        if media["videos"]:
+            _enforce_video_limits(str(media["videos"][0].get("local_path") or ""), "instagram")
         if media["videos"]:
             public_url = media["videos"][0].get("public_url") or ""
             if not public_url:
@@ -1850,10 +1900,11 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
                 ig_user_id,
                 access_token,
                 {"media_type": "REELS", "video_url": public_url, "caption": message},
+                payload=payload,
             )
         elif len(media["images"]) > 1:
             child_ids = []
-            for item in media["images"][:10]:
+            for index, item in enumerate(media["images"][:10]):
                 public_url = item.get("public_url") or ""
                 if not public_url:
                     raise PreparedPublishError("Instagram carousel publish requires public image URLs")
@@ -1863,6 +1914,7 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
                         ig_user_id,
                         access_token,
                         {"image_url": public_url, "is_carousel_item": "true"},
+                        payload=payload, operation=f"child:{index}",
                     )
                 )
             container_id = _instagram_create_container(
@@ -1870,6 +1922,7 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
                 ig_user_id,
                 access_token,
                 {"media_type": "CAROUSEL", "children": ",".join(child_ids), "caption": message},
+                payload=payload,
             )
         elif media["images"]:
             public_url = media["images"][0].get("public_url") or ""
@@ -1880,18 +1933,14 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
                 ig_user_id,
                 access_token,
                 {"image_url": public_url, "caption": message},
+                payload=payload,
             )
         else:
             raise PreparedPublishError("Instagram publish requires at least one image or video")
 
-        _wait_for_container_status(http, container_id, access_token, platform="instagram")
-        publish_response = http.post(
-            f"{FACEBOOK_GRAPH_ROOT}/{ig_user_id}/media_publish",
-            data={"creation_id": container_id, "access_token": access_token},
-            timeout=120,
-        )
-        _raise_for_status(publish_response)
-        return {"container_id": container_id, "publish": _response_payload(publish_response)}
+        return finish_container(http, platform="instagram", user_id=ig_user_id,
+                                access_token=access_token, payload=payload, container_id=container_id,
+                                finalize=not bool(first_comment))
 
     try:
         post_result = _do_post()
@@ -1900,37 +1949,33 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
             raise
         config = _maybe_refresh_instagram_token(config, session=session)
         config = _rederive_meta_page_token(config, "instagram", session=session)
+        payload["_updated_config"] = config
         access_token = str(config.get("accessToken") or access_token).strip()
         post_result = _do_post()
 
     publish_body = post_result.get("publish", {}) if isinstance(post_result, dict) else {}
-    first_comment = _first_comment_text(payload)
     if first_comment:
         media_id = publish_body.get("id") if isinstance(publish_body, dict) else None
-
-        def _poster(pid, text):
-            response = http.post(
-                f"{FACEBOOK_GRAPH_ROOT}/{pid}/comments",
-                data={"message": text, "access_token": access_token},
-                timeout=60,
-            )
-            _raise_for_status(response)
-        _try_post_first_comment(platform="instagram", post_id=media_id, text=first_comment, poster=_poster)
+        if not media_id:
+            raise delivery.DeliveryUnknown("Instagram post is published but its comment destination ID is unavailable")
+        operations = generic_delivery.Operations(payload, "instagram", allow_receipt=True)
+        if not operations.get("comment"):
+            response = operations.request("comment", lambda: http.post(
+                f"{FACEBOOK_GRAPH_ROOT}/{media_id}/comments",
+                data={"message": first_comment, "access_token": access_token}, timeout=60))
+            comment = _response_payload(response) or {}
+            operations.record("comment", comment.get("id") if isinstance(comment, dict) else None,
+                              provider_receipt=False)
+        delivery.accepted(payload, provider="instagram", receipt_id=post_result["container_id"],
+                          status="delivered", stage="complete", media_id=str(media_id))
     return {"container_id": post_result.get("container_id", ""), "publish": publish_body, "updated_config": config}
 
 
-def _threads_create_container(http, user_id: str, access_token: str, data: dict) -> str:
-    response = http.post(
-        f"{THREADS_GRAPH_ROOT}/{user_id}/threads",
-        data={**data, "access_token": access_token},
-        timeout=120,
-    )
-    _raise_for_status(response)
-    payload = _response_payload(response)
-    container_id = payload.get("id")
-    if not container_id:
-        raise PreparedPublishError("Threads media creation did not return an id")
-    return str(container_id)
+def _threads_create_container(http, user_id: str, access_token: str, data: dict,
+                              *, payload=None, operation="container") -> str:
+    from myUtils.meta_delivery import create_container
+    return create_container(http, platform="threads", user_id=user_id, access_token=access_token,
+                            payload=payload if payload is not None else {}, data=data, operation=operation)
 
 
 def _validate_threads_video_artifact(item: dict[str, Any]) -> None:
@@ -2032,8 +2077,12 @@ def _maybe_refresh_threads_token(config: dict[str, Any], *, session=None) -> dic
 
 
 def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
+    from myUtils import delivery as delivery_state
+    from myUtils.meta_delivery import finish_container
+    generic_delivery.Operations(payload, "threads", allow_receipt=True)
     config = dict(account.config or {})
     config = _maybe_refresh_threads_token(config, session=session)
+    payload["_updated_config"] = config
     user_id = str(config.get("threadUserId") or config.get("userId") or "").strip()
     access_token = str(_config_value(config, "accessToken") or "").strip()
     if not user_id:
@@ -2042,6 +2091,11 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
         raise PreparedPublishError("Threads publish requires accessToken or accessTokenEnv")
 
     http = _get_session(session)
+    prior = delivery_state.receipt_for(payload, "threads")
+    if prior is not None:
+        result = finish_container(http, platform="threads", user_id=user_id,
+                                  access_token=access_token, payload=payload, container_id=prior["id"])
+        return {**result, "updated_config": config}
     message = _payload_message(payload)
     # Threads caps post text at 500 characters and returns
     # `HTTP 500: Param text must be at most 500 characters long` when
@@ -2073,10 +2127,11 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
             user_id,
             access_token,
             {"media_type": "VIDEO", "video_url": public_url, "text": message},
+            payload=payload,
         )
     elif len(media["images"]) > 1:
         child_ids = []
-        for item in media["images"][:10]:
+        for index, item in enumerate(media["images"][:10]):
             public_url = item.get("public_url") or ""
             if not public_url:
                 raise PreparedPublishError("Threads carousel publish requires public image URLs")
@@ -2086,6 +2141,7 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
                     user_id,
                     access_token,
                     {"media_type": "IMAGE", "image_url": public_url, "is_carousel_item": "true"},
+                    payload=payload, operation=f"child:{index}",
                 )
             )
         container_id = _threads_create_container(
@@ -2093,6 +2149,7 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
             user_id,
             access_token,
             {"media_type": "CAROUSEL", "children": ",".join(child_ids), "text": message},
+            payload=payload,
         )
     elif media["images"]:
         public_url = media["images"][0].get("public_url") or ""
@@ -2103,6 +2160,7 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
             user_id,
             access_token,
             {"media_type": "IMAGE", "image_url": public_url, "text": message},
+            payload=payload,
         )
     else:
         container_id = _threads_create_container(
@@ -2110,20 +2168,13 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
             user_id,
             access_token,
             {"media_type": "TEXT", "text": message},
+            payload=payload,
         )
 
-    # Text-only posts publish instantly; media (video/image/carousel)
-    # containers need a moment to fetch/transcode the remote URL.
-    if media["videos"] or media["images"]:
-        _wait_for_container_status(http, container_id, access_token, platform="threads")
-
-    publish_response = http.post(
-        f"{THREADS_GRAPH_ROOT}/{user_id}/threads_publish",
-        data={"creation_id": container_id, "access_token": access_token},
-        timeout=120,
-    )
-    _raise_for_status(publish_response)
-    return {"container_id": container_id, "publish": _response_payload(publish_response), "updated_config": config}
+    result = finish_container(http, platform="threads", user_id=user_id,
+                              access_token=access_token, payload=payload, container_id=container_id,
+                              ready=not (media["videos"] or media["images"]))
+    return {**result, "updated_config": config}
 
 
 def validate_reddit_config_live(config: dict[str, Any], *, session=None) -> dict:
@@ -2313,6 +2364,24 @@ def _tiktok_file_upload(
             offset += chunk_len
 
 
+def _tiktok_submit(http, url, payload, **kwargs):
+    from myUtils import delivery
+    delivery.starting(payload, operation="tiktok-init")
+    response = http.post(url, **kwargs)
+    if 400 <= response.status_code < 500:
+        delivery.checkpoint(payload, submission_started=False)
+    try:
+        body = response.json()
+    except (ValueError, TypeError):
+        raise delivery.DeliveryUnknown("TikTok returned an unreadable submission response") from None
+    data = body.get("data") or {}
+    if data.get("publish_id"):
+        delivery.accepted(payload, provider="tiktok", receipt_id=str(data["publish_id"]))
+    elif (body.get("error") or {}).get("code") not in (None, "", "ok"):
+        delivery.checkpoint(payload, submission_started=False)
+    return response
+
+
 def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     config = dict(account.config or {})
     artifacts = payload.get("artifacts") or []
@@ -2412,8 +2481,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
                 },
                 "post_mode": post_mode,
             }
-            response = http.post(
-                TIKTOK_VIDEO_INIT_URL,
+            response = _tiktok_submit(http, TIKTOK_VIDEO_INIT_URL, payload,
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
@@ -2465,8 +2533,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
                 },
                 "post_mode": post_mode,
             }
-            response = http.post(
-                TIKTOK_VIDEO_INIT_URL,
+            response = _tiktok_submit(http, TIKTOK_VIDEO_INIT_URL, payload,
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
@@ -2499,8 +2566,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
                 },
                 "post_mode": post_mode,
             }
-            response = http.post(
-                TIKTOK_VIDEO_INIT_URL,
+            response = _tiktok_submit(http, TIKTOK_VIDEO_INIT_URL, payload,
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
@@ -2561,8 +2627,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             "post_mode": post_mode,
             "media_type": "PHOTO",
         }
-        response = http.post(
-            TIKTOK_CONTENT_INIT_URL,
+        response = _tiktok_submit(http, TIKTOK_CONTENT_INIT_URL, payload,
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json",
@@ -2752,69 +2817,71 @@ def _x_auth_header(
     return "OAuth " + ", ".join(header_parts)
 
 
-def _x_media_upload(*, file_path: str, access_token: str, session=None) -> str:
-    """Upload media via X API v2 using the same OAuth2 account as the tweet."""
+def _x_media_upload(*, file_path: str, access_token: str, session=None,
+                    operations=None, operation: str = "media:0") -> str:
+    """Upload once per media ID, retaining initialize/segment/finalize progress."""
+    operations = operations or generic_delivery.Operations({}, "twitter")
     http = _get_session(session)
     source = Path(file_path)
-    file_size = source.stat().st_size
     mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
     media_category = "tweet_video" if mime_type.startswith("video/") else "tweet_image"
     auth_headers = {"Authorization": f"Bearer {access_token}"}
-    # The v2 media API uses POST initialize, per-id append/finalize and a v2
-    # status endpoint; the legacy command-style endpoint is OAuth1-only.
-    init = http.post(
-        X_MEDIA_INITIALIZE_URL,
-        headers={**auth_headers, "Content-Type": "application/json"},
-        json={"media_type": mime_type, "total_bytes": file_size, "media_category": media_category},
-        timeout=120,
-    )
-    _raise_for_status(init)
-    init_data = init.json().get("data") or {}
-    media_id = str(init_data.get("id") or "")
-    if not media_id:
-        raise PreparedPublishError("X media initialize response did not include a media id")
+    init_name = f"{operation}:initialize"
+    prior = operations.get(init_name)
+    if prior:
+        media_id = prior["id"]
+    else:
+        file_size = source.stat().st_size
+        init = operations.request(init_name, lambda: http.post(
+            X_MEDIA_INITIALIZE_URL,
+            headers={**auth_headers, "Content-Type": "application/json"},
+            json={"media_type": mime_type, "total_bytes": file_size, "media_category": media_category},
+            timeout=120))
+        init_body = _response_payload(init) or {}
+        init_data = init_body.get("data") if isinstance(init_body, dict) else None
+        media_id = init_data.get("id") if isinstance(init_data, dict) else None
+        operations.record(init_name, media_id, provider_receipt=False)
+        media_id = str(media_id)
 
-    segment_bytes = 4 * 1024 * 1024
-    with source.open("rb") as fh:
-        segment_index = 0
-        while chunk := fh.read(segment_bytes):
-            append = http.post(
-                f"{X_MEDIA_UPLOAD_URL}/{media_id}/append",
-                headers=auth_headers,
-                data={"segment_index": str(segment_index)},
-                files={"media": (source.name, chunk, mime_type)},
-                timeout=600,
-            )
-            _raise_for_status(append)
-            segment_index += 1
-
-    finalize = http.post(
-        f"{X_MEDIA_UPLOAD_URL}/{media_id}/finalize",
-        headers=auth_headers,
-        timeout=120,
-    )
-    _raise_for_status(finalize)
-    processing = (finalize.json().get("data") or {}).get("processing_info") or {}
+    finalize_name = f"{operation}:finalize"
+    finalized = operations.get(finalize_name)
+    if not finalized:
+        segment_bytes = 4 * 1024 * 1024
+        with source.open("rb") as fh:
+            segment_index = 0
+            while chunk := fh.read(segment_bytes):
+                name = f"{operation}:segment:{segment_index}"
+                if not operations.get(name):
+                    operations.request(name, lambda: http.post(
+                        f"{X_MEDIA_UPLOAD_URL}/{media_id}/append", headers=auth_headers,
+                        data={"segment_index": str(segment_index)},
+                        files={"media": (source.name, chunk, mime_type)}, timeout=600))
+                    operations.record(name, media_id, provider_receipt=False)
+                segment_index += 1
+        finalize = operations.request(finalize_name, lambda: http.post(
+            f"{X_MEDIA_UPLOAD_URL}/{media_id}/finalize", headers=auth_headers, timeout=120))
+        processing = ((_response_payload(finalize) or {}).get("data") or {}).get("processing_info") or {}
+        operations.record(finalize_name, media_id, provider_receipt=False,
+                          status="processing" if processing else "complete")
+    else:
+        processing = {"state": "pending"} if finalized["status"] == "processing" else {}
     deadline = time.monotonic() + 600
     while processing:
         state = str(processing.get("state") or "").lower()
         if state == "succeeded":
             break
         if state == "failed":
-            error = processing.get("error") or {}
-            raise PreparedPublishError(f"X media processing failed: {error.get('message') or error}")
+            raise PreparedPublishError("X media processing failed", retryable=False)
         delay = max(float(processing.get("check_after_secs") or 2), 1)
         if time.monotonic() + delay >= deadline:
             raise PreparedPublishError("X media processing did not finish within 600 seconds")
         time.sleep(delay)
-        status = http.get(
-            X_MEDIA_UPLOAD_URL,
-            headers=auth_headers,
-            params={"command": "STATUS", "media_id": media_id},
-            timeout=120,
-        )
-        _raise_for_status(status)
-        processing = (status.json().get("data") or {}).get("processing_info") or {}
+        status_response = http.get(X_MEDIA_UPLOAD_URL, headers=auth_headers,
+                                   params={"command": "STATUS", "media_id": media_id}, timeout=120)
+        _raise_for_status(status_response)
+        processing = ((status_response.json().get("data") or {}).get("processing_info")
+                      or {"state": "pending"})
+    operations.record(finalize_name, media_id, provider_receipt=False)
     return media_id
 
 
@@ -2931,8 +2998,13 @@ def _raise_x_publish_error(exc: Exception, *, stage: str) -> PreparedPublishErro
         message += f" (HTTP {status})"
     if code:
         message += f" code={code}"
-    retryable = not (_twitter_refresh_requires_reconnect(exc) or str(status) == "401")
-    return PreparedPublishError(message, details={"stage": stage, "status": status, "code": code}, retryable=retryable)
+    retryable = getattr(exc, "retryable", True) and not (
+        _twitter_refresh_requires_reconnect(exc) or str(status) == "401")
+    details = {"stage": stage, "status": status, "code": code}
+    retry_after = (getattr(exc, "details", None) or {}).get("retryAfter")
+    if retry_after:
+        details["retryAfter"] = retry_after
+    return PreparedPublishError(message, details=details, retryable=retryable)
 
 
 def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, Any]:
@@ -2942,6 +3014,11 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
     persist refreshed tokens back to the database.
     """
     config = dict(account.config or {})
+    operations = generic_delivery.Operations(payload, "twitter")
+    prior = operations.get("tweet")
+    if prior:
+        operations.finish(receipt_id=prior["id"])
+        return {"results": [{"data": {"id": prior["id"]}}], "updated_config": config}
     config.setdefault("twitterAuthType", getattr(account, "auth_type", ""))
 
     # A rotated refresh token is single-use; persist it immediately so any later
@@ -2966,6 +3043,7 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
         account_id=getattr(account, "id", None),
         db_path=(payload or {}).get("_db_path"),
     )
+    payload["_updated_config"] = config  # transient; never part of a checkpoint
 
     # Check if we have OAuth 2.0 token (from PKCE flow)
     oauth2_token = str(config.get("accessToken") or "").strip()
@@ -3001,7 +3079,9 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
             for item in media_items
         ):
             raise PreparedPublishError("Twitter received an unsupported or unclassified media artifact")
-    for item in media_items:
+    for index, item in enumerate(media_items):
+        if operations.get(f"media:{index}") or operations.get(f"media:{index}:finalize"):
+            continue
         local_path = str(item.get("local_path") or "").strip()
         if not local_path:
             raise PreparedPublishError(
@@ -3015,6 +3095,7 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
             )
 
     upload_items = media["images"] or media["videos"]
+    operations.plan([f"media:{index}" for index in range(len(upload_items))] + ["tweet"])
 
     # Upload media with the account's OAuth2 user token so media and tweet
     # requests are authenticated as the same profile identity.
@@ -3033,14 +3114,23 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
         if media["videos"]:
             for item in upload_items:
                 _enforce_video_limits(str(item.get("local_path") or ""), "twitter")
-        for item in upload_items:
+        for index, item in enumerate(upload_items):
             local_path = item.get("local_path")
+            operation = f"media:{index}"
+            prior_media = operations.get(operation)
+            if prior_media:
+                media_ids.append(prior_media["id"])
+                continue
             try:
-                mid = _x_media_upload(file_path=local_path, access_token=oauth2_token, session=http)
+                mid = _x_media_upload(file_path=local_path, access_token=oauth2_token, session=http,
+                                      operations=operations, operation=operation)
+            except (delivery.LeaseLost, delivery.DeliveryUnknown, delivery.DeliveryPending):
+                raise
             except Exception as exc:
                 raise _raise_x_publish_error(exc, stage="media upload (OAuth 2.0)") from exc
             if not mid:
                 raise PreparedPublishError("X media upload returned no media ID")
+            operations.record(operation, mid, provider_receipt=False)
             media_ids.append(mid)
         if len(media_ids) != len(upload_items):
             raise PreparedPublishError("X media upload did not attach every requested media item")
@@ -3053,16 +3143,21 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
     headers = _twitter_auth_headers(config, method="POST", url=X_TWEET_URL)
     headers["Content-Type"] = "application/json"
     try:
-        resp = http.post(
+        resp = operations.request("tweet", lambda: http.post(
             X_TWEET_URL,
             headers=headers,
             data=json.dumps(tweet_data),
             timeout=120,
-        )
-        _raise_for_status(resp)
+        ))
+    except (delivery.LeaseLost, delivery.DeliveryUnknown, delivery.DeliveryPending):
+        raise
     except Exception as exc:
         raise _raise_x_publish_error(exc, stage="tweet creation (OAuth 2.0)") from exc
-    return {"results": [_response_payload(resp)], "updated_config": config}
+    body = _response_payload(resp) or {}
+    tweet = body.get("data") if isinstance(body, dict) else None
+    operations.record("tweet", tweet.get("id") if isinstance(tweet, dict) else None)
+    operations.finish()
+    return {"results": [body], "updated_config": config}
 
 
 def _twitter_oauth1_credentials(config: dict[str, Any]) -> tuple[str, str, str, str]:
@@ -3786,10 +3881,19 @@ def _verify_youtube_visibility(http, access_token: str, video_id: str, requested
 
 
 def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
+    operations = generic_delivery.Operations(payload, "youtube")
     config = dict(account.config or {})
     channel_id = str(config.get("channelId") or "").strip()
     if not channel_id:
         raise PreparedPublishError("YouTube publish requires channelId")
+    playlist_id = str(config.get("playlistId") or "").strip()
+    operations.plan(["video"] + ([f"playlist:{playlist_id}"] if playlist_id else []))
+    prior = operations.get("video")
+    if prior:
+        http = _get_session(session)
+        access_token = _google_access_token(config, session=http)
+        return _finish_youtube_upload(http, payload, config, operations, access_token,
+                                      {"id": prior["id"]})
 
     media = _extract_media(payload)
     if not media["videos"]:
@@ -3897,7 +4001,7 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
 
     logger.info("YouTube upload: title=%r, tags=%d, privacy=%s", title, len(tags), status["privacyStatus"])
 
-    init_response = http.post(
+    init_response = operations.request("video", lambda: http.post(
         YOUTUBE_RESUMABLE_UPLOAD_URL,
         headers={
             **headers,
@@ -3907,14 +4011,13 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
         },
         data=json.dumps(metadata),
         timeout=120,
-    )
-    _raise_for_status(init_response)
+    ))
     upload_url = init_response.headers.get("Location")
     if not upload_url:
-        raise PreparedPublishError("YouTube resumable upload did not return a Location header")
+        raise delivery.DeliveryUnknown("YouTube upload initialization returned no session; do not recreate blindly")
 
     with video_path.open("rb") as handle:
-        upload_response = http.put(
+        upload_response = operations.request("video", lambda: http.put(
             upload_url,
             headers={
                 "Authorization": f"Bearer {access_token}",
@@ -3922,49 +4025,51 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
             },
             data=handle,
             timeout=1800,
-        )
-    _raise_for_status(upload_response)
-    result = upload_response.json()
-    video_id = result.get("id")
-    # "Succeeded" must mean visible at the requested visibility. An unaudited
-    # API project is routinely force-locked to private, which silently hides
-    # the post while the target reports success (the Stonewall video did exactly
-    # this). Verify and fail loudly instead.
-    if video_id:
-        _verify_youtube_visibility(http, access_token, str(video_id), status["privacyStatus"])
+        ), continuing=True)
+    result = _response_payload(upload_response) or {}
+    video_id = result.get("id") if isinstance(result, dict) else None
+    operations.record("video", video_id, status="processing", stage="video",
+                      privacy=status["privacyStatus"], scheduled=bool(config.get("publishAt")))
+    return _finish_youtube_upload(http, payload, config, operations, access_token, result,
+                                  media=media, video_path=video_path)
 
-    # Upload thumbnail if available
-    thumbnail_path = _find_thumbnail(media, video_path)
-    if thumbnail_path and result.get("id"):
+
+def _finish_youtube_upload(http, payload, config, operations, access_token, result,
+                           *, media=None, video_path=None):
+    video = operations.get("video")
+    video_id = video["id"]
+    if video["status"] != "complete":
+        generic_delivery.poll_youtube_video(http, payload, access_token, video_id,
+                                             privacy=video.get("privacy", "private"),
+                                             scheduled=bool(video.get("scheduled")))
+        operations.record("video", video_id, stage="video")
+
+    # Thumbnail replacement is idempotent and remains best-effort, but a lost
+    # lease must never be swallowed or followed by another provider write.
+    thumbnail_path = _find_thumbnail(media, video_path) if media and video_path else None
+    if thumbnail_path and not operations.get("thumbnail"):
+        delivery.checkpoint(payload)
         try:
-            _upload_youtube_thumbnail(http, access_token, result["id"], thumbnail_path)
-            logger.info("YouTube thumbnail uploaded: %s", thumbnail_path.name)
+            _upload_youtube_thumbnail(http, access_token, video_id, thumbnail_path)
+        except delivery.LeaseLost:
+            raise
         except Exception as exc:
             logger.warning("YouTube thumbnail upload failed: %s", exc)
+        else:
+            operations.record("thumbnail", video_id, provider_receipt=False)
 
-    # Add to playlist if configured
     playlist_id = str(config.get("playlistId") or "").strip()
-    if playlist_id and result.get("id"):
-        playlist_response = http.post(
+    operation = f"playlist:{playlist_id}"
+    if playlist_id and not operations.get(operation):
+        playlist_response = operations.request(operation, lambda: http.post(
             YOUTUBE_PLAYLIST_INSERT_URL,
-            headers={
-                **headers,
-                "Content-Type": "application/json; charset=UTF-8",
-            },
-            data=json.dumps(
-                {
-                    "snippet": {
-                        "playlistId": playlist_id,
-                        "resourceId": {
-                            "kind": "youtube#video",
-                            "videoId": result["id"],
-                        },
-                    }
-                }
-            ),
-            timeout=120,
-        )
-        _raise_for_status(playlist_response)
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"},
+            data=json.dumps({"snippet": {"playlistId": playlist_id,
+                            "resourceId": {"kind": "youtube#video", "videoId": video_id}}}), timeout=120))
+        playlist = _response_payload(playlist_response) or {}
+        operations.record(operation, playlist.get("id") if isinstance(playlist, dict) else None,
+                          provider_receipt=False)
+    operations.finish(receipt_id=video_id)
     return result
 
 
@@ -4065,6 +4170,8 @@ def publish_teaching_blog_sync(
     session=None,
 ) -> list[dict[str, Any]]:
     """Publish a Markdown post to a GitHub repo via the Contents API."""
+    operations = generic_delivery.Operations(payload, "teaching_blog")
+    operations.plan(["post"])
     config = account.config or {}
     owner = str(_config_value(config, "repoOwner") or "").strip()
     repo = str(_config_value(config, "repoName") or "").strip()
@@ -4102,6 +4209,11 @@ def publish_teaching_blog_sync(
         message = "\n".join(lines)
 
     file_path = f"{content_dir}/{slug}.md"
+    prior = operations.get("post")
+    if prior:
+        operations.finish()
+        return [{"path": prior["path"], "sha": prior["id"],
+                 "url": f"https://github.com/{owner}/{repo}/blob/{branch}/{prior['path']}"}]
     content_b64 = base64.b64encode(message.encode("utf-8")).decode("ascii")
 
     http = _get_session(session)
@@ -4117,6 +4229,8 @@ def publish_teaching_blog_sync(
     get_resp = http.get(get_url, headers=headers, params={"ref": branch}, timeout=30)
     if get_resp.status_code == 200:
         existing_sha = get_resp.json().get("sha")
+    elif get_resp.status_code != 404:
+        _raise_for_status(get_resp)
 
     # PUT (create or update)
     put_body: dict[str, Any] = {
@@ -4127,9 +4241,11 @@ def publish_teaching_blog_sync(
     if existing_sha:
         put_body["sha"] = existing_sha
 
-    put_resp = http.put(get_url, headers=headers, json=put_body, timeout=30)
-    _raise_for_status(put_resp)
-    result = put_resp.json()
+    put_resp = operations.request("post", lambda: http.put(get_url, headers=headers, json=put_body, timeout=30))
+    result = _response_payload(put_resp) or {}
+    content = result.get("content") if isinstance(result, dict) else None
+    operations.record("post", content.get("sha") if isinstance(content, dict) else None, path=file_path)
+    operations.finish()
 
     return [{"path": file_path, "sha": result.get("content", {}).get("sha"), "url": result.get("content", {}).get("html_url")}]
 
@@ -4373,6 +4489,7 @@ def publish_nw_sw_blog_sync(
     ``content/posts/zh`` (zh) in the target repo, sharing the same slug /
     ``translationKey`` so the site links the two versions.
     """
+    operations = generic_delivery.Operations(payload, "nw_sw_blog")
     config = account.config or {}
     owner = str(_config_value(config, "repoOwner") or "").strip()
     repo = str(_config_value(config, "repoName") or "").strip()
@@ -4390,6 +4507,7 @@ def publish_nw_sw_blog_sync(
     for locale in locales:
         if locale not in NW_SW_BLOG_VALID_LOCALES:
             raise PreparedPublishError(f"NW/SW Blog locale must be 'en' or 'zh', got '{locale}'")
+    operations.plan([f"file:{locale}" for locale in locales])
 
     message = _payload_message(payload)
     if not message:
@@ -4445,8 +4563,17 @@ def publish_nw_sw_blog_sync(
                 "sha": probe_json.get("sha"),
                 "text": _nw_sw_blog_decode_content(probe_json.get("content")),
             }
+        elif probe_resp.status_code != 404:
+            _raise_for_status(probe_resp)
 
     for index, locale in enumerate(locales):
+        operation = f"file:{locale}"
+        prior = operations.get(operation)
+        if prior:
+            results.append({"locale": locale, "path": prior["path"], "sha": prior["id"],
+                            "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{prior['path']}",
+                            "persona": prior["persona"]})
+            continue
         locale_message = sections[min(index, len(sections) - 1)] if sections else message
 
         title = _nw_sw_blog_title_for(payload, locale_message, index, locale)
@@ -4520,7 +4647,8 @@ def publish_nw_sw_blog_sync(
 
         put_resp = None
         for attempt in range(1, BLOG_CONFLICT_ATTEMPTS + 1):
-            put_resp = http.put(get_url, headers=headers, json=put_body, timeout=30)
+            put_resp = operations.request(operation, lambda: http.put(
+                get_url, headers=headers, json=put_body, timeout=30), allow_statuses=(409,))
             if put_resp.status_code != 409:
                 break
             logger.warning(
@@ -4536,6 +4664,8 @@ def publish_nw_sw_blog_sync(
             fresh_json = fresh.json() or {}
             if (fresh_json.get("content") or "") == content_b64:
                 # Someone else already published this exact content.
+                operations.record(operation, fresh_json.get("sha"), path=file_path,
+                                  locale=locale, persona=effective_persona)
                 results.append({
                     "locale": locale,
                     "path": file_path,
@@ -4552,6 +4682,9 @@ def publish_nw_sw_blog_sync(
         if put_resp is not None:
             _raise_for_status(put_resp)
             put_json = put_resp.json() if hasattr(put_resp, "json") else {}
+            operations.record(operation, (put_json.get("content") or {}).get("sha")
+                              or (put_json.get("commit") or {}).get("sha"),
+                              path=file_path, locale=locale, persona=effective_persona)
             results.append({
                 "locale": locale,
                 "path": file_path,
@@ -4559,6 +4692,7 @@ def publish_nw_sw_blog_sync(
                 "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{file_path}",
                 "persona": effective_persona,
             })
+    operations.finish()
     return results
 
 
@@ -4831,6 +4965,12 @@ def _bluesky_message_and_media(payload: dict) -> tuple[str, list[dict], list[dic
 
 def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[str, Any]]:
     """Publish a text/image/video post to Bluesky via the AT Protocol."""
+    operations = generic_delivery.Operations(payload, "bluesky")
+    prior = operations.get("post")
+    if prior:
+        operations.finish()
+        return [{"uri": prior["id"], **{key: prior.get(key) for key in
+                 ("cid", "handle", "did", "chars", "images", "videos")}}]
     config = account.config or {}
     cfg = _bluesky_config(config)
     http = _get_session(session)
@@ -4841,11 +4981,14 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
         raise PreparedPublishError("Bluesky media artifacts were supplied but none is a supported image/video")
     if len(image_items) > 4 or len(video_items) > 1 or (image_items and video_items):
         raise PreparedPublishError("Bluesky posts support up to four images or one video, not mixed media")
-    for item in [*video_items, *image_items]:
+    for index, item in enumerate([*video_items, *image_items]):
+        if operations.get(f"blob:{index}"):
+            continue
         local = Path(str(item.get("local_path") or ""))
         public_url = str(item.get("public_url") or "").strip()
         if not (local.is_file() and local.stat().st_size > 0) and not public_url:
             raise PreparedPublishError("Bluesky media artifact has no readable local file or public URL")
+    operations.plan([f"blob:{index}" for index in range(len(video_items) + len(image_items))] + ["post"])
     auth = _bluesky_create_session(http, cfg)
 
     record: dict[str, Any] = {
@@ -4854,6 +4997,20 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
     }
 
     uploaded_media: dict[str, Any] = {"images": 0, "videos": 0}
+
+    def _saved_blob(index):
+        prior = operations.get(f"blob:{index}")
+        if prior:
+            return {"$type": "blob", "ref": {"$link": prior["id"]},
+                    "mimeType": prior["mime_type"], "size": prior["size"]}
+        return None
+
+    def _remember_blob(index, blob):
+        # uploadBlob is content-addressed/idempotent. Store only its CID and
+        # the minimal embed metadata, not a raw provider response.
+        operations.record(f"blob:{index}", (blob.get("ref") or {}).get("$link"),
+                          provider_receipt=False, mime_type=str(blob.get("mimeType") or ""),
+                          size=int(blob.get("size") or 0))
 
     def _resolve_local(item: dict) -> tuple[str | None, str | None]:
         local_path = item.get("local_path") or ""
@@ -4868,7 +5025,10 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
             return tmp, tmp
         raise PreparedPublishError("Bluesky media artifact has no readable local file or public URL")
 
-    if video_items:
+    if video_items and _saved_blob(0):
+        record["embed"] = {"$type": "app.bsky.embed.video", "video": _saved_blob(0)}
+        uploaded_media["videos"] = 1
+    elif video_items:
         # Bluesky allows a single video per post.
         video = video_items[0]
         local_path, tmp_path = _resolve_local(video)
@@ -4896,12 +5056,14 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
                     retryable=False,
                 )
             shrunk_path = _bluesky_shrink_video(local_path)
+            delivery.checkpoint(payload)
             blob = _bluesky_upload_blob(
                 http, jwt=auth["accessJwt"], service=cfg["service"],
                 local_path=shrunk_path, mime="video/mp4",
             )
             if not blob:
                 raise PreparedPublishError("Bluesky video upload returned no blob")
+            _remember_blob(0, blob)
             embed: dict[str, Any] = {
                 "$type": "app.bsky.embed.video",
                 "video": blob,
@@ -4921,14 +5083,21 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
     elif image_items:
         blobs: list[dict] = []
         alt_texts: list[str] = []
-        for item in image_items[:4]:
+        for index, item in enumerate(image_items[:4]):
+            prior_blob = _saved_blob(index)
+            if prior_blob:
+                blobs.append(prior_blob)
+                alt_texts.append(str(item.get("alt_text") or "").strip())
+                continue
             local_path, tmp_path = _resolve_local(item)
             shrunk_path = None
             try:
                 shrunk_path = _bluesky_shrink_image(local_path)
+                delivery.checkpoint(payload)
                 blob = _bluesky_upload_blob(http, jwt=auth["accessJwt"], service=cfg["service"], local_path=shrunk_path)
                 if not blob:
                     raise PreparedPublishError("Bluesky image upload returned no blob")
+                _remember_blob(index, blob)
                 blobs.append(blob)
                 alt_texts.append(str(item.get("alt_text") or "").strip())
             finally:
@@ -4952,7 +5121,7 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
             "values": [{"val": cfg["label"]}],
         }
 
-    create_resp = http.post(
+    create_resp = operations.request("post", lambda: http.post(
         f"{cfg['service']}/xrpc/com.atproto.repo.createRecord",
         headers={"Authorization": f"Bearer {auth['accessJwt']}", "Content-Type": "application/json"},
         json={
@@ -4961,9 +5130,15 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
             "record": record,
         },
         timeout=120,
-    )
-    _raise_for_status(create_resp)
-    result = create_resp.json()
+    ))
+    result = _response_payload(create_resp) or {}
+    if not isinstance(result, dict):
+        result = {}
+    operations.record("post", result.get("uri"),
+                      status="complete" if result.get("cid") else "processing",
+                      cid=str(result.get("cid") or ""), handle=auth["handle"], did=auth["did"],
+                      chars=len(message), **uploaded_media)
+    operations.finish()
     return [{
         "uri": result.get("uri"),
         "cid": result.get("cid"),
@@ -4985,3 +5160,14 @@ def validate_bluesky_config_live(config: dict[str, Any], *, session=None) -> dic
         "authenticated": True,
         "label": cfg["label"] or None,
     }
+
+
+def _telegram_checkpoint(payload, delivery_key, completed_by_chat, chat_id, operations):
+    from myUtils import delivery
+    completed_by_chat[chat_id] = sorted(operations)
+    payload.setdefault("telegramCompletedByDelivery", {})[delivery_key] = completed_by_chat
+    ambiguous = any(str(op).startswith("ambiguous:")
+                    for chats in payload["telegramCompletedByDelivery"].values()
+                    for completed in chats.values() for op in completed)
+    delivery.checkpoint(payload, submission_started=ambiguous,
+                        payload={"telegramCompletedByDelivery": payload["telegramCompletedByDelivery"]})

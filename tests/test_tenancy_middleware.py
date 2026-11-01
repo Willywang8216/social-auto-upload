@@ -33,6 +33,7 @@ if flask_available and sqlalchemy_available:
         ROLE_EDITOR,
         ROLE_OWNER,
         ROLE_VIEWER,
+        AuthIdentity,
         Session as SessionRow,
         User,
         Workspace,
@@ -69,6 +70,7 @@ class ConfigModeTests(unittest.TestCase):
                 "APP_ENV": "testing",
                 "SAU_AUTH_MODE": "hybrid",
                 "SAU_GOOGLE_LOGIN_ENABLED": "true",
+                "SAU_GOOGLE_ALLOWED_EMAILS": "u@x.com",
                 "GOOGLE_LOGIN_CLIENT_ID": "c",
                 "GOOGLE_LOGIN_CLIENT_SECRET": "s",
                 "SAU_PUBLIC_BASE_URL": "https://up.example.com",
@@ -141,6 +143,10 @@ class TenancyMiddlewareTests(unittest.TestCase):
                            created_by_user_id=user.id)
             db.add_all([user, ws])
             db.flush()
+            db.add(AuthIdentity(
+                user_id=user.id, provider="google", provider_subject=user.id,
+                email_at_provider="u@x.com", email_verified=True,
+            ))
             db.add(WorkspaceMember(workspace_id=ws.id, user_id=user.id, role=role))
             sid = uuid.uuid4().hex
             db.add(SessionRow(
@@ -155,6 +161,7 @@ class TenancyMiddlewareTests(unittest.TestCase):
         return load_config({
             "APP_ENV": "testing", "SAU_AUTH_MODE": "hybrid", "SAU_GOOGLE_LOGIN_ENABLED": "true",
             "GOOGLE_LOGIN_CLIENT_ID": "c", "GOOGLE_LOGIN_CLIENT_SECRET": "s",
+            "SAU_GOOGLE_ALLOWED_EMAILS": "u@x.com",
             "SAU_PUBLIC_BASE_URL": "https://up.example.com", "SECRET_KEY": "x" * 40,
         })
 
@@ -273,6 +280,7 @@ class RealGateHybridTests(unittest.TestCase):
         self.app.config["SAU_APP_CONFIG"] = load_config({
             "APP_ENV": "testing", "SAU_AUTH_MODE": "hybrid", "SAU_GOOGLE_LOGIN_ENABLED": "true",
             "GOOGLE_LOGIN_CLIENT_ID": "c", "GOOGLE_LOGIN_CLIENT_SECRET": "s",
+            "SAU_GOOGLE_ALLOWED_EMAILS": "u@x.com",
             "SAU_PUBLIC_BASE_URL": "https://up.example.com", "SECRET_KEY": "x" * 40,
         })
         self.client = self.app.test_client()
@@ -297,6 +305,10 @@ class RealGateHybridTests(unittest.TestCase):
                            created_by_user_id=user.id)
             db.add_all([user, ws])
             db.flush()
+            db.add(AuthIdentity(
+                user_id=user.id, provider="google", provider_subject=user.id,
+                email_at_provider="u@x.com", email_verified=True,
+            ))
             db.add(WorkspaceMember(workspace_id=ws.id, user_id=user.id, role=ROLE_OWNER))
             sid = uuid.uuid4().hex
             db.add(SessionRow(

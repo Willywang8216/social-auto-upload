@@ -334,7 +334,7 @@ class PreparedWorkerDispatchTests(unittest.TestCase):
 
         self.assertEqual(captured["title"], "My Post Title")
         self.assertEqual(captured["subreddit"], "python")
-        self.assertEqual(captured["account_file"], "/tmp/cookie.json")
+        self.assertEqual(Path(captured["account_file"]), Path("/tmp/cookie.json"))
 
     def test_reddit_cookie_mode_multiple_subreddits(self) -> None:
         """Cookie mode iterates over all subreddits in the draft."""

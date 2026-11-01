@@ -73,7 +73,7 @@ class ClassifiedFailure(Exception):
 
     @property
     def is_retryable(self) -> bool:
-        return self.category is TRANSIENT
+        return self.category in {TRANSIENT, RECOVERABLE}
 
     @property
     def is_recoverable(self) -> bool:
@@ -88,7 +88,6 @@ class ClassifiedFailure(Exception):
 _CREDENTIAL_DEAD_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"HTTP 401", re.IGNORECASE),
     re.compile(r"Unauthorized", re.IGNORECASE),
-    re.compile(r"token expired", re.IGNORECASE),
     re.compile(r"session (?:key is )?(?:malformed|invalidated|expired)", re.IGNORECASE),
     re.compile(r"invalid_grant", re.IGNORECASE),
     re.compile(r"refresh_token_revoked", re.IGNORECASE),
@@ -197,6 +196,14 @@ def classify_failure(
 
     if _matches_any(text, _MEDIA_INVALID_PATTERNS):
         return ClassifiedFailure(text, PERMANENT, platform=platform, cause=exc)
+
+    # A restore error or explicitly refreshable expiry is recoverable unless
+    # the publisher marked it non-retryable. A revoked refresh token still
+    # wins: no amount of retrying can repair it.
+    if _matches_any(text, _RECOVERABLE_PATTERNS) and not re.search(
+        r"invalid_grant|refresh_token_revoked|re-?authori[sz]", text, re.IGNORECASE
+    ):
+        return ClassifiedFailure(text, RECOVERABLE, platform=platform, cause=exc)
 
     if _matches_any(text, _CREDENTIAL_DEAD_PATTERNS):
         return ClassifiedFailure(text, PERMANENT, platform=platform, cause=exc)

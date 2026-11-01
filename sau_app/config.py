@@ -1,9 +1,9 @@
 """Validated application configuration (Phase 1).
 
 Reads deployment settings from the environment into an immutable ``AppConfig``
-and enforces fail-closed rules **in production only**. Development and test
-environments keep today's permissive behavior (open mode allowed, no secrets
-required) so nothing existing breaks.
+and enforces fail-closed deployment rules. Development and test environments
+still allow legacy open mode; Google login must be safely configured in every
+environment, including an explicit operator allowlist in single/shadow mode.
 
 The intent is to give later phases a single place to add mandatory secrets
 (``SECRET_KEY``, ``DATABASE_URL``, ``REDIS_URL``, ``CREDENTIAL_MASTER_KEY``…)
@@ -14,6 +14,7 @@ CI stay frictionless.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -21,7 +22,7 @@ DEFAULT_REQUEST_ID_HEADER = "X-Request-ID"
 
 
 class ConfigError(RuntimeError):
-    """Raised when required configuration is missing or invalid in production."""
+    """Raised when required deployment or Google-login configuration is unsafe."""
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,10 @@ class AppConfig:
     google_login_enabled: bool = False
     google_login_client_id: str | None = None
     google_login_client_secret: str | None = None
+    # Exact Google operator identities; emails are case-insensitive, subjects are not.
+    # Required in single/shadow mode, where legacy data is not tenant-scoped.
+    google_allowed_emails: frozenset[str] = frozenset()
+    google_allowed_subjects: frozenset[str] = frozenset()
     public_base_url: str | None = None
     frontend_origin: str | None = None
     session_cookie_name: str = "__Host-sau_session"
@@ -62,8 +67,8 @@ class AppConfig:
 
     @property
     def sessions_honored_by_gate(self) -> bool:
-        """Whether a valid session may satisfy the auth gate (hybrid/oidc)."""
-        return self.auth_mode in {"hybrid", "oidc"}
+        """Whether an authorized session may satisfy the auth gate (hybrid/oidc)."""
+        return self.google_login_enabled and self.auth_mode in {"hybrid", "oidc"}
 
     @property
     def google_login_redirect_uri(self) -> str | None:
@@ -95,12 +100,17 @@ def _as_int(value: str | None, *, default: int) -> int:
         return default
 
 
+def _allowlist(value: str | None, *, emails: bool = False) -> frozenset[str]:
+    entries = re.split(r"[,\s]+", value or "")
+    return frozenset(entry.casefold() if emails else entry for entry in entries if entry)
+
+
 def load_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     """Build and validate an :class:`AppConfig` from ``environ`` (or ``os.environ``).
 
     Raises :class:`ConfigError` when ``APP_ENV=production`` and a mandatory
-    setting is missing or unsafe. In any other environment the same problems are
-    recorded as ``warnings`` and the app boots normally.
+    setting is missing or unsafe. Google-login settings also fail closed outside
+    production; other problems are recorded as ``warnings`` in development/test.
     """
 
     env_map = os.environ if environ is None else environ
@@ -117,6 +127,8 @@ def load_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     google_login_enabled = _as_bool(env_map.get("SAU_GOOGLE_LOGIN_ENABLED"), default=False)
     google_login_client_id = _clean(env_map.get("GOOGLE_LOGIN_CLIENT_ID"))
     google_login_client_secret = _clean(env_map.get("GOOGLE_LOGIN_CLIENT_SECRET"))
+    google_allowed_emails = _allowlist(env_map.get("SAU_GOOGLE_ALLOWED_EMAILS"), emails=True)
+    google_allowed_subjects = _allowlist(env_map.get("SAU_GOOGLE_ALLOWED_SUBJECTS"))
     public_base_url = _clean(env_map.get("SAU_PUBLIC_BASE_URL"))
     frontend_origin = _clean(env_map.get("SAU_FRONTEND_ORIGIN")) or public_base_url
     session_cookie_name = _clean(env_map.get("SESSION_COOKIE_NAME")) or "__Host-sau_session"
@@ -156,6 +168,11 @@ def load_config(environ: Mapping[str, str] | None = None) -> AppConfig:
             problems.append("SAU_GOOGLE_LOGIN_ENABLED is on but SAU_PUBLIC_BASE_URL is not set")
         if not secret_key:
             problems.append("SAU_GOOGLE_LOGIN_ENABLED is on but SECRET_KEY is not set (needed to sign sessions)")
+        if tenancy_mode in {"single", "shadow"} and not (google_allowed_emails or google_allowed_subjects):
+            problems.append(
+                "SAU_GOOGLE_LOGIN_ENABLED in single/shadow mode requires explicit operators in "
+                "SAU_GOOGLE_ALLOWED_EMAILS or SAU_GOOGLE_ALLOWED_SUBJECTS"
+            )
 
     # Google-login misconfiguration fails closed whenever it is enabled — even
     # outside production — because a half-configured login flow is unsafe.
@@ -178,6 +195,8 @@ def load_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         google_login_enabled=google_login_enabled,
         google_login_client_id=google_login_client_id,
         google_login_client_secret=google_login_client_secret,
+        google_allowed_emails=google_allowed_emails,
+        google_allowed_subjects=google_allowed_subjects,
         public_base_url=public_base_url,
         frontend_origin=frontend_origin,
         session_cookie_name=session_cookie_name,

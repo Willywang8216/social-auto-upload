@@ -39,6 +39,8 @@ def _parse_env_line(line: str) -> tuple[str, str] | None:
 
 
 def load_repo_env(*, env_path: str | Path | None = None, override: bool = False) -> Path | None:
+    if os.environ.get("SAU_TESTING") == "1" and env_path is None:
+        return None
     target = Path(env_path) if env_path is not None else DEFAULT_ENV_PATH
     target = target.expanduser().resolve()
     if not target.exists():

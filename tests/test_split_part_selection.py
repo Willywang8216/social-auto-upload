@@ -17,12 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _load_selector():
-    source = (REPO_ROOT / "sau_backend.py").read_text(encoding="utf-8")
-    namespace = {"platform_limits": platform_limits}
-    start = source.index("def _artifact_payloads_for_platform")
-    end = source.index("def _read_json_body")
-    exec(compile(source[start:end], "sau_backend.py", "exec"), namespace)
-    return namespace
+    from myUtils import publish_services
+    return vars(publish_services)
 
 
 _SELECT = _load_selector()

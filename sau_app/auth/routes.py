@@ -20,6 +20,7 @@ from ..config import AppConfig
 from ..db import get_sessionmaker
 from ..db.identity_models import WorkspaceMember, Workspace
 from ..db.repositories import IdentityRepository
+from .access import google_access_allowed
 from .oidc import GoogleOIDCClient, OIDCError
 from .permissions import permissions_for
 from .sessions import (
@@ -102,6 +103,12 @@ def google_callback():
             _LOGGER.warning("google callback rejected: %s", exc)
             return redirect(_frontend_url(config, "/#/login?error=verify"), code=302)
 
+        # Authenticate at Google != authorize an SAU operator. Check before any
+        # upsert so denied identities cannot create users or workspaces.
+        if not google_access_allowed(config, db, claims=claims):
+            db.commit()  # denied callbacks still consume their one-use state
+            return redirect(_frontend_url(config, "/#/login?error=access_denied"), code=302)
+
         login = IdentityRepository(db).upsert_google_login(
             subject=claims.subject,
             email=claims.email,
@@ -131,7 +138,7 @@ def _current_session_payload(config: AppConfig) -> dict:
 
     Session = get_sessionmaker()
     with Session() as db:
-        row = SessionStore(db).get_active(session_id, idle_seconds=config.session_idle_seconds)
+        row = SessionStore(db).get_authorized(session_id, config=config)
         if row is None:
             db.commit()
             return {"authenticated": False}
@@ -143,8 +150,11 @@ def _current_session_payload(config: AppConfig) -> dict:
             )
         ).one_or_none()
         workspace = db.get(Workspace, row.active_workspace_id) if row.active_workspace_id else None
+        if member is None or workspace is None:
+            db.commit()
+            return {"authenticated": False}
         user = row.user
-        role = member.role if member else "viewer"
+        role = member.role
         payload = {
             "authenticated": True,
             "user": {

@@ -1,0 +1,31 @@
+# Dockerfile-specific context exclusions. Unlike the legacy .dockerignore,
+# the frontend lock MUST be included for npm ci.
+.venv
+.git
+.idea
+cookies
+conf.py
+sau_frontend/dist
+sau_frontend/node_modules
+.env
+.env.*
+!.env.example
+rclone-cache.conf
+secrets
+cookiesFile
+videoFile
+uploads
+generated
+logs
+backups
+rclone-backup
+*.db
+*.db-*
+*.db.*
+*.bak
+.playwright-mcp
+.claude
+**/__pycache__
+**/*.pyc
+.pytest_cache
+db/publish.pause

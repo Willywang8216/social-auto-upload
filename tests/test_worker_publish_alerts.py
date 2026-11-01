@@ -83,6 +83,16 @@ class PublishFailureAlertTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _spec(self, targets, *, platform: str = "twitter"):
+        # These tests inject publisher failures, not missing-account preflight.
+        from myUtils.sqlite_utils import connect
+        with connect(self.db_path) as conn:
+            for reference, _file, _schedule in targets:
+                if reference.startswith("account:"):
+                    account_id = int(reference.split(":", 1)[1])
+                    conn.execute("INSERT OR IGNORE INTO accounts "
+                                 "(id,profile_id,platform,account_name,cookie_path,auth_type,status) "
+                                 "VALUES (?,?,?,?,'','api',1)",
+                                 (account_id, self.profile_id, platform, f"fixture-{account_id}"))
         return _spec(targets, platform=platform, profile_id=self.profile_id)
 
     def _drain(self, executor, *, retry: RetryPolicy | None = None) -> None:
@@ -331,7 +341,8 @@ class PublishFailureAlertTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         body = sent[0]["body"]
         self.assertNotIn("SEKRET123", body)
-        self.assertIn("access_token=<redacted>", body)
+        self.assertIn("[REDACTED_QUERY]", body)
+        self.assertNotIn("access_token=", body)
 
     def test_scrub_secrets_masks_common_credential_shapes(self) -> None:
         cleaned = _scrub_secrets(

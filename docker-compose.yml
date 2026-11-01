@@ -1,6 +1,6 @@
 services:
   # Local STT + spoken-language detection. Deliberately its own service:
-  # ci-watch only ever recreates `social-auto-upload`, so this one keeps its
+  # ci-watch only recreates the web/worker pair, so this service keeps its
   # warm whisper model across deploys, and its CPU cannot be starved by the
   # app's ffmpeg transcodes (nor the other way round). The app reaches it by
   # name on the shared network; it is not published to the host, because the
@@ -31,14 +31,11 @@ services:
     networks:
       - 1panel-network
 
-  social-auto-upload:
-    # Pull the published image rather than building it locally so Watchtower
-    # can actually update it (the previous `build: .` produced
-    # `social-auto-upload-social-auto-upload:latest`, which lives on Docker
-    # Hub under nobody — Watchtower would 401 every cycle). The GHCR image
-    # is published by `.github/workflows/image.yml` on every push to main.
-    image: ghcr.io/willywang8216/social-auto-upload:latest
-    pull_policy: always
+  social-auto-upload: &sau-service
+    # ci-watch is the sole production deployer. Both roles use one tested,
+    # immutable image; registry/Watchtower updates cannot bypass release gates.
+    image: ${SAU_IMAGE:-ghcr.io/willywang8216/social-auto-upload:latest}
+    pull_policy: never
     container_name: social-auto-upload
     # Run as the host operator's uid/gid (default 1000). The image sets no USER,
     # so Docker defaulted to root and every bind-mounted dir the app writes
@@ -50,13 +47,11 @@ services:
     # write the same files. Override for a host whose operator is not 1000.
     user: "${SAU_UID:-1000}:${SAU_GID:-1000}"
     restart: always
-    # The image's Dockerfile bakes in `--timeout 120`, but a 602 MB source
-    # re-encodes in ~900 s and media prep runs inline in the submit request,
-    # so any large synchronous submit was guaranteed to 504 at 120 s while the
-    # transcode later completed (campaigns existed but the operator saw a 504).
-    # Override here (compose pulls the prebuilt image, so the Dockerfile CMD is
-    # not rebuilt by a normal deploy) with a ceiling above the worst-case
-    # encode. Keep the rest identical to the image CMD.
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 65m
+    # Preserve the long request ceiling; graceful shutdown must also let an
+    # already accepted request finish. Queue work is owned by worker below.
     command:
       - gunicorn
       - wsgi:app
@@ -65,6 +60,8 @@ services:
       - --threads
       - "8"
       - --timeout
+      - "1800"
+      - --graceful-timeout
       - "1800"
       - --bind
       - 0.0.0.0:5409
@@ -77,32 +74,14 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    # Watchtower: this container is deliberately OPTED OUT.
-    # The host runs `Watchtower --interval 3600 --cleanup --label-enable`, so it
-    # only touches containers whose `…watchtower.enable` label is true. That label
-    # used to be true, which meant two deployers updated the same container from
-    # two different images of the same commit (Watchtower pulled the GHCR build;
-    # ci-watch builds locally). ci-watch compares the running image against its
-    # own and therefore re-deployed in a loop — 119 times — restarting the
-    # container mid-encode and stranding campaign preps in needs_review.
-    # `scripts/ci-watch.sh` is now the single deployer: it runs every 2 minutes,
-    # is prep-aware (it defers rather than killing a running encode) and needs no
-    # GitHub Actions. To hand deploys back to Watchtower, set this to "true" and
-    # stop the ci-watch cron entry.
+    # ci-watch runs every two minutes and shares a lock with deploy-local.sh.
+    # Keep Watchtower disabled for BOTH roles to prevent mismatched releases.
     labels:
-      # OFF since 2026-10-22. Two deployers were fighting: Watchtower pulled the
-      # GHCR build (a different image ID for the same commit) and ci-watch, which
-      # builds locally, then read that as "the running container differs" and
-      # re-deployed forever — restarting the container mid-prep and stranding
-      # campaigns in needs_review. ci-watch is the documented deployer, runs every
-      # 2 minutes, and is prep-aware (it defers instead of killing an encode), so
-      # Watchtower is redundant here. Re-enable only if ci-watch is retired.
       com.centurylinklabs.watchtower.enable: "false"
     healthcheck:
-      # Cheap probe: a 200 from the static SPA proves the container is
-      # serving traffic and can reach its bound port. Watchtower's own
-      # monitor-only health check relies on this HEALTHCHECK firing.
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5409/', timeout=3).status==200 else 1)\""]
+      # Readiness includes schema + a fresh non-draining publisher heartbeat.
+      # A deployment pause deliberately reports unhealthy until activation.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5409/readyz', timeout=3)"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -137,39 +116,48 @@ services:
       - "host.docker.internal:host-gateway"
     env_file:
       - .env
+    environment: &sau-environment
+      # Non-secret overrides only. All secrets still come from .env.
+      HOME: /tmp
+      XDG_CACHE_HOME: /tmp/.cache
+      SAU_PROCESS_ROLE: web
+      SAU_REQUIRE_WORKER_HEALTH: "1"
+      SAU_DB_PATH: /app/db/database.db
+      SAU_PAUSE_CLAIMS_FILE: /app/db/publish.pause
+      SAU_ACCOUNT_MAINTENANCE_INTERVAL_SECONDS: "600"
+      SAU_ACCOUNT_MAINTENANCE_EXPIRING_WITHIN_SECONDS: "3600"
+      BROWSERLESS_URL: http://browserless:3000
+      # Only the GDrive cache config is mounted, not the operator's remotes.
+      RCLONE_CONFIG: /app/rclone-cache.conf
+      SAU_STORAGE_BACKENDS: share,do_spaces
+      # share remains disabled until its existing Telegram token is refreshed.
+      SAU_SHARE_ENABLED: "0"
+      SAU_SHARE_PUBLIC_BASE: https://share.iamwillywang.com
+      SAU_SHARE_UPLOAD_BASE: http://share-web
+      # DIRECT_POST verified domains; FILE_UPLOAD does not require these.
+      SAU_TIKTOK_VERIFIED_URL_PREFIXES: https://pub-9915b1494003455c9ab872fd7094e64e.r2.dev/,https://share.iamwillywang.com/
+
+  worker:
+    # Inherit the EXACT image, uid, data/config mounts, network, logging and
+    # environment. Only this process starts publishing and maintenance loops.
+    <<: *sau-service
+    container_name: social-auto-upload-worker
+    command: ["python", "-m", "myUtils.worker", "--max-concurrent", "3"]
+    ports: []
     environment:
-      # Non-secret overrides only. All secrets come from .env
-      # A non-root uid has no passwd entry inside the image, so HOME would
-      # otherwise stay at the inaccessible /root. Point cache lookups at a
-      # world-writable path (rclone/fontconfig/playwright all honour these).
-      - HOME=/tmp
-      - XDG_CACHE_HOME=/tmp/.cache
-      - SAU_ACCOUNT_MAINTENANCE_INTERVAL_SECONDS=600
-      - SAU_ACCOUNT_MAINTENANCE_EXPIRING_WITHIN_SECONDS=3600
-      - BROWSERLESS_URL=http://browserless:3000
-      # Keep rclone away from the operator's own config: the cache read-back
-      # only ever needs the GDrive remote mounted above.
-      - RCLONE_CONFIG=/app/rclone-cache.conf
-      # --- Media public-hosting (publish pipeline) ---
-      # Backend order tried by myUtils.media_remote_storage. "share" is the
-      # self-hosted tgstate host (preferred); "do_spaces" is the S3/R2 backup.
-      - SAU_STORAGE_BACKENDS=share,do_spaces
-      # share/tgstate host: disabled until its Telegram bot token is refreshed
-      # (getUpdates/sendDocument currently return Unauthorized). To enable:
-      # refresh the bot token in the tgstate settings, add SAU_SHARE_SESSION_TOKEN
-      # to .env, then set SAU_SHARE_ENABLED=1. While disabled, media is served
-      # from DO Spaces / R2.
-      - SAU_SHARE_ENABLED=0
-      - SAU_SHARE_PUBLIC_BASE=https://share.iamwillywang.com
-      - SAU_SHARE_UPLOAD_BASE=http://share-web
-      # Verified URL prefixes for TikTok PULL_FROM_URL (DIRECT_POST only).
-      # FILE_UPLOAD (draft mode) does not require these. Domains must also be
-      # verified in the TikTok developer console before DIRECT_POST works.
-      - SAU_TIKTOK_VERIFIED_URL_PREFIXES=https://pub-9915b1494003455c9ab872fd7094e64e.r2.dev/,https://share.iamwillywang.com/
+      <<: *sau-environment
+      SAU_PROCESS_ROLE: worker
+      SAU_REQUIRE_WORKER_HEALTH: "0"
+    healthcheck:
+      test: ["CMD", "python", "scripts/release_probe.py", "worker"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Local development PostgreSQL for the multi-tenant migration (Phase 2+).
   # Opt-in: it only starts with `docker compose --profile dev up`, so the
-  # production single-service stack is unchanged. Point the app/tests at it via
+  # production web/worker stack is unchanged. Point the app/tests at it via
   #   DATABASE_URL=postgresql+psycopg://sau:sau@postgres:5432/sau
   #   TEST_DATABASE_URL=postgresql+psycopg://sau:sau@localhost:5433/sau
   postgres:

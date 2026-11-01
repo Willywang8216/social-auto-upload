@@ -61,6 +61,7 @@ class GoogleLoginFlowTests(unittest.TestCase):
             {
                 "APP_ENV": "testing",
                 "SAU_GOOGLE_LOGIN_ENABLED": "true",
+                "SAU_GOOGLE_ALLOWED_EMAILS": "zoe@example.com",
                 "GOOGLE_LOGIN_CLIENT_ID": "client-id",
                 "GOOGLE_LOGIN_CLIENT_SECRET": "client-secret",
                 "SAU_PUBLIC_BASE_URL": "https://up.example.com",

@@ -748,8 +748,8 @@ def _stamp_alembic_head(db_path: Path) -> None:
     try:
         from alembic.config import Config
         from alembic.script import ScriptDirectory
-    except ImportError:
-        return
+    except ImportError as exc:
+        raise RuntimeError("Alembic is required to initialize the application schema") from exc
 
     try:
         cfg = Config(str(ALEMBIC_INI_PATH))
@@ -761,16 +761,13 @@ def _stamp_alembic_head(db_path: Path) -> None:
             cfg.set_main_option("script_location", str(migrations_dir))
         cfg.set_main_option("sqlalchemy.url", f"sqlite:///{Path(db_path).resolve()}")
         head_rev = ScriptDirectory.from_config(cfg).get_current_head()
-    except Exception:
-        # Couldn't load the config (e.g. ini missing in a packaged wheel);
-        # leaving the version table empty just means a future
-        # ``alembic upgrade head`` will run the baseline migration, which
-        # is itself idempotent.
-        return
+    except Exception as exc:
+        raise RuntimeError("Cannot load migration configuration; schema initialization aborted") from exc
     if head_rev is None:
-        return
+        raise RuntimeError("No Alembic migration head is available")
 
-    with sqlite3.connect(db_path) as conn:
+    from contextlib import closing
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS alembic_version "
             "(version_num VARCHAR(32) NOT NULL PRIMARY KEY)"
@@ -793,7 +790,8 @@ def _stamp_alembic_head(db_path: Path) -> None:
 
 def bootstrap(db_path: Path = DB_PATH) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
+    from contextlib import closing
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         conn.execute("PRAGMA foreign_keys = ON")
         cursor = conn.cursor()
         cursor.execute(LEGACY_USER_INFO)

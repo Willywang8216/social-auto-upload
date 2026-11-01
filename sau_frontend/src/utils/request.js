@@ -39,72 +39,68 @@ request.interceptors.request.use(
   }
 )
 
-// 响应拦截器
+// Callers with an inline error state (polling, submission, health) can set
+// `silentError: true`. Other callers can use error.notified to avoid a second toast.
+export function showRequestError(error, message = error?.message || '請求失敗') {
+  if (error?.notified) return
+  ElMessage.error(message)
+  if (error && typeof error === 'object') error.notified = true
+}
+
+function rejectResponse(error) {
+  const status = error.response?.status >= 400
+    ? error.response.status
+    : Number(error.response?.data?.code)
+  const backendMsg = error.response?.data?.msg || error.response?.data?.message
+  const silent = error.config?.silentError
+  const notify = (message) => { if (!silent) showRequestError(error, message) }
+
+  if (error.code === 'ERR_CANCELED' || error.name === 'CanceledError' || error.name === 'AbortError') {
+    return Promise.reject(error)
+  }
+  if (status === 401) {
+    if (!isRedirectingToLogin) {
+      isRedirectingToLogin = true
+      notify('未授權，請重新登入')
+      clearToken()
+      clearCsrfToken()
+      // Lazy import avoids a module-load cycle.
+      import('@/stores/auth')
+        .then(({ useAuthStore }) => useAuthStore().clearSession())
+        .catch(() => {})
+      if (typeof window !== 'undefined' && window.location && !window.location.hash.includes('#/login')) {
+        window.location.hash = '#/login'
+      }
+      setTimeout(() => { isRedirectingToLogin = false }, 1000)
+    } else {
+      error.notified = true
+    }
+  } else if (status === 403) {
+    // Forbidden is a permission/CSRF failure, not an expired login.
+    notify(backendMsg || '沒有執行此操作的權限，請確認權限或重新整理頁面')
+  } else if (error.response) {
+    notify(backendMsg || (status === 404 ? '找不到請求位址' : status >= 500 ? '伺服器內部錯誤' : '請求失敗'))
+  } else if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+    notify('請求逾時，請稍後確認結果')
+  } else {
+    notify('網路連線失敗，請檢查連線或稍後確認結果')
+  }
+  return Promise.reject(error)
+}
+
+// HTTP 202 is accepted too: the API still returns a body with code: 200.
 request.interceptors.response.use(
   (response) => {
     const { data } = response
-    
-    // 根据后端接口规范处理响应
-    if (data.code === 200 || data.success) {
-      return data
-    } else {
-      ElMessage.error(data.msg || data.message || '請求失敗')
-      return Promise.reject(new Error(data.msg || data.message || '請求失敗'))
-    }
+    if (data && (data.code === 200 || data.success === true)) return data
+    const error = new Error(data?.msg || data?.message || '無效的伺服器回應')
+    // Preserve status/config for callers deciding whether an error is retryable.
+    error.response = response
+    error.config = response.config
+    error.code = Number(data?.code) >= 400 ? 'ERR_API_RESPONSE' : 'ERR_INVALID_RESPONSE'
+    return rejectResponse(error)
   },
-  (error) => {
-    console.error('回應錯誤:', error)
-
-    // Extract backend error message from response body if available
-    const backendMsg = error.response?.data?.msg || error.response?.data?.message || ''
-
-    // 处理HTTP错误状态码
-    if (error.response) {
-      const { status } = error.response
-      switch (status) {
-        case 401:
-        case 403:
-          if (!isRedirectingToLogin) {
-            isRedirectingToLogin = true
-            ElMessage.error('未授權，請重新登入')
-            clearToken()
-            // Drop any stale Google session so the router guard stops treating
-            // the workspace as authenticated. Imported lazily to avoid a
-            // module-load cycle and to reach the store only at runtime.
-            clearCsrfToken()
-            import('@/stores/auth')
-              .then(({ useAuthStore }) => useAuthStore().clearSession())
-              .catch(() => {})
-            // Bounce back to the login screen using the hash router. Use a
-            // direct location.hash assignment rather than importing the
-            // router, which would create a circular dependency.
-            if (typeof window !== 'undefined' &&
-                window.location && !window.location.hash.includes('#/login')) {
-              window.location.hash = '#/login'
-            }
-            // Reset guard after navigation
-            setTimeout(() => { isRedirectingToLogin = false }, 1000)
-          }
-          break
-        case 404:
-          ElMessage.error(backendMsg || '找不到請求位址')
-          break
-        case 500:
-          ElMessage.error(backendMsg || '伺服器內部錯誤')
-          break
-        default:
-          ElMessage.error(backendMsg || '請求失敗')
-      }
-      } else {
-        if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
-          ElMessage.error('請求逾時，請縮小篩選範圍或稍後重試')
-        } else if (error.code === 'ERR_CANCELED' || error.name === 'CanceledError') {
-          // A newer filter request superseded this one; don't show an error.
-        } else {
-          ElMessage.error('網路連線失敗，請檢查連線或稍後重試')
-        }
-      }
-  }
+  rejectResponse
 )
 
 // 封装常用的请求方法

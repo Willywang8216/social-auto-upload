@@ -1,22 +1,8 @@
 """Publish MCP tools — submit / preview / regenerate.
 
-These are the heavy ones. They delegate to ``myUtils.publish_orchestrator``
-for the actual fan-out + enqueue logic and reuse the heavy callbacks that
-live in ``sau_backend``:
-
-* ``_prepare_campaign_media_artifacts`` — watermark / intro / outro /
-  screenshots / remote hosting.
-* ``_generate_account_draft`` — per-account LLM-generated copy.
-* ``_ensure_file_record_for_path`` — register the file under videoFile/.
-* ``_artifact_payloads_for_platform`` — platform-specific artifact
-  selection (TikTok gets the raw remote / local artefact; other platforms
-  get the watermarked preview).
-* ``_job_to_payload`` — jobs.Job -> dict envelope.
-
-``preview`` and ``regenerate`` reuse ``_build_preview_media_context`` and
-``_preview_media_group_stub`` so the LLM-facing inputs match the
-``/publish-center/preview`` and ``/publish-center/regenerate`` HTTP routes
-byte-for-byte.
+Submissions use the Flask-free durable admission service and always return
+before media preparation. Reuse ``submission_id`` after a timeout; changing
+the intent under that ID is rejected rather than publishing twice.
 """
 
 from __future__ import annotations
@@ -52,54 +38,31 @@ def register(mcp: FastMCP) -> None:
         account_drafts: dict[str, dict[str, Any]] | None = None,
         tiktok_post_settings: dict[str, dict[str, Any]] | None = None,
         db_path: str | None = None,
+        submission_id: str | None = None,
     ) -> dict[str, Any]:
-        from myUtils import campaign_prep
-        from sau_backend import (
-            _artifact_payloads_for_platform,
-            _async_prep_enabled,
-            _ensure_file_record_for_path,
-            _generate_account_draft,
-            _job_to_payload,
-            _prepare_campaign_media_artifacts,
-        )
+        from myUtils import publish_services
 
         try:
-            common = dict(
-                profile_ids=[int(p) for p in profile_ids],
-                selected_account_ids=[int(v) for v in selected_account_ids]
-                if selected_account_ids
-                else None,
-                media_file_paths=[str(p) for p in media_file_paths],
-                brief=str(brief or ""),
+            result = publish_services.submit_publish(
+                profile_ids=profile_ids,
+                selected_account_ids=selected_account_ids,
+                media_file_paths=media_file_paths,
+                brief=brief or "",
                 options=options or {},
                 schedule=schedule,
                 account_drafts=account_drafts or {},
                 tiktok_post_settings=tiktok_post_settings or {},
                 db_path=resolve_db_path(db_path),
+                submission_id=submission_id,
+                source="mcp",
             )
-            if _async_prep_enabled():
-                # Same opt-in async contract as POST /publish-center/submit:
-                # campaign(s) created in ``preparing`` with no jobs yet.
-                result = campaign_prep.submit_publish_async(
-                    **common,
-                    ensure_file_record_for_path=_ensure_file_record_for_path,
-                )
-                status = "preparing"
-            else:
-                result = publish_orchestrator.submit_publish(
-                    **common,
-                    prepare_artifacts=_prepare_campaign_media_artifacts,
-                    generate_account_draft=_generate_account_draft,
-                    ensure_file_record_for_path=_ensure_file_record_for_path,
-                    artifact_payloads_for_platform=_artifact_payloads_for_platform,
-                    job_to_payload=_job_to_payload,
-                )
-                status = "queued" if result.jobs else "needs_review"
+            status = "preparing" if result.campaign_ids else "needs_review"
             return {
                 "campaignIds": result.campaign_ids,
                 "status": status,
                 "jobs": result.jobs,
                 "skipped": result.skipped,
+                "submissionId": submission_id,
             }
         except Exception as exc:  # noqa: BLE001
             return error_payload(exc)

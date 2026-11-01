@@ -17,8 +17,8 @@ export const campaignsApi = {
     return http.post('/campaigns/prepare', payload)
   },
 
-  getCampaign(campaignId) {
-    return http.get(`/campaigns/${campaignId}`)
+  getCampaign(campaignId, config = {}) {
+    return http.get(`/campaigns/${campaignId}`, undefined, config)
   },
 
   updateCampaignPost(campaignId, postId, payload) {

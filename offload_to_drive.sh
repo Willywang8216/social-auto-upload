@@ -666,7 +666,7 @@ import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-IN_FLIGHT = ("running", "retrying")
+IN_FLIGHT = ("running", "retrying", "awaiting_delivery", "needs_review", "blocked")
 DUE_SOON_MINUTES = 30
 KEEP_LOCAL_PREFIXES = ("_library/",)  # under the videoFile root
 
@@ -678,7 +678,9 @@ due_cutoff = (now_utc + timedelta(minutes=DUE_SOON_MINUTES)).isoformat(
 ).replace("T", " ")
 
 seen = set()
-conn = sqlite3.connect("/app/db/database.db")
+from pathlib import Path
+db_path = Path(os.environ.get("SAU_DB_PATH", "/app/db/database.db")).resolve()
+conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)
 
 
 def emit(rel: str) -> None:
@@ -718,14 +720,9 @@ def emit_owed(sql: str, params: tuple = ()) -> None:
     for in-flight and due-soon rows."""
     for payload_json, file_ref in conn.execute(sql, params):
         emit_file_ref(file_ref)
-        try:
-            data = json.loads(payload_json)
-        except Exception:
-            # Payloads are written by enqueue_job with json.dumps, so this
-            # should not happen; if it does, skip rather than abort the
-            # whole exclude build (the unrecorded-file walk below still
-            # protects anything file_records knows nothing about).
-            continue
+        data = json.loads(payload_json)
+        if not isinstance(data, dict):
+            raise ValueError("Invalid live payload; refusing offload")
         for artifact in data.get("artifacts") or []:
             local_path = artifact.get("local_path") or ""
             if local_path:
@@ -759,13 +756,12 @@ DUE_SOON_SQL = """
 for (raw_metadata,) in conn.execute(
     "SELECT metadata_json FROM campaigns WHERE status = 'preparing'"
 ):
-    try:
-        metadata = json.loads(raw_metadata or "{}")
-    except Exception:
-        continue
+    metadata = json.loads(raw_metadata or "{}")
     if not isinstance(metadata, dict):
-        continue
+        raise ValueError("Invalid preparation metadata; refusing offload")
     prep_request = metadata.get("prepRequest") or {}
+    if not isinstance(prep_request, dict):
+        raise ValueError("Invalid preparation request; refusing offload")
     for path in (prep_request.get("mediaFilePaths") or []):
         if isinstance(path, str) and path.strip():
             emit_file_ref(path.strip())
@@ -786,13 +782,24 @@ for (local_path,) in conn.execute(
 
 # 1 + 2: in-flight targets, and pending targets inside the claim-race window.
 emit_owed(
-    """
+    f"""
     SELECT j.payload_json, t.file_ref FROM publish_jobs j
     JOIN publish_job_targets t ON t.job_id = j.id
-    WHERE t.status IN (?, ?)
+    WHERE t.status IN ({','.join('?' for _ in IN_FLIGHT)})
     """,
     IN_FLIGHT,
 )
+# Cancellation does not undo a provider's possible acceptance. Keep its bytes
+# until delivery is positively settled; historical unconfirmed receipts pin too.
+emit_owed("""
+    SELECT j.payload_json, t.file_ref FROM publish_jobs j
+    JOIN publish_job_targets t ON t.job_id=j.id
+    WHERE NOT json_valid(COALESCE(t.checkpoint_json,'{}'))
+       OR (json_extract(t.checkpoint_json,'$.submission_started')=1
+           AND COALESCE(t.delivery_state,'')<>'delivered')
+       OR (t.id IN (SELECT target_id FROM sociamonials_delivered_assets)
+           AND COALESCE(t.delivery_state,'')<>'delivered')
+""")
 emit_owed(DUE_SOON_SQL, (due_cutoff,))
 
 # Fail-closed invariant: a file referenced by ANY live target (pending,
@@ -853,14 +860,13 @@ for payload_json, file_ref in conn.execute(
     """
     SELECT j.payload_json, t.file_ref FROM publish_jobs j
     JOIN publish_job_targets t ON t.job_id = j.id
-    WHERE t.status IN ('pending', 'running', 'retrying')
+    WHERE t.status IN ('pending', 'running', 'retrying', 'awaiting_delivery', 'needs_review', 'blocked')
     """
 ):
     emit_file_ref_if_unmapped(file_ref)
-    try:
-        data = json.loads(payload_json)
-    except Exception:
-        continue
+    data = json.loads(payload_json)
+    if not isinstance(data, dict):
+        raise ValueError("Invalid live payload; refusing offload")
     for artifact in data.get("artifacts") or []:
         local_path = artifact.get("local_path") or ""
         if local_path:

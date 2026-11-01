@@ -412,15 +412,28 @@
             {{ schedule.mode === 'now' ? '立即發佈' : '送出排程' }}
           </el-button>
         </el-tooltip>
-        <el-button size="large" @click="resetForm">取消</el-button>
+        <el-button size="large" :disabled="submitting" @click="resetForm">取消</el-button>
       </div>
       <div v-if="submitResult" class="pc-submit-result">
         <el-alert
-          :title="submitResult.message"
-          :type="submitResult.type"
+          :title="submitDisplay.message"
+          :type="submitDisplay.type"
           :closable="false"
           show-icon
         />
+        <p v-if="submitResult.submissionId" class="pc-subtle">提交編號：{{ submitResult.submissionId }}</p>
+        <p v-if="submitResult.error" class="pc-subtle">{{ submitResult.error }}</p>
+        <router-link to="/jobs" class="pc-link">檢查發佈佇列（確認結果前請勿重複發佈）</router-link>
+        <div v-for="campaignId in submitResult.campaignIds || []" :key="campaignId" class="pc-jobs-list">
+          <span>準備 #{{ campaignId }} · </span>
+          <el-tag :type="publishStatusType(preparations[campaignId]?.status || 'preparing')" size="small">
+            {{ publishStatusLabel(preparations[campaignId]?.status || 'preparing') }}
+          </el-tag>
+          <span class="pc-subtle pc-ml-8">{{ preparations[campaignId]?.progressLabel || '正在取得準備進度' }}</span>
+          <p v-if="preparations[campaignId]?.error || preparations[campaignId]?.lastError" class="pc-subtle">{{ preparations[campaignId].error || preparations[campaignId].lastError }}</p>
+          <p class="pc-subtle" role="status">{{ pollingStatusText(preparationPolling[campaignId]) }}</p>
+          <el-button v-if="['error', 'paused', 'stopped'].includes(preparationPolling[campaignId]?.status)" size="small" @click="startPreparationPolling(campaignId)">更新準備狀態</el-button>
+        </div>
         <el-alert
           v-if="hasTiktokSelected && submitResult.jobs?.length"
           title="TikTok 內容可能需要幾分鐘的處理時間才會在平台上顯示。"
@@ -429,20 +442,17 @@
           :closable="false"
           style="margin-top: 8px;"
         />
-        <div v-if="submitResult.jobs?.length" class="pc-jobs-list">
-          <div v-for="job in submitResult.jobs" :key="job.id">
-            <router-link :to="`/jobs?jobId=${job.id}`" class="pc-link">Job #{{ job.id }}</router-link>
-            <span class="pc-subtle pc-ml-8">{{ job.platform }} — {{ job.totalTargets }} target(s)</span>
-            <el-tag v-if="tiktokJobStatuses[job.id]" :type="tiktokJobStatuses[job.id].type" size="small" style="margin-left: 8px;">
-              {{ tiktokJobStatuses[job.id].label }}
-            </el-tag>
-            <a
-              v-if="tiktokJobStatuses[job.id]?.url"
-              :href="tiktokJobStatuses[job.id].url"
-              target="_blank"
-              class="pc-link"
-              style="margin-left: 8px;"
-            >查看貼文</a>
+        <div v-if="submittedJobs.length" class="pc-jobs-list">
+          <div v-for="job in submittedJobs" :key="job.id">
+            <router-link :to="`/jobs?job=${job.id}`" class="pc-link">Job #{{ job.id }}</router-link>
+            <span class="pc-subtle pc-ml-8">{{ job.platform }} — {{ job.totalTargets ?? '—' }} target(s)</span>
+            <el-tag :type="publishStatusType(job.status)" size="small" style="margin-left: 8px;">{{ publishStatusLabel(job.status) }}</el-tag>
+            <p v-if="publishActionHint(job.status)" class="pc-subtle">{{ publishActionHint(job.status) }}</p>
+            <p v-for="target in (job.targets || []).filter(t => targetReliabilityDetails(t))" :key="target.id" class="pc-subtle">
+              #{{ target.id }} · {{ publishStatusLabel(target.status) }} · {{ targetReliabilityDetails(target) }}
+            </p>
+            <p class="pc-subtle" role="status">{{ pollingStatusText(jobsStore.pollingByJobId[job.id]) }}</p>
+            <el-button v-if="['error', 'paused', 'stopped'].includes(jobsStore.pollingByJobId[job.id]?.status)" size="small" @click="jobsStore.startPolling(job.id)">更新狀態（不重送）</el-button>
           </div>
         </div>
       </div>
@@ -523,7 +533,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 
@@ -536,11 +546,18 @@ import { materialApi } from '@/api/material'
 import { tiktokApi } from '@/api/tiktok'
 import TikTokPostSettings from '@/components/TikTokPostSettings.vue'
 import TikTokReviewModal from '@/components/TikTokReviewModal.vue'
+import { useJobsStore } from '@/stores/jobs'
+import { campaignsApi } from '@/api/campaigns'
+import { createPoller, pollingStatusText } from '@/utils/polling'
+import { needsPublishAction, isTerminalJobStatus, publishStatusLabel, publishStatusType, publishActionHint, targetReliabilityDetails } from '@/utils/publish-status'
+import { createPublishSubmitter, campaignPreparation, lastSubmission, rememberSubmission, submissionPresentation } from '@/utils/publish-submission'
 
 const STAGGER_MINUTES = 5
 
 const profilesStore = useProfilesStore()
 const templatesStore = usePublishTemplatesStore()
+const jobsStore = useJobsStore()
+const submitPublication = createPublishSubmitter((payload) => publishCenterApi.submit(payload, { silentError: true }))
 
 const uploadAction = buildApiUrl('/upload')
 const authHeaders = computed(() => {
@@ -733,51 +750,85 @@ function getNextUnreviewedTiktokAccount() {
   return null
 }
 
-// TikTok publish status polling
-const tiktokJobStatuses = reactive({}) // jobId -> { type, label, url }
-let statusPollInterval = null
+// The worker's job/target snapshots are authoritative for provider delivery.
+// Preparation has no job yet, so follow the existing campaign read API first.
+const preparations = reactive({})
+const preparationPolling = reactive({})
+const preparationPollers = new Map()
+const trackedJobs = new Set()
+let trackingDisposed = false
+const submittedJobs = computed(() => (submitResult.value?.jobs || []).map((job) => jobsStore.jobsById[job.id] || job))
+const submitDisplay = computed(() => {
+  const campaignIds = submitResult.value?.campaignIds || []
+  const data = {
+    ...submitResult.value, jobs: submittedJobs.value,
+    campaigns: campaignIds.map((id) => preparations[id] || { id, status: 'preparing' }),
+  }
+  // A single ready campaign must not hide another campaign still preparing or
+  // unavailable. Drop the receipt status only after all live snapshots arrive.
+  if (data.jobs.length && data.jobs.every((job) => jobsStore.jobsById[job.id])
+    && campaignIds.every((id) => preparations[id] && preparations[id].status !== 'preparing')) data.status = undefined
+  return submissionPresentation(data)
+})
 
-async function pollTiktokStatuses() {
-  if (!submitResult.value?.jobs?.length) return
-  for (const job of submitResult.value.jobs) {
-    if (job.platform !== 'tiktok') continue
-    try {
-      const resp = await tiktokApi.getPublishStatus(job.id)
-      const statuses = resp?.data || []
-      if (statuses.length > 0) {
-        const latest = statuses[statuses.length - 1]
-        const status = latest.status || latest.publish_status || ''
-        const postUrl = latest.platform_url || latest.public_url || latest.share_url || ''
-        if (status === 'success' || status === 'published' || status === 'publish_complete') {
-          tiktokJobStatuses[job.id] = { type: 'success', label: '已發佈', url: postUrl }
-        } else if (status === 'failed' || status === 'error') {
-          tiktokJobStatuses[job.id] = { type: 'danger', label: '發佈失敗', url: '' }
-        } else if (status === 'processing' || status === 'uploading') {
-          tiktokJobStatuses[job.id] = { type: 'warning', label: '處理中...', url: '' }
-        } else {
-          tiktokJobStatuses[job.id] = { type: 'info', label: status || '已送出', url: '' }
-        }
-      }
-    } catch {
-      // Ignore polling errors
+function trackJobs(jobs) {
+  if (trackingDisposed || !submitResult.value) return
+  const merged = new Map((submitResult.value.jobs || []).map((job) => [String(job.id), job]))
+  for (const job of jobs) {
+    merged.set(String(job.id), { ...merged.get(String(job.id)), ...job })
+    if (!trackedJobs.has(String(job.id))) {
+      trackedJobs.add(String(job.id))
+      jobsStore.startPolling(job.id)
     }
   }
+  submitResult.value.jobs = [...merged.values()]
+  rememberSubmission(submitResult.value)
 }
 
-function startStatusPolling() {
-  if (statusPollInterval) clearInterval(statusPollInterval)
-  pollTiktokStatuses()
-  statusPollInterval = setInterval(pollTiktokStatuses, 10000) // Poll every 10 seconds
-  // Stop after 5 minutes
-  setTimeout(() => {
-    if (statusPollInterval) {
-      clearInterval(statusPollInterval)
-      statusPollInterval = null
-    }
-  }, 300000)
+function startPreparationPolling(campaignId) {
+  if (trackingDisposed) return
+  if (!preparationPollers.has(campaignId)) {
+    preparationPollers.set(campaignId, createPoller(
+      (signal) => campaignsApi.getCampaign(campaignId, { signal, silentError: true }),
+      {
+        interval: 2500,
+        onState: (state) => { preparationPolling[campaignId] = state },
+        onResult: (response) => {
+          const campaign = campaignPreparation(response, campaignId)
+          preparations[campaignId] = campaign
+          trackJobs(campaign.jobs)
+          if (needsPublishAction(campaign.status)) return 'paused'
+          if (isTerminalJobStatus(campaign.status) || (campaign.status !== 'preparing' && campaign.jobs.length)) return 'completed'
+        },
+      }
+    ))
+  }
+  preparationPollers.get(campaignId).start()
 }
+
+function trackSubmission() {
+  if (!submitResult.value || trackingDisposed) return
+  trackJobs(submitResult.value.jobs || [])
+  for (const id of submitResult.value.campaignIds || []) startPreparationPolling(id)
+}
+
+function stopTracking() {
+  preparationPollers.forEach((poller) => poller.stop())
+  preparationPollers.clear()
+  trackedJobs.forEach((id) => jobsStore.stopPolling(id))
+  trackedJobs.clear()
+  Object.keys(preparations).forEach((id) => delete preparations[id])
+  Object.keys(preparationPolling).forEach((id) => delete preparationPolling[id])
+}
+
+onBeforeUnmount(() => {
+  trackingDisposed = true
+  stopTracking()
+})
 
 onMounted(async () => {
+  submitResult.value = lastSubmission()
+  trackSubmission()
   try {
     await profilesStore.refreshProfiles()
     await templatesStore.refresh()
@@ -1481,6 +1532,7 @@ function buildTiktokPostSettingsPayload() {
 }
 
 async function submit() {
+  if (submitting.value) return
   // TikTok's app review requires a dedicated review page with creator info,
   // metadata selection, commercial content disclosure, and explicit consent.
   // Open the review modal for the first TikTok account instead of a simple confirm dialog.
@@ -1509,10 +1561,12 @@ async function submit() {
 
 // This function bypasses the modal opening and actually submits to the backend
 async function submitAfterTiktokReview() {
+  if (submitting.value) return
+  stopTracking()
   submitting.value = true
   submitResult.value = null
   try {
-    const response = await publishCenterApi.submit({
+    const data = await submitPublication({
       profileIds: selectedProfileIds.value,
       selectedAccountIds: selectedAccountIds.value,
       mediaFilePaths: mediaFiles.value.map((file) => file.path),
@@ -1522,30 +1576,15 @@ async function submitAfterTiktokReview() {
       accountDrafts: buildAccountDraftsPayload(),
       tiktokPostSettings: buildTiktokPostSettingsPayload(),
     })
-    const data = response?.data || {}
-    // Async prep returns before any job exists: a non-empty ``campaignIds``
-    // with ``status: 'preparing'`` means the submission is live, not empty.
-    // Rendering that as the old "no jobs produced" warning would tell the
-    // operator nothing happened when prep is actually running.
-    const isPreparing = data.status === 'preparing' || (!data.jobs?.length && (data.campaignIds?.length || 0) > 0)
-    submitResult.value = {
-      type: data.jobs?.length ? 'success' : (isPreparing ? 'info' : 'warning'),
-      message: data.jobs?.length
-        ? `已排入 ${data.jobs.length} 個發佈工作`
-        : (isPreparing
-            ? '已排入準備佇列，媒體準備完成後會自動建立發佈工作'
-            : '送出成功，但未產生任何工作'),
-      jobs: data.jobs,
-      campaignIds: data.campaignIds,
-      status: data.status,
-      skipped: data.skipped,
-    }
-    // Start TikTok status polling if there are TikTok jobs
-    if (data.jobs?.some(j => j.platform === 'tiktok')) {
-      startStatusPolling()
-    }
+    submitResult.value = data
+    trackSubmission()
   } catch (err) {
-    submitResult.value = { type: 'error', message: err?.message || '送出失敗' }
+    submitResult.value = {
+      status: err?.uncertain ? 'uncertain' : 'rejected',
+      error: err?.message || '送出失敗',
+      submissionId: err?.submissionId,
+      jobs: [], campaignIds: [],
+    }
   } finally {
     submitting.value = false
   }
@@ -1616,6 +1655,8 @@ async function onTemplateSelected(templateId) {
 }
 
 function resetForm() {
+  if (submitting.value) return
+  stopTracking()
   mediaFiles.value = []
   selectedProfileIds.value = []
   selectedAccountIds.value = []

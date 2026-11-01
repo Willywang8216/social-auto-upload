@@ -29,6 +29,7 @@ from myUtils import media_remote_storage
 from myUtils import ops_alerts
 from myUtils import platform_limits
 from myUtils import profiles as profile_registry
+from myUtils.sqlite_utils import connect as _db_connection
 
 # Platforms that publish by handing the platform a public media URL (the
 # platform fetches the bytes itself), so they require a publicly-reachable
@@ -103,7 +104,7 @@ def _resolve_video_file_path_safely(
 
 
 def _load_storage_backend_by_id(backend_id: int, *, db_path: Path) -> dict | None:
-    with sqlite3.connect(db_path) as conn:
+    with _db_connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT * FROM storage_backends WHERE id = ?", (backend_id,)
@@ -126,7 +127,7 @@ def _resolve_backend_id_for_artifact(
     remote_name = getattr(remote_artifact, "remote_name", None)
     if not remote_name:
         return None
-    with sqlite3.connect(db_path) as conn:
+    with _db_connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
         # rclone remotes store the remote name in ``bucket``; share/DO Spaces
         # use a provider slug. Try both.
@@ -139,7 +140,7 @@ def _resolve_backend_id_for_artifact(
 
 def _download_file_from_storage(file_path: str, *, db_path: Path) -> Path | None:
     """Download a file from storage if it has a storage_key or CDN URL. Returns local path or None."""
-    with sqlite3.connect(db_path) as conn:
+    with _db_connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT storage_key, storage_backend_id, storage_cdn_url FROM file_records WHERE file_path = ?",
@@ -188,11 +189,7 @@ def _download_file_from_storage(file_path: str, *, db_path: Path) -> Path | None
     # Try 2: Download via public CDN URL
     if row["storage_cdn_url"]:
         try:
-            import requests as _requests
-            resp = _requests.get(row["storage_cdn_url"], timeout=60)
-            resp.raise_for_status()
-            local_path.write_bytes(resp.content)
-            return local_path
+            return media_remote_storage.download_public_url(row["storage_cdn_url"], local_path)
         except Exception:
             logging.getLogger(__name__).exception("Failed to download %s from CDN", file_path)
 

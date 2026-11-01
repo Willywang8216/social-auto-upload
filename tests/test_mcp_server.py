@@ -9,12 +9,14 @@ integration coverage that the schema ↔ tool wiring stays correct.
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import db.createTable as create_table
 
@@ -41,6 +43,12 @@ class _McpTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self._tmp.name) / "mcp.db"
+        db_env = patch.dict(os.environ, {"SAU_DB_PATH": str(self.db_path)})
+        db_env.start()
+        self.addCleanup(db_env.stop)
+        cookie_root = patch("myUtils.profiles.COOKIE_ROOT", Path(self._tmp.name) / "cookies")
+        cookie_root.start()
+        self.addCleanup(cookie_root.stop)
         create_table.bootstrap(self.db_path)
 
         # Imported lazily so the conf stub above is in place first.
@@ -329,66 +337,100 @@ class JobsToolTests(_McpTestCase):
 
 
 class PublishToolTests(_McpTestCase):
-    """Smoke tests for the publish orchestrator tools.
-
-    We don't run a real upload (that needs LLM + cookies); we just verify
-    the tool surfaces ``not_found`` / ``invalid_input`` envelopes when
-    the inputs are wrong and that valid inputs reach the orchestrator.
-    """
+    """MCP envelopes and arguments for the Flask-free admission service."""
 
     def test_publish_submit_missing_profile_returns_not_found(self) -> None:
-        out = self._call(
-            tool="publish_submit",
-            profile_ids=[999],
-            media_file_paths=["x.mp4"],
-            brief="hi",
-            db_path=str(self.db_path),
-        )
+        from mcp_server._shared import error_payload
+
+        missing = LookupError("Profile not found: id=999")
+        with patch("myUtils.publish_services.submit_publish", side_effect=missing) as submit:
+            out = self._call(
+                tool="publish_submit", profile_ids=[999],
+                media_file_paths=["x.mp4"], brief="hi", db_path=str(self.db_path),
+            )
+        self.assertEqual(out, error_payload(missing))
         self.assertEqual(out["error"], "not_found")
+        self.assertNotIn("status", out)
+        self.assertEqual(submit.call_args.kwargs["profile_ids"], [999])
 
     def test_publish_submit_status_is_preparing_under_async(self) -> None:
-        # Parity with POST /publish-center/submit: the MCP result carries the
-        # async state so a client can tell "preparing" from "nothing queued".
-        from unittest.mock import patch
+        from myUtils import publish_orchestrator
 
+        profile, account = self._seed()
+        fake_result = publish_orchestrator.SubmitResult(campaign_ids=[42], jobs=[], skipped=[])
+        options = {"watermarkDisabled": True}
+        schedule = {"publishNow": False, "startAt": "2030-03-04T08:00:00Z"}
+        drafts = {str(account["id"]): {"message": "Approved copy"}}
+        tiktok = {str(account["id"]): {"privacyLevel": "SELF_ONLY"}}
+        with patch("myUtils.publish_services.submit_publish", return_value=fake_result) as submit:
+            out = self._call(
+                tool="publish_submit", profile_ids=[profile["id"]],
+                selected_account_ids=[account["id"]], media_file_paths=["SFW x.mp4"],
+                brief="hi", options=options, schedule=schedule, account_drafts=drafts,
+                tiktok_post_settings=tiktok, db_path=str(self.db_path), submission_id="mcp:42",
+            )
+        self.assertEqual(out, {
+            "status": "preparing", "campaignIds": [42], "jobs": [],
+            "skipped": [], "submissionId": "mcp:42",
+        })
+        submit.assert_called_once_with(
+            profile_ids=[profile["id"]], selected_account_ids=[account["id"]],
+            media_file_paths=["SFW x.mp4"], brief="hi", options=options, schedule=schedule,
+            account_drafts=drafts, tiktok_post_settings=tiktok, db_path=self.db_path,
+            submission_id="mcp:42", source="mcp",
+        )
+
+    def test_publish_submit_remains_preparing_when_async_switch_is_off(self) -> None:
         from myUtils import publish_orchestrator
 
         profile, _ = self._seed()
-        fake_result = publish_orchestrator.SubmitResult(
-            campaign_ids=[42], jobs=[], skipped=[]
-        )
-        with patch("sau_backend._async_prep_enabled", return_value=True), \
-                patch("sau_backend.campaign_prep.submit_publish_async", return_value=fake_result):
+        fake_result = publish_orchestrator.SubmitResult(campaign_ids=[1], jobs=[], skipped=[])
+        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "0"}), \
+                patch("myUtils.publish_services.submit_publish", return_value=fake_result) as submit:
             out = self._call(
-                tool="publish_submit",
-                profile_ids=[profile["id"]],
-                media_file_paths=["x.mp4"],
-                brief="hi",
-                db_path=str(self.db_path),
+                tool="publish_submit", profile_ids=[profile["id"]],
+                media_file_paths=["x.mp4"], brief="hi", db_path=str(self.db_path),
             )
-        self.assertEqual(out["status"], "preparing")
-        self.assertEqual(out["campaignIds"], [42])
-        self.assertEqual(out["jobs"], [])
+        self.assertEqual(out, {
+            "status": "preparing", "campaignIds": [1], "jobs": [],
+            "skipped": [], "submissionId": None,
+        })
+        submit.assert_called_once_with(
+            profile_ids=[profile["id"]], selected_account_ids=None,
+            media_file_paths=["x.mp4"], brief="hi", options={}, schedule=None,
+            account_drafts={}, tiktok_post_settings={}, db_path=self.db_path,
+            submission_id=None, source="mcp",
+        )
 
-    def test_publish_submit_status_is_queued_on_sync_path(self) -> None:
-        from unittest.mock import patch
-
+    def test_publish_submit_policy_block_returns_needs_review_without_jobs(self) -> None:
         from myUtils import publish_orchestrator
 
-        profile, _ = self._seed()
-        fake_result = publish_orchestrator.SubmitResult(
-            campaign_ids=[1], jobs=[{"id": 1}], skipped=[]
-        )
-        with patch("sau_backend._async_prep_enabled", return_value=False), \
-                patch("myUtils.publish_orchestrator.submit_publish", return_value=fake_result):
+        skipped = [{"profileId": 1, "reason": "nsfw_no_adult_safe_account"}]
+        result = publish_orchestrator.SubmitResult(campaign_ids=[], jobs=[], skipped=skipped)
+        with patch("myUtils.publish_services.submit_publish", return_value=result):
             out = self._call(
-                tool="publish_submit",
-                profile_ids=[profile["id"]],
-                media_file_paths=["x.mp4"],
-                brief="hi",
-                db_path=str(self.db_path),
+                tool="publish_submit", profile_ids=[1], media_file_paths=["x.mp4"],
+                brief="hi", db_path=str(self.db_path), submission_id="mcp:blocked",
             )
-        self.assertEqual(out["status"], "queued")
+        self.assertEqual(out, {
+            "status": "needs_review", "campaignIds": [], "jobs": [],
+            "skipped": skipped, "submissionId": "mcp:blocked",
+        })
+
+    def test_publish_submit_service_errors_use_error_payload(self) -> None:
+        from mcp_server._shared import error_payload
+        from myUtils.submissions import SubmissionConflict
+
+        for exc in (ValueError("Unsafe media path"), SubmissionConflict("changed intent"),
+                    RuntimeError("admission unavailable")):
+            with self.subTest(error=type(exc).__name__), \
+                    patch("myUtils.publish_services.submit_publish", side_effect=exc):
+                out = self._call(
+                    tool="publish_submit", profile_ids=[1], media_file_paths=["x.mp4"],
+                    brief="hi", db_path=str(self.db_path),
+                )
+            self.assertEqual(out, error_payload(exc))
+            self.assertNotIn("status", out)
 
     def test_publish_preview_returns_profiles_envelope(self) -> None:
         profile, _ = self._seed()

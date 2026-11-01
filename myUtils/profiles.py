@@ -509,6 +509,9 @@ def delete_profile(profile_id: int, *, workspace_id: str | None = None, db_path:
         # Confirm ownership before deleting (foreign profile -> LookupError -> 404).
         get_profile(profile_id, workspace_id=workspace_id, db_path=db_path)
     with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        refs = [f"account:{row[0]}" for row in conn.execute("SELECT id FROM accounts WHERE profile_id=?", (profile_id,))]
+        _block_deleted_account_targets(conn, refs)
         conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
         conn.commit()
 
@@ -860,6 +863,8 @@ def delete_account(account_id: int, *, workspace_id: str | None = None, db_path:
     if workspace_id is not None:
         get_account(account_id, workspace_id=workspace_id, db_path=db_path)
     with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _block_deleted_account_targets(conn, [f"account:{account_id}"])
         conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
         conn.commit()
 
@@ -901,3 +906,26 @@ def iter_accounts_for_publish(
             )
         accounts.append(match)
     return accounts
+
+
+def _block_deleted_account_targets(conn, refs: list[str]) -> None:
+    """Called in the deletion transaction; never leave runnable dangling refs."""
+    from myUtils import jobs
+    if not refs:
+        return
+    placeholders = ",".join("?" for _ in refs)
+    unresolved = conn.execute(
+        f"SELECT id FROM publish_job_targets WHERE account_ref IN ({placeholders}) "
+        "AND status IN ('running','awaiting_delivery','needs_review') LIMIT 1", refs).fetchone()
+    if unresolved:
+        raise ValueError("Resolve or cancel active/uncertain deliveries before deleting this account")
+    affected = conn.execute(
+        f"SELECT DISTINCT job_id FROM publish_job_targets WHERE account_ref IN ({placeholders}) "
+        "AND status IN ('pending','retrying','blocked')", refs).fetchall()
+    conn.execute(
+        f"UPDATE publish_job_targets SET status='blocked', error_category='account_missing', "
+        "last_error='Destination account was deleted; select an explicit replacement', "
+        "lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,next_attempt_at=NULL "
+        f"WHERE account_ref IN ({placeholders}) AND status IN ('pending','retrying','blocked')", refs)
+    for row in affected:
+        jobs._recount_job(conn, row[0])

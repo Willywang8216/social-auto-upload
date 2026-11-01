@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sqlite3
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,10 +40,16 @@ class CampaignApiTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.base_dir = Path(self._tmp.name)
         self.db_path = self.base_dir / "db" / "database.db"
+        db_env = patch.dict(os.environ, {"SAU_DB_PATH": str(self.db_path)})
+        db_env.start()
+        self.addCleanup(db_env.stop)
         create_table.bootstrap(self.db_path)
 
         self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
         self._base_dir_patch.start()
+        media_base = patch("myUtils.campaign_media_prep.BASE_DIR", self.base_dir)
+        media_base.start()
+        self.addCleanup(media_base.stop)
         # Force open mode so tests don't need auth tokens
         from myUtils.security import SecurityPolicy
         self._orig_policy = sau_backend.app.config["SECURITY_POLICY"]
@@ -68,7 +76,7 @@ class CampaignApiTests(unittest.TestCase):
         ).config or {}
 
     def _insert_file_record(self, filename: str, file_path: str) -> int:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             cursor = conn.execute(
                 """
                 INSERT INTO file_records (filename, filesize, file_path)
@@ -202,7 +210,7 @@ class CampaignApiTests(unittest.TestCase):
 
         # Disable the only account, then publish again: nothing can be queued,
         # but the campaign already has a queued post and must stay publishing.
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute("UPDATE accounts SET enabled = 0 WHERE id = ?", (account_id,))
             conn.commit()
         second = self.client.post(f"/campaigns/{campaign_id}/publish", json={})
@@ -263,7 +271,7 @@ class CampaignApiTests(unittest.TestCase):
             "name": "Fallback", "items": [{"fileRecordId": file_id, "role": "image"}],
         }).get_json()["data"]["id"]
         with patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={}), \
-             patch.object(self.sau_backend, "_account_audience_language", return_value=""):
+             patch.object(self.sau_backend.publish_services, "_account_audience_language", return_value=""):
             response = self.client.post("/campaigns/prepare", json={
                 "profileId": profile["id"], "mediaGroupId": group,
                 "selectedAccountIds": [account["id"]],
@@ -298,7 +306,7 @@ class CampaignApiTests(unittest.TestCase):
             "name": "Brief only", "items": [{"fileRecordId": file_id, "role": "image"}],
         }).get_json()["data"]["id"]
         with patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={}), \
-             patch.object(self.sau_backend, "_account_audience_language", return_value=""):
+             patch.object(self.sau_backend.publish_services, "_account_audience_language", return_value=""):
             response = self.client.post("/campaigns/prepare", json={
                 "profileId": profile["id"], "mediaGroupId": group,
                 "selectedAccountIds": [account["id"]],
@@ -499,7 +507,7 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 'INSERT INTO tiktok_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
                 ('state-123', profile_id, account_id, 'brand-tiktok', 'https://socialupload.iamwillywang.com/oauth/tiktok/callback', '["user.info.basic", "video.upload", "video.publish"]', 'started'),
@@ -547,7 +555,7 @@ class CampaignApiTests(unittest.TestCase):
         )
         account_id = account_response.get_json()['data']['id']
 
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 'INSERT INTO tiktok_review_events (event_type, status, account_id, account_name, payload_json, headers_json, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)',
                 ('refresh', 'ok', account_id, 'brand-tiktok', '{"status":"ok"}', '{}', '{}'),
@@ -1009,7 +1017,7 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.get_json()['data']
         self.assertEqual(body['authorizeUrl'], 'https://www.reddit.com/api/v1/authorize?demo=1')
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             row = conn.execute('SELECT COUNT(*) FROM reddit_oauth_requests WHERE account_id = ?', (account_id,)).fetchone()
         self.assertEqual(row[0], 1)
 
@@ -1030,7 +1038,7 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 'INSERT INTO reddit_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
                 ('reddit-state-1', profile_id, account_id, 'brand-reddit', 'https://up.iamwillywang.com/oauth/reddit/callback', '["identity", "submit", "read"]', 'started'),
@@ -1092,7 +1100,7 @@ class CampaignApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.get_json()['data']
         self.assertEqual(body['authorizeUrl'], 'https://accounts.google.com/o/oauth2/v2/auth?demo=1')
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             row = conn.execute('SELECT COUNT(*) FROM youtube_oauth_requests WHERE account_id = ?', (account_id,)).fetchone()
         self.assertEqual(row[0], 1)
 
@@ -1112,7 +1120,7 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 'INSERT INTO youtube_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
                 ('youtube-state-1', profile_id, account_id, 'brand-youtube', 'https://up.iamwillywang.com/oauth/youtube/callback', '["https://www.googleapis.com/auth/youtube.upload"]', 'started'),
@@ -1152,7 +1160,7 @@ class CampaignApiTests(unittest.TestCase):
             })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['data']['authorizeUrl'], 'https://facebook.com/dialog/oauth?demo=1')
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             row = conn.execute('SELECT COUNT(*) FROM meta_oauth_requests WHERE account_id = ?', (account_id,)).fetchone()
         self.assertEqual(row[0], 1)
 
@@ -1169,7 +1177,7 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 'INSERT INTO meta_oauth_requests (state_token, profile_id, account_id, account_name, platform, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                 ('meta-state-1', profile_id, account_id, 'brand-facebook', 'facebook', 'https://up.iamwillywang.com/oauth/meta/callback', '["pages_show_list"]', 'started'),
@@ -1196,7 +1204,7 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 'INSERT INTO meta_oauth_requests (state_token, profile_id, account_id, account_name, platform, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                 ('meta-state-2', profile_id, account_id, 'brand-instagram', 'instagram', 'https://up.iamwillywang.com/oauth/meta/callback', '["instagram_basic"]', 'started'),
@@ -1247,7 +1255,7 @@ class CampaignApiTests(unittest.TestCase):
             })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['data']['authorizeUrl'], 'https://threads.net/oauth/authorize?demo=1')
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             row = conn.execute('SELECT COUNT(*) FROM threads_oauth_requests WHERE account_id = ?', (account_id,)).fetchone()
         self.assertEqual(row[0], 1)
 
@@ -1264,7 +1272,7 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 'INSERT INTO threads_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
                 ('threads-state-1', profile_id, account_id, 'brand-threads', 'https://up.iamwillywang.com/oauth/threads/callback', '["threads_basic", "threads_content_publish"]', 'started'),
@@ -1380,7 +1388,7 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 'INSERT INTO reddit_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
                 ('reddit-state-2', profile_id, account_id, 'brand-reddit', 'https://up.iamwillywang.com/oauth/reddit/callback', '["identity", "submit"]', 'started'),
@@ -1410,7 +1418,7 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 'INSERT INTO threads_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
                 ('threads-state-2', profile_id, account_id, 'brand-threads', 'https://up.iamwillywang.com/oauth/threads/callback', '["threads_basic"]', 'started'),

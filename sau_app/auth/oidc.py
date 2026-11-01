@@ -99,7 +99,7 @@ class GoogleOIDCClient:
         return GoogleClaims(
             subject=str(claims.get("sub")),
             email=claims.get("email"),
-            email_verified=bool(claims.get("email_verified")),
+            email_verified=claims.get("email_verified") is True,
             name=claims.get("name"),
             picture=claims.get("picture"),
             raw=dict(claims),

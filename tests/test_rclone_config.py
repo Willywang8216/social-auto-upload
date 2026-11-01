@@ -37,6 +37,12 @@ class WritableConfigTests(unittest.TestCase):
         self.addCleanup(self.readonly_dir.chmod, 0o755)
         self.home = self.root / "home"
         self.home.mkdir()
+        # chmod alone does not emulate a read-only mount under root or Windows.
+        real_access = os.access
+        access = patch.object(rclone_config.os, "access", side_effect=lambda path, mode, *a, **kw:
+            False if Path(path) == self.readonly_dir else real_access(path, mode, *a, **kw))
+        access.start()
+        self.addCleanup(access.stop)
 
     def test_a_read_only_directory_gets_a_writable_copy(self):
         copied = rclone_config.writable_rclone_config(self.config, home=self.home)
@@ -44,7 +50,8 @@ class WritableConfigTests(unittest.TestCase):
         self.assertEqual(Path(copied).read_text(encoding="utf-8"),
                          self.config.read_text(encoding="utf-8"))
         self.assertTrue(os.access(Path(copied).parent, os.W_OK))
-        self.assertEqual(oct(Path(copied).stat().st_mode & 0o777), "0o600")
+        if os.name == "posix":
+            self.assertEqual(oct(Path(copied).stat().st_mode & 0o777), "0o600")
 
     def test_an_already_writable_config_is_left_alone(self):
         writable = self.root / "rclone.conf"
@@ -59,7 +66,8 @@ class WritableConfigTests(unittest.TestCase):
         first = rclone_config.writable_rclone_config(self.config, home=self.home)
         os.utime(self.config, (1, 1))  # the mounted file is refreshed daily
         self.config.write_text("[gdrive]\ntype = drive\nnew = 1\n", encoding="utf-8")
-        os.utime(self.config, None)
+        newer = Path(first).stat().st_mtime + 2
+        os.utime(self.config, (newer, newer))
         second = rclone_config.writable_rclone_config(self.config, home=self.home)
         self.assertEqual(first, second)
         self.assertIn("new = 1", Path(second).read_text(encoding="utf-8"))

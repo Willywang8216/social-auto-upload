@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from queue import Queue
 from pathlib import Path
 from unittest.mock import patch
@@ -92,6 +94,10 @@ class GetFileServingTests(unittest.TestCase):
         self.sau_backend = sau_backend
         self._tmp = tempfile.TemporaryDirectory()
         self.base_dir = Path(self._tmp.name)
+        self.db_path = self.base_dir / "db" / "database.db"
+        db_env = patch.dict(os.environ, {"SAU_DB_PATH": str(self.db_path)})
+        db_env.start()
+        self.addCleanup(db_env.stop)
         (self.base_dir / "videoFile").mkdir(parents=True, exist_ok=True)
         self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
         self._base_dir_patch.start()
@@ -125,21 +131,21 @@ class GetFileServingTests(unittest.TestCase):
 
         self._write("_library/NW/clip with spaces.jpg", b"nested-bytes")
         query = urlencode({"filename": "_library/NW/clip with spaces.jpg"})
-        response = self.client.get(f"/getFile?{query}")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data, b"nested-bytes")
+        with self.client.get(f"/getFile?{query}") as response:
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data, b"nested-bytes")
 
     def test_deeply_nested_file_is_served(self) -> None:
         self._write("_batch1/nsfw/deep. mp4", b"deep-bytes")
-        response = self.client.get("/getFile?filename=_batch1/nsfw/deep.%20mp4")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data, b"deep-bytes")
+        with self.client.get("/getFile?filename=_batch1/nsfw/deep.%20mp4") as response:
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data, b"deep-bytes")
 
     def test_root_level_file_still_served(self) -> None:
         self._write("plain.mp4", b"root-bytes")
-        response = self.client.get("/getFile?filename=plain.mp4")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data, b"root-bytes")
+        with self.client.get("/getFile?filename=plain.mp4") as response:
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data, b"root-bytes")
 
     def test_traversal_out_of_a_subdirectory_is_still_rejected(self) -> None:
         (self.base_dir / "conf.py").write_bytes(b"secret")
@@ -167,7 +173,7 @@ class TwitterOAuthReconnectTests(unittest.TestCase):
         create_table.bootstrap(self.db_path)
         self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
         self._base_dir_patch.start()
-        self._db_path_patch = patch.object(sau_backend, "_current_db_path", return_value=self.db_path)
+        self._db_path_patch = patch.dict(os.environ, {"SAU_DB_PATH": str(self.db_path)})
         self._db_path_patch.start()
         from myUtils.security import SecurityPolicy
         self._orig_policy = sau_backend.app.config["SECURITY_POLICY"]
@@ -307,6 +313,9 @@ class LegacyDbBootstrapEndpointTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.base_dir = Path(self._tmp.name)
         (self.base_dir / "db").mkdir(parents=True, exist_ok=True)
+        db_env = patch.dict(os.environ, {"SAU_DB_PATH": str(self._legacy_db_path())})
+        db_env.start()
+        self.addCleanup(db_env.stop)
         self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
         self._base_dir_patch.start()
 
@@ -327,7 +336,7 @@ class LegacyDbBootstrapEndpointTests(unittest.TestCase):
         return self.base_dir / "db" / "database.db"
 
     def _table_names(self) -> set[str]:
-        with sqlite3.connect(self._legacy_db_path()) as conn:
+        with closing(sqlite3.connect(self._legacy_db_path())) as conn:
             rows = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
@@ -368,7 +377,7 @@ class LegacyDbBootstrapEndpointTests(unittest.TestCase):
         cookie_path = cookie_dir / "main.json"
         cookie_path.write_text("{}")
 
-        with sqlite3.connect(self._legacy_db_path()) as conn:
+        with closing(sqlite3.connect(self._legacy_db_path())) as conn, conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO profiles (name, slug, description, settings_json) VALUES (?, ?, ?, ?)",
@@ -392,11 +401,11 @@ class LegacyDbBootstrapEndpointTests(unittest.TestCase):
         cookie_path = cookie_dir / "main.json"
         cookie_path.write_text('{"cookies": [], "origins": []}')
 
-        response = self.client.get(
+        with self.client.get(
             f"/downloadCookie?filePath={cookie_path.as_posix()}"
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b'"cookies"', response.data)
+        ) as response:
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b'"cookies"', response.data)
 
 
 if __name__ == "__main__":

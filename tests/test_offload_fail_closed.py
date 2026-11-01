@@ -19,6 +19,7 @@ import sys
 import textwrap
 import unittest
 from pathlib import Path
+from myUtils.sqlite_utils import Connection as ClosingConnection
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -46,16 +47,17 @@ def _build_harness(db_path: Path, local_src: Path) -> str:
     For testing, we patch the DB path and the /app source root to point at fixtures.
     """
     body = _extract_pending_excludes_body()
-    # Patch the DB path
+    # Source has a configurable read-only DB path; never let the harness
+    # inherit an ambient database or open a production path.
     patched = body.replace(
-        'conn = sqlite3.connect("/app/db/database.db")',
-        f'conn = sqlite3.connect("{db_path}")',
+        'db_path = Path(os.environ.get("SAU_DB_PATH", "/app/db/database.db")).resolve()',
+        f'db_path = Path({str(db_path)!r}).resolve()',
     )
     # Patch /app/ references to the fixture source root.
     # The code uses "/app/" + root for os.walk and in path markers.
     patched = patched.replace(
         'base = "/app/" + root',
-        f'base = "{local_src}/" + root',
+        f'base = {str(local_src.as_posix())!r} + "/" + root',
     )
     # Also patch the marker strings used to extract relative paths from absolute ones.
     # The code checks for "/videoFile/", "/uploads/", "/generated/" in paths.
@@ -117,7 +119,7 @@ class FailClosedTests(unittest.TestCase):
             media.write_bytes(b"mapped bytes")
 
             # Create a storage backend
-            with sqlite3.connect(db) as conn:
+            with sqlite3.connect(db, factory=ClosingConnection) as conn:
                 conn.execute(
                     "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key,enabled) "
                     "VALUES ('test','T','rclone','drive','','sau/generated','','',1)"
@@ -175,7 +177,7 @@ class FailClosedTests(unittest.TestCase):
             media.parent.mkdir(parents=True, exist_ok=True)
             media.write_bytes(b"unmapped bytes")
 
-            with sqlite3.connect(db) as conn:
+            with sqlite3.connect(db, factory=ClosingConnection) as conn:
                 # Create a file_records row WITHOUT storage_key/storage_backend_id
                 conn.execute(
                     "INSERT INTO file_records (filename,filesize,file_path) VALUES (?,?,?)",
@@ -223,7 +225,7 @@ class FailClosedTests(unittest.TestCase):
             media.parent.mkdir(parents=True, exist_ok=True)
             media.write_bytes(b"future mapped bytes")
 
-            with sqlite3.connect(db) as conn:
+            with sqlite3.connect(db, factory=ClosingConnection) as conn:
                 conn.execute(
                     "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key,enabled) "
                     "VALUES ('test2','T','rclone','drive','','sau/generated','','',1)"
@@ -281,7 +283,7 @@ class FailClosedTests(unittest.TestCase):
             media.parent.mkdir(parents=True, exist_ok=True)
             media.write_bytes(b"future unmapped bytes")
 
-            with sqlite3.connect(db) as conn:
+            with sqlite3.connect(db, factory=ClosingConnection) as conn:
                 # Create a file_records row WITHOUT storage_key/storage_backend_id
                 conn.execute(
                     "INSERT INTO file_records (filename,filesize,file_path) VALUES (?,?,?)",
@@ -324,7 +326,7 @@ class FailClosedTests(unittest.TestCase):
             media.parent.mkdir(parents=True, exist_ok=True)
             media.write_bytes(b"public url bytes")
 
-            with sqlite3.connect(db) as conn:
+            with sqlite3.connect(db, factory=ClosingConnection) as conn:
                 # file_records WITHOUT storage mapping
                 conn.execute(
                     "INSERT INTO file_records (filename,filesize,file_path) VALUES (?,?,?)",

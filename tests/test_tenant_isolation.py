@@ -29,6 +29,7 @@ if flask_available and sqlalchemy_available:
     from sau_app.config import load_config
     from sau_app.db.identity_models import (
         ROLE_OWNER,
+        AuthIdentity,
         Session as SessionRow,
         User,
         Workspace,
@@ -118,6 +119,10 @@ class ProfileTenantIsolationTests(unittest.TestCase):
                            created_by_user_id=user.id)
             db.add_all([user, ws])
             db.flush()
+            db.add(AuthIdentity(
+                user_id=user.id, provider="google", provider_subject=user.id,
+                email_at_provider=email, email_verified=True,
+            ))
             db.add(WorkspaceMember(workspace_id=ws.id, user_id=user.id, role=ROLE_OWNER))
             sid = uuid.uuid4().hex
             csrf = uuid.uuid4().hex

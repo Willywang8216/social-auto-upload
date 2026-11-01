@@ -554,17 +554,10 @@ def submit_publish_async(
 
 
 def make_default_prep_runner() -> Callable[[campaign_store.Campaign, Path], dict]:
-    """Build the production prep runner used by the worker process.
-
-    The heavy callbacks live in ``sau_backend``; they are imported lazily so
-    importing this module (and the worker) never drags in the Flask app on its
-    own. In the in-process worker the module is already loaded, so this is a
-    no-op import; the standalone worker only pays for it when a campaign
-    actually needs preparing.
-    """
+    """Build the worker runner using Flask-free shared application services."""
 
     def _runner(campaign: campaign_store.Campaign, db_path: Path) -> dict:
-        from sau_backend import (
+        from myUtils.publish_services import (
             _artifact_part_groups_for_platform,
             _artifact_payloads_for_platform,
             _generate_account_draft,

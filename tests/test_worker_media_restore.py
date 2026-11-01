@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import db.createTable as create_table
 from myUtils import worker
+from myUtils.sqlite_utils import Connection as ClosingConnection
 
 # A valid ISO-BMFF header (size + b"ftyp") so the restore media-integrity
 # guard accepts the fixture bytes the mocked downloads write.
@@ -21,7 +22,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.db_path = self.root / "restore.db"
         create_table.bootstrap(self.db_path)
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO file_records (filename, filesize, file_path, storage_key) VALUES (?, ?, ?, ?)",
                 ("clip.mp4", 1.0, "clip.mp4", "videoFile/clip.mp4"),
@@ -30,13 +31,44 @@ class WorkerMediaRestoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
+    def test_absolute_upload_alias_restores_the_exact_registered_file(self) -> None:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
+            backend_id = conn.execute(
+                "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) "
+                "VALUES ('uploads','Uploads','rclone','drive','','sau/uploads','','')"
+            ).lastrowid
+            conn.execute("INSERT INTO file_records (filename,filesize,file_path,storage_key,storage_backend_id) "
+                         "VALUES ('x.mp4',132,'uploads/x.mp4','x.mp4',?)", (backend_id,))
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_remote_storage, "download_from_backend",
+            side_effect=lambda _backend, _key, destination: Path(destination).write_bytes(_MP4_FIXTURE),
+        ) as download:
+            result = worker._resolve_file_path("/app/uploads/x.mp4", db_path=self.db_path)
+        self.assertEqual(result, self.root / "uploads" / "x.mp4")
+        self.assertEqual(result.read_bytes(), _MP4_FIXTURE)
+        self.assertEqual(download.call_args.args[1], "x.mp4")
+
+    def test_unrelated_absolute_path_never_uses_a_same_named_project_file(self) -> None:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
+            backend_id = conn.execute(
+                "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) "
+                "VALUES ('source','Source','rclone','drive','','sau/videoFile','','')"
+            ).lastrowid
+            conn.execute("UPDATE file_records SET storage_backend_id=?", (backend_id,))
+        unrelated = self.root.parent / "another-repository" / "videoFile" / "clip.mp4"
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_remote_storage, "download_from_backend",
+        ) as download:
+            self.assertIsNone(worker._try_download_from_storage(str(unrelated), self.db_path))
+        download.assert_not_called()
+
     def test_resolve_file_path_raises_clear_error_when_remote_row_missing(self) -> None:
         with patch.object(worker, "BASE_DIR", self.root):
             with self.assertRaisesRegex(worker.MediaRestoreError, "unavailable"):
                 worker._resolve_file_path("missing.mp4", db_path=self.db_path)
 
     def test_backend_restore_failure_is_explicit_and_does_not_leave_partial_file(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute("INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                          ("test-drive", "Test Drive", "rclone", "drive", "auto", "sau/videoFile", "", ""))
             backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
@@ -66,7 +98,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         self.assertEqual(payload["thumbnail"], "videoFile/missing-thumbnail.jpg")
 
     def test_explicit_video_file_prefix_restores_to_media_root(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO file_records (filename, filesize, file_path, storage_key) VALUES (?, ?, ?, ?)",
                 ("prefixed.mp4", 1.0, "videoFile/prefixed.mp4", "prefixed.mp4"),
@@ -96,7 +128,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         permanently with MediaRestoreError even though the bytes were registered
         on a backend the whole time.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO file_records (filename, filesize, file_path, storage_key) VALUES (?, ?, ?, ?)",
                 ("x.mp4", 1.0, "videoFile/_batch1/x.mp4", "_batch1/x.mp4"),
@@ -129,7 +161,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
 
 
     def test_generated_campaign_artifact_restores_from_public_url(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute("INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                          ("test-drive", "Test Drive", "rclone", "drive", "auto", "sau/videoFile", "", ""))
             backend_id = conn.execute("SELECT id FROM storage_backends").fetchone()[0]
@@ -170,7 +202,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         )
 
     def test_generated_artifact_never_falls_back_to_source_record(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) VALUES (?,?,?,?,?,?,?,?)",
                 ("source-drive", "Source Drive", "rclone", "drive", "", "sau/videoFile", "", ""),
@@ -198,8 +230,8 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             with self.assertRaisesRegex(worker.MediaRestoreError, "safe public HTTPS"):
                 worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
-    def test_legacy_generated_artifact_restores_only_from_unique_registered_mapping(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+    def test_legacy_generated_artifact_uses_exact_registered_object_key(self) -> None:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) VALUES (?,?,?,?,?,?,?,?)",
                 ("gdrive-generated", "Generated Drive", "rclone", "drive", "", "sau/generated", "", ""),
@@ -208,6 +240,10 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             conn.execute(
                 "INSERT INTO file_records (filename,filesize,file_path,storage_key,storage_backend_id) VALUES (?,?,?,?,?)",
                 ("clip_pub.mp4", 14, "legacy-generated/clip_pub.mp4", "campaigns/campaign-2236/clip_pub.mp4", backend_id),
+            )
+            conn.execute(
+                "INSERT INTO file_records (filename,filesize,file_path,storage_key,storage_backend_id) VALUES (?,?,?,?,?)",
+                ("clip_pub.mp4", 14, "another-legacy/clip_pub.mp4", "campaigns/campaign-9999/clip_pub.mp4", backend_id),
             )
         generated_root = self.root / "generated" / "campaigns"
         generated_path = generated_root / "campaign-2236" / "clip_pub.mp4"
@@ -222,8 +258,30 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         self.assertEqual(generated_path.read_bytes(), _MP4_FIXTURE)
         self.assertEqual(download.call_args.args[1], "campaigns/campaign-2236/clip_pub.mp4")
 
+    def test_legacy_generated_object_key_is_refused_across_ambiguous_roots(self) -> None:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
+            for prefix in ("first", "second"):
+                backend_id = conn.execute(
+                    "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) "
+                    "VALUES (?,?,'rclone','drive','',?,'','')", (prefix, prefix, f"{prefix}/generated"),
+                ).lastrowid
+                conn.execute(
+                    "INSERT INTO file_records (filename,filesize,file_path,storage_key,storage_backend_id) VALUES (?,?,?,?,?)",
+                    ("clip.mp4", 14, f"legacy/{prefix}/clip.mp4", "campaigns/campaign-4/clip.mp4", backend_id),
+                )
+        generated_root = self.root / "generated" / "campaigns"
+        destination = generated_root / "campaign-4" / "clip.mp4"
+        payload = {"artifacts": [{"local_path": str(destination)}]}
+        with patch.object(worker, "BASE_DIR", self.root), patch.object(
+            worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
+        ), patch.object(worker.media_remote_storage, "download_from_backend") as download:
+            with self.assertRaises(worker.MediaRestoreError):
+                worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+        download.assert_not_called()
+        self.assertFalse(destination.exists())
+
     def test_generated_artifact_prefers_registered_remote_backend(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) VALUES (?,?,?,?,?,?,?,?)",
                 ("gdrive-generated", "Generated Drive", "rclone", "drive", "", "sau/generated", "", ""),
@@ -331,7 +389,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         The stored row names the host path, but the restore must land on the
         container-equivalent path this process can actually use.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO file_records (filename, filesize, file_path, storage_key) VALUES (?, ?, ?, ?)",
                 ("demo.mp4", 1.0, "videoFile/_inbox_cache/demo.mp4", "_inbox_cache/demo.mp4"),
@@ -372,7 +430,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         failures: the record and the bytes were fine, the destination could not
         be created because the container prefix was never mapped.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO file_records (filename, filesize, file_path, storage_key) VALUES (?, ?, ?, ?)",
                 ("demo2.mp4", 1.0, "videoFile/_inbox_cache/demo2.mp4", "_inbox_cache/demo2.mp4"),
@@ -408,7 +466,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         false and the by-name generated fallback was skipped, so the artifact
         was declared to have no file record even though a Drive mapping existed.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -507,7 +565,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
                 worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
     def test_cdn_empty_response_is_rejected_and_tempfile_removed(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute("UPDATE file_records SET storage_cdn_url=?", ("https://cdn.example/clip.mp4",))
         destination = self.root / "artifacts" / "clip.mp4"
 
@@ -559,7 +617,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
     def test_one_byte_placeholder_restore_is_rejected(self) -> None:
         """A generated Drive object that is literally one byte must not count
         as a successful restore: it was handed to uploaders as video."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) VALUES (?,?,?,?,?,?,?,?)",
                 ("gdrive-generated", "Generated Drive", "rclone", "drive", "auto", "sau/generated", "", ""),
@@ -585,7 +643,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
 
     def test_one_byte_placeholder_falls_through_to_public_url(self) -> None:
         """The placeholder backend must not mask a working public URL."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) VALUES (?,?,?,?,?,?,?,?)",
                 ("gdrive-generated", "Generated Drive", "rclone", "drive", "auto", "sau/generated", "", ""),
@@ -646,7 +704,7 @@ class GeneratedArtifactNeverSubstitutesSourceTests(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.db_path = self.root / "derived.db"
         create_table.bootstrap(self.db_path)
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             # The RAW source, which must never be substituted.
             conn.execute(
                 "INSERT INTO file_records (filename, filesize, file_path, storage_key) "
@@ -718,7 +776,7 @@ class ArtifactRestoreFromBackendTests(unittest.TestCase):
         with storage_key=campaigns/campaign-2514/...mp4 and storage_backend_id=691,
         but the publisher still raised 'media file is missing or empty'.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -759,7 +817,7 @@ class ArtifactRestoreFromBackendTests(unittest.TestCase):
         public_url set, but no file_records row, so the restore must fall back
         to the campaign_artifacts.public_url path.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO campaigns (name, profile_id, media_group_id) VALUES (?, ?, ?)",
                 ("Test Campaign", 1, 1),
@@ -798,7 +856,7 @@ class ArtifactRestoreFromBackendTests(unittest.TestCase):
         """A generated artifact (watermarked_video kind) with a file_records row
         must restore from the backend, not fall back to source bytes.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -878,7 +936,7 @@ class MediaRestoreErrorRetryableTests(unittest.TestCase):
         failed due to a transient error (network timeout, 503, etc.). Retrying
         may succeed.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -908,7 +966,7 @@ class MediaRestoreErrorRetryableTests(unittest.TestCase):
 
     def test_successful_restore_does_not_raise(self) -> None:
         """A successful restore must not raise and must place the file."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO storage_backends (slug, label, provider, bucket, region, endpoint, access_key, secret_key)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

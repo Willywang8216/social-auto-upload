@@ -5,37 +5,36 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   backend-tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Install dependencies
-        run: uv sync --extra web --group dev
-
-      - name: Create conf.py from example
-        run: cp conf.example.py conf.py
-
-      - name: Install Patchright browsers
-        run: uv run patchright install chromium
-
-      - name: Check for undefined names (missing imports)
-        run: uv run python scripts/check_undefined_names.py myUtils sau_backend.py sau_app sau_cli.py scripts sau_inbox
-
-      - name: Run backend tests
-        run: uv run pytest tests/ --ignore=tests/test_security_http.py -q
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.12.7"
+      - name: Locked backend gates (all maintained Python and all tests, including security)
+        run: bash scripts/release-gates.sh backend --python '${{ matrix.python }}' --receipts "$RUNNER_TEMP/receipts"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-backend-${{ matrix.python }}
+          path: ${{ runner.temp }}/receipts/backend-${{ matrix.python }}.json
+          if-no-files-found: error
 
   postgres-tests:
+    # Additional dialect coverage; production release gates exercise SQLite.
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -53,67 +52,48 @@ jobs:
           --health-retries 5
     env:
       TEST_DATABASE_URL: postgresql+psycopg://sau:sau@localhost:5432/sautest
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Install dependencies (with postgres extra)
-        run: uv sync --extra web --extra postgres --group dev
-
-      - name: Create conf.py from example
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.12.7"
+      - name: Install frozen dependencies (with postgres extra)
+        run: uv sync --frozen --extra web --extra postgres --group dev --no-install-project
+      - name: Create non-production config
         run: cp conf.example.py conf.py
-
-      - name: Run repository + identity + migration tests against PostgreSQL
-        run: uv run pytest tests/test_db_repositories.py tests/test_identity_provisioning.py tests/test_alembic.py -q
+      - name: Repository, identity and migration tests against PostgreSQL
+        run: uv run --no-sync python -X utf8 -m pytest tests/test_db_repositories.py tests/test_identity_provisioning.py tests/test_alembic.py -q --basetemp "$RUNNER_TEMP/pytest-postgres"
 
   frontend-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: "22"
-
-      - name: Install dependencies
-        working-directory: sau_frontend
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: sau_frontend
-        run: npm run build
+          python-version: "3.10"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.21.1"
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.12.7"
+      - name: Frontend npm ci, test, build gates
+        run: bash scripts/release-gates.sh frontend --receipts "$RUNNER_TEMP/receipts"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-frontend
+          path: ${{ runner.temp }}/receipts/frontend.json
+          if-no-files-found: error
 
   dependency-guard:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Check no playwright in requirements.txt
+      - name: Keep the legacy dependency path on Patchright
         run: |
-          if grep -q "^playwright==" requirements.txt; then
-            echo "ERROR: requirements.txt contains playwright== dependency"
-            echo "The project uses patchright exclusively."
-            exit 1
-          fi
-          echo "OK: No playwright dependency found"
-
-      - name: Check patchright is present
-        run: |
-          if ! grep -q "^patchright==" requirements.txt; then
-            echo "ERROR: requirements.txt missing patchright== dependency"
-            exit 1
-          fi
-          echo "OK: patchright dependency found"
-
-# Re-register trigger placeholder (2026-10-09): GitHub stopped indexing these
-# workflows after commit d1319216 (no runs for any subsequent push, including an
-# empty probe commit). Touching the file forces GitHub to re-read and
-# re-register it. Remove once Actions is confirmed working again.
+          ! grep -q '^playwright==' requirements.txt
+          grep -q '^patchright==' requirements.txt

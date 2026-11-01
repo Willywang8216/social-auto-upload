@@ -7,6 +7,7 @@ worker, and offload lifecycle can manage it.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -103,3 +104,61 @@ def stage_remote_media(remote_path: str, *, runner=None) -> str:
     # UUID names prevent collisions across queued jobs while retaining the media
     # suffix so MIME and video/image classification remain correct.
     return f"_inbox_cache/{destination.name}"
+
+
+def register_remote_source(remote_path: str, *, db_path: Path,
+                           workspace_id: str | None = None) -> str:
+    """Register an exact inbox object without network I/O or staging bytes.
+
+    A stable directory (not a filename prefix) preserves the operator's SFW
+    filename convention. Only trusted inbox state supplies this remote path;
+    arbitrary browser clients cannot register a remote storage location.
+    """
+    from myUtils.sqlite_utils import connect
+    from myUtils.campaign_media_prep import IMAGE_SUFFIXES, VIDEO_SUFFIXES
+
+    rel = validate_remote_path(remote_path)
+    spec = remote_spec(rel)
+    remote, full_key = spec.split(":", 1)
+    root = full_key[:-(len(rel) + 1)]
+    identity = hashlib.sha256(f"{spec}\0{workspace_id or ''}".encode("utf-8")).hexdigest()
+    name = PurePosixPath(rel).name
+    if Path(name).suffix.lower() not in IMAGE_SUFFIXES | VIDEO_SUFFIXES:
+        # The inbox's typed directory provides admission metadata for an
+        # extensionless object; preparation still probes the downloaded bytes.
+        name += ".mp4" if PurePosixPath(rel).parts[1] == "video" else ".jpg"
+    local_ref = f"_inbox_cache/{identity}/{name}"
+    slug = "inbox-" + hashlib.sha256(f"{remote}:{root}".encode()).hexdigest()[:24]
+    with connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        backend = conn.execute(
+            "SELECT id, provider, bucket, endpoint FROM storage_backends WHERE slug = ?",
+            (slug,),
+        ).fetchone()
+        if backend is None:
+            cur = conn.execute(
+                "INSERT INTO storage_backends "
+                "(slug,label,provider,bucket,region,endpoint,access_key,secret_key) "
+                "VALUES (?,?,'rclone',?,'',?,'','')",
+                (slug, "Inbox source", remote, root),
+            )
+            backend_id = int(cur.lastrowid)
+        else:
+            backend_id, provider, bucket, endpoint = backend
+            if (provider, bucket, endpoint) != ("rclone", remote, root):
+                raise InboxDriveError("Registered inbox backend identity has changed")
+        row = conn.execute(
+            "SELECT storage_backend_id, storage_key, workspace_id FROM file_records "
+            "WHERE file_path = ? ORDER BY id LIMIT 1", (local_ref,),
+        ).fetchone()
+        if row is not None:
+            if tuple(row) != (backend_id, rel, workspace_id):
+                raise InboxDriveError("Registered inbox source identity has changed")
+        else:
+            conn.execute(
+                "INSERT INTO file_records "
+                "(filename, filesize, file_path, storage_backend_id, storage_key, workspace_id) "
+                "VALUES (?,0,?,?,?,?)",
+                (name, local_ref, backend_id, rel, workspace_id),
+            )
+    return local_ref

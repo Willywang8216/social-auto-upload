@@ -125,7 +125,18 @@
           <header><h3>{{ post.platform }} · {{ post.accounts?.map((account) => account.name).filter(Boolean).join(', ') || '未設定帳號' }}</h3><el-tag :type="entityTagType(post.status)" effect="plain">{{ entityStatusLabel(post.status) }}</el-tag></header>
           <div v-if="editingEntityPostId === post.id"><el-input v-model="editingEntityCopy" type="textarea" :rows="4" /><el-button type="primary" @click="saveEntityCopy(post)">儲存文案</el-button><el-button @click="editingEntityPostId = null">取消</el-button></div>
           <div v-else class="entity-copy-block"><span>此平台文案</span><p>{{ post.draft?.message || '尚未填寫文案' }}</p><el-button v-if="post.status === 'queued' || post.status === 'ready'" size="small" @click="editingEntityPostId = post.id; editingEntityCopy = post.draft?.message || ''">編輯文案</el-button><el-button v-if="post.status === 'queued' || post.status === 'ready'" size="small" type="danger" @click="cancelPostTargets(post)">取消此貼文排程</el-button></div>
-          <div v-for="job in (entityDetails.jobs || []).filter((item) => item.targets?.some((target) => target.fileRef === `campaign_post:${post.id}`))" :key="job.id"><div v-for="target in job.targets.filter((item) => item.fileRef === `campaign_post:${post.id}`)" :key="target.id" class="entity-target-row"><el-tag :type="entityTagType(target.status)" effect="plain">{{ entityStatusLabel(target.status) }}</el-tag><span>{{ target.accountName }} · {{ target.scheduleAt || '立即發佈' }}</span><span v-if="target.lastError" class="entity-error">{{ target.lastError }}</span><el-date-picker v-if="target.status === 'pending' || target.status === 'retrying'" v-model="target._editSchedule" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DDTHH:mm:00" /><el-button v-if="target._editSchedule && (target.status === 'pending' || target.status === 'retrying')" size="small" @click="manageTarget('reschedule', target)">儲存時間</el-button><el-button v-if="target.status === 'pending' || target.status === 'retrying'" size="small" type="danger" @click="manageTarget('cancel', target)">取消</el-button><el-button v-if="target.status === 'failed'" size="small" type="warning" @click="manageTarget('retry', target)">重試</el-button></div></div>
+          <div v-for="job in (entityDetails.jobs || []).filter((item) => item.targets?.some((target) => target.fileRef === `campaign_post:${post.id}`))" :key="job.id">
+            <div v-for="target in job.targets.filter((item) => item.fileRef === `campaign_post:${post.id}`)" :key="target.id" class="entity-target-row">
+              <el-tag :type="entityTagType(target.status)" effect="plain">{{ entityStatusLabel(target.status) }}</el-tag>
+              <span>{{ target.accountName }} · {{ target.scheduleAt || '立即發佈' }}</span>
+              <span v-if="target.lastError || target.last_error" class="entity-error">{{ target.lastError || target.last_error }}</span>
+              <span v-if="targetReliabilityDetails(target)">{{ targetReliabilityDetails(target) }}</span>
+              <el-date-picker v-if="target.status === 'pending' || target.status === 'retrying'" v-model="target._editSchedule" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DDTHH:mm:00" />
+              <el-button v-if="target._editSchedule && (target.status === 'pending' || target.status === 'retrying')" size="small" @click="manageTarget('reschedule', target)">儲存時間</el-button>
+              <el-button v-if="target.status === 'pending' || target.status === 'retrying'" size="small" type="danger" @click="manageTarget('cancel', target)">取消</el-button>
+              <el-button v-if="canRetryTarget(target)" size="small" type="warning" @click="manageTarget('retry', target)">重試</el-button>
+            </div>
+          </div>
         </section>
         <section v-if="entityDetails.artifacts?.some((item) => item.url)" class="entity-drawer-section entity-links"><h3>媒體連結</h3><a v-for="link in artifactLinks(entityDetails.artifacts, 5)" :key="link.key" :href="link.url" target="_blank" rel="noopener">{{ link.text === '開啟媒體' ? '開啟媒體' : link.text + ' · 開啟連結' }}</a></section>
       </div>
@@ -136,12 +147,19 @@
       title="任務詳情"
       direction="rtl"
       size="640px"
+      destroy-on-close
     >
       <PublishJobProgress
         v-if="selectedJob"
         :job="selectedJob"
+        :polling="jobsStore.pollingByJobId[selectedJobId]"
+        @refresh="jobsStore.startPolling(selectedJobId)"
         @cancel="cancelSelected"
       />
+      <div v-else-if="selectedJobId" role="status">
+        {{ pollingStatusText(jobsStore.pollingByJobId[selectedJobId]) }}
+        <el-button v-if="jobsStore.pollingByJobId[selectedJobId]?.status === 'error'" @click="jobsStore.startPolling(selectedJobId)">更新狀態</el-button>
+      </div>
     </el-drawer>
   </div>
 </template>
@@ -159,6 +177,9 @@ import { useProfilesStore } from '@/stores/profiles'
 import { getPlatformLabel, getPlatformTagType, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
 import { mediaPreviewSource, mediaStateLabel } from '@/utils/mediaState'
 import { artifactLinks } from '@/utils/entityLinks'
+import { canRetryTarget, publishStatusLabel, publishStatusType, targetReliabilityDetails } from '@/utils/publish-status'
+import { pollingStatusText } from '@/utils/polling'
+import { showRequestError } from '@/utils/request'
 
 const profilesStore = useProfilesStore()
 const profiles = computed(() => profilesStore.profiles)
@@ -190,7 +211,7 @@ const allDates = ref(false)
 const entityLoading = ref(false)
 const entityLoadingMore = ref(false)
 const entityPageSize = 50
-const entityStatusOptions = ['scheduled', 'queued', 'publishing', 'published', 'failed', 'cancelled', 'needs_review']
+const entityStatusOptions = ['scheduled', 'queued', 'preparing', 'publishing', 'awaiting_delivery', 'blocked', 'needs_review', 'published', 'failed', 'cancelled']
 const currentDate = new Date()
 const todayDate = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(currentDate.getDate()).padStart(2, '0')}`
 let entitySearchTimer = null
@@ -212,6 +233,10 @@ const TERMINAL = new Set([
 function isTerminal(status) {
   return TERMINAL.has(status)
 }
+
+watch(drawerVisible, (visible) => {
+  if (!visible && selectedJobId.value != null) jobsStore.stopPolling(selectedJobId.value)
+})
 
 watch([entityDateRange, entityPlatformFilters, entityProfileFilters, entityAccountFilters, entityKeyword, entityStatusFilter, allDates], () => {
   if (entitySearchTimer) window.clearTimeout(entitySearchTimer)
@@ -249,7 +274,7 @@ async function loadEntities(reset = false) {
     entityTotal.value = response.total || 0
     entityHasMore.value = Boolean(response.hasMore)
   } catch (error) {
-    ElMessage.error(error?.message || 'Unable to load content entities')
+    showRequestError(error, error?.message || 'Unable to load content entities')
   } finally {
     entityLoading.value = false
   }
@@ -287,7 +312,7 @@ async function loadMoreEntities() {
     entityTotal.value = response.total || 0
     entityHasMore.value = Boolean(response.hasMore)
   } catch (error) {
-    ElMessage.error(error?.message || 'Unable to load more entities')
+    showRequestError(error, error?.message || 'Unable to load more entities')
   } finally {
     entityLoadingMore.value = false
   }
@@ -301,7 +326,7 @@ async function openEntity(entity) {
       router.replace({ query: { ...route.query, entity: entityDetails.value.entityId } })
     }
   } catch (error) {
-    ElMessage.error(error?.message || 'Unable to load entity')
+    showRequestError(error, error?.message || 'Unable to load entity')
   }
 }
 
@@ -316,7 +341,7 @@ async function cancelPostTargets(post) {
     await loadEntities(true)
     ElMessage.success('Pending targets cancelled')
   } catch (error) {
-    if (error !== 'cancel' && error !== 'close') ElMessage.error(error?.message || 'Post cancellation failed')
+    if (error !== 'cancel' && error !== 'close') showRequestError(error, error?.message || 'Post cancellation failed')
   }
 }
 
@@ -331,7 +356,7 @@ async function saveEntityCopy(post) {
     await loadEntities(true)
     ElMessage.success('Copy updated')
   } catch (error) {
-    ElMessage.error(error?.message || 'Copy update failed')
+    showRequestError(error, error?.message || 'Copy update failed')
   }
 }
 
@@ -348,20 +373,12 @@ async function manageTarget(action, target) {
     entityDetails.value = await jobsStore.fetchEntity(entityDetails.value.entityId)
     await loadEntities(true)
   } catch (error) {
-    if (error !== 'cancel' && error !== 'close') ElMessage.error(error?.message || 'Target update failed')
+    if (error !== 'cancel' && error !== 'close') showRequestError(error, error?.message || 'Target update failed')
   }
 }
 
-function entityTagType(status) {
-  if (['published', 'succeeded'].includes(status)) return 'success'
-  if (status === 'failed') return 'danger'
-  if (['publishing', 'retrying'].includes(status)) return 'warning'
-  return 'info'
-}
-
-function entityStatusLabel(status) {
-  return ({ scheduled: '已排程', queued: '佇列中', publishing: '發佈中', published: '已發佈', prepared: '已準備', needs_review: '需要檢查', failed: '失敗', cancelled: '已取消', pending: '待處理', retrying: '重試中', succeeded: '已完成' })[status] || status || '未知'
-}
+const entityTagType = publishStatusType
+const entityStatusLabel = publishStatusLabel
 
 async function loadJobs() {
   loading.value = true
@@ -392,7 +409,7 @@ async function loadMore() {
     })
     hasMore.value = result.hasMore
   } catch (error) {
-    ElMessage.error(error?.message || '載入更多任務失敗')
+    showRequestError(error, error?.message || '載入更多任務失敗')
   } finally {
     loadingMore.value = false
   }
@@ -405,23 +422,17 @@ async function drainNow() {
     ElMessage.success('佇列已排空')
     await loadJobs()
   } catch (error) {
-    ElMessage.error(error?.message || '排空佇列失敗')
+    showRequestError(error, error?.message || '排空佇列失敗')
   } finally {
     draining.value = false
   }
 }
 
-async function openDetail(job) {
+function openDetail(job) {
+  if (selectedJobId.value != null && selectedJobId.value !== job.id) jobsStore.stopPolling(selectedJobId.value)
   selectedJobId.value = job.id
   drawerVisible.value = true
-  try {
-    await jobsStore.fetchJob(job.id)
-    if (!isTerminal(job.status)) {
-      jobsStore.startPolling(job.id, { interval: 1500 })
-    }
-  } catch (error) {
-    ElMessage.error('載入任務詳情失敗')
-  }
+  jobsStore.startPolling(job.id)
 }
 
 async function cancel(job) {
@@ -436,7 +447,7 @@ async function cancel(job) {
     await jobsStore.cancelJob(job.id)
     ElMessage.success('任務已取消')
   } catch (error) {
-    ElMessage.error(error?.message || '取消失敗')
+    showRequestError(error, error?.message || '取消失敗')
   }
 }
 
@@ -456,27 +467,8 @@ function platformLabel(platform) {
   return getPlatformLabel(platform)
 }
 
-const STATUS_LABELS = {
-  pending: '佇列中',
-  running: '發佈中',
-  succeeded: '已完成',
-  failed: '部分失敗',
-  cancelled: '已取消'
-}
-
-function statusLabel(status) {
-  return STATUS_LABELS[status] || status
-}
-
-function statusTagType(status) {
-  switch (status) {
-    case 'succeeded': return 'success'
-    case 'failed':    return 'danger'
-    case 'cancelled': return 'info'
-    case 'running':   return 'warning'
-    default:          return 'info'
-  }
-}
+const statusLabel = publishStatusLabel
+const statusTagType = publishStatusType
 
 function progressStatus(status) {
   switch (status) {
@@ -505,8 +497,8 @@ onMounted(async () => {
   if (route.query.entity) {
     await openEntity({ entityId: String(route.query.entity) })
     router.replace({ query: { ...route.query, entity: undefined } })
-  } else if (route.query.job) {
-    const jobId = Number(route.query.job)
+  } else if (route.query.job || route.query.jobId) {
+    const jobId = Number(route.query.job || route.query.jobId)
     if (Number.isInteger(jobId) && jobId > 0) {
       await openDetail({ id: jobId, status: 'pending' })
     }
@@ -521,7 +513,7 @@ onBeforeUnmount(() => {
     window.clearInterval(refreshTimer)
     refreshTimer = null
   }
-  jobsStore.stopAllPolling()
+  if (selectedJobId.value != null) jobsStore.stopPolling(selectedJobId.value)
 })
 </script>
 

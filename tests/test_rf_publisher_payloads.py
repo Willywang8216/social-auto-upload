@@ -313,14 +313,17 @@ def test_nw_sw_blog_409_conflict_retries_with_fresh_sha():
 
 def test_nw_sw_blog_409_conflict_idempotent_when_content_matches():
     """409 with matching content should be treated as success (idempotent)."""
-    # The actual content includes frontmatter, so we need to match the full MDX
     message = "Test post content"
-    # Simulate what the code would generate (simplified - just check the flow works)
-    # In reality, the content includes frontmatter, but for this test we just verify
-    # that when content matches, it's marked as idempotent
-    content_b64 = base64.b64encode(b"simulated full mdx content").decode()
 
-    session = _RecordingSession([
+    class MatchingSession(_RecordingSession):
+        def get(self, url, **kwargs):
+            response = super().get(url, **kwargs)
+            if response._payload.get("sha") == "matching-sha":
+                written = next(call for call in reversed(self.calls) if call[0] == "PUT")
+                response._payload["content"] = written[2]["json"]["content"]
+            return response
+
+    session = MatchingSession([
         # Probe GET en - file exists
         _FakeResponse({"sha": "old-sha-123", "content": base64.b64encode(b"old").decode()}),
         # Probe GET zh - no such file
@@ -328,7 +331,7 @@ def test_nw_sw_blog_409_conflict_idempotent_when_content_matches():
         # First PUT - 409 conflict
         _FakeResponse({"message": "Conflict"}, status_code=409),
         # Re-GET after 409 - content already matches what we want
-        _FakeResponse({"sha": "matching-sha", "content": content_b64}),
+        _FakeResponse({"sha": "matching-sha"}),
     ])
     account = SimpleNamespace(config={
         "repoOwner": "test-owner",
@@ -336,7 +339,7 @@ def test_nw_sw_blog_409_conflict_idempotent_when_content_matches():
         "githubToken": "test-token",
         "persona": "sexualwill",
     })
-    # Patch the frontmatter generation to return our test content
+    # Deterministic metadata; the fake re-read returns the entire attempted MDX.
     with patch.object(prepared_publishers, "_nw_sw_blog_frontmatter", return_value="---\ntitle: test\n---"):
         results = prepared_publishers.publish_nw_sw_blog_sync(
             account,
@@ -344,13 +347,12 @@ def test_nw_sw_blog_409_conflict_idempotent_when_content_matches():
             session=session,
         )
     assert len(results) == 1
-    # The idempotent flag should be set when content matches
-    # Note: In practice, the content comparison is exact, so this test verifies the flow
+    assert results[0]["idempotent"] is True
+    assert results[0]["sha"] == "matching-sha"
     get_calls = [c for c in session.calls if c[0] == "GET"]
     put_calls = [c for c in session.calls if c[0] == "PUT"]
     assert len(get_calls) == 3, "2 probes plus the re-read after 409"
-    # Either 1 PUT (if content matched) or 2 PUTs (if content differed and retried)
-    assert len(put_calls) in [1, 2], "Should have attempted PUT"
+    assert len(put_calls) == 1, "Identical provider content must not be written again"
 
 
 if __name__ == "__main__":

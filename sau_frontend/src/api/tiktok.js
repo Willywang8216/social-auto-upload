@@ -21,7 +21,7 @@ export const tiktokApi = {
     return http.post('/media/video-info', { file_path: filePath })
   },
 
-  getPublishStatus(jobId) {
-    return http.get(`/tiktok/publish-status/${jobId}`)
+  getPublishStatus(jobId, config = {}) {
+    return http.get(`/tiktok/publish-status/${jobId}`, undefined, config)
   }
 }

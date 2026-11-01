@@ -10,9 +10,9 @@ silently on this box:
   * publish targets that failed recently (grouped by error, so "Reddit is
     disabled" is one line, not fifty),
   * campaigns stuck in ``needs_review`` (prep failed — nothing will publish),
-  * targets whose ``schedule_at`` passed more than ``--overdue-min`` ago and are
-    still ``pending`` (the scheduler thread is not draining),
-  * the inbox watcher heartbeat (delegated to ``inbox_monitor.py`` logic).
+  * work overdue after both its schedule and retry delay, not future posts,
+  * blocked/manual-review targets, expired leases and overdue delivery polls,
+  * publisher and inbox watcher heartbeats.
 
 Every alert is deduplicated per signature for ``--cooldown`` seconds and sent
 through :func:`myUtils.ops_alerts.send_ops_alert` (Telegram / webhook / SMTP).
@@ -24,9 +24,11 @@ through :func:`myUtils.ops_alerts.send_ops_alert` (Telegram / webhook / SMTP).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import time
@@ -34,10 +36,12 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from myUtils.publish_health import publish_health_snapshot, safe_text
+
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_DB = Path(os.environ.get("SAU_DB_PATH") or (REPO / "db" / "database.db"))
 STATE_PATH = REPO / "logs" / "pipeline-monitor-state.json"
-HEALTH_URL = os.environ.get("SAU_HEALTH_URL", "http://127.0.0.1:5409/healthz")
+HEALTH_URL = os.environ.get("SAU_HEALTH_URL", "http://127.0.0.1:5409/readyz")
 
 
 def _load_dotenv() -> None:
@@ -72,7 +76,8 @@ def _iso(value: datetime) -> str:
 
 def _load_state() -> dict:
     try:
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
 
@@ -85,7 +90,7 @@ def _save_state(state: dict) -> None:
 
 
 def _connect(db: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db, timeout=20)
+    conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -94,59 +99,46 @@ def _check_healthz(timeout: float = 10.0) -> str | None:
     try:
         with urllib.request.urlopen(HEALTH_URL, timeout=timeout) as resp:
             if resp.status != 200:
-                return f"HTTP {resp.status} from {HEALTH_URL}"
+                return f"HTTP {resp.status} from the application health endpoint"
     except Exception as exc:  # noqa: BLE001
-        return f"{type(exc).__name__}: {exc}"
+        return safe_text(f"{type(exc).__name__}: {exc}")
     return None
 
 
 def _check_failed_targets(conn: sqlite3.Connection, minutes: int) -> list[str]:
     cutoff = _iso(_now() - timedelta(minutes=minutes))
+    conn.create_function("monitor_error", 1, lambda text: safe_text(text, 90))
     rows = conn.execute(
-        """
-        SELECT COALESCE(substr(last_error, 1, 90), 'unknown') AS err, COUNT(*) AS n,
-               MAX(finished_at) AS last
-        FROM publish_job_targets
-        WHERE status = 'failed' AND finished_at >= ?
-        GROUP BY err ORDER BY n DESC LIMIT 6
-        """,
-        (cutoff,),
+        "SELECT monitor_error(last_error) AS err, COUNT(*) AS n, MAX(finished_at) AS last "
+        "FROM publish_job_targets WHERE status = 'failed' "
+        "AND julianday(finished_at) >= julianday(?) AND julianday(finished_at) <= julianday(?) "
+        "GROUP BY err ORDER BY n DESC LIMIT 6", (cutoff, _iso(_now())),
     ).fetchall()
-    # "disabled by the operator" is a deliberate setting, not a fault.
-    interesting = [r for r in rows if "disabled by the operator" not in str(r["err"])]
-    return [
-        f"{r['n']}× {r['err']} (last {r['last']})" for r in interesting
-    ]
+    return [f"{r['n']}× {r['err']} (last {safe_text(r['last'], 40)})" for r in rows
+            if "disabled by the operator" not in str(r["err"])]
 
 
 def _check_needs_review(conn: sqlite3.Connection, hours: int) -> list[str]:
     cutoff = _iso(_now() - timedelta(hours=hours))
     rows = conn.execute(
         """
-        SELECT id, profile_id, COALESCE(substr(last_error, 1, 90), '') AS err,
+        SELECT id, profile_id, COALESCE(last_error, '') AS err,
                COALESCE(prepared_at, created_at) AS at
         FROM campaigns
-        WHERE status = 'needs_review' AND COALESCE(prepared_at, created_at) >= ?
+        WHERE status = 'needs_review' AND julianday(COALESCE(prepared_at, created_at)) >= julianday(?)
         ORDER BY id DESC LIMIT 8
         """,
         (cutoff,),
     ).fetchall()
-    return [f"campaign {r['id']} (profile {r['profile_id']}): {r['err']}" for r in rows]
+    return [f"campaign {r['id']} (profile {r['profile_id']}): {safe_text(r['err'], 90)}" for r in rows]
 
 
 def _check_overdue(conn: sqlite3.Connection, overdue_min: int) -> list[str]:
-    cutoff = _iso(_now() - timedelta(minutes=overdue_min))
-    rows = conn.execute(
-        """
-        SELECT account_ref, COUNT(*) AS n, MIN(schedule_at) AS oldest
-        FROM publish_job_targets
-        WHERE status = 'pending' AND schedule_at IS NOT NULL AND schedule_at != ''
-          AND replace(schedule_at, 'T', ' ') <= replace(?, 'T', ' ')
-        GROUP BY account_ref ORDER BY n DESC LIMIT 5
-        """,
-        (cutoff,),
-    ).fetchall()
-    return [f"{r['n']} overdue on {r['account_ref']} (oldest {r['oldest']})" for r in rows]
+    # Share eligibility/date handling with the API; old code ignored immediate
+    # work and called retries overdue even while their durable backoff ran.
+    db_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    snapshot = publish_health_snapshot(db_path, stale_threshold_minutes=overdue_min)
+    return _publishing_problems(snapshot).get("overdue", [])
 
 
 def _check_disk(path: Path, *, warn_pct: float = 85.0, crit_pct: float = 92.0) -> list[str]:
@@ -157,9 +149,16 @@ def _check_disk(path: Path, *, warn_pct: float = 85.0, crit_pct: float = 92.0) -
     writes fail, and the failures look like unrelated bugs.
     """
     try:
-        stats = os.statvfs(str(path))
+        if hasattr(os, "statvfs"):
+            stats = os.statvfs(str(path))
+        else:
+            usage = shutil.disk_usage(path)
+            used_pct = 100.0 * usage.used / usage.total if usage.total else 0.0
+            if used_pct < warn_pct:
+                return []
+            return [f"disk {used_pct:.0f}% full ({usage.free/1e9:.1f} GB free) — publishing is at risk"]
     except OSError as exc:
-        return [f"cannot stat {path}: {exc}"]
+        return [safe_text(f"cannot stat disk: {exc}")]
     total = stats.f_blocks * stats.f_frsize
     free = stats.f_bavail * stats.f_frsize
     if total <= 0:
@@ -223,13 +222,13 @@ def _check_stt(*, timeout: float = 60.0) -> list[str]:
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
-            detail = exc.read().decode("utf-8", "replace")[:160]
+            detail = safe_text(exc.read(4096).decode("utf-8", "replace"), 160)
         except Exception:  # noqa: BLE001
             pass
-        return [f"STT gateway {base} rejected the probe: HTTP {exc.code} {detail} "
-                f"— new uploads will get generic copy until this is fixed"]
+        return [safe_text(f"STT gateway rejected the probe: HTTP {exc.code} {detail} "
+                          "— new uploads will get generic copy until this is fixed", 300)]
     except Exception as exc:  # noqa: BLE001
-        return [f"STT gateway {base} unreachable: {type(exc).__name__}: {exc}"]
+        return [safe_text(f"STT gateway unreachable: {type(exc).__name__}: {exc}")]
     return []
 
 
@@ -245,12 +244,12 @@ def _check_routing(conn: sqlite3.Connection, *, limit: int = 5) -> list[str]:
 
         violations = routing_audit.pending_violations(conn)
     except Exception as exc:  # noqa: BLE001 — a broken audit must not hide other alerts
-        return [f"routing audit failed: {type(exc).__name__}: {exc}"]
+        return [safe_text(f"routing audit failed: {type(exc).__name__}: {exc}")]
     if not violations:
         return []
     videos = [v for v in violations if v["media_kind"] == "video"]
     detail = ", ".join(
-        f"{v['account_name']} gets {v['content_language']} {v['media_kind']}"
+        f"{safe_text(v['account_name'], 80)} gets {safe_text(v['content_language'], 20)} {safe_text(v['media_kind'], 20)}"
         for v in violations[:limit]
     )
     return [
@@ -274,9 +273,9 @@ def _check_offload(repo: Path) -> list[str]:
                 match = re.search(r"deferred=(\d+)", line)
                 deferred = int(match.group(1)) if match else 0
                 if deferred >= 5:
-                    return [f"last offload deferred {deferred} file(s): {line[-140:]}"]
+                    return [f"last offload deferred {deferred} file(s): {safe_text(line, 1000)[-140:]}"]
                 return []
-            return [f"last offload run failed: {line[-160:]}"]
+            return [f"last offload run failed: {safe_text(line, 1000)[-160:]}"]
     return ["no completed offload run found in offload.log"]
 
 
@@ -295,6 +294,50 @@ def _check_inbox_health(inbox: Path, stale_min: float) -> list[str]:
     return []
 
 
+def _publishing_problems(snapshot) -> dict[str, list[str]]:
+    """Bounded alerts from the same delivery/eligibility metrics as the API."""
+    problems: dict[str, list[str]] = {}
+    failures = [f"{f.count}× {f.platform}: {f.error_pattern} (last {f.last_seen})"
+                for f in snapshot.recent_failures if "disabled by the operator" not in f.error_pattern]
+    if failures:
+        problems["publish-failures"] = failures[:6]
+    for platform in snapshot.platforms:
+        queue = platform.queue
+        if queue["overdue"]:
+            problems.setdefault("overdue", []).append(
+                f"{queue['overdue']} overdue submissions on {platform.platform} "
+                f"(oldest due {queue['oldestDueAt']})")
+        if queue["overdueDeliveryPolls"]:
+            problems.setdefault("awaiting-delivery", []).append(
+                f"{queue['overdueDeliveryPolls']} overdue receipt polls on {platform.platform}; "
+                "accepted by provider, NOT confirmed delivered")
+        if platform.blocked or platform.needs_review:
+            problems.setdefault("action-needed", []).append(
+                f"{platform.platform}: {platform.blocked} blocked, {platform.needs_review} need manual review")
+        if queue["invalidSchedule"]:
+            problems.setdefault("action-needed", []).append(
+                f"{platform.platform}: {queue['invalidSchedule']} invalid schedule/retry timestamps")
+        if queue["staleRunning"]:
+            problems.setdefault("stale-leases", []).append(
+                f"{platform.platform}: {queue['staleRunning']} stale executions "
+                f"({queue['expiredLeases']} expired, {queue['orphanedLeases']} orphaned leases); "
+                "reconcile before resubmission")
+    if not snapshot.worker_health.get("ok"):
+        problems["workers"] = [
+            "No fresh, non-draining publisher heartbeat within "
+            f"{snapshot.worker_health.get('maxAgeSeconds', 90)} seconds"]
+    if snapshot.totals.get("accountsNeedingReconnect"):
+        problems["account-reconnect"] = [f"{snapshot.totals['accountsNeedingReconnect']} accounts need reconnect"]
+    if snapshot.totals.get("accountConfigIssues"):
+        problems["account-config"] = [f"{snapshot.totals['accountConfigIssues']} accounts have invalid configuration"]
+    return {area: items[:6] for area, items in problems.items()}
+
+
+def _bounded_problems(problems) -> dict[str, list[str]]:
+    return {safe_text(area, 60): [safe_text(item, 300) for item in items[:6]]
+            for area, items in list(problems.items())[:20] if items}
+
+
 def collect_problems(db: Path, repo: Path, inbox: Path, *, overdue_min: int = 45,
                      failed_minutes: int = 120, review_hours: int = 24,
                      watch_stale_min: float = 20) -> dict[str, list[str]]:
@@ -304,23 +347,28 @@ def collect_problems(db: Path, repo: Path, inbox: Path, *, overdue_min: int = 45
         problems["app"] = [health]
     if not db.exists():
         problems["database"] = [f"missing database {db}"]
-        return problems
-    conn = _connect(db)
+        return _bounded_problems(problems)
+    conn = None
     try:
-        failed = _check_failed_targets(conn, failed_minutes)
-        if failed:
-            problems["publish-failures"] = failed
+        conn = _connect(db)
+        try:
+            snapshot = publish_health_snapshot(db, failure_window_hours=failed_minutes / 60,
+                                               stale_threshold_minutes=overdue_min)
+            problems.update(_publishing_problems(snapshot))
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            # A broken target snapshot must not hide an independent prep fault.
+            problems["database"] = [safe_text(f"publish health unavailable: {type(exc).__name__}: {exc}")]
         review = _check_needs_review(conn, review_hours)
         if review:
             problems["needs-review"] = review
-        overdue = _check_overdue(conn, overdue_min)
-        if overdue:
-            problems["overdue"] = overdue
         routing = _check_routing(conn)
         if routing:
             problems["language-routing"] = routing
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        problems["database"] = [safe_text(f"publish health unavailable: {type(exc).__name__}: {exc}")]
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     disk = _check_disk(repo)
     if disk:
         problems["disk"] = disk
@@ -333,13 +381,13 @@ def collect_problems(db: Path, repo: Path, inbox: Path, *, overdue_min: int = 45
     inbox_problems = _check_inbox_health(inbox, watch_stale_min)
     if inbox_problems:
         problems["inbox-watcher"] = inbox_problems
-    return problems
+    return _bounded_problems(problems)
 
 
 def _render(problems: dict[str, list[str]]) -> tuple[str, str]:
     subject = f"🚨 SAU pipeline: {len(problems)} area(s) need attention"
     lines = []
-    for area, items in problems.items():
+    for area, items in _bounded_problems(problems).items():
         lines.append(f"• {area}")
         lines.extend(f"    {item}" for item in items)
     lines.append("")
@@ -371,7 +419,8 @@ def main(argv: list[str] | None = None) -> int:
         review_hours=args.review_hours,
         watch_stale_min=args.watch_stale_min,
     )
-    payload = {area: items for area, items in problems.items()}
+    problems = _bounded_problems(problems)
+    payload = dict(problems)
     print(json.dumps(payload, ensure_ascii=False, indent=2) if payload else "healthy")
     if args.status or not problems:
         return 0 if not problems else 1
@@ -381,7 +430,11 @@ def main(argv: list[str] | None = None) -> int:
     now = time.time()
     sent: list[str] = []
     for area, items in problems.items():
-        signature = f"{area}:{'|'.join(sorted(items))[:200]}"
+        # Never persist raw error text in state. Timestamps/elapsed ages change
+        # every poll; normalize them so one outage cannot evade its cooldown.
+        stable = re.sub(r"\d{4}-\d\d-\d\d[T ][0-9:.+Z-]+", "<time>", "|".join(sorted(items)))
+        stable = re.sub(r"\b\d+(?:\.\d+)?\s*(?:min(?:utes)?|seconds|hours)\b", "<age>", stable)
+        signature = f"{area}:" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:24]
         last = float(alerts.get(signature) or 0)
         if now - last < args.cooldown:
             continue
@@ -393,8 +446,9 @@ def main(argv: list[str] | None = None) -> int:
                 alerts[signature] = now
                 sent.append(area)
         except Exception as exc:  # noqa: BLE001
-            print(f"alert failed for {area}: {exc}", file=sys.stderr)
-    state["alerts"] = {k: v for k, v in alerts.items() if now - float(v or 0) < 7 * 86400}
+            print(safe_text(f"alert failed for {area}: {exc}"), file=sys.stderr)
+    retained = ((k, v) for k, v in alerts.items() if now - float(v or 0) < 7 * 86400)
+    state["alerts"] = dict(sorted(retained, key=lambda item: float(item[1]), reverse=True)[:1024])
     state["checked_at"] = _iso(_now())
     _save_state(state)
     print(f"alerted: {sent or 'none (cooldown or send failure)'}")

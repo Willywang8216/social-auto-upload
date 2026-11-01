@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,7 @@ class JobLifecycleTests(unittest.TestCase):
         create_table.bootstrap(self.db_path)
 
     def tearDown(self) -> None:
+        gc.collect()  # Close legacy bootstrap's unreachable SQLite handles on Windows.
         self._tmp.cleanup()
 
     def test_enqueue_creates_job_and_targets(self) -> None:
@@ -158,6 +160,7 @@ class StaleRunningRecoveryTests(unittest.TestCase):
         create_table.bootstrap(self.db_path)
 
     def tearDown(self) -> None:
+        gc.collect()
         self._tmp.cleanup()
 
     def _backdate_started_at(self, target_id: int, hours: float) -> None:
@@ -168,7 +171,8 @@ class StaleRunningRecoveryTests(unittest.TestCase):
                  - _td(hours=hours)).isoformat(timespec="seconds")
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "UPDATE publish_job_targets SET started_at = ? WHERE id = ?",
+                "UPDATE publish_job_targets SET started_at = ?, lease_owner = NULL, "
+                "lease_token = NULL, lease_expires_at = NULL WHERE id = ?",
                 (stale, target_id),
             )
             conn.commit()
@@ -229,7 +233,8 @@ class StaleRunningRecoveryTests(unittest.TestCase):
         target = jobs.claim_next_targets(limit=1, db_path=self.db_path)[0]
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "UPDATE publish_job_targets SET started_at = NULL WHERE id = ?",
+                "UPDATE publish_job_targets SET started_at = NULL, lease_owner = NULL, "
+                "lease_token = NULL, lease_expires_at = NULL WHERE id = ?",
                 (target.id,),
             )
             conn.commit()
@@ -270,6 +275,7 @@ class CancelRaceTests(unittest.TestCase):
         create_table.bootstrap(self.db_path)
 
     def tearDown(self) -> None:
+        gc.collect()
         self._tmp.cleanup()
 
     def _enqueue_two_running(self) -> jobs.Job:
@@ -349,6 +355,7 @@ class ListJobsLimitTests(unittest.TestCase):
             )
 
     def tearDown(self) -> None:
+        gc.collect()
         self._tmp.cleanup()
 
     def test_negative_limit_rejected(self) -> None:
@@ -392,6 +399,7 @@ class ScheduleGateTests(unittest.TestCase):
         create_table.bootstrap(self.db_path)
 
     def tearDown(self) -> None:
+        gc.collect()
         self._tmp.cleanup()
 
     def test_future_scheduled_target_is_not_claimable(self) -> None:
@@ -424,6 +432,7 @@ class TargetMutationTests(unittest.TestCase):
         create_table.bootstrap(self.db_path)
 
     def tearDown(self) -> None:
+        gc.collect()
         self._tmp.cleanup()
 
     def _enq(self, targets, *, key="k1") -> jobs.Job:
@@ -468,30 +477,12 @@ class TargetMutationTests(unittest.TestCase):
     def test_cross_workspace_target_mutation_is_forbidden(self) -> None:
         """With the workspace_id column present, mutating another workspace's
         target must not be found (IDOR guard)."""
-        import sqlite3
-        with sqlite3.connect(self.db_path) as conn:
-            cols = {r[1] for r in conn.execute(
-                "PRAGMA table_info(publish_jobs)").fetchall()}
-            if "workspace_id" not in cols:
-                conn.execute("ALTER TABLE publish_jobs ADD COLUMN workspace_id TEXT")
         job = jobs.enqueue_job(
             _spec(targets=[("acct-1", "f1", None)]), workspace_id="ws-A",
             db_path=self.db_path,
         )
         target = jobs.list_targets(job.id, db_path=self.db_path)[0]
 
-        # CI's bootstrap runs the 0015-0018 migrations, so publish_jobs
-        # already carries workspace_id; on pre-migration scratch DBs the
-        # column is added here. Without the column the legacy path still
-        # works (the mutation would not 404 cross-scope).
-        with sqlite3.connect(self.db_path) as conn:
-            cols = {r[1] for r in conn.execute(
-                "PRAGMA table_info(publish_jobs)").fetchall()}
-        if "workspace_id" not in cols:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("ALTER TABLE publish_jobs ADD COLUMN workspace_id TEXT")
-                conn.execute("UPDATE publish_jobs SET workspace_id = 'ws-A' WHERE id = ?",
-                             (job.id,))
 
         with self.assertRaises(LookupError):
             jobs.cancel_target(target.id, workspace_id="ws-B",

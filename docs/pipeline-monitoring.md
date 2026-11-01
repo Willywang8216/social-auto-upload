@@ -23,11 +23,11 @@ All alerts go to Telegram **@Notification_personalprojectbot**
 | Inbox watcher | every minute | a scan **raises** (thumbnails, Drive listing, state write) — the exact 2026-10-17 failure | `sau-inbox/watch.py::report_scan_failure` |
 | Watcher watchdog | `*/10` | no **successful** scan in 15 min, or the health file is missing (cron died, run lock stuck, Drive unreachable) | `sau-inbox/inbox_monitor.py` |
 | Stuck-item reminder | `*/10` (same job) | a `ready`/`pending` item is older than 24 h — it arrived, was announced once, and nobody approved it | `sau-inbox/inbox_monitor.py` |
-| Pipeline monitor | `*/15` | app `/healthz` down · **disk > 85 %** (warn) / **> 92 %** (critical) · last offload `rc != 0` · publish targets **failed in the last 2 h** (excluding "disabled by the operator") · campaigns in `needs_review` (last 24 h) · targets **overdue > 45 min** · watcher heartbeat stale > 30 min | `myUtils/pipeline_monitor.py` |
+| Pipeline monitor | `*/15` | app HTTP health down (`SAU_HEALTH_URL`, default `/healthz`; see §8 for readiness) · **disk > 85 %** (warn) / **> 92 %** (critical) · last offload `rc != 0` · publish targets **failed in the last 2 h** (excluding "disabled by the operator") · campaigns in `needs_review` (last 24 h) · targets **overdue > 45 min** · watcher heartbeat stale > 30 min | `myUtils/pipeline_monitor.py` |
 | Disk reclaim | daily 04:30 | nothing (silent); bounds the Docker build cache and dangling layers | `scripts/disk-reclaim.sh` |
 | Auto-publish | `*/10` | never alerts on success; a failed submit retries 3×, then reports | `myUtils/inbox_autopublish.py` |
 | Auto-archive | `*/15` | never alerts on success; on a failed Drive move it reports and leaves the file in place | `myUtils/inbox_archive.py` |
-| Worker / digest | in-process | account refresh failures, publish exceptions, the 09:00 daily digest | `myUtils/ops_alerts.py` |
+| Worker / digest | standalone worker service | account refresh failures, publish exceptions, the 09:00 daily digest; web never owns these loops | `myUtils/ops_alerts.py` |
 
 Every alert is deduplicated per signature (watcher 30 min, watchdog 60 min,
 pipeline monitor 60 min), so a permanent outage is one message per hour, not
@@ -148,11 +148,11 @@ README.
 | --- | --- |
 | watcher crashes every minute (missing dependency, Drive auth, disk full) | watcher alert (immediate) + watchdog (15 min) |
 | cron entry removed / machine rebooted without cron | watchdog (no heartbeat) |
-| scheduler thread stops draining | pipeline monitor (overdue targets) |
+| publisher stops claiming / heartbeat goes stale | `/readyz`, worker Docker probe and pipeline monitor (overdue targets) |
 | prep dies (artifact missing, ffmpeg OOM, container restart mid-encode) | pipeline monitor (`needs_review`) |
 | a platform starts rejecting posts | pipeline monitor (failed targets in 2 h) |
 | offload stops moving media out (disk fills) | pipeline monitor (`rc != 0`) |
-| app container down / bad image | pipeline monitor (`/healthz`) |
+| app container down / bad image | pipeline monitor (`SAU_HEALTH_URL`); release probes additionally require schema/worker `/readyz` |
 | inbox fills with published media | auto-archive cron |
 
 ## 5. Disk: why it filled and what keeps it bounded
@@ -219,3 +219,47 @@ What changed:
   recovery is a `preparing` reset (see
   `reports/inbox-new-uploads-2026-10-20.md` §11.2).
 * The monitor cannot see *wrong* content — only stuck or failed work.
+
+## 8. Release ownership and paused readiness
+
+The every-two-minute `scripts/ci-watch.sh` is the **only production deployer**.
+GitHub Actions gates/publishes images; Watchtower stays disabled for both
+`social-auto-upload` (web) and `social-auto-upload-worker`. They must have the
+same image ID and `SAU_BUILD_REVISION`/OCI revision. Only worker owns publishing
+and maintenance; both share `/app/db/database.db` and the existing data mounts.
+
+Read-only operational probes (no synthetic publish is needed):
+
+```bash
+docker exec social-auto-upload python scripts/release_probe.py web
+docker exec social-auto-upload-worker python scripts/release_probe.py worker
+```
+
+`/healthz` returning 200 only means the web process is alive. Normal readiness
+requires `/readyz` 200, the expected schema/revision, and a fresh **non-draining**
+publisher heartbeat. A rendered SPA homepage is not a release gate.
+
+The host cron monitor still defaults to `/healthz` in
+`myUtils/pipeline_monitor.py`. At rollout, set
+`SAU_HEALTH_URL=http://127.0.0.1:5409/readyz` in that cron process's environment
+to monitor readiness as well. Without that override its HTTP check is only
+liveness; the release/Compose probes already require `/readyz`. Do not assume
+changing container settings also changes a host cron environment.
+
+During deployment `db/publish.pause` stops new claims; existing targets/preps
+must drain before any restart or migration. The normal probes deliberately fail
+while paused. The deploy helper uses its separate `--allow-paused` verification
+mode to check a fresh draining heartbeat and schema without releasing work,
+then requires normal readiness after activation. A `--hold` initial rollout or
+failed release retains the pause; cron never silently removes it. Investigate a
+persistent pause even if `/healthz` remains green.
+
+Do not recover by copying an old live SQLite file or resetting publish rows:
+external posts may already exist. Failed releases retain verified online
+snapshots and private configuration/image baselines, and roll back **images
+only**, keeping claims paused on uncertainty. Legacy web embedded publishers
+ignore the new pause and require a parent-controlled idle/outage transition.
+See [the release/backup runbook](ci-watch.md) for hold/resume, safe offline
+restore, lock ownership, evidence paths and that initial-rollout limitation.
+All existing inbox/offload/archive/backup cron schedules and destinations remain
+unchanged.

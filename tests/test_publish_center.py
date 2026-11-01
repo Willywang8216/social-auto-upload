@@ -1,7 +1,7 @@
 """Tests for the Publish Center feature.
 
 Covers:
-- publish_orchestrator.submit_publish (single-media split, stagger scheduling)
+- publish_services.submit_publish (durable admission, off-request prep and splitting)
 - publish_orchestrator._request_data_for_options (option translation)
 - publish_orchestrator._resolve_base_time (schedule resolution)
 - Backend HTTP endpoints: /publish-center/preview, /regenerate, /submit
@@ -16,7 +16,8 @@ import sys
 import tempfile
 import types
 import unittest
-from datetime import datetime, timedelta
+from contextlib import ExitStack, closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -29,6 +30,8 @@ if "conf" not in sys.modules:
     sys.modules["conf"] = conf_module
 
 from myUtils import publish_orchestrator
+from myUtils import campaign_media_prep, campaign_prep, campaigns as campaign_store
+from myUtils import jobs as job_runtime, publish_services
 from myUtils import profiles as profile_registry
 from myUtils import platform_capabilities
 
@@ -59,10 +62,14 @@ class ResolveBaseTimeTests(unittest.TestCase):
         encoded the bug, under which an operator picking 07:00 got 15:00. With
         Asia/Shanghai as the operator timezone, 10:00 local is 02:00 UTC.
         """
-        result = publish_orchestrator._resolve_base_time({
-            "publishNow": False,
-            "startAt": "2026-06-17T10:00:00",
-        })
+        # Exercise localization, independent of Windows' optional tzdata package.
+        with patch.dict(os.environ, {"SAU_OPERATOR_TIMEZONE": "Asia/Shanghai"}), \
+                patch.object(publish_orchestrator, "ZoneInfo", return_value=timezone(timedelta(hours=8))) as zone:
+            result = publish_orchestrator._resolve_base_time({
+                "publishNow": False,
+                "startAt": "2026-06-17T10:00:00",
+            })
+        zone.assert_called_once_with("Asia/Shanghai")
         self.assertIsNotNone(result)
         self.assertEqual(result.year, 2026)
         self.assertEqual(result.month, 6)
@@ -223,6 +230,9 @@ class PublishCenterPreviewTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.base_dir = Path(self._tmp.name)
         self.db_path = self.base_dir / "db" / "database.db"
+        db_env = patch.dict(os.environ, {"SAU_DB_PATH": str(self.db_path)})
+        db_env.start()
+        self.addCleanup(db_env.stop)
         create_table.bootstrap(self.db_path)
 
         self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
@@ -311,358 +321,369 @@ class PublishCenterSubmitTests(unittest.TestCase):
 
         self.sau_backend = sau_backend
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
         self.base_dir = Path(self._tmp.name)
         self.db_path = self.base_dir / "db" / "database.db"
+        self.patches = ExitStack()
+        self.addCleanup(self.patches.close)
+        self.patches.enter_context(patch.dict(os.environ, {"SAU_DB_PATH": str(self.db_path)}))
+        self.patches.enter_context(patch.object(sau_backend, "BASE_DIR", self.base_dir))
+        self.patches.enter_context(patch.object(campaign_media_prep, "BASE_DIR", self.base_dir))
         create_table.bootstrap(self.db_path)
-
-        self._base_dir_patch = patch.object(sau_backend, "BASE_DIR", self.base_dir)
-        self._base_dir_patch.start()
+        (self.base_dir / "videoFile").mkdir()
 
         from myUtils.security import SecurityPolicy
-        self._orig_policy = sau_backend.app.config["SECURITY_POLICY"]
-        sau_backend.app.config["SECURITY_POLICY"] = SecurityPolicy(
-            tokens=frozenset(), cors_origins=("http://localhost:5173",)
-        )
-        sau_backend.app.config["TESTING"] = True
+        self.patches.enter_context(patch.dict(sau_backend.app.config, {
+            "SECURITY_POLICY": SecurityPolicy(
+                tokens=frozenset(), cors_origins=("http://localhost:5173",),
+            ),
+            "TESTING": True,
+        }))
         self.client = sau_backend.app.test_client()
-
-    def tearDown(self):
-        self._base_dir_patch.stop()
-        self.sau_backend.app.config["SECURITY_POLICY"] = self._orig_policy
-        self._tmp.cleanup()
+        # Admission must not execute media prep, generation, or notifications.
+        self.prep = self.patches.enter_context(patch.object(
+            publish_services, "_prepare_campaign_media_artifacts",
+            side_effect=AssertionError("media prep ran during HTTP admission"),
+        ))
+        self.draft = self.patches.enter_context(patch.object(
+            publish_services, "_generate_account_draft",
+            side_effect=AssertionError("draft generation ran during HTTP admission"),
+        ))
+        self.notify = self.patches.enter_context(patch.object(publish_services, "_notify_tg_review"))
+        self.drain = self.patches.enter_context(patch.object(sau_backend, "_start_worker_drain_thread"))
 
     def _create_profile_and_account(self, platform="telegram"):
-        profile = profile_registry.create_profile(
-            "Test Brand", db_path=self.db_path,
-        )
+        profile = profile_registry.create_profile("Test Brand", db_path=self.db_path)
         account = profile_registry.add_account(
-            profile_id=profile.id,
-            platform=platform,
-            account_name=f"test-{platform}",
-            auth_type="manual",
-            config={"chatId": "@test", "botToken": "fake-token"},
+            profile_id=profile.id, platform=platform, account_name=f"test-{platform}",
+            auth_type="manual", config={"chatId": "@test", "botToken": "fake-token"},
             db_path=self.db_path,
         )
         return profile, account
 
+    def _write_media(self, filename):
+        path = self.base_dir / "videoFile" / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"synthetic media; the prep callback is mocked")
+        return path
+
+    def _snapshot(self):
+        tables = ("file_records", "media_groups", "media_group_items", "campaigns",
+                  "campaign_posts", "publish_jobs", "publish_job_targets", "publish_submissions")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            return {table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+                    for table in tables}
+
+    def _assert_admitted(self, response, *, campaign_count=1):
+        self.assertEqual(response.status_code, 202, response.get_json())
+        body = response.get_json()
+        self.assertEqual(body["code"], 200)
+        data = body["data"]
+        self.assertEqual(data["status"], "preparing" if campaign_count else "needs_review")
+        self.assertEqual(len(data["campaignIds"]), campaign_count)
+        self.assertEqual(data["jobs"], [])
+        self.prep.assert_not_called()
+        self.draft.assert_not_called()
+        self.notify.assert_not_called()
+        snapshot = self._snapshot()
+        for table in ("campaign_posts", "publish_jobs", "publish_job_targets"):
+            self.assertEqual(snapshot[table], [], table)
+        for campaign_id in data["campaignIds"]:
+            campaign = campaign_store.get_campaign(campaign_id, db_path=self.db_path)
+            self.assertEqual(campaign.status, campaign_store.CAMPAIGN_PREPARING)
+            self.assertIsNone(campaign.prepared_at)
+        return data
+
+    def _prepare_admitted(self, data):
+        """Run the real Flask-free prep/finalize path, mocking only heavy work."""
+        from flask import has_app_context, has_request_context
+
+        self.assertFalse(has_app_context())
+        self.assertFalse(has_request_context())
+
+        def prepare(campaign_id, profile, media_files, request_data, **kwargs):
+            self.assertEqual(kwargs["db_path"], self.db_path)
+            for media in media_files:
+                path = campaign_media_prep._resolve_video_file_path_safely(media["file_path"])
+                self.assertTrue(path.is_file())
+                self.assertGreater(path.stat().st_size, 0)
+                campaign_store.add_campaign_artifact(
+                    campaign_id, artifact_kind="local",
+                    source_file_record_id=media["file_record_id"], local_path=str(path),
+                    metadata={"role": media["role"]}, db_path=self.db_path,
+                )
+            return {"transcriptText": "A quiet walk beside the river."}
+
+        result = {"jobs": [], "skipped": []}
+        with patch.object(publish_services, "_prepare_campaign_media_artifacts", side_effect=prepare), \
+                patch.object(publish_services, "_generate_account_draft", return_value={
+                    "message": "A quiet walk beside the river.", "hashtags": [], "firstComment": "",
+                }), patch.object(publish_services, "_notify_tg_review"):
+            runner = campaign_prep.make_default_prep_runner()
+            for campaign_id in data["campaignIds"]:
+                campaign = campaign_store.claim_next_preparing_campaign(
+                    owner="test-publish-center", db_path=self.db_path,
+                )
+                self.assertIsNotNone(campaign)
+                self.assertEqual(campaign.id, campaign_id)
+                prepared = runner(campaign, self.db_path)
+                result["jobs"].extend(prepared["jobs"])
+                result["skipped"].extend(prepared["skipped"])
+        return result
+
+    def _submit(self, profile, account, media, **extra):
+        for filename in media:
+            self._write_media(filename)
+        body = {
+            "profileIds": [profile.id], "selectedAccountIds": [account.id],
+            "mediaFilePaths": media, "brief": "post",
+            "options": {"watermark": False, "intro": False, "outro": False},
+            "schedule": {"publishNow": True}, "accountDrafts": {},
+        }
+        body.update(extra)
+        return self.client.post("/publish-center/submit", json=body)
+
     def test_submit_requires_profile_ids(self):
-        resp = self.client.post("/publish-center/submit", json={
-            "mediaFilePaths": ["video.mp4"],
-        })
+        before = self._snapshot()
+        resp = self.client.post("/publish-center/submit", json={"mediaFilePaths": ["video.mp4"]})
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("profileIds", resp.get_json()["msg"])
+        self.assertIn("profile", resp.get_json()["msg"])
+        self.assertEqual(self._snapshot(), before)
 
     def test_submit_requires_media_files(self):
         profile, _ = self._create_profile_and_account()
+        before = self._snapshot()
         resp = self.client.post("/publish-center/submit", json={
-            "profileIds": [profile.id],
-            "mediaFilePaths": [],
+            "profileIds": [profile.id], "mediaFilePaths": [],
         })
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("mediaFilePaths", resp.get_json()["msg"])
-
-    def _insert_file_record(self, filename: str = "test-video.mp4") -> int:
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                "INSERT INTO file_records (filename, file_path, filesize) VALUES (?, ?, ?)",
-                (filename, filename, 1024),
-            )
-            conn.commit()
-            return cur.lastrowid
+        self.assertIn("media file", resp.get_json()["msg"])
+        self.assertEqual(self._snapshot(), before)
 
     def test_submit_creates_jobs_for_valid_request(self):
         profile, account = self._create_profile_and_account()
-        file_record_id = self._insert_file_record()
-        with patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={}), \
-             patch.object(self.sau_backend, "_generate_account_draft", return_value={
-                 "message": "Test post", "hashtags": [], "firstComment": "",
-             }), \
-             patch.object(self.sau_backend, "_ensure_file_record_for_path", return_value=file_record_id), \
-             patch.object(self.sau_backend, "_artifact_payloads_for_platform", return_value=[]), \
-             patch.object(self.sau_backend, "_job_to_payload", side_effect=lambda j: {"id": j.id, "platform": j.platform, "totalTargets": 1}):
-            resp = self.client.post("/publish-center/submit", json={
-                "profileIds": [profile.id],
-                "selectedAccountIds": [account.id],
-                "mediaFilePaths": ["test-video.mp4"],
-                "brief": "Test post",
-                "options": {"watermark": False, "intro": False, "outro": False},
-                "schedule": {"publishNow": True},
-                "accountDrafts": {},
-            })
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()["data"]
-        self.assertGreaterEqual(len(data["jobs"]), 1)
+        resp = self._submit(profile, account, ["test-video.mp4"], brief="Test post")
+        data = self._assert_admitted(resp)
+        prepared = self._prepare_admitted(data)
+        self.assertEqual(len(prepared["jobs"]), 1)
+        job = job_runtime.get_job(prepared["jobs"][0]["id"], db_path=self.db_path)
+        self.assertEqual(job.platform, "telegram")
+        self.assertEqual(job.payload["draft"]["message"], "A quiet walk beside the river.")
+        self.assertTrue(job.payload["artifacts"])
+        posts = campaign_store.list_campaign_posts(data["campaignIds"][0], db_path=self.db_path)
+        self.assertEqual(posts[0].draft, job.payload["draft"])
+        self.assertEqual(posts[0].status, campaign_store.CAMPAIGN_POST_QUEUED)
 
     def test_submit_overrides_are_normalized_before_queuing(self):
-        """A stringified / label-blob accountDraft must not reach the platform.
-
-        The operator approves copy that the preview already normalised, but the
-        override in the submit body is the client's copy of the draft. If it
-        arrives stringified (the model returned a JSON object as text) or as a
-        "Title: ... / Description: ..." blob, the orchestrator must normalise it
-        at the point of consumption rather than post a dict literal.
-        """
+        """Stringified client overrides must be normalized at prep consumption."""
         profile, account = self._create_profile_and_account()
-        file_record_id = self._insert_file_record()
-        with patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={}), \
-             patch.object(self.sau_backend, "_ensure_file_record_for_path", return_value=file_record_id), \
-             patch.object(self.sau_backend, "_artifact_payloads_for_platform", return_value=[]), \
-             patch.object(self.sau_backend, "_job_to_payload", side_effect=lambda j: {"id": j.id, "platform": j.platform, "totalTargets": 1}):
-            resp = self.client.post("/publish-center/submit", json={
-                "profileIds": [profile.id],
-                "selectedAccountIds": [account.id],
-                "mediaFilePaths": ["SFW test-video.mp4"],
-                "brief": "Test post",
-                "options": {"watermark": False, "intro": False, "outro": False},
-                "schedule": {"publishNow": True},
-                "accountDrafts": {
-                    str(account.id): {
-                        "message": "{'title': 'A title', 'description': 'Real body text'}",
-                        "hashtags": [],
-                        "firstComment": "",
-                    },
-                },
-            })
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()["data"]
-        self.assertGreaterEqual(len(data["jobs"]), 1)
-        job_id = data["jobs"][0]["id"]
-
-        from myUtils import jobs as job_runtime
-        job = job_runtime.get_job(job_id, db_path=self.db_path)
-        draft = job.payload.get("draft") or {}
-        message = str(draft.get("message") or "")
+        resp = self._submit(profile, account, ["SFW test-video.mp4"], accountDrafts={
+            str(account.id): {
+                "message": "{'title': 'A title', 'description': 'Real body text'}",
+                "hashtags": [], "firstComment": "",
+            },
+        })
+        data = self._assert_admitted(resp)
+        prepared = self._prepare_admitted(data)
+        self.assertEqual(len(prepared["jobs"]), 1)
+        job = job_runtime.get_job(prepared["jobs"][0]["id"], db_path=self.db_path)
+        message = str(job.payload["draft"].get("message") or "")
         self.assertNotIn("{'title'", message, "stringified draft leaked to the platform")
         self.assertNotIn('"title"', message)
-        # The body copy survives; only the field labels are removed.
         self.assertIn("Real body text", message)
 
     def test_youtube_is_skipped_for_image_only_media_with_account_name(self):
         profile, account = self._create_profile_and_account(platform="youtube")
-        resp = self._submit(profile, account, ["SFW still.jpg"])
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()["data"]
-        self.assertEqual(data["jobs"], [])
+        data = self._assert_admitted(self._submit(profile, account, ["SFW still.jpg"]), campaign_count=0)
         self.assertEqual(data["skipped"][0]["accountName"], account.account_name)
         self.assertIn("requires video media", data["skipped"][0]["reason"])
+        self.drain.assert_not_called()
 
     def test_tiktok_photo_draft_is_skipped_before_queueing(self):
         profile, account = self._create_profile_and_account(platform="tiktok")
         resp = self._submit(profile, account, ["SFW still.jpg"], options={
             "watermark": False, "intro": False, "outro": False, "tiktokDirectPost": False,
         })
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()["data"]
-        self.assertEqual(data["jobs"], [])
+        data = self._assert_admitted(resp, campaign_count=0)
         self.assertEqual(data["skipped"][0]["accountName"], account.account_name)
         self.assertIn("requires Direct Post", data["skipped"][0]["reason"])
+        self.drain.assert_not_called()
 
     def test_single_media_platform_splits_into_multiple_jobs(self):
-        """When a single-media platform gets multiple files, it should split into staggered jobs.
-
-        TikTok bans nudity, so the fixtures carry the ``SFW`` marker: an
-        unlabelled filename is rated NSFW and would (correctly) be dropped by
-        the content gate before it ever reaches the split logic under test.
-        """
+        # TikTok forbids nudity: keep the source filename's SFW marker so this
+        # exercises splitting, not a (correct) content-policy rejection.
         profile, account = self._create_profile_and_account(platform="tiktok")
-        # TikTok is single-media
         self.assertFalse(platform_capabilities.platform_supports_multi_media("tiktok"))
-
-        file_record_ids = []
-        for fname in ["SFW video1.mp4", "SFW video2.mp4", "SFW video3.mp4"]:
-            file_record_ids.append(self._insert_file_record(fname))
-        call_count = {"n": 0}
-        def mock_ensure(path, db_path):
-            idx = call_count["n"]
-            call_count["n"] += 1
-            return file_record_ids[idx] if idx < len(file_record_ids) else file_record_ids[0]
-
-        with patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={}), \
-             patch.object(self.sau_backend, "_generate_account_draft", return_value={
-                 "message": "Test TikTok", "hashtags": [], "firstComment": "",
-             }), \
-             patch.object(self.sau_backend, "_ensure_file_record_for_path", side_effect=mock_ensure), \
-             patch.object(self.sau_backend, "_artifact_payloads_for_platform", return_value=[]), \
-             patch.object(self.sau_backend, "_job_to_payload", side_effect=lambda j: {"id": j.id, "platform": j.platform, "totalTargets": 1}):
-            resp = self.client.post("/publish-center/submit", json={
-                "profileIds": [profile.id],
-                "selectedAccountIds": [account.id],
-                "mediaFilePaths": ["SFW video1.mp4", "SFW video2.mp4", "SFW video3.mp4"],
-                "brief": "TikTok batch",
-                "options": {"watermark": False, "intro": False, "outro": False},
-                "schedule": {"publishNow": True},
-                "accountDrafts": {},
-            })
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()["data"]
-        # Should create 3 jobs (one per video), not 1
-        self.assertEqual(len(data["jobs"]), 3)
-
-    # --- NSFW containment on the publish-center path (the one the UI uses) ---
-
-    def _submit(self, profile, account, media, **extra):
-        file_record_id = self._insert_file_record(media[0])
-        with patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={}), \
-             patch.object(self.sau_backend, "_generate_account_draft", return_value={
-                 "message": "post", "hashtags": [], "firstComment": "",
-             }), \
-             patch.object(self.sau_backend, "_ensure_file_record_for_path", return_value=file_record_id), \
-             patch.object(self.sau_backend, "_artifact_payloads_for_platform", return_value=[]), \
-             patch.object(self.sau_backend, "_job_to_payload", side_effect=lambda j: {"id": j.id, "platform": j.platform, "totalTargets": 1}):
-            body = {
-                "profileIds": [profile.id],
-                "selectedAccountIds": [account.id],
-                "mediaFilePaths": media,
-                "brief": "post",
-                "options": {"watermark": False, "intro": False, "outro": False},
-                "schedule": {"publishNow": True},
-                "accountDrafts": {},
-            }
-            body.update(extra)
-            return self.client.post("/publish-center/submit", json=body)
+        media = ["SFW video1.mp4", "SFW video2.mp4", "SFW video3.mp4"]
+        data = self._assert_admitted(self._submit(profile, account, media))
+        prepared = self._prepare_admitted(data)
+        self.assertEqual(len(prepared["jobs"]), 3)
+        jobs = [job_runtime.get_job(j["id"], db_path=self.db_path) for j in prepared["jobs"]]
+        self.assertEqual(len({tuple(j.payload["fileRecordIds"]) for j in jobs}), 3)
+        self.assertTrue(all(len(j.payload["fileRecordIds"]) == 1 for j in jobs))
 
     def test_unlabelled_media_is_never_sent_to_instagram_even_when_selected(self):
-        # Explicitly selecting the Instagram account must not be enough: the
-        # filename carries no "sfw" marker, so the file is NSFW and Instagram
-        # is dropped. This is the publish-center route the web UI calls.
         profile, ig = self._create_profile_and_account(platform="instagram")
-        resp = self._submit(profile, ig, ["20260722155038425.mp4"])
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()["data"]
-        self.assertEqual(data["jobs"], [])
-        self.assertEqual(
-            [s["reason"] for s in data["skipped"]], ["nsfw_no_adult_safe_account"],
+        data = self._assert_admitted(
+            self._submit(profile, ig, ["20260722155038425.mp4"]), campaign_count=0,
         )
+        self.assertEqual([s["reason"] for s in data["skipped"]], ["nsfw_no_adult_safe_account"])
+        self.drain.assert_not_called()
 
     def test_sfw_labelled_media_reaches_instagram(self):
         profile, ig = self._create_profile_and_account(platform="instagram")
-        resp = self._submit(profile, ig, ["SFW 20260813074703243.mp4"])
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.get_json()["data"]["jobs"]), 1)
+        data = self._assert_admitted(self._submit(profile, ig, ["SFW 20260813074703243.mp4"]))
+        prepared = self._prepare_admitted(data)
+        self.assertEqual([j["platform"] for j in prepared["jobs"]], ["instagram"])
 
     def test_unlabelled_media_still_reaches_adult_safe_platforms(self):
         profile, tg = self._create_profile_and_account(platform="telegram")
-        resp = self._submit(profile, tg, ["20260722155038425.mp4"])
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.get_json()["data"]["jobs"]), 1)
+        data = self._assert_admitted(self._submit(profile, tg, ["20260722155038425.mp4"]))
+        prepared = self._prepare_admitted(data)
+        self.assertEqual([j["platform"] for j in prepared["jobs"]], ["telegram"])
 
     def test_nsfw_batch_to_mixed_profile_keeps_only_safe_accounts(self):
         profile, tg = self._create_profile_and_account(platform="telegram")
         ig = profile_registry.add_account(
-            profile_id=profile.id, platform="instagram", account_name="ig",
-            auth_type="manual", config={}, db_path=self.db_path,
+            profile.id, "instagram", "ig", auth_type="manual", db_path=self.db_path,
         )
-        resp = self._submit(
-            profile, tg, ["20260722155038425.mp4"],
-            selectedAccountIds=[tg.id, ig.id],
-        )
-        self.assertEqual(resp.status_code, 200)
-        jobs = resp.get_json()["data"]["jobs"]
-        self.assertEqual([j["platform"] for j in jobs], ["telegram"])
+        data = self._assert_admitted(self._submit(
+            profile, tg, ["20260722155038425.mp4"], selectedAccountIds=[tg.id, ig.id],
+        ))
+        campaign = campaign_store.get_campaign(data["campaignIds"][0], db_path=self.db_path)
+        self.assertEqual(campaign.selected_account_ids, [tg.id])
+        self.assertEqual(campaign_store.get_prep_request(campaign)["selectedAccountIds"], [tg.id])
+        prepared = self._prepare_admitted(data)
+        self.assertEqual([j["platform"] for j in prepared["jobs"]], ["telegram"])
 
     def test_sfw_flag_in_options_cannot_launder_unlabelled_media(self):
-        # A request body saying "this is SFW" is not trusted over the filename.
         profile, ig = self._create_profile_and_account(platform="instagram")
-        resp = self._submit(
-            profile, ig, ["20260722155038425.mp4"],
-            options={"watermark": False, "intro": False, "outro": False, "sfwFlag": "sfw"},
-        )
-        self.assertEqual(resp.get_json()["data"]["jobs"], [])
-
-    # --- Async prep switch (SAU_ASYNC_PREP) ---
+        resp = self._submit(profile, ig, ["20260722155038425.mp4"], options={
+            "watermark": False, "intro": False, "outro": False, "sfwFlag": "sfw",
+        })
+        data = self._assert_admitted(resp, campaign_count=0)
+        self.assertEqual([s["reason"] for s in data["skipped"]], ["nsfw_no_adult_safe_account"])
+        self.drain.assert_not_called()
 
     def _submit_async_payload(self, profile, account, filename="SFW async.mp4"):
         return {
-            "profileIds": [profile.id],
-            "selectedAccountIds": [account.id],
-            "mediaFilePaths": [filename],
-            "brief": "async post",
+            "profileIds": [profile.id], "selectedAccountIds": [account.id],
+            "mediaFilePaths": [filename], "brief": "async post",
             "options": {"watermark": False, "intro": False, "outro": False},
-            "schedule": {"publishNow": True},
-            "accountDrafts": {},
+            "schedule": {"publishNow": True}, "accountDrafts": {},
         }
 
-    def test_async_prep_off_keeps_the_synchronous_submit(self):
+    def test_async_prep_off_still_uses_durable_admission(self):
         profile, account = self._create_profile_and_account()
-        file_record_id = self._insert_file_record()
-        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "0"}), \
-             patch.object(self.sau_backend, "_prepare_campaign_media_artifacts", return_value={}), \
-             patch.object(self.sau_backend, "_generate_account_draft", return_value={
-                 "message": "sync post", "hashtags": [], "firstComment": "",
-             }), \
-             patch.object(self.sau_backend, "_ensure_file_record_for_path", return_value=file_record_id), \
-             patch.object(self.sau_backend, "_artifact_payloads_for_platform", return_value=[]), \
-             patch.object(self.sau_backend, "_job_to_payload", side_effect=lambda j: {"id": j.id, "platform": j.platform, "totalTargets": 1}), \
-             patch.object(self.sau_backend, "_start_worker_drain_thread") as drain, \
-             patch.object(self.sau_backend.campaign_prep, "submit_publish_async") as async_submit:
-            resp = self.client.post("/publish-center/submit", json={
-                "profileIds": [profile.id],
-                "selectedAccountIds": [account.id],
-                "mediaFilePaths": ["test-video.mp4"],
-                "brief": "sync post",
-                "options": {"watermark": False, "intro": False, "outro": False},
-                "schedule": {"publishNow": True},
-                "accountDrafts": {},
-            })
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()["data"]
-        self.assertGreaterEqual(len(data["jobs"]), 1)
-        # The synchronous response shape is unchanged: no async ``status`` key.
-        self.assertNotIn("status", data)
-        async_submit.assert_not_called()
-        drain.assert_called_once()
+        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "0"}):
+            resp = self._submit(profile, account, ["test-video.mp4"])
+        self._assert_admitted(resp)
+        self.drain.assert_called_once()
 
     def test_async_prep_on_returns_preparing_without_running_prep(self):
         profile, account = self._create_profile_and_account()
-        file_record_id = self._insert_file_record()
-        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "1"}), \
-             patch.object(self.sau_backend, "_ensure_file_record_for_path", return_value=file_record_id), \
-             patch.object(self.sau_backend, "_prepare_campaign_media_artifacts") as prep, \
-             patch.object(self.sau_backend, "_generate_account_draft") as draft, \
-             patch.object(self.sau_backend, "_start_worker_drain_thread") as drain, \
-             patch.object(self.sau_backend, "_notify_tg_review") as tg:
-            resp = self.client.post(
-                "/publish-center/submit",
-                json=self._submit_async_payload(profile, account),
-            )
-        self.assertEqual(resp.status_code, 200, resp.get_json())
-        data = resp.get_json()["data"]
-        self.assertEqual(data["status"], "preparing")
-        self.assertEqual(data["jobs"], [])
-        self.assertEqual(len(data["campaignIds"]), 1)
-        # Neither the heavy prep nor draft generation may run in the request.
-        prep.assert_not_called()
-        draft.assert_not_called()
-        # Telegram cards are deferred to the worker once jobs exist.
-        tg.assert_not_called()
-        drain.assert_called_once()
-
-        from myUtils import campaigns as campaign_store
-
-        campaign = campaign_store.get_campaign(
-            data["campaignIds"][0], db_path=self.db_path
-        )
-        self.assertEqual(campaign.status, campaign_store.CAMPAIGN_PREPARING)
+        self._write_media("SFW async.mp4")
+        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "1"}):
+            resp = self.client.post("/publish-center/submit", json=self._submit_async_payload(profile, account))
+        data = self._assert_admitted(resp)
+        self.drain.assert_called_once()
+        campaign = campaign_store.get_campaign(data["campaignIds"][0], db_path=self.db_path)
         request = campaign_store.get_prep_request(campaign)
         self.assertIsNotNone(request)
         self.assertEqual(request["brief"], "async post")
         self.assertEqual(request["schedule"], {"publishNow": True})
+        self.assertEqual(request["mediaFilePaths"], ["SFW async.mp4"])
+        self.assertEqual(request["selectedAccountIds"], [account.id])
 
     def test_async_prep_on_starts_drain_with_empty_jobs(self):
-        # Regression: the old ``if result.jobs`` guard skipped the drain when
-        # async prep returned a campaign with no jobs, so prep never started.
         profile, account = self._create_profile_and_account()
-        file_record_id = self._insert_file_record()
-        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "1"}), \
-             patch.object(self.sau_backend, "_ensure_file_record_for_path", return_value=file_record_id), \
-             patch.object(self.sau_backend, "_start_worker_drain_thread") as drain:
-            resp = self.client.post(
-                "/publish-center/submit",
-                json=self._submit_async_payload(profile, account),
+        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "1"}):
+            resp = self._submit(profile, account, ["SFW async.mp4"])
+        self._assert_admitted(resp)
+        self.drain.assert_called_once()
+
+    def test_stable_submission_id_replays_identical_admission_after_prep(self):
+        profile, account = self._create_profile_and_account()
+        self._write_media("SFW async.mp4")
+        body = dict(self._submit_async_payload(profile, account), submissionId="ui:stable")
+        first = self.client.post("/publish-center/submit", json=body)
+        data = self._assert_admitted(first)
+        self.assertEqual(data["submissionId"], "ui:stable")
+        self.assertEqual(len(self._prepare_admitted(data)["jobs"]), 1)
+        before_retry = self._snapshot()
+        second = self.client.post("/publish-center/submit", json=body)
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(second.get_json(), first.get_json())
+        self.assertEqual(self._snapshot(), before_retry)
+
+    def test_stable_submission_id_rejects_changed_intent_without_mutation(self):
+        profile, account = self._create_profile_and_account()
+        self._write_media("SFW async.mp4")
+        body = dict(self._submit_async_payload(profile, account), submissionId="ui:stable")
+        self._assert_admitted(self.client.post("/publish-center/submit", json=body))
+        before = self._snapshot()
+        response = self.client.post("/publish-center/submit", json=dict(body, brief="Different intent"))
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertEqual(response.get_json()["code"], 409)
+        self.assertIsNone(response.get_json()["data"])
+        self.assertEqual(self._snapshot(), before)
+
+    def test_all_selected_accounts_are_validated_before_admission(self):
+        profile, account = self._create_profile_and_account()
+        other = profile_registry.create_profile("Other", db_path=self.db_path)
+        foreign = profile_registry.add_account(other.id, "telegram", "other", auth_type="manual", db_path=self.db_path)
+        self._write_media("SFW async.mp4")
+        body = self._submit_async_payload(profile, account)
+        before = self._snapshot()
+        for invalid_id in (99999, foreign.id):
+            with self.subTest(account=invalid_id):
+                response = self.client.post("/publish-center/submit", json=dict(
+                    body, selectedAccountIds=[account.id, invalid_id],
+                ))
+                self.assertEqual(response.status_code, 400, response.get_json())
+                self.assertIn("Account", response.get_json()["msg"])
+                self.assertEqual(self._snapshot(), before)
+        self.drain.assert_not_called()
+
+    def test_invalid_media_paths_are_rejected_without_admission(self):
+        profile, account = self._create_profile_and_account()
+        outside = self.base_dir / "SFW outside.mp4"
+        outside.write_bytes(b"not inside videoFile")
+        (self.base_dir / "videoFile" / "SFW directory.mp4").mkdir()
+        before = self._snapshot()
+        for path in ("../SFW outside.mp4", str(outside), "SFW missing.mp4", "SFW directory.mp4"):
+            with self.subTest(path=path):
+                response = self.client.post("/publish-center/submit", json=self._submit_async_payload(profile, account, path))
+                self.assertEqual(response.status_code, 400, response.get_json())
+                self.assertEqual(self._snapshot(), before)
+        self.drain.assert_not_called()
+
+    def test_empty_local_media_is_rejected_without_admission(self):
+        profile, account = self._create_profile_and_account()
+        (self.base_dir / "videoFile" / "SFW empty.mp4").touch()
+        before = self._snapshot()
+        response = self.client.post("/publish-center/submit", json=self._submit_async_payload(profile, account, "SFW empty.mp4"))
+        self.assertEqual(response.status_code, 400, response.get_json())
+        self.assertEqual(self._snapshot(), before)
+        self.drain.assert_not_called()
+
+    def test_registered_local_media_without_bytes_is_not_a_remote_source(self):
+        profile, account = self._create_profile_and_account()
+        filename = "SFW stale.mp4"
+        # A legacy row without an exact remote backend/key cannot justify an
+        # absent local source. The inbox tests cover genuine remote admission.
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "INSERT INTO file_records (filename, file_path, filesize) VALUES (?, ?, ?)",
+                (filename, filename, 1),
             )
-        self.assertEqual(resp.status_code, 200, resp.get_json())
-        self.assertEqual(resp.get_json()["data"]["jobs"], [])
-        drain.assert_called_once()
+        before = self._snapshot()
+        response = self.client.post(
+            "/publish-center/submit", json=self._submit_async_payload(profile, account, filename),
+        )
+        self.assertEqual(response.status_code, 400, response.get_json())
+        self.assertEqual(self._snapshot(), before)
+        self.drain.assert_not_called()
 
 
 class AsyncPrepSwitchTests(unittest.TestCase):
@@ -746,6 +767,9 @@ class DuplicateQueueGuardTests(unittest.TestCase):
 
         self._tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self._tmp.name) / "guard.db"
+        db_env = patch.dict(os.environ, {"SAU_DB_PATH": str(self.db_path)})
+        db_env.start()
+        self.addCleanup(db_env.stop)
         create_table.bootstrap(self.db_path)
         self.profile = profile_registry.create_profile("Guard", db_path=self.db_path)
 
@@ -753,7 +777,7 @@ class DuplicateQueueGuardTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _seed(self, account_ref: str, status: str) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "INSERT INTO media_groups (id, name, notes, status)"
                 " VALUES (900, 'g', '', 'ready')"
@@ -855,6 +879,9 @@ class DuplicateGuardSameFileDifferentGroupTests(unittest.TestCase):
 
         self._tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self._tmp.name) / "dup.db"
+        db_env = patch.dict(os.environ, {"SAU_DB_PATH": str(self.db_path)})
+        db_env.start()
+        self.addCleanup(db_env.stop)
         create_table.bootstrap(self.db_path)
         self.profile = profile_registry.create_profile("Dup", db_path=self.db_path)
 
@@ -863,7 +890,7 @@ class DuplicateGuardSameFileDifferentGroupTests(unittest.TestCase):
 
     def _seed_group(self, gid: int, post_id: int, job_id: int, account_ref: str, status: str) -> None:
         """One media group -> campaign -> post -> job -> target chain."""
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "INSERT INTO file_records (id, filename, file_path) VALUES (701, 'clip.mp4', 'clip.mp4')"
             )
@@ -901,7 +928,7 @@ class DuplicateGuardSameFileDifferentGroupTests(unittest.TestCase):
         # Group 810 queued for account 127.
         self._seed_group(810, 810, 810, "account:127", "pending")
         # A RETRY: same file_record 701, but a brand-new group 811 and campaign.
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "INSERT INTO media_groups (id, name, notes, status) VALUES (811, 'g2', '', 'ready')"
             )
@@ -919,7 +946,7 @@ class DuplicateGuardSameFileDifferentGroupTests(unittest.TestCase):
 
     def test_a_genuinely_different_file_is_not_blocked(self):
         self._seed_group(820, 820, 820, "account:127", "pending")
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "INSERT INTO file_records (id, filename, file_path) VALUES (702, 'other.mp4', 'other.mp4')"
             )
@@ -939,7 +966,7 @@ class DuplicateGuardSameFileDifferentGroupTests(unittest.TestCase):
 
     def test_same_file_on_a_different_account_is_allowed(self):
         self._seed_group(830, 830, 830, "account:127", "pending")
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "INSERT INTO media_groups (id, name, notes, status) VALUES (831, 'g4', '', 'ready')"
             )
@@ -959,7 +986,7 @@ class DuplicateGuardSameFileDifferentGroupTests(unittest.TestCase):
         self._seed_group(840, 840, 840, "account:127", "pending")
         # A genuinely new submission reuses 701 but also adds 702. The file SET
         # differs, so "shares any one file" must not treat it as a retry.
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "INSERT INTO file_records (id, filename, file_path) VALUES (702, 'b.mp4', 'b.mp4')"
             )
@@ -982,7 +1009,7 @@ class DuplicateGuardSameFileDifferentGroupTests(unittest.TestCase):
     def test_same_set_in_a_different_order_is_still_a_duplicate(self):
         # Queued group 850 holds {701, 702}.
         self._seed_group(850, 850, 850, "account:127", "pending")
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "INSERT INTO file_records (id, filename, file_path) VALUES (702, 'b.mp4', 'b.mp4')"
             )
@@ -992,7 +1019,7 @@ class DuplicateGuardSameFileDifferentGroupTests(unittest.TestCase):
             )
             conn.commit()
         # A retry group carries the same files in the opposite order.
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "INSERT INTO media_groups (id, name, notes, status) VALUES (851, 'g6', '', 'ready')"
             )

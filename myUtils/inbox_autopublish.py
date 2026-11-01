@@ -39,7 +39,6 @@ Safety
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import sys
@@ -65,7 +64,20 @@ def _state_lock(state_path: Path):
     lock_path = state_path.with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+")
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            if handle.tell() == 0:
+                handle.write("\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except BaseException:
+        handle.close()
+        raise
     return handle
 
 
@@ -89,6 +101,8 @@ def _env(name: str) -> str:
     value = os.environ.get(name, "")
     if value:
         return value.strip()
+    if os.environ.get("SAU_TESTING") == "1":
+        return ""
     dotenv = REPO.parent / "sau-inbox" / ".env"
     for candidate in (dotenv, REPO / ".env"):
         try:
@@ -224,7 +238,10 @@ def _fmt_local(value: datetime) -> str:
 # actions
 # --------------------------------------------------------------------------
 def submit(item_id: str, start_at: str, *, timeout: float = 120.0) -> tuple[bool, str]:
-    payload = json.dumps({"schedule": {"publishNow": False, "startAt": start_at}}).encode("utf-8")
+    payload = json.dumps({
+        "submissionId": f"inbox:{item_id}",
+        "schedule": {"publishNow": False, "startAt": start_at},
+    }).encode("utf-8")
     # Item ids are "<persona>:<topic>:<timestamp>" and the topic is the operator's
     # filename, so it contains spaces and non-ASCII. Interpolated raw, urllib
     # refused the request outright ("URL can't contain control characters") and
@@ -246,7 +263,12 @@ def submit(item_id: str, start_at: str, *, timeout: float = 120.0) -> tuple[bool
                 payload = json.loads(body)
             except ValueError:
                 return False, f"unparseable response: {body[:200]}"
-            return bool(isinstance(payload, dict) and payload.get("code") == 200), body
+            data = payload.get("data") if isinstance(payload, dict) else None
+            confirmed = (
+                isinstance(payload, dict) and payload.get("code") == 200
+                and isinstance(data, dict) and bool(data.get("campaignIds"))
+            )
+            return confirmed, body
     except urllib.error.HTTPError as exc:
         return False, f"HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:400]}"
     except Exception as exc:  # noqa: BLE001
@@ -308,17 +330,20 @@ def run(state_path: Path, *, grace_hours: float, remind_hours: float, max_attemp
                 entry["autoReminderSent"] = now.isoformat(timespec="seconds")
 
         for entry in buckets["publish"]:
-            start_at = start_at_for(entry, now)
+            # Persist the first schedule intent before sending. A retry after
+            # a lost response must not drift to a new date and conflict.
+            start_at = entry.get("autoSubmissionStartAt") or start_at_for(entry, now)
             print(f"publish {entry.get('remotePath')} (startAt={start_at})")
             if dry_run:
                 continue
             entry["autoPublishState"] = "publishing"
+            entry["autoSubmissionStartAt"] = start_at
             save_state(state_path, state)
             ok, body = submit(str(entry.get("id")), start_at)
             if ok:
                 results["published"] += 1
                 entry.pop("autoPublishState", None)
-                entry["publishedAt"] = now.isoformat(timespec="seconds")
+                entry["submittedAt"] = now.isoformat(timespec="seconds")
                 remote = str(entry.get("remotePath") or "")
                 state["ready"] = [e for e in state.get("ready", []) if e is not entry]
                 state.setdefault("processed", {})[f"drive:{remote}"] = now.isoformat(timespec="seconds")

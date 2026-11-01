@@ -21,6 +21,7 @@ import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from contextlib import closing
 
 import db.createTable as create_table
 
@@ -73,7 +74,7 @@ class PrepQueuePersistenceTests(unittest.TestCase):
         }
         if attempts is not None:
             metadata[campaigns.PREP_ATTEMPTS_KEY] = attempts
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "UPDATE campaigns SET metadata_json = ? WHERE id = ?",
                 (json.dumps(metadata, ensure_ascii=False), campaign_id),
@@ -161,7 +162,7 @@ class PrepQueuePersistenceTests(unittest.TestCase):
         campaign_row = campaigns.get_campaign(campaign.id, db_path=self.db_path)
         metadata = dict(campaign_row.metadata or {})
         metadata[campaigns.PREP_CRASHES_KEY] = campaigns.PREP_MAX_CRASHES
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "UPDATE campaigns SET metadata_json = ? WHERE id = ?",
                 (json.dumps(metadata, ensure_ascii=False), campaign.id),
@@ -192,7 +193,7 @@ class PrepQueuePersistenceTests(unittest.TestCase):
         campaign_row = campaigns.get_campaign(campaign.id, db_path=self.db_path)
         metadata = dict(campaign_row.metadata or {})
         metadata[campaigns.PREP_CRASHES_KEY] = campaigns.PREP_MAX_CRASHES
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "UPDATE campaigns SET metadata_json = ? WHERE id = ?",
                 (json.dumps(metadata, ensure_ascii=False), campaign.id),
@@ -446,7 +447,7 @@ class RunCampaignPrepTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _file_record(self, filename: str) -> int:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             cursor = conn.execute(
                 "INSERT INTO file_records (filename, filesize, file_path) VALUES (?, ?, ?)",
                 (filename, 1.0, f"/tmp/{filename}"),

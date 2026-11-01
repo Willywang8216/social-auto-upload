@@ -1326,6 +1326,7 @@ def publish_via_sociamonials(
     key, and :class:`SociamonialsFallbackError` for any API/media failure.  The
     caller marks the target succeeded only when this returns.
     """
+    from myUtils import delivery as delivery_state
     account_id = _account_value(account, "id", None)
     mapping = resolve_mapping(
         int(account_id) if account_id is not None else None,
@@ -1360,6 +1361,14 @@ def publish_via_sociamonials(
     headers = _headers(key)
     resolved_db_path = db_path if db_path is not None else payload.get("_db_path")
     used_assets: list[dict[str, Any]] = []
+    receipt = delivery_state.receipt_for(payload, "sociamonials")
+    if receipt is not None:
+        delivery = _wait_for_delivery(http, headers, receipt["id"], timeout=0)
+        return {"ok": True, "post_id": receipt["id"], "network": receipt.get("network", network),
+                "workspace_id": receipt.get("workspace_id", _workspace_int(ws)),
+                "used_assets": receipt.get("used_assets") or [],
+                "delivery_state": delivery.get("state"), "delivered": delivery.get("delivered"),
+                "delivery_error": delivery.get("error"), "status": delivery.get("state")}
 
     warnings: list[str] = []
     message, moved_links = compose_message_with_links(payload, network=network)
@@ -1491,9 +1500,17 @@ def publish_via_sociamonials(
             f"{network} requires an image or video and no usable media was found"
         )
 
+    delivery_state.starting(payload, operation="sociamonials-create-post")
     response = http.post(POSTS_URL, json=body, headers=headers, timeout=request_timeout)
+    if 400 <= response.status_code < 500:
+        delivery_state.checkpoint(payload, submission_started=False)
     _raise_for_status(response, context="create post")
     result = _json_body(response)
+    if result.get("post_id"):
+        delivery_state.accepted(payload, provider="sociamonials", receipt_id=str(result["post_id"]),
+                                network=network, workspace_id=_workspace_int(ws), used_assets=used_assets)
+    else:
+        raise delivery_state.DeliveryUnknown("Sociamonials returned no post receipt")
     result_warnings = result.get("warnings")
     if isinstance(result_warnings, list):
         warnings.extend(str(item) for item in result_warnings if str(item).strip())

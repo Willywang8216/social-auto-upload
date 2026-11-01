@@ -1,177 +1,183 @@
-"""ci-watch must recognise a container that already runs the target commit.
+"""Exercise the actual watcher identity gate with fake Docker/gate commands.
 
-The bug this pins (2026-10-22): two deployers produced two different image IDs
-for the same commit — Watchtower pulled the GHCR build, ci-watch builds locally —
-and ci-watch compared **image IDs**. It therefore decided "the running container
-differs" every two minutes and re-deployed forever (119 occurrences in the log),
-force-restarting the container after each wait and killing the in-flight campaign
-preps (7 campaigns stranded in needs_review).
-
-The identity check must therefore:
-  * accept a running container whose `org.opencontainers.image.revision` label
-    equals origin/main, whatever its image ID is,
-  * still fall back to the image-ID comparison for an image with no label,
-  * and still re-deploy when the revision genuinely differs (a manual revert).
-
-The real decision block from `scripts/ci-watch.sh` is what runs; only `git` and
-`docker` are stubbed.
+A mutable image tag must not cause a deploy loop. The current contract is
+stronger than revision alone: a matching web/worker pair, exact image receipt,
+revision labels and both readiness probes are required. No real Docker, network,
+credentials, or deployment commands run in this harness.
 """
-
 from __future__ import annotations
 
+import inspect
+import json
 import os
+from pathlib import Path
+import shlex
+import shutil
+import sqlite3
 import subprocess
 import tempfile
-import textwrap
 import unittest
-from pathlib import Path
+
+from scripts import sqlite_backup
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "ci-watch.sh"
 TARGET = "f61ef1f2b48c0671eb83d75dd6a9dc437dd6c44a"
+IMAGE = "sha256:" + "a" * 64
+OTHER_IMAGE = "sha256:" + "b" * 64
 
 
-def _identity_harness(root: Path, *, running_revision: str, running_id: str,
-                      target_id: str, image_exists: bool) -> str:
-    """The real decision block, with git/docker replaced by shell functions."""
+def _bash():
+    if os.name == "nt" and (git := shutil.which("git")):
+        candidate = Path(git).parent.parent / "bin" / "bash.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("bash")
+
+
+def _run_identity_check(root: Path, *, revision=TARGET, web_image=IMAGE,
+                        worker_image=IMAGE, receipt_image=IMAGE, receipts_ok=True,
+                        health="healthy", probes_ok=True, worker_present=True,
+                        worker_revision=None, last=TARGET) -> str:
     source = SCRIPT.read_text(encoding="utf-8")
-    start = source.index("# Resolve origin/main")
-    end = source.index("# Build (only when the image for this commit does not already exist)")
-    block = source[start:end]
-    log = root / "ci-watch.log"
-    state = root / "ci-watch.state"
-    state.write_text(TARGET + "\n", encoding="utf-8")
-    return textwrap.dedent(f"""
-        set -uo pipefail
-        LOG="{log}"
-        STATE="{state}"
-        SERVICE="social-auto-upload"
-        IMAGE_BASE="ghcr.io/willywang8216/social-auto-upload"
-        log() {{ printf '%s\\n' "$*" >> "$LOG"; }}
-        notify_failure() {{ :; }}
-        git() {{
-          case "$1" in
-            fetch) return 0 ;;
-            rev-parse) printf '%s\\n' "{TARGET}"; return 0 ;;
-            *) command git "$@" ;;
-          esac
-        }}
-        docker() {{
-          if [ "$1" = "inspect" ]; then
-            case "$3" in
-              *revision*) printf '%s\\n' "{running_revision}" ;;
-              *Image*)    printf '%s\\n' "{running_id}" ;;
-            esac
-            return 0
-          fi
-          if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
-            if [ "{1 if image_exists else 0}" = "0" ]; then return 1; fi
-            case "$4" in
-              *Id*) printf '%s\\n' "{target_id}" ;;
-            esac
-            return 0
-          fi
-          exit 0
-        }}
-        {block}
-        printf 'FELL_THROUGH\\n' >> "$LOG"
-    """)
+    start = source.index("already_healthy() {")
+    block = source[start:source.index("BUILD_LOG=", start)]
+    log = root / "watch.log"
+    worker_revision = revision if worker_revision is None else worker_revision
+    harness = f"""
+set -euo pipefail
+LOG={shlex.quote(log.as_posix())}
+LOG_DIR={shlex.quote(root.as_posix())}
+TARGET={TARGET}
+LAST={shlex.quote(last)}
+SERVICE=social-auto-upload
+WORKER=social-auto-upload-worker
+CI_WATCH_FORCE=0
+PYTHON=gate_check
+log() {{ printf '%s\\n' "$*" >> "$LOG"; }}
+gate_check() {{
+  [[ {int(receipts_ok)} == 1 ]] || return 1
+  [[ "$*" == *"--image-id {receipt_image}"* ]]
+}}
+docker() {{
+  if [[ "$1" == inspect ]]; then
+    local name="${{@: -1}}"
+    if [[ "$name" == "$WORKER" && {int(worker_present)} != 1 ]]; then return 1; fi
+    case "$3" in
+      *Image*)
+        if [[ "$name" == "$WORKER" ]]; then printf '%s\\n' '{worker_image}';
+        else printf '%s\\n' '{web_image}'; fi ;;
+      *revision*)
+        if [[ "$name" == "$WORKER" ]]; then printf '%s\\n' '{worker_revision}';
+        else printf '%s\\n' '{revision}'; fi ;;
+      *Health*) printf '%s\\n' '{health}' ;;
+      *) return 97 ;;
+    esac
+    return 0
+  fi
+  if [[ "$1" == exec ]]; then [[ {int(probes_ok)} == 1 ]]; return; fi
+  # In particular, never inspect a mutable image tag or invoke a real daemon.
+  return 98
+}}
+{block}
+printf 'GATES_REQUIRED\\n' >> "$LOG"
+"""
+    result = subprocess.run([_bash(), "-c", harness], capture_output=True, text=True,
+                            timeout=15, env={**os.environ})
+    if result.returncode:
+        raise AssertionError(f"watcher harness failed ({result.returncode}): {result.stderr}")
+    return log.read_text(encoding="utf-8")
 
 
-def _run_identity_check(root: Path, **kwargs) -> str:
-    harness = _identity_harness(root, **kwargs)
-    subprocess.run(["bash", "-c", harness], env={**os.environ}, text=True,
-                   capture_output=True)
-    log = root / "ci-watch.log"
-    return log.read_text(encoding="utf-8") if log.exists() else ""
-
-
+@unittest.skipUnless(_bash(), "Bash is required to exercise the deployment shell")
 class CiWatchIdentityTests(unittest.TestCase):
-    def test_ghcr_pulled_container_for_the_same_commit_is_left_alone(self):
-        """The exact 2026-10-22 loop: same commit, different image ID."""
+    def check(self, *, healthy, **kwargs):
         with tempfile.TemporaryDirectory() as tmp:
-            text = _run_identity_check(
-                Path(tmp),
-                running_revision=TARGET,          # GHCR build: correct label
-                running_id="sha256:68a4b943",
-                target_id="sha256:0b8abc64",      # local build: different ID
-                image_exists=True,
-            )
-            self.assertIn("already deployed and running (revision", text)
-            self.assertNotIn("re-deploying", text)
-            self.assertNotIn("FELL_THROUGH", text)
+            output = _run_identity_check(Path(tmp), **kwargs)
+        self.assertEqual("nothing to do" in output, healthy, output)
+        self.assertEqual("GATES_REQUIRED" in output, not healthy, output)
 
-    def test_image_id_fallback_still_works_without_a_revision_label(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            text = _run_identity_check(
-                Path(tmp),
-                running_revision="",
-                running_id="sha256:same",
-                target_id="sha256:same",
-                image_exists=True,
-            )
-            self.assertIn("already deployed and running (image id)", text)
-            self.assertNotIn("FELL_THROUGH", text)
+    def test_gated_running_pair_is_left_alone_without_consulting_mutable_tags(self):
+        self.check(healthy=True)
 
-    def test_a_different_revision_is_redeployed(self):
-        """A manual revert must still be corrected."""
-        with tempfile.TemporaryDirectory() as tmp:
-            text = _run_identity_check(
-                Path(tmp),
-                running_revision="b746c0c79a7ad93125c0a14f6b720b123830d106",
-                running_id="sha256:old",
-                target_id="sha256:new",
-                image_exists=True,
-            )
-            self.assertIn("re-deploying", text)
-            self.assertIn("revision=b746c0c", text)
-            self.assertIn("FELL_THROUGH", text)
+    def test_an_unlabelled_image_is_not_certified_by_image_id_alone(self):
+        self.check(healthy=False, revision="")
 
-    def test_missing_local_image_is_not_treated_as_deployed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            text = _run_identity_check(
-                Path(tmp),
-                running_revision="",
-                running_id="sha256:whatever",
-                target_id="",
-                image_exists=False,
-            )
-            self.assertIn("re-deploying", text)
+    def test_a_different_revision_requires_gated_deployment(self):
+        self.check(healthy=False, revision="b" * 40)
+
+    def test_mismatched_role_images_are_not_accepted(self):
+        self.check(healthy=False, worker_image=OTHER_IMAGE)
+
+    def test_missing_worker_is_not_accepted(self):
+        self.check(healthy=False, worker_present=False)
+
+    def test_missing_or_different_image_receipt_is_not_accepted(self):
+        self.check(healthy=False, receipts_ok=False)
+        self.check(healthy=False, receipt_image=OTHER_IMAGE)
+
+    def test_wrong_worker_revision_is_not_hidden_by_healthy_web(self):
+        self.check(healthy=False, worker_revision="b" * 40)
+
+    def test_unhealthy_or_failed_readiness_requires_verification(self):
+        self.check(healthy=False, health="unhealthy")
+        self.check(healthy=False, probes_ok=False)
+
+    def test_a_missing_success_marker_is_not_treated_as_verified(self):
+        self.check(healthy=False, last="")
 
 
 class CiWatchDeferralTests(unittest.TestCase):
-    def test_script_defers_instead_of_deploying_over_in_flight_work(self):
-        source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("deferring deploy of ${SHORT}", source)
-        self.assertIn("SAU_CI_WATCH_FORCE_DEPLOY", source)
-        # the forced path must still exist for emergencies
-        self.assertIn("deploying anyway (forced)", source)
+    def test_busy_work_is_drained_without_an_emergency_force_kill(self):
+        watcher = SCRIPT.read_text(encoding="utf-8")
+        deploy = (REPO / "scripts/deploy-local.sh").read_text(encoding="utf-8")
+        self.assertIn('bash "$WORKTREE/scripts/deploy-local.sh"', watcher)
+        self.assertIn("wait_drained || fail", deploy)
+        self.assertNotIn("SAU_CI_WATCH_FORCE_DEPLOY", watcher)
+        self.assertNotIn("deploying anyway (forced)", watcher)
+        self.assertNotIn("--signal=KILL", deploy)
+        self.assertLess(deploy.index("wait_drained || fail"), deploy.index("social-auto-upload db/createTable.py"))
 
-    def test_build_passes_the_commit_and_date_labels(self):
-        source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn('--build-arg GIT_SHA="$TARGET"', source)
+    def test_build_passes_the_exact_commit_and_date_labels(self):
+        source = (REPO / "scripts/deploy-local.sh").read_text(encoding="utf-8")
+        self.assertIn('--build-arg GIT_SHA="$REVISION"', source)
+        self.assertIn('--build-arg SAU_BUILD_REVISION="$REVISION"', source)
         self.assertIn("--build-arg BUILD_DATE=", source)
 
-    def test_dockerfile_stamps_the_labels(self):
-        dockerfile = (REPO / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("ARG GIT_SHA", dockerfile)
-        self.assertIn('org.opencontainers.image.revision="${GIT_SHA}"', dockerfile)
+    def test_dockerfile_stamps_the_revision_used_by_both_roles(self):
+        source = (REPO / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("ARG GIT_SHA", source)
+        self.assertIn('org.opencontainers.image.revision="${SAU_BUILD_REVISION}"', source)
+        self.assertIn('ENV SAU_BUILD_REVISION=${SAU_BUILD_REVISION}', source)
 
-    def test_deferral_is_bounded_so_a_busy_queue_cannot_block_deploys(self):
+    def test_dirty_and_unpublished_local_work_is_preserved(self):
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("SAU_CI_WATCH_MAX_DEFER_SECONDS", source)
-        self.assertIn("ci-watch-defer.state", source)
-        # the clock must be cleared when a deploy finally succeeds
-        self.assertIn('rm -f "$LOG_DIR/ci-watch-defer.state"', source)
+        self.assertLess(source.index("scripts/release_checks.py clean"), source.index("git fetch"))
+        self.assertIn('git merge-base --is-ancestor "$LOCAL_HEAD" "$TARGET"', source)
+        self.assertIn("unpublished/divergent history; refusing to overwrite", source)
+        self.assertNotIn("git reset", source)
+        self.assertIn("watcher will not release the pause", source)
 
-    def test_active_prep_window_covers_a_long_encode(self):
-        """A 30-minute window hid the longest preps from the guard."""
-        source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("SAU_CI_WATCH_PREP_WINDOW_MINUTES:-60", source)
+    def test_long_lived_prep_leases_are_not_ignored_by_a_time_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.db"
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript("CREATE TABLE publish_job_targets(status TEXT, lease_token TEXT);"
+                                   "CREATE TABLE campaigns(status TEXT, metadata_json TEXT);")
+                conn.execute("INSERT INTO campaigns VALUES ('preparing', ?)",
+                             (json.dumps({"_prepLease": {"owner": "slow", "claimedAt": "1999-01-01"}}),))
+                conn.commit()
+            finally:
+                conn.close()
+            activity = sqlite_backup.activity(path)
+            self.assertEqual(activity["active_preps"], 1)
+            self.assertFalse(activity["drained"])
+        self.assertNotIn("MAX_DEFER", SCRIPT.read_text(encoding="utf-8"))
 
-    def test_watchtower_is_opted_out_so_only_one_deployer_updates_the_container(self):
-        compose = (REPO / "docker-compose.yml").read_text(encoding="utf-8")
-        self.assertIn('com.centurylinklabs.watchtower.enable: "false"', compose)
+    def test_watchtower_is_opted_out_so_only_one_deployer_updates_the_pair(self):
+        source = (REPO / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn('com.centurylinklabs.watchtower.enable: "false"', source)
 
 
 if __name__ == "__main__":

@@ -136,20 +136,9 @@ def _no_safety_margin(monkeypatch):
 
 @pytest.fixture()
 def db_path(tmp_path):
+    from db.createTable import bootstrap
     path = tmp_path / "test.db"
-    with sqlite3.connect(path) as conn:
-        conn.execute(
-            "CREATE TABLE publish_jobs (id INTEGER PRIMARY KEY, platform TEXT, payload_json TEXT)"
-        )
-        conn.execute(
-            """
-            CREATE TABLE publish_job_targets (
-                id INTEGER PRIMARY KEY, job_id INTEGER, account_ref TEXT,
-                file_ref TEXT, status TEXT
-            )
-            """
-        )
-        conn.commit()
+    bootstrap(path)
     return path
 
 
@@ -157,13 +146,13 @@ def _add_target(db_path, *, target_id, job_id, status, filename, file_ref="campa
     payload = {"artifacts": [{"local_path": f"/app/generated/{filename}", "public_url": ""}]}
     with sqlite3.connect(db_path) as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO publish_jobs (id, platform, payload_json) VALUES (?, 'twitter', ?)",
-            (job_id, json.dumps(payload)),
+            "INSERT OR REPLACE INTO publish_jobs (id, idempotency_key, platform, payload_json) VALUES (?, ?, 'twitter', ?)",
+            (job_id, f"reclaim-{job_id}", json.dumps(payload)),
         )
         conn.execute(
             "INSERT OR REPLACE INTO publish_job_targets "
-            "(id, job_id, account_ref, file_ref, status) VALUES (?, ?, 'account:1', ?, ?)",
-            (target_id, job_id, file_ref, status),
+            "(id, job_id, account_ref, file_ref, status, delivery_state) VALUES (?, ?, 'account:1', ?, ?, ?)",
+            (target_id, job_id, file_ref, status, "delivered" if status == "succeeded" else ""),
         )
         conn.commit()
 
@@ -214,9 +203,10 @@ def test_target_history_partitions_live_and_delivered(db_path):
 
 def test_malformed_payload_does_not_break_history(db_path):
     with sqlite3.connect(db_path) as conn:
-        conn.execute("INSERT INTO publish_jobs VALUES (1, 'twitter', 'not json')")
+        conn.execute("INSERT INTO publish_jobs (id,idempotency_key,platform,payload_json) VALUES (1,'bad','twitter','not json')")
         conn.execute(
-            "INSERT INTO publish_job_targets VALUES (1, 1, 'account:1', 'campaign_post:1', 'succeeded')"
+            "INSERT INTO publish_job_targets (id,job_id,account_ref,file_ref,status,delivery_state) "
+            "VALUES (1,1,'account:1','campaign_post:1','succeeded','delivered')"
         )
         conn.commit()
     assert reclaim.delivered_filenames(db_path) == {}
@@ -337,6 +327,8 @@ def test_partition_reasons_separates_keep_buckets():
 # --------------------------------------------------------------------------- #
 
 def test_record_and_load_delivered_assets_is_idempotent(db_path):
+    _add_target(db_path, target_id=2, job_id=1, status="succeeded", filename="a.mp4")
+    _add_target(db_path, target_id=3, job_id=2, status="succeeded", filename="a.mp4")
     written = reclaim.record_delivered_assets(
         db_path,
         [{"asset_id": 5, "filename": "a.mp4", "size_bytes": 10, "media_type": "video"}],
@@ -426,10 +418,12 @@ def test_reclaim_max_bytes_bounds_a_single_run(db_path):
 
 
 def test_reclaim_marks_the_ledger_row_as_reclaimed(db_path):
+    _add_target(db_path, target_id=1, job_id=1, status="succeeded", filename="done.mp4")
     reclaim.record_delivered_assets(
         db_path,
         [{"asset_id": 10, "filename": "done.mp4", "size_bytes": 500, "media_type": "video"}],
         workspace_id=26985,
+        target_id=1,
     )
     assets = [_asset(10, "done.mp4", 500)]
     session = StorageSession(storage=_storage(500, 1000), assets=assets)
@@ -637,28 +631,8 @@ def test_collect_used_assets_parses_a_reference(tmp_path):
 # Fallback integration: the guard runs before an upload and the ids are returned
 # --------------------------------------------------------------------------- #
 
-def test_fallback_reclaims_before_upload_and_returns_used_assets(tmp_path):
-    db_path = tmp_path / "int.db"
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            "CREATE TABLE publish_jobs (id INTEGER PRIMARY KEY, platform TEXT, payload_json TEXT)"
-        )
-        conn.execute(
-            """
-            CREATE TABLE publish_job_targets (
-                id INTEGER PRIMARY KEY, job_id INTEGER, account_ref TEXT,
-                file_ref TEXT, status TEXT
-            )
-            """
-        )
-        delivered = {"artifacts": [{"local_path": "/app/generated/old.mp4"}]}
-        conn.execute(
-            "INSERT INTO publish_jobs VALUES (1, 'twitter', ?)", (json.dumps(delivered),)
-        )
-        conn.execute(
-            "INSERT INTO publish_job_targets VALUES (1, 1, 'account:1', 'campaign_post:1', 'succeeded')"
-        )
-        conn.commit()
+def test_fallback_reclaims_before_upload_and_returns_used_assets(tmp_path, db_path):
+    _add_target(db_path, target_id=1, job_id=1, status="succeeded", filename="old.mp4")
 
     session = FlowSession(storage=_storage(995, 1000), assets=[_asset(10, "old.mp4", 500)])
     local = tmp_path / "new.mp4"
@@ -680,3 +654,15 @@ def test_fallback_reclaims_before_upload_and_returns_used_assets(tmp_path):
     deletes = [int(c[1].rsplit("/", 1)[-1]) for c in session.deletes()]
     assert deletes == [10]
     assert used and used[0]["asset_id"] == 77
+
+
+def test_unconfirmed_success_retains_receipted_media(db_path):
+    _add_target(db_path, target_id=1, job_id=1, status="succeeded", filename="unconfirmed.mp4")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE publish_job_targets SET delivery_state='awaiting_delivery', checkpoint_json=? WHERE id=1",
+                     (json.dumps({"submission_started": True, "provider_receipt": {
+                         "provider": "sociamonials", "id": "post-1", "status": "processing"}}),))
+    assert reclaim.delivered_filenames(db_path) == {}
+    live = reclaim.live_filenames(db_path)
+    assert live == {"unconfirmed.mp4": {1}}
+    assert reclaim.plan_reclaim([_asset(1, "unconfirmed.mp4", 100)], live=live, delivered={}, delivered_asset_ids={}) == []

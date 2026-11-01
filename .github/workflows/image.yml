@@ -1,57 +1,43 @@
 name: Build & Push App Image
 
-# This workflow pushes the production image to GHCR on every push to main.
-#
-# GOTCHA: GITHUB_TOKEN with packages:write cannot create new packages under a
-# user namespace on the first push — it returns "permission_denied:
-# read_package". Even when the package already exists, GITHUB_TOKEN pushes have
-# been flaky on this user-namespace setup. So we authenticate with a PAT stored
-# as the `CR_PAT` repo secret (which has packages:write).
-#
-# To rotate the PAT: regenerate at https://github.com/settings/tokens (needs
-# `write:packages` scope), then `gh secret set CR_PAT -b <new-pat> --repo
-# Willywang8216/social-auto-upload`.
-
+# Publishing is not deploying. The every-two-minute ci-watch is the sole
+# production deployer. Never publish an image ahead of the same release gates.
+# Preserve CR_PAT authentication for this existing user-namespace GHCR package.
 on:
   push:
     branches: [main]
-    paths:
-      - 'Dockerfile'
-      - 'sau_frontend/**'
-      - 'sau_backend.py'
-      - 'sau_app/**'
-      - 'uploader/**'
-      - 'myUtils/**'
-      - 'mcp_server/**'
-      - 'migrations/**'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - 'alembic.ini'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  gates:
+    uses: ./.github/workflows/ci.yml
+
   build-and-push:
+    needs: gates
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/receipts
+      - name: Verify all gate receipts belong to this clean exact commit
+        run: bash scripts/release-gates.sh verify --receipts "$RUNNER_TEMP/receipts"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
       - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: willywang8216
           password: ${{ secrets.CR_PAT }}
-
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
@@ -59,16 +45,18 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=ref,event=branch
-            type=sha,prefix=sha-
+            type=sha,prefix=sha-,format=long
             type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and push
+      - name: Build and push the gated revision
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            SAU_BUILD_REVISION=${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

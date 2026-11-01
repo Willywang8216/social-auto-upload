@@ -1554,7 +1554,8 @@ def _resolve_default_db_path() -> Path:
     Operators running the backend in-place already have this file; we point
     the MCP entry at it so agents see the same rows as the web UI.
     """
-    return (Path(BASE_DIR) / "db" / "database.db").resolve()
+    from utils.conf_defaults import default_db_path
+    return default_db_path().resolve()
 
 
 def _build_sau_mcp_entry() -> dict:

@@ -21,6 +21,11 @@
         取消任務
       </el-button>
     </div>
+    <p v-if="publishActionHint(job.status)" class="polling-status">{{ publishActionHint(job.status) }}</p>
+    <div v-if="polling" class="polling-status" role="status">
+      {{ pollingStatusText(polling) }}
+      <el-button v-if="['error', 'paused', 'stopped'].includes(polling.status)" size="small" text @click="$emit('refresh')">更新狀態（不重送）</el-button>
+    </div>
 
     <el-progress
       :percentage="percentage"
@@ -31,7 +36,7 @@
 
     <div v-if="job.targets && job.targets.length" class="targets">
       <div
-        v-for="target in job.targets"
+        v-for="target in normalizedTargets"
         :key="target.id"
         :class="['target-row', `target-${target.status}`]"
       >
@@ -50,6 +55,7 @@
         <span v-if="target.lastError" class="target-error" :title="target.lastError">
           {{ target.lastError }}
         </span>
+        <span v-if="targetReliabilityDetails(target)" class="target-reliability">{{ targetReliabilityDetails(target) }}</span>
       </div>
     </div>
 
@@ -66,6 +72,7 @@
         <span v-if="ts.post_id" class="tiktok-post-id">Post: {{ ts.post_id }}</span>
         <a
           v-if="ts.platform_url"
+          rel="noopener noreferrer"
           :href="ts.platform_url"
           target="_blank"
           class="tiktok-link"
@@ -75,68 +82,65 @@
         <span v-if="ts.fail_reason" class="tiktok-fail">{{ ts.fail_reason }}</span>
       </div>
     </div>
+    <p v-if="['backoff', 'error'].includes(providerPolling?.status)" class="polling-status" role="status">TikTok：{{ pollingStatusText(providerPolling) }}</p>
   </div>
 </template>
 
 <script setup>
 import { computed, ref, watch, onUnmounted } from 'vue'
 import { tiktokApi } from '@/api/tiktok'
+import { createPoller, invalidResponse, pollingStatusText } from '@/utils/polling'
+import { isTerminalJobStatus, needsPublishAction, normalizeTarget, publishActionHint, publishStatusLabel, publishStatusType, targetReliabilityDetails } from '@/utils/publish-status'
 
 const props = defineProps({
   job: {
     type: Object,
     default: null
-  }
+  },
+  polling: { type: Object, default: null }
 })
 
-defineEmits(['cancel'])
+defineEmits(['cancel', 'refresh'])
 
+const normalizedTargets = computed(() => (props.job?.targets || []).map(normalizeTarget))
 const tiktokStatuses = ref([])
-let pollTimer = null
+const providerPolling = ref(null)
+let providerPoller = null
 
 function clearPoll() {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
+  providerPoller?.stop()
+  providerPoller = null
 }
 
-async function fetchTiktokStatus(jobId) {
-  try {
-    const res = await tiktokApi.getPublishStatus(jobId)
-    tiktokStatuses.value = res?.data?.data || res?.data || []
-  } catch {
-    tiktokStatuses.value = []
-  }
-}
-
-function isTiktokProcessing() {
-  return tiktokStatuses.value.some(s => s.status === 'processing')
-}
-
-watch(() => props.job, async (job) => {
+// Watch identity, not the entire snapshot: each job refresh must not spawn a
+// second provider read. The same bounded/cancellable read loop is used here.
+watch([() => props.job?.id, () => props.job?.platform], ([jobId, platform]) => {
   clearPoll()
-  if (!job || job.platform !== 'tiktok' || !job.id) {
-    tiktokStatuses.value = []
-    return
-  }
-  await fetchTiktokStatus(job.id)
-  // Poll every 10 seconds while any TikTok status is still processing
-  if (isTiktokProcessing()) {
-    pollTimer = setInterval(async () => {
-      await fetchTiktokStatus(job.id)
-      if (!isTiktokProcessing()) {
-        clearPoll()
-      }
-    }, 10000)
-  }
+  tiktokStatuses.value = []
+  providerPolling.value = null
+  if (!jobId || platform !== 'tiktok' || needsPublishAction(props.job?.status)) return
+  providerPoller = createPoller(
+    (signal) => tiktokApi.getPublishStatus(jobId, { signal, silentError: true }),
+    {
+      interval: 10000,
+      onState: (state) => { providerPolling.value = state },
+      onResult: (response) => {
+        const statuses = response?.data?.data || response?.data
+        if (!Array.isArray(statuses)) throw invalidResponse()
+        tiktokStatuses.value = statuses
+        if (needsPublishAction(props.job?.status)) return 'paused'
+        if ((statuses.length && statuses.every((item) => ['publish_complete', 'failed', 'needs_review', 'blocked'].includes(item.status)))
+          || (!statuses.length && isTerminalJobStatus(props.job?.status))) return 'completed'
+      },
+    }
+  )
+  providerPoller.start()
 }, { immediate: true })
 
+watch(() => props.job?.status, (status) => { if (needsPublishAction(status)) clearPoll() })
 onUnmounted(clearPoll)
 
-const TERMINAL = new Set(['succeeded', 'failed', 'cancelled'])
-
-const isTerminal = computed(() => props.job && TERMINAL.has(props.job.status))
+const isTerminal = computed(() => isTerminalJobStatus(props.job?.status))
 
 const percentage = computed(() => {
   if (!props.job || !props.job.totalTargets) return 0
@@ -152,49 +156,10 @@ const progressStatus = computed(() => {
   return ''
 })
 
-const STATUS_LABELS = {
-  pending: '佇列中',
-  running: '發佈中',
-  succeeded: '已完成',
-  failed: '部分失敗',
-  cancelled: '已取消'
-}
-
-const statusLabel = computed(() => STATUS_LABELS[props.job?.status] || props.job?.status || '')
-
-const statusTagType = computed(() => {
-  switch (props.job?.status) {
-    case 'succeeded': return 'success'
-    case 'failed':    return 'danger'
-    case 'cancelled': return 'info'
-    case 'running':   return 'warning'
-    default:          return 'info'
-  }
-})
-
-function targetTagType(status) {
-  switch (status) {
-    case 'succeeded': return 'success'
-    case 'failed':    return 'danger'
-    case 'cancelled': return 'info'
-    case 'running':   return 'warning'
-    case 'retrying':  return 'warning'
-    default:          return 'info'
-  }
-}
-
-const TARGET_LABELS = {
-  pending: '佇列中',
-  running: '執行中',
-  retrying: '重試中',
-  succeeded: '成功',
-  failed: '失敗',
-  cancelled: '已取消'
-}
-
-function targetStatusLabel(status) {
-  return TARGET_LABELS[status] || status
-}
+const statusLabel = computed(() => publishStatusLabel(props.job?.status))
+const statusTagType = computed(() => publishStatusType(props.job?.status))
+const targetStatusLabel = publishStatusLabel
+const targetTagType = publishStatusType
 
 function shortRef(value) {
   if (!value) return ''
@@ -202,22 +167,8 @@ function shortRef(value) {
   return `${value.slice(0, 12)}…${value.slice(-12)}`
 }
 
-function tiktokStatusTag(status) {
-  switch (status) {
-    case 'publish_complete': return 'success'
-    case 'failed': return 'danger'
-    default: return 'warning'
-  }
-}
-
-function tiktokStatusLabel(status) {
-  switch (status) {
-    case 'processing': return '處理中'
-    case 'publish_complete': return '已發佈'
-    case 'failed': return '發佈失敗'
-    default: return status
-  }
-}
+const tiktokStatusLabel = publishStatusLabel
+const tiktokStatusTag = publishStatusType
 </script>
 
 <style lang="scss" scoped>
@@ -250,6 +201,11 @@ function tiktokStatusLabel(status) {
     margin-bottom: var(--space-4);
   }
 
+  .polling-status {
+    margin: 8px 0;
+    color: var(--text-2);
+    font-size: 13px;
+  }
   .targets {
     display: flex;
     flex-direction: column;
@@ -257,7 +213,7 @@ function tiktokStatusLabel(status) {
 
     .target-row {
       display: grid;
-      grid-template-columns: 80px 1fr 1fr auto auto;
+      grid-template-columns: max-content minmax(0, 1fr) minmax(0, 1fr) auto auto;
       gap: 12px;
       align-items: center;
       padding: 6px 10px;
@@ -266,6 +222,11 @@ function tiktokStatusLabel(status) {
       font-size: 13px;
       color: var(--text-2);
 
+      .target-reliability {
+        grid-column: 1 / -1;
+        color: var(--text-2);
+        overflow-wrap: anywhere;
+      }
       .target-account,
       .target-file {
         overflow: hidden;

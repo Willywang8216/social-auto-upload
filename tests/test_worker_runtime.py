@@ -142,7 +142,7 @@ class StructuredLoggingTests(unittest.TestCase):
         path = job_logging.job_log_path(1)
         body = path.read_text()
         self.assertIn("target_id=1", body)
-        self.assertIn("failed permanently", body)
+        self.assertIn("retry budget exhausted", body)
         self.assertIn("RuntimeError: boom", body)
 
 

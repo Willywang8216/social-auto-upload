@@ -24,8 +24,8 @@ export const jobsApi = {
   },
 
   // Fetch a single job along with its targets array.
-  get(jobId) {
-    return http.get(`/jobs/${jobId}`)
+  get(jobId, config = {}) {
+    return http.get(`/jobs/${jobId}`, undefined, config)
   },
 
   // Cancel a non-terminal job. Idempotent: cancelling an already-terminal

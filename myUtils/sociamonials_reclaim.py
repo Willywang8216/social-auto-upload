@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 # Target states that still need the bytes. ``TARGET_CLAIMABLE`` plus ``running``
 # covers the period from queueing through delivery; a terminal target does not.
-LIVE_TARGET_STATUSES: tuple[str, ...] = ("pending", "retrying", "running")
+LIVE_TARGET_STATUSES: tuple[str, ...] = ("pending", "retrying", "running", "blocked", "awaiting_delivery", "needs_review")
 # A target only means "delivered" once it is ``succeeded``. ``failed`` and
 # ``cancelled`` never delivered and must never unlock a delete.
 DELIVERED_TARGET_STATUSES: tuple[str, ...] = ("succeeded",)
@@ -185,7 +185,8 @@ def safety_bytes() -> int:
 # --------------------------------------------------------------------------- #
 
 def connect(db_path: Path | str) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path))
+    from myUtils.sqlite_utils import connect as sqlite_connect
+    conn = sqlite_connect(str(db_path))
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -318,7 +319,8 @@ def load_delivered_assets(db_path: Path | str) -> dict[int, str]:
         ensure_table(db_path)
         with connect(db_path) as conn:
             rows = conn.execute(
-                f"SELECT asset_id, delivered_at FROM {DELIVERED_TABLE}"
+                f"SELECT d.asset_id, d.delivered_at FROM {DELIVERED_TABLE} d "
+                "JOIN publish_job_targets t ON t.id=d.target_id WHERE t.delivery_state='delivered'"
             ).fetchall()
     except sqlite3.Error as exc:  # noqa: BLE001 - a missing ledger is not fatal
         logger.warning("could not read the sociamonials delivered-asset ledger: %s", exc)
@@ -334,12 +336,20 @@ def _target_filenames(db_path: Path | str, statuses: Sequence[str]) -> dict[str,
     """Map ``filename -> {target_id}`` for targets in ``statuses``.
 
     Reads the payload's artifact filenames (the same files ``collect_media``
-    would attach) plus any legacy path-shaped ``file_ref``.  A malformed
-    payload is skipped rather than aborting the sweep.
+    would attach) plus any legacy path-shaped ``file_ref``. Malformed live
+    references abort reclamation; unreadable is not evidence of unused media.
     """
-    if not Path(str(db_path)).exists() or not statuses:
+    if not statuses:
         return {}
+    if not Path(str(db_path)).is_file():
+        raise RuntimeError("Cannot verify live media references; database is absent")
     placeholders = ",".join("?" for _ in statuses)
+    confirmed_only = tuple(statuses) == DELIVERED_TARGET_STATUSES
+    receipt_guard = " AND t.delivery_state='delivered'" if confirmed_only else (
+        f" OR t.id IN (SELECT target_id FROM {DELIVERED_TABLE}) AND COALESCE(t.delivery_state,'')<>'delivered'"
+        " OR (json_valid(t.checkpoint_json) AND json_extract(t.checkpoint_json,'$.submission_started')=1 "
+        "AND COALESCE(json_extract(t.checkpoint_json,'$.provider_receipt.status'),'')<>'delivered')"
+        " OR NOT json_valid(COALESCE(t.checkpoint_json,'{}'))")
     try:
         with connect(db_path) as conn:
             rows = conn.execute(
@@ -348,16 +358,28 @@ def _target_filenames(db_path: Path | str, statuses: Sequence[str]) -> dict[str,
                        j.payload_json AS payload_json
                 FROM publish_job_targets t
                 JOIN publish_jobs j ON j.id = t.job_id
-                WHERE t.status IN ({placeholders})
+                WHERE (t.status IN ({placeholders}){receipt_guard})
                 """,
                 tuple(statuses),
             ).fetchall()
-    except sqlite3.Error as exc:  # noqa: BLE001 - no history means nothing is protected
-        logger.warning("could not read publish target history: %s", exc)
-        return {}
+    except sqlite3.Error as exc:
+        raise RuntimeError("Cannot verify live media references; refusing reclamation") from exc
     result: dict[str, set[int]] = {}
     for row in rows:
-        names = artifact_filenames(_parse_payload(row["payload_json"]))
+        if confirmed_only:
+            payload = _parse_payload(row["payload_json"])
+        else:
+            import json
+            try:
+                payload = json.loads(row["payload_json"])
+                if not isinstance(payload, dict):
+                    raise ValueError("payload is not an object")
+                artifacts = payload.get("artifacts") or []
+                if not isinstance(artifacts, list) or any(not isinstance(a, dict) for a in artifacts):
+                    raise ValueError("invalid artifact references")
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Cannot decode live media references; refusing reclamation") from exc
+        names = artifact_filenames(payload)
         if _looks_like_filename(row["file_ref"]):
             names.add(basename(row["file_ref"]))
         for name in names:

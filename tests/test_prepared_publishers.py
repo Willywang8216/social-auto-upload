@@ -294,7 +294,7 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(result["id"], "123")
 
     def test_discord_attaches_local_media_with_multipart(self):
-        session = _RecordingSession([_FakeResponse({})])
+        session = _RecordingSession([_FakeResponse({"id": "message-1"})])
         account = SimpleNamespace(config={"webhookUrl": "https://discord.example/webhook"})
         with tempfile.TemporaryDirectory() as tmp:
             image = Path(tmp) / "cover.jpg"
@@ -306,7 +306,7 @@ class PreparedPublisherTests(unittest.TestCase):
                 }]},
                 session=session,
             )
-        self.assertEqual(session.calls[0][1], "https://discord.example/webhook")
+        self.assertEqual(session.calls[0][1], "https://discord.example/webhook?wait=true")
         self.assertIn("files[0]", session.calls[0][2]["files"])
         payload_json = json.loads(session.calls[0][2]["data"]["payload_json"])
         self.assertEqual(payload_json["content"], "Discord launch")
@@ -322,7 +322,7 @@ class PreparedPublisherTests(unittest.TestCase):
             )
         self.assertEqual(session.calls, [])
 
-        session = _RecordingSession([_FakeResponse({})])
+        session = _RecordingSession([_FakeResponse({"id": "message-2"})])
         prepared_publishers.publish_discord_sync(
             account, {"message": "Discord attachment", "artifacts": [{
                 "public_url": "https://cdn.example/image.jpg", "artifact_kind": "watermarked_image",
@@ -331,7 +331,7 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[0][2]["json"]["embeds"][0]["image"]["url"], "https://cdn.example/image.jpg")
 
     def test_discord_text_only_without_artifacts_remains_allowed(self):
-        session = _RecordingSession([_FakeResponse({})])
+        session = _RecordingSession([_FakeResponse({"id": "message-3"})])
         prepared_publishers.publish_discord_sync(
             SimpleNamespace(config={"webhookUrl": "https://discord.example/webhook"}),
             {"message": "intentional text-only"}, session=session,
@@ -967,8 +967,8 @@ class PreparedPublisherTests(unittest.TestCase):
             _FakeResponse({"access_token": "google-token"}),
             _FakeResponse({}, headers={"Location": "https://upload.example/resumable"}),
             _FakeResponse({"id": "video123"}),
-            _FakeResponse({"items": [{"status": {"privacyStatus": "public"}}]}),
-            _FakeResponse({}),
+            _FakeResponse({"items": [{"id": "video123", "status": {"privacyStatus": "public", "uploadStatus": "processed"}}]}),
+            _FakeResponse({"id": "playlist-item-1"}),
         ])
         account = SimpleNamespace(
             config={
@@ -1006,6 +1006,7 @@ class PreparedPublisherTests(unittest.TestCase):
     def test_facebook_publish_returns_updated_config_with_re_derived_page_token(self):
         session = _RecordingSession([
             _FakeResponse({"id": "video-1"}),
+            _FakeResponse({"id": "video-1", "status": {"video_status": "ready"}, "published": True}),
         ])
         account = SimpleNamespace(config={
             "pageId": "p1",
@@ -1091,7 +1092,7 @@ class PreparedPublisherTests(unittest.TestCase):
         class _AuthError(_FakeResponse):
             status_code = 401
             def __init__(self):
-                super().__init__({"error": {"code": 190, "error_subcode": 463, "message": "Token expired"}})
+                super().__init__({"error": {"code": 190, "error_subcode": 463, "message": "Token expired"}}, status_code=401)
             def raise_for_status(self):
                 from myUtils.prepared_publishers import PreparedPublishError
                 raise PreparedPublishError("HTTP 401: Token expired code=190 error_subcode=463 type=OAuthException")
@@ -1099,6 +1100,7 @@ class PreparedPublisherTests(unittest.TestCase):
         session = _RecordingSession([
             _AuthError(),
             _FakeResponse({"id": "video-1"}),
+            _FakeResponse({"id": "video-1", "status": {"video_status": "ready"}, "published": True}),
         ])
         account = SimpleNamespace(config={
             "pageId": "p1",
@@ -1120,13 +1122,13 @@ class PreparedPublisherTests(unittest.TestCase):
                 session=session,
             )
         self.assertEqual(result["results"][-1]["id"], "video-1")
-        self.assertEqual(len(session.calls), 2)  # 1 failure + 1 success after retry
+        self.assertEqual(len(session.calls), 3)  # 1 rejection + 1 upload + confirmed processing status
 
     def test_facebook_publish_does_not_retry_twice_on_persistent_401(self):
         class _AuthError(_FakeResponse):
             status_code = 401
             def __init__(self):
-                super().__init__({"error": {"code": 190, "error_subcode": 463, "message": "Token expired"}})
+                super().__init__({"error": {"code": 190, "error_subcode": 463, "message": "Token expired"}}, status_code=401)
             def raise_for_status(self):
                 from myUtils.prepared_publishers import PreparedPublishError
                 raise PreparedPublishError("HTTP 401: Token expired code=190 error_subcode=463 type=OAuthException")
@@ -1158,7 +1160,8 @@ class PreparedPublisherTests(unittest.TestCase):
 
     def test_facebook_publish_does_not_retry_on_400(self):
         class _BadRequest(_FakeResponse):
-            status_code = 400
+            def __init__(self):
+                super().__init__(status_code=400)
             def raise_for_status(self):
                 from myUtils.prepared_publishers import PreparedPublishError
                 raise PreparedPublishError("HTTP 400: bad request")

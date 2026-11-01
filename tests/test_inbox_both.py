@@ -1,16 +1,20 @@
 """Tests for the inbox "both" (nw=1 + sw=3) publish path.
 
-These hit the pure ``_inbox_publish_payload`` mapping helper and the Flask
-route wiring (via a small isolated ``Flask.app`` that registers the helpers so
-the routes' closure over the module globals resolves). They do not touch a
-real DB or start jobs.
+The payload helper and real Flask admission route use a fresh synthetic DB.
+Drive registration is local-only; downloads, preparation, and publishing never
+run in the request. Prep failure coverage drives the Flask-free runner explicitly.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
+import sqlite3
+import tempfile
 import unittest
+from contextlib import ExitStack, closing
+from pathlib import Path
 from unittest.mock import patch
 
 flask_available = importlib.util.find_spec("flask") is not None
@@ -91,209 +95,239 @@ class InboxPublishPayloadTest(unittest.TestCase):
         self.assertIsNone(schedule)
 
 
-@unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
-class InboxPublishRouteTest(unittest.TestCase):
-    def test_route_registered(self):
-        from sau_backend import app
+class _InboxPublishTestCase(unittest.TestCase):
+    def setUp(self):
+        import db.createTable as create_table
+        import sau_backend
+        from myUtils import profiles
+        from myUtils.security import SecurityPolicy
 
-        rules = {r.rule for r in app.url_map.iter_rules()}
+        self.sau_backend = sau_backend
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base_dir = Path(self._tmp.name)
+        self.db_path = self.base_dir / "db" / "database.db"
+        self.patches = ExitStack()
+        self.addCleanup(self.patches.close)
+        self.patches.enter_context(patch.dict(os.environ, {
+            "SAU_DB_PATH": str(self.db_path),
+            "SAU_INBOX_DRIVE_REMOTE": "test-drive", "SAU_INBOX_DRIVE_ROOT": "Test-Inbox",
+        }))
+        self.patches.enter_context(patch.object(sau_backend, "BASE_DIR", self.base_dir))
+        self.patches.enter_context(patch("myUtils.campaign_media_prep.BASE_DIR", self.base_dir))
+        create_table.bootstrap(self.db_path)
+        nw = profiles.create_profile("NW", db_path=self.db_path)
+        profiles.create_profile("Unused", db_path=self.db_path)
+        sw = profiles.create_profile("SW", db_path=self.db_path)
+        self.accounts = [
+            profiles.add_account(nw.id, "telegram", "nw", auth_type="manual", db_path=self.db_path),
+            profiles.add_account(sw.id, "instagram", "sw", auth_type="manual", db_path=self.db_path),
+        ]
+        self.item = dict(BOTH_ITEM, profileIds=[nw.id, sw.id])
+        self.patches.enter_context(patch.dict(sau_backend.app.config, {
+            "SECURITY_POLICY": SecurityPolicy(
+                tokens=frozenset(), cors_origins=("http://localhost:5173",),
+            ),
+            "TESTING": True,
+        }))
+        self.client = sau_backend.app.test_client()
+        self.listed = self.patches.enter_context(patch("myUtils.inbox_ops.list_items", return_value={
+            "ready": [self.item], "pending": [], "quarantined": [],
+        }))
+        self.staged = self.patches.enter_context(patch(
+            "myUtils.inbox_drive.stage_remote_media",
+            side_effect=AssertionError("HTTP must not stage Drive media"),
+        ))
+        self.downloaded = self.patches.enter_context(patch(
+            "myUtils.campaign_media_prep._download_file_from_storage",
+            side_effect=AssertionError("HTTP must not download media"),
+        ))
+        self.prepared = self.patches.enter_context(patch(
+            "myUtils.publish_services._prepare_campaign_media_artifacts",
+            side_effect=AssertionError("HTTP must not prepare media"),
+        ))
+        self.drafted = self.patches.enter_context(patch("myUtils.publish_services._generate_account_draft"))
+        self.notified = self.patches.enter_context(patch("myUtils.publish_services._notify_tg_review"))
+        self.drained = self.patches.enter_context(patch("sau_backend._start_worker_drain_thread"))
+
+    def _post(self, **body):
+        return self.client.post(f"/api/inbox/items/{self.item['id']}/publish", json=body)
+
+    def _rows(self, table):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid")]
+
+    def _assert_no_request_work(self):
+        self.staged.assert_not_called()
+        self.downloaded.assert_not_called()
+        self.prepared.assert_not_called()
+        self.drafted.assert_not_called()
+        self.notified.assert_not_called()
+        for table in ("publish_jobs", "publish_job_targets", "campaign_posts"):
+            self.assertEqual(self._rows(table), [], table)
+
+    def _assert_accepted(self, response):
+        from myUtils import campaigns
+
+        self.assertEqual(response.status_code, 202, response.get_json())
+        self.assertEqual(response.get_json()["code"], 200)
+        data = response.get_json()["data"]
+        self.assertEqual(data["status"], "preparing")
+        self.assertEqual(data["jobs"], [])
+        self.assertEqual(data["skipped"], [])
+        self.assertEqual(data["submissionId"], f"inbox:{self.item['id']}")
+        self.assertEqual(len(data["campaignIds"]), 2)
+        self._assert_no_request_work()
+        for campaign_id, account in zip(data["campaignIds"], self.accounts):
+            campaign = campaigns.get_campaign(campaign_id, db_path=self.db_path)
+            self.assertEqual(campaign.status, campaigns.CAMPAIGN_PREPARING)
+            self.assertEqual(campaign.profile_id, account.profile_id)
+            self.assertEqual(campaign.selected_account_ids, [account.id])
+            request = campaigns.get_prep_request(campaign)
+            self.assertEqual(request["contentRating"], "sfw")
+            self.assertEqual(request["source"], "inbox")
+            self.assertEqual(request["submissionId"], data["submissionId"])
+        return data
+
+    def _cached_source(self):
+        from myUtils import inbox_drive
+
+        local_ref = inbox_drive.register_remote_source(
+            "both/video/sfw-demo.mp4", db_path=self.db_path,
+        )
+        source = self.base_dir / "videoFile" / local_ref
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"previously cached synthetic media")
+        return source
+
+
+@unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
+class InboxPublishRouteTest(_InboxPublishTestCase):
+    def test_route_registered(self):
+        rules = {r.rule for r in self.sau_backend.app.url_map.iter_rules()}
         self.assertIn("/api/inbox/items/<string:item_id>/publish", rules)
 
     def test_publish_endpoint_maps_both_profiles(self):
-        from sau_backend import app
+        from myUtils import campaigns, publish_services
 
-        captured = {}
-
-        def fake_submit_publish(**kwargs):
-            captured.update(kwargs)
-            return SimpleNamespace(campaign_ids=[10, 11], jobs=[{"id": 1}, {"id": 2}])
-
-        with patch("sau_backend.publish_orchestrator.submit_publish", side_effect=fake_submit_publish):
-            client = app.test_client()
-            from myUtils.security import SecurityPolicy
-            original_policy = app.config["SECURITY_POLICY"]
-            app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
-            with patch("myUtils.inbox_ops.list_items") as listed, \
-                    patch("myUtils.inbox_ops.approve") as approved, \
-                    patch("sau_backend._start_worker_drain_thread") as drained, \
-                    patch("myUtils.inbox_drive.remote_path_for_item", return_value="both/video/sfw-demo.mp4"), \
-                    patch("myUtils.inbox_drive.stage_remote_media", return_value="_inbox_cache/demo.mp4"):
-                listed.return_value = {"ready": [dict(BOTH_ITEM)], "pending": [], "quarantined": []}
-                approved.return_value = dict(BOTH_ITEM)
-                resp = client.post("/api/inbox/items/item-both-1/publish", json={})
-
-        self.assertEqual(resp.status_code, 200, resp.get_json())
-        payload = resp.get_json()
-        self.assertEqual(payload["code"], 200)
-        self.assertEqual(payload["data"]["campaignIds"], [10, 11])
-        self.assertEqual(payload["data"]["jobs"], [{"id": 1}, {"id": 2}])
-        self.assertEqual(captured["profile_ids"], [1, 3])
-        self.assertEqual(len(captured["media_file_paths"]), 1)
-        self.assertTrue(captured["media_file_paths"][0].endswith("/_inbox_cache/demo.mp4"))
-        self.assertIsNone(captured["schedule"])
-        drained.assert_called_once()
-        app.config["SECURITY_POLICY"] = original_policy
+        with patch.object(publish_services, "submit_publish", wraps=publish_services.submit_publish) as submit:
+            resp = self._post()
+        data = self._assert_accepted(resp)
+        self.assertEqual(submit.call_args.kwargs["profile_ids"], [1, 3])
+        self.assertEqual(submit.call_args.kwargs["db_path"], self.db_path)
+        self.assertEqual(submit.call_args.kwargs["source"], "inbox")
+        self.assertIsNone(submit.call_args.kwargs["schedule"])
+        files = self._rows("file_records")
+        self.assertEqual(len(files), 1)
+        identity = hashlib.sha256(b"test-drive:Test-Inbox/both/video/sfw-demo.mp4\0").hexdigest()
+        local_ref = f"_inbox_cache/{identity}/sfw-demo.mp4"
+        self.assertEqual(submit.call_args.kwargs["media_file_paths"], [local_ref])
+        self.assertEqual(files[0]["file_path"], local_ref)
+        self.assertEqual(files[0]["filename"], "sfw-demo.mp4")
+        self.assertEqual(files[0]["storage_key"], "both/video/sfw-demo.mp4")
+        self.assertIsNotNone(files[0]["storage_backend_id"])
+        self.assertFalse((self.base_dir / "videoFile" / local_ref).exists())
+        for campaign_id in data["campaignIds"]:
+            campaign = campaigns.get_campaign(campaign_id, db_path=self.db_path)
+            self.assertEqual(campaigns.get_prep_request(campaign)["mediaFilePaths"], [local_ref])
+        self.drained.assert_called_once()
 
     def test_publish_endpoint_missing_item_404(self):
-        from sau_backend import app
-
-        client = app.test_client()
-        from myUtils.security import SecurityPolicy
-        original_policy = app.config["SECURITY_POLICY"]
-        app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
-        with patch("myUtils.inbox_ops.list_items") as listed:
-            listed.return_value = {"ready": [], "pending": [], "quarantined": []}
-            resp = client.post("/api/inbox/items/nope/publish", json={})
+        self.listed.return_value = {"ready": [], "pending": [], "quarantined": []}
+        resp = self.client.post("/api/inbox/items/nope/publish", json={})
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.get_json()["code"], 404)
-        app.config["SECURITY_POLICY"] = original_policy
+        self.assertEqual(self._rows("file_records"), [])
+        self.assertEqual(self._rows("campaigns"), [])
+        self._assert_no_request_work()
+        self.drained.assert_not_called()
 
     def test_publish_endpoint_starts_drain_when_campaign_has_no_jobs(self):
-        # Regression for async prep: the old ``if result.jobs`` guard skipped
-        # the drain when a campaign was created with no jobs yet, so prep was
-        # never picked up. ``campaignIds`` must also arm the drain.
-        from sau_backend import app
-
-        def fake_submit_publish(**_kwargs):
-            return SimpleNamespace(campaign_ids=[10], jobs=[])
-
-        with patch("sau_backend.publish_orchestrator.submit_publish", side_effect=fake_submit_publish):
-            client = app.test_client()
-            from myUtils.security import SecurityPolicy
-            original_policy = app.config["SECURITY_POLICY"]
-            app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
-            with patch("myUtils.inbox_ops.list_items") as listed, \
-                    patch("sau_backend._start_worker_drain_thread") as drained, \
-                    patch("myUtils.inbox_drive.remote_path_for_item", return_value="both/video/sfw-demo.mp4"), \
-                    patch("myUtils.inbox_drive.stage_remote_media", return_value="_inbox_cache/demo.mp4"):
-                listed.return_value = {"ready": [dict(BOTH_ITEM)], "pending": [], "quarantined": []}
-                resp = client.post("/api/inbox/items/item-both-1/publish", json={})
-        self.assertEqual(resp.status_code, 200, resp.get_json())
-        self.assertEqual(resp.get_json()["data"]["jobs"], [])
-        self.assertEqual(resp.get_json()["data"]["campaignIds"], [10])
-        drained.assert_called_once()
-        app.config["SECURITY_POLICY"] = original_policy
+        self._assert_accepted(self._post())
+        self.drained.assert_called_once()
 
     def test_publish_endpoint_async_prep_returns_preparing(self):
-        from sau_backend import app
+        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "1"}):
+            self._assert_accepted(self._post())
+        self.drained.assert_called_once()
 
-        def fake_async_submit(**_kwargs):
-            return SimpleNamespace(campaign_ids=[7], jobs=[], skipped=[])
+    def test_retry_reuses_inbox_submission_and_registered_source(self):
+        first = self._post()
+        self._assert_accepted(first)
+        tables = ("file_records", "storage_backends", "media_groups", "media_group_items",
+                  "campaigns", "publish_submissions")
+        before = {table: self._rows(table) for table in tables}
+        second = self._post()
+        self._assert_accepted(second)
+        self.assertEqual(second.get_json(), first.get_json())
+        self.assertEqual({table: self._rows(table) for table in tables}, before)
 
-        with patch.dict(os.environ, {"SAU_ASYNC_PREP": "1"}), \
-                patch("sau_backend.campaign_prep.submit_publish_async", side_effect=fake_async_submit), \
-                patch("sau_backend.publish_orchestrator.submit_publish") as sync_submit:
-            client = app.test_client()
-            from myUtils.security import SecurityPolicy
-            original_policy = app.config["SECURITY_POLICY"]
-            app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
-            with patch("myUtils.inbox_ops.list_items") as listed, \
-                    patch("sau_backend._start_worker_drain_thread") as drained, \
-                    patch("myUtils.inbox_drive.remote_path_for_item", return_value="both/video/sfw-demo.mp4"), \
-                    patch("myUtils.inbox_drive.stage_remote_media", return_value="_inbox_cache/demo.mp4"):
-                listed.return_value = {"ready": [dict(BOTH_ITEM)], "pending": [], "quarantined": []}
-                resp = client.post("/api/inbox/items/item-both-1/publish", json={})
-        self.assertEqual(resp.status_code, 200, resp.get_json())
-        data = resp.get_json()["data"]
-        self.assertEqual(data["status"], "preparing")
-        self.assertEqual(data["jobs"], [])
-        self.assertEqual(data["campaignIds"], [7])
-        sync_submit.assert_not_called()
-        drained.assert_called_once()
-        app.config["SECURITY_POLICY"] = original_policy
+    def test_retry_with_changed_intent_returns_conflict(self):
+        self._assert_accepted(self._post())
+        tables = ("file_records", "media_groups", "campaigns", "publish_submissions")
+        before = {table: self._rows(table) for table in tables}
+        response = self._post(brief="Different operator intent")
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertEqual(response.get_json()["code"], 409)
+        self.assertEqual({table: self._rows(table) for table in tables}, before)
+        self._assert_no_request_work()
 
 
 @unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
-class InboxPublishStagingCleanupTest(unittest.TestCase):
-    """The staged Drive source must survive an async submit.
-
-    Once prep is asynchronous ``submit_publish`` returns ``jobs=[]`` while the
-    campaign is still ``preparing``. The cleanup must key on "was a campaign
-    created?", never on "were jobs returned?", otherwise the only local copy
-    is deleted before prep ever reads it (silent data loss).
-    """
-
-    def _post_publish(self, *, submit_result=None, submit_side_effect=None):
-        import tempfile
-        from pathlib import Path
-
-        from sau_backend import app
-        import sau_backend
-
-        tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tmpdir.cleanup)
-        staged_rel = "_inbox_cache/demo.mp4"
-        staged_abs = Path(tmpdir.name) / "videoFile" / staged_rel
-        staged_abs.parent.mkdir(parents=True, exist_ok=True)
-        staged_abs.write_bytes(b"staged-media")
-
-        submit_kwargs = (
-            {"side_effect": submit_side_effect}
-            if submit_side_effect is not None
-            else {"return_value": submit_result}
-        )
-
-        client = app.test_client()
-        from myUtils.security import SecurityPolicy
-        original_policy = app.config["SECURITY_POLICY"]
-        app.config["SECURITY_POLICY"] = SecurityPolicy(
-            tokens=frozenset(), cors_origins=("http://localhost:5173",)
-        )
-        try:
-            with patch.object(sau_backend, "BASE_DIR", tmpdir.name), \
-                    patch("sau_backend.publish_orchestrator.submit_publish", **submit_kwargs), \
-                    patch("myUtils.inbox_ops.list_items") as listed, \
-                    patch("sau_backend._start_worker_drain_thread"), \
-                    patch("sau_backend._notify_tg_review"), \
-                    patch("myUtils.inbox_drive.remote_path_for_item",
-                          return_value="both/video/sfw-demo.mp4"), \
-                    patch("myUtils.inbox_drive.stage_remote_media",
-                          return_value=staged_rel):
-                listed.return_value = {
-                    "ready": [dict(BOTH_ITEM)], "pending": [], "quarantined": []
-                }
-                resp = client.post("/api/inbox/items/item-both-1/publish", json={})
-        finally:
-            app.config["SECURITY_POLICY"] = original_policy
-        return resp, staged_abs
+class InboxPublishStagingCleanupTest(_InboxPublishTestCase):
+    """Admission preserves remote references/cached bytes; staging is worker work."""
 
     def test_async_submit_with_campaign_but_no_jobs_keeps_staged_file(self):
-        resp, staged_abs = self._post_publish(
-            submit_result=SimpleNamespace(campaign_ids=[42], jobs=[])
-        )
-        self.assertEqual(resp.status_code, 200, resp.get_json())
-        self.assertEqual(resp.get_json()["data"]["campaignIds"], [42])
-        self.assertEqual(resp.get_json()["data"]["jobs"], [])
-        self.assertTrue(
-            staged_abs.exists(),
-            "async submit (campaign created, jobs still empty) must not delete "
-            "the staged source",
-        )
+        staged_abs = self._cached_source()
+        self._assert_accepted(self._post())
+        self.assertEqual(staged_abs.read_bytes(), b"previously cached synthetic media")
+        self.assertEqual(len(self._rows("file_records")), 1)
 
-    def test_failed_submit_without_campaign_discards_staged_file(self):
-        resp, staged_abs = self._post_publish(
-            submit_result=SimpleNamespace(campaign_ids=[], jobs=[], skipped=[])
-        )
-        self.assertEqual(resp.status_code, 200, resp.get_json())
-        self.assertFalse(
-            staged_abs.exists(),
-            "a submission that created no campaign genuinely failed -> discard",
-        )
+    def test_remote_download_failure_is_deferred_until_preparation(self):
+        from flask import has_app_context, has_request_context
+        from myUtils import campaign_prep, campaigns, publish_services
+        from myUtils.inbox_drive import InboxDriveError
 
-    def test_lookup_error_after_orchestrator_invoked_keeps_staged_file(self):
-        def boom(**_kwargs):
-            raise LookupError("profile 3 not found")
+        response = self._post()
+        data = self._assert_accepted(response)
+        registered = self._rows("file_records")
+        self.assertEqual(len(registered), 1)
+        self.assertFalse((self.base_dir / "videoFile" / registered[0]["file_path"]).exists())
+        campaign = campaigns.claim_next_preparing_campaign(owner="test-inbox", db_path=self.db_path)
+        self.assertEqual(campaign.id, data["campaignIds"][0])
+        self.assertFalse(has_app_context())
+        self.assertFalse(has_request_context())
+        failure = InboxDriveError("synthetic remote source is temporarily unavailable")
+        with patch.object(publish_services, "_prepare_campaign_media_artifacts", side_effect=failure) as prep:
+            with self.assertRaisesRegex(InboxDriveError, "temporarily unavailable"):
+                campaign_prep.make_default_prep_runner()(campaign, self.db_path)
+        prep.assert_called_once()
+        self.assertEqual(prep.call_args.args[2][0]["file_path"], registered[0]["file_path"])
+        # Apply the runner caller's failure transition, without starting a worker.
+        self.assertTrue(campaigns.finish_campaign_prep(
+            campaign.id, owner="test-inbox", status=campaigns.CAMPAIGN_NEEDS_REVIEW,
+            last_error=str(failure), db_path=self.db_path,
+        ))
+        failed = campaigns.get_campaign(campaign.id, db_path=self.db_path)
+        self.assertEqual(failed.status, campaigns.CAMPAIGN_NEEDS_REVIEW)
+        self.assertIn("temporarily unavailable", failed.last_error)
+        self.assertEqual(self._rows("file_records"), registered)
+        self._assert_no_request_work()
 
-        resp, staged_abs = self._post_publish(submit_side_effect=boom)
-        self.assertEqual(resp.status_code, 404)
-        self.assertTrue(
-            staged_abs.exists(),
-            "a failure mid-orchestration may leave a campaign referencing the "
-            "staged source, so it must not be deleted",
-        )
-
-
-from types import SimpleNamespace  # noqa: E402
+    def test_invalid_profile_creates_no_campaign_and_keeps_cached_source(self):
+        staged_abs = self._cached_source()
+        registered = self._rows("file_records")
+        response = self._post(profileIds=[1, 99999])
+        self.assertEqual(response.status_code, 400, response.get_json())
+        self.assertIn("Profile not found", response.get_json()["msg"])
+        self.assertEqual(self._rows("campaigns"), [])
+        self.assertEqual(self._rows("media_groups"), [])
+        self.assertEqual(self._rows("publish_submissions"), [])
+        self.assertEqual(self._rows("file_records"), registered)
+        self.assertTrue(staged_abs.exists())
+        self._assert_no_request_work()
+        self.drained.assert_not_called()
 
 
 if __name__ == "__main__":

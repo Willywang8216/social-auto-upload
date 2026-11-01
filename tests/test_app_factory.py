@@ -82,7 +82,8 @@ class HealthEndpointTests(unittest.TestCase):
     def test_healthz_liveness(self) -> None:
         resp = self.client.get("/healthz")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.get_json(), {"status": "ok"})
+        self.assertEqual(resp.get_json()["status"], "ok")
+        self.assertEqual(set(resp.get_json()), {"status", "revision"})
 
     def test_readyz_returns_checks(self) -> None:
         resp = self.client.get("/readyz")
@@ -119,7 +120,9 @@ class HealthEndpointTests(unittest.TestCase):
         )
         try:
             self.assertEqual(self.client.get("/healthz").status_code, 200)
-            self.assertEqual(self.client.get("/readyz").status_code, 200)
+            # Readiness may legitimately fail without a worker/database; it
+            # must still bypass the application authentication gate.
+            self.assertIn(self.client.get("/readyz").status_code, (200, 503))
             # A protected route without the token is still rejected.
             self.assertEqual(self.client.get("/whoami").status_code, 401)
         finally:

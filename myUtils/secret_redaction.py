@@ -92,3 +92,18 @@ def strip_redaction_sentinels(obj: Any) -> Any:
     if isinstance(obj, list):
         return [strip_redaction_sentinels(item) for item in obj]
     return obj
+
+
+def redact_text(value: Any) -> str:
+    """Mask credentials in free-form exceptions before storage or logging."""
+    import re
+    text = str(value or "")
+    text = re.sub(
+        r"(?i)\b(access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key|password|bot[_-]?token)"
+        r"([\"']?\s*[:=]\s*[\"']?)[^\s&,;\"')\]}]+",
+        r"\1\2[REDACTED]", text)
+    text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+", "Bearer [REDACTED]", text)
+    text = re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot[REDACTED]", text)
+    # Signed URLs can carry names other than token (AWS/Google signatures).
+    text = re.sub(r"(https?://[^\s?]+)\?[^\s\"']+", r"\1?[REDACTED_QUERY]", text)
+    return text

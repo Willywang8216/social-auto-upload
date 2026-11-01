@@ -111,7 +111,9 @@ def _connect(db_path: Path | None):
     outlives the block — enough to break temp-dir cleanup on Windows and to
     leak descriptors in the long-running server. This wrapper does both.
     """
-    conn = sqlite3.connect(str(db_path or Path("/app/db/database.db")))
+    from myUtils.sqlite_utils import connect
+    from utils.conf_defaults import default_db_path
+    conn = connect(db_path or default_db_path())
     conn.row_factory = sqlite3.Row
     try:
         yield conn

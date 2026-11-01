@@ -411,7 +411,7 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         # 小红书标签上限为 10 个，超过会导致死循环卡住发布
         max_tags = 10
         if len(self.tags) > max_tags:
-            xhs_logger.warning(
+            xiaohongshu_logger.warning(
                 _msg("🏷️", f"标签数量 {len(self.tags)} 超过小红书上限 {max_tags}，只取前 {max_tags} 个: {self.tags[:max_tags]}")
             )
             self.tags = self.tags[:max_tags]
@@ -433,7 +433,7 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
                 await first_item.wait_for(state="visible", timeout=4000)
                 await first_item.click()
             except Exception as exc:
-                xhs_logger.warning(
+                xiaohongshu_logger.warning(
                     _msg("🏷️", f"话题『{tag}』未出现候选，跳过该标签继续发布: {exc}")
                 )
                 # 清掉已键入但未成词的 "#tag" 文本，避免它残留进正文

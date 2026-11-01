@@ -14,6 +14,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sqlalchemy_available = importlib.util.find_spec("sqlalchemy") is not None
 
@@ -44,14 +45,16 @@ class EngineTests(unittest.TestCase):
                 os.environ["DATABASE_URL"] = prev
 
     def test_resolve_url_falls_back_to_sqlite(self) -> None:
-        prev = os.environ.pop("DATABASE_URL", None)
-        try:
-            url = resolve_database_url()
-            self.assertTrue(url.startswith("sqlite:///"))
-            self.assertTrue(url.endswith("db/database.db"))
-        finally:
-            if prev is not None:
-                os.environ["DATABASE_URL"] = prev
+        from utils import conf_defaults
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(conf_defaults, "BASE_DIR", Path(tmp)), \
+                patch.dict(os.environ):
+            os.environ.pop("DATABASE_URL", None)
+            # Clear only this test's override, with a synthetic fallback path.
+            os.environ.pop("SAU_DB_PATH", None)
+            expected = Path(tmp) / "db" / "database.db"
+            self.assertEqual(resolve_database_url(), f"sqlite:///{expected.resolve()}")
 
     def test_sqlite_engine_enforces_foreign_keys(self) -> None:
         engine = make_engine("sqlite:///:memory:")
@@ -141,6 +144,9 @@ class LegacyInteropTests(unittest.TestCase):
 
         self._tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self._tmp.name) / "interop.db"
+        db_env = patch.dict(os.environ, {"SAU_DB_PATH": str(self.db_path)})
+        db_env.start()
+        self.addCleanup(db_env.stop)
         create_table.bootstrap(self.db_path)
         self.engine = make_engine(f"sqlite:///{self.db_path}")
 

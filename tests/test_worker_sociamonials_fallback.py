@@ -1,15 +1,10 @@
 """Tests for the Sociamonials fallback hook in the publish worker.
 
-When a target exhausts its retry budget the worker hands the post to
-Sociamonials instead of declaring it permanently failed. These tests pin the
-contract:
-
-* the fallback only fires after a genuine retry-budget exhaustion (never on a
-  target the publisher classified non-retryable, never before the last
-  attempt);
-* a successful fallback transitions the target to ``succeeded``;
-* every fallback failure path falls through to the normal permanent-failure
-  transition — the feature must never turn a failure into a silent loss.
+When a target exhausts its retry budget the worker may use an explicitly
+configured fallback. Acceptance is not proof of delivery: processing receipts
+stay pending, approval holds require review, and only confirmed delivery is
+eligible for the delivered-media ledger. Missing accounts never choose a
+replacement destination or reach the provider.
 
 The real publisher is stubbed: these tests assert the *wiring*, and
 ``tests/test_sociamonials_fallback.py`` covers the API client itself.
@@ -61,6 +56,14 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
             config={},
             db_path=self.db_path,
         ).id
+        # The fallback hook must be reached through an existing prepared campaign.
+        from myUtils.sqlite_utils import connect
+        with connect(self.db_path) as conn:
+            conn.execute("INSERT INTO media_groups (id,name) VALUES (1,'fixture')")
+            conn.execute("INSERT INTO campaigns (id,profile_id,media_group_id,status) "
+                         "VALUES (1,?,1,'publishing')", (self.profile_id,))
+            conn.execute("INSERT INTO campaign_posts (id,campaign_id,platform,status) "
+                         "VALUES (1,1,'bluesky','queued')")
 
         self._env = patch.dict(os.environ, {}, clear=False)
         self._env.start()
@@ -206,13 +209,9 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
         patched.assert_not_called()
         self.assertEqual(self._status(), jobs.TARGET_FAILED)
 
-    def test_non_retryable_x_failure_falls_back_to_sociamonials(self) -> None:
-        """A dead/flagged X credential must still reach the fallback.
-
-        Sociamonials holds its own X OAuth connection, so a ``retryable=False``
-        X reconnect failure is deliverable even though a permanent failure on
-        any other platform must not be re-routed.
-        """
+    def test_permanent_direct_x_failure_is_not_rerouted(self) -> None:
+        """Permanent failures must not silently choose another provider route."""
+        os.environ["SAU_X_DIRECT_PUBLISH"] = "1"
         self._enable_fallback()
         twitter_account_id = profile_registry.add_account(
             self.profile_id,
@@ -247,8 +246,9 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
             },
         ) as patched:
             self._drain(exc_type=_BoomPermanent)
-        patched.assert_called_once()
-        self.assertEqual(self._status(), jobs.TARGET_SUCCEEDED)
+        patched.assert_not_called()
+        self.assertEqual(self._status(), jobs.TARGET_FAILED)
+        self.assertEqual(jobs.list_targets(job.id, db_path=self.db_path)[0].attempts, 1)
 
     def test_x_target_goes_straight_to_the_fallback_when_direct_is_disabled(self) -> None:
         self._enable_fallback()
@@ -291,7 +291,7 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
             asyncio.run(worker.drain())
         self.assertEqual(executor_calls["n"], 0)
         patched.assert_called_once()
-        self.assertEqual(self._status(), jobs.TARGET_SUCCEEDED)
+        self.assertEqual(self._status(), jobs.TARGET_AWAITING_DELIVERY)
 
     def test_direct_x_runs_when_explicitly_enabled(self) -> None:
         self._enable_fallback()
@@ -413,6 +413,8 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
                 "ok": True,
                 "post_id": 4242,
                 "status": "delivered",
+                "delivery_state": "delivered",
+                "delivered": True,
                 "network": "blsk",
                 "requires_approval": False,
                 "warnings": [],
@@ -493,7 +495,7 @@ class SociamonialsFallbackMissingAccountTests(unittest.TestCase):
         self._env.stop()
         self._tmp.cleanup()
 
-    def test_missing_account_falls_through_without_crashing(self) -> None:
+    def test_missing_account_is_blocked_without_fallback(self) -> None:
         job = jobs.enqueue_job(
             jobs.JobSpec(
                 platform="bluesky",
@@ -525,7 +527,7 @@ class SociamonialsFallbackMissingAccountTests(unittest.TestCase):
         patched.assert_not_called()
 
         targets = jobs.list_targets(job.id, db_path=self.db_path)
-        self.assertEqual(targets[0].status, jobs.TARGET_FAILED)
+        self.assertEqual(targets[0].status, jobs.TARGET_BLOCKED)
 
 
 class SociamonialsDeliveryVerificationTests(unittest.TestCase):
@@ -590,6 +592,7 @@ class SociamonialsDeliveryVerificationTests(unittest.TestCase):
         ):
             asyncio.run(worker.drain())
         target = jobs.list_targets(job.id, db_path=self.db_path)[0]
+        self._last_target = target
         return target.status, str(target.last_error or "")
 
     def test_failed_delivery_is_recorded_as_failed(self):
@@ -621,9 +624,12 @@ class SociamonialsDeliveryVerificationTests(unittest.TestCase):
         })
         self.assertEqual(status, jobs.TARGET_SUCCEEDED)
 
-    def test_unconfirmed_delivery_is_still_a_success(self):
-        # A still-queued post must not be failed: the platform may deliver it a
-        # few seconds later, and the idempotency key prevents a duplicate.
+    def test_delivered_flag_without_a_receipt_requires_review(self):
+        status, _ = self._run({"ok": True, "delivered": True, "delivery_state": "delivered"})
+        self.assertEqual(status, jobs.TARGET_NEEDS_REVIEW)
+
+    def test_unconfirmed_delivery_stays_pending(self):
+        # Retain the receipt for another poll; do not report delivery or repost.
         status, _ = self._run({
             "ok": True,
             "post_id": 2,
@@ -635,20 +641,21 @@ class SociamonialsDeliveryVerificationTests(unittest.TestCase):
             "requires_approval": False,
             "warnings": [],
         })
-        self.assertEqual(status, jobs.TARGET_SUCCEEDED)
+        self.assertEqual(status, jobs.TARGET_AWAITING_DELIVERY)
+        self.assertEqual(self._last_target.checkpoint["provider_receipt"]["id"], "2")
 
     def test_delivered_assets_are_recorded_for_reclaim(self):
         status, _ = self._run({
             "ok": True,
             "post_id": 7,
-            "status": "scheduled",
+            "status": "delivered",
             "network": "tw",
             "workspace_id": 26985,
             "used_assets": [
                 {"asset_id": 9001, "filename": "clip.mp4", "size_bytes": 1234, "media_type": "video"}
             ],
-            "delivery_state": "pending",
-            "delivered": False,
+            "delivery_state": "delivered",
+            "delivered": True,
             "delivery_error": "",
             "requires_approval": False,
             "warnings": [],
@@ -657,12 +664,20 @@ class SociamonialsDeliveryVerificationTests(unittest.TestCase):
         ledger = sociamonials_reclaim.load_delivered_assets(self.db_path)
         self.assertIn(9001, ledger)
 
+    def test_pending_assets_do_not_enter_the_delivered_ledger(self):
+        status, _ = self._run({
+            "ok": True, "post_id": 8, "status": "scheduled", "network": "tw",
+            "workspace_id": 26985, "delivery_state": "pending", "delivered": False,
+            "used_assets": [{"asset_id": 9002, "filename": "pending.mp4", "size_bytes": 123}],
+        })
+        self.assertEqual(status, jobs.TARGET_AWAITING_DELIVERY)
+        self.assertNotIn(9002, sociamonials_reclaim.load_delivered_assets(self.db_path))
+
     def test_a_post_held_for_approval_is_not_recorded_as_delivered(self):
         # Sociamonials can hold a post until a human releases it. It will NOT
         # deliver on its own, so reporting success tells the operator a post is
         # live when nobody can see it - the "200 but nothing landed" failure this
-        # fallback exists to prevent. ``pending`` is different and still succeeds
-        # (see the test above): that post may deliver moments later.
+        # fallback exists to prevent. A pending receipt instead remains pollable.
         status, error = self._run({
             "ok": True,
             "post_id": 2,
@@ -674,7 +689,7 @@ class SociamonialsDeliveryVerificationTests(unittest.TestCase):
             "requires_approval": True,
             "warnings": [],
         })
-        self.assertEqual(status, jobs.TARGET_FAILED)
+        self.assertEqual(status, jobs.TARGET_NEEDS_REVIEW)
         self.assertIn("approval", error)
 
     def test_an_explicit_approval_delivery_state_is_not_delivered(self):
@@ -689,7 +704,7 @@ class SociamonialsDeliveryVerificationTests(unittest.TestCase):
             "requires_approval": False,
             "warnings": [],
         })
-        self.assertEqual(status, jobs.TARGET_FAILED)
+        self.assertEqual(status, jobs.TARGET_NEEDS_REVIEW)
         self.assertIn("approval", error)
 
 
@@ -883,8 +898,8 @@ class FallbackNormalisesArtifactUrlsTests(unittest.TestCase):
     def test_the_payload_artifacts_are_normalised_before_the_fallback(self):
         import inspect
 
-        source = inspect.getsource(worker)
-        marker = source.index("media_paths = _fallback_media_paths(payload)")
-        preceding = source[max(0, marker - 1200):marker]
+        source = inspect.getsource(PublishWorker._try_sociamonials_fallback)
+        marker = source.index("_fallback_media_paths(payload)")
+        preceding = source[:marker]
         self.assertIn("_normalise_artifact_url", preceding)
-        self.assertIn('_artifact["public_url"]', preceding)
+        self.assertRegex(preceding, r'\b\w+\["public_url"\]\s*=\s*_normalise_artifact_url\(')

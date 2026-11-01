@@ -16,7 +16,7 @@ from typing import Iterator
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
-from utils.conf_defaults import BASE_DIR
+from utils.conf_defaults import BASE_DIR, default_db_path
 
 _engine: Engine | None = None
 _Session: sessionmaker[Session] | None = None
@@ -33,7 +33,7 @@ def resolve_database_url() -> str:
     configured = (os.environ.get("DATABASE_URL") or "").strip()
     if configured:
         return configured
-    legacy = Path(BASE_DIR) / "db" / "database.db"
+    legacy = default_db_path()
     return f"sqlite:///{legacy.resolve()}"
 
 
@@ -51,7 +51,7 @@ def make_engine(url: str | None = None, **kwargs) -> Engine:
 
     url = url or resolve_database_url()
     if _is_sqlite(url):
-        kwargs.setdefault("connect_args", {"check_same_thread": False})
+        kwargs.setdefault("connect_args", {"check_same_thread": False, "timeout": 15})
     engine = create_engine(url, future=True, **kwargs)
 
     if _is_sqlite(url):
@@ -60,6 +60,7 @@ def make_engine(url: str | None = None, **kwargs) -> Engine:
         def _enable_sqlite_fk(dbapi_connection, _record):  # noqa: ANN001
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys = ON")
+            cursor.execute("PRAGMA busy_timeout = 15000")
             cursor.close()
 
     return engine

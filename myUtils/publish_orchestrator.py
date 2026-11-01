@@ -41,6 +41,7 @@ from myUtils import platform_capabilities
 
 _logger = logging.getLogger(__name__)
 from myUtils import profiles as profile_registry
+from myUtils.sqlite_utils import connect as _db_connection
 
 
 STAGGER_MINUTES = 5
@@ -90,7 +91,7 @@ def _account_ids_with_identity(platform: str, value: str, *, db_path: Path) -> l
     fields = _META_IDENTITY_FIELDS.get(platform, ())
     ids: list[int] = []
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             for field in fields:  # fixed whitelist, never caller input
                 rows = conn.execute(
                     f"SELECT id FROM accounts WHERE platform = ? "
@@ -148,7 +149,7 @@ def _already_queued_for_media(
     failure still works.
     """
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             row = conn.execute(
                 """
                 WITH candidate AS (
@@ -867,7 +868,7 @@ def submit_publish(
             campaign.id,
             status=campaign_store.CAMPAIGN_PUBLISHING if succeeded else campaign_store.CAMPAIGN_NEEDS_REVIEW,
             prepared_at=now_fn().isoformat(timespec="seconds"),
-            published_at=now_fn().isoformat(timespec="seconds") if succeeded else None,
+            published_at=None,
             last_error=None if succeeded else "No publishable posts queued",
             db_path=db_path,
         )
@@ -1060,6 +1061,13 @@ def _build_payload(
 
 
 def _enqueue_post(platform, payload, targets, campaign, post, job_to_payload, db_path):
+    metadata = campaign.metadata or {}
+    lease = metadata.get(campaign_store.PREP_LEASE_KEY) or {}
+    prep_fence = ((str(lease.get("owner") or ""), int(metadata.get(campaign_store.PREP_ATTEMPTS_KEY) or 0))
+                  if lease else None)
+    with campaign_store._connect(db_path) as conn:
+        row = conn.execute("SELECT workspace_id FROM campaigns WHERE id=?", (campaign.id,)).fetchone()
+        workspace_id = row[0] if row else None
     job = job_runtime.enqueue_job(
         job_runtime.JobSpec(
             platform=platform,
@@ -1069,19 +1077,16 @@ def _enqueue_post(platform, payload, targets, campaign, post, job_to_payload, db
             idempotency_key=f"publish-center-campaign-{campaign.id}-post-{post.id}",
         ),
         db_path=db_path,
-    )
-    campaign_store.update_campaign_post(
-        post.id,
-        status=campaign_store.CAMPAIGN_POST_QUEUED,
-        last_published_job_id=job.id,
-        db_path=db_path,
+        workspace_id=workspace_id,
+        campaign_post_id=post.id,
+        prep_fence=prep_fence,
     )
     return job_to_payload(job)
 
 
 def _load_media_group_files_via_callback(media_group_id: int, *, db_path: Path) -> list[dict]:
     import sqlite3
-    with sqlite3.connect(db_path) as conn:
+    with _db_connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """

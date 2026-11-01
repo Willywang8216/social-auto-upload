@@ -7,11 +7,14 @@
 #   ./scripts/backup.sh --dry-run  # show what would happen without doing it
 
 set -euo pipefail
+umask 077
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-PROJECT_DIR="/home/will/social-auto-upload"
+PROJECT_DIR="${SAU_PROJECT_DIR:-/home/will/social-auto-upload}"
+PYTHON="${SAU_RELEASE_PYTHON:-python3}"
+SQLITE_BACKUP="${PROJECT_DIR}/scripts/sqlite_backup.py"
 BACKUP_DIR="${PROJECT_DIR}/backups"
 LOG_FILE="${BACKUP_DIR}/backup.log"
 REMOTE="Onedrive-Yahooforsub-Tao:Scripts-ssh-ssl-keys/socialupload/"
@@ -99,6 +102,7 @@ rotate_backups() {
                 log "Rotating local backup: $(basename "$f")"
                 if [[ "$DRY_RUN" == false ]]; then
                     rm -f "$f"
+                    rm -f "${f}.sha256"
                 fi
             done <<< "$to_delete"
         else
@@ -124,6 +128,7 @@ rotate_backups() {
                 log "Rotating remote backup: ${f}"
                 if [[ "$DRY_RUN" == false ]]; then
                     rclone deletefile "${REMOTE}${f}" 2>&1 || log "WARNING: failed to delete remote file ${f}"
+                    rclone deletefile "${REMOTE}${f}.sha256" 2>&1 || log "WARNING: no remote checksum sidecar for ${f}"
                 fi
             done <<< "$to_delete_remote"
         else
@@ -139,10 +144,9 @@ if [[ "$DRY_RUN" == true ]]; then
     log "=== DRY RUN MODE - no changes will be made ==="
 fi
 
-log "Starting backup: ${ARCHIVE_NAME}"
 
 # Verify required tools
-for cmd in tar rclone; do
+for cmd in tar rclone sha256sum flock "$PYTHON"; do
     command -v "$cmd" >/dev/null 2>&1 || die "'${cmd}' is not installed or not in PATH"
 done
 
@@ -153,6 +157,16 @@ done
 if [[ "$DRY_RUN" == false ]]; then
     mkdir -p "$BACKUP_DIR"
     touch "$LOG_FILE"
+fi
+log "Starting backup: ${ARCHIVE_NAME}"
+[[ -f "${PROJECT_DIR}/db/database.db" ]] || die "Required database is missing"
+TEMP_DIR=""
+cleanup() { [[ -z "$TEMP_DIR" ]] || rm -rf "$TEMP_DIR"; }
+trap cleanup EXIT
+if [[ "$DRY_RUN" == false ]]; then
+    mkdir -p "${PROJECT_DIR}/logs"
+    exec 9>"${PROJECT_DIR}/logs/ci-watch.lock"
+    flock -n 9 || die "Deploy/restore/backup lock is held; retry later"
 fi
 
 # ---------------------------------------------------------------------------
@@ -186,10 +200,20 @@ log "Backing up: ${existing_items[*]}"
 if [[ "$DRY_RUN" == true ]]; then
     log "[dry-run] Would create archive: ${ARCHIVE_NAME} containing: ${existing_items[*]}"
 else
-    tar -czf "$ARCHIVE_PATH" \
-        -C "$PROJECT_DIR" \
-        "${existing_items[@]}" \
-        2>&1
+    TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sau-backup.XXXXXX")
+    mkdir -p "${TEMP_DIR}/db"
+    "$PYTHON" "$SQLITE_BACKUP" snapshot "${PROJECT_DIR}/db/database.db" "${TEMP_DIR}/db/database.db"
+    "$PYTHON" "$SQLITE_BACKUP" verify "${TEMP_DIR}/db/database.db" --restore-check
+    non_db_items=()
+    for item in "${existing_items[@]}"; do
+        [[ "$item" == "db/database.db" ]] || non_db_items+=("$item")
+    done
+    # Never archive the live DB or WAL directly. Only this online snapshot is
+    # included; credential/config bytes and the existing remote are unchanged.
+    tar -czf "${ARCHIVE_PATH}.tmp" -C "$PROJECT_DIR" "${non_db_items[@]}" \
+        -C "$TEMP_DIR" db/database.db db/database.db.sha256
+    mv "${ARCHIVE_PATH}.tmp" "$ARCHIVE_PATH"
+    (cd "$BACKUP_DIR" && sha256sum "$ARCHIVE_NAME" >"${ARCHIVE_NAME}.sha256")
 
     archive_size=$(du -h "$ARCHIVE_PATH" | cut -f1)
     log "Archive created: ${ARCHIVE_PATH} (${archive_size})"
@@ -202,11 +226,11 @@ if [[ "$DRY_RUN" == true ]]; then
     log "[dry-run] Would upload ${ARCHIVE_NAME} to ${REMOTE}"
 else
     log "Uploading to remote: ${REMOTE}"
-    if rclone copy "$ARCHIVE_PATH" "$REMOTE" 2>&1; then
+    if rclone copy "$ARCHIVE_PATH" "$REMOTE" 2>&1 && rclone copy "${ARCHIVE_PATH}.sha256" "$REMOTE" 2>&1; then
         log "Upload complete"
         # Purge local archive after successful upload
         log "Removing local archive: ${ARCHIVE_NAME}"
-        rm -f "$ARCHIVE_PATH"
+        rm -f "$ARCHIVE_PATH" "${ARCHIVE_PATH}.sha256"
     else
         die "rclone upload failed"
     fi

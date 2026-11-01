@@ -24,6 +24,7 @@ from myUtils.auth import check_cookie
 from myUtils import account_validation
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory, current_app, url_for, redirect, g, has_request_context
 from utils.conf_defaults import BASE_DIR
+from myUtils.sqlite_utils import connect as _db_connection
 from myUtils import campaigns as campaign_store
 from myUtils import content_rating
 from myUtils import content_rules
@@ -39,6 +40,8 @@ from myUtils import platform_limits
 from myUtils import profiles as profile_registry
 from myUtils import prepared_publishers
 from myUtils import publish_orchestrator
+from myUtils import publish_services
+from myUtils.submissions import SubmissionConflict
 from myUtils import publish_templates as template_store
 from myUtils import account_events
 from myUtils import secret_redaction
@@ -173,7 +176,7 @@ LEGACY_DB_REQUIRED_TABLES = frozenset({"user_info", "file_records"})
 def _get_legacy_db_path() -> Path:
     """Resolve the legacy SQLite path from the current BASE_DIR value."""
 
-    return Path(BASE_DIR) / "db" / "database.db"
+    return Path(os.environ.get("SAU_DB_PATH") or Path(BASE_DIR) / "db" / "database.db")
 
 
 def _tiktok_client_key() -> str:
@@ -292,7 +295,7 @@ def _verify_tiktok_signature(raw_body: bytes, header_value: str | None) -> tuple
 
 
 def _legacy_db_missing_required_tables(db_path: Path) -> bool:
-    with sqlite3.connect(db_path) as conn:
+    with _db_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT name FROM sqlite_master "
             "WHERE type = 'table' AND name IN (?, ?)",
@@ -737,7 +740,7 @@ def upload_file_to_spaces():
             # Save record to file_records so it appears in 素材庫
             try:
                 db_path = _ensure_legacy_db_ready()
-                with sqlite3.connect(db_path) as conn:
+                with _db_connection(db_path) as conn:
                     cursor = conn.cursor()
                     cursor.execute(
                         "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_cdn_url) VALUES (?, ?, ?, ?, ?)",
@@ -785,7 +788,7 @@ def upload_register():
             filesize_mb = 0
 
         db_path = _ensure_legacy_db_ready()
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_cdn_url) VALUES (?, ?, ?, ?, ?)",
@@ -904,7 +907,7 @@ def multipart_upload_complete():
             size = data.get("size", 0)
             filesize_mb = round(size / (1024 * 1024), 2) if size else 0
             db_path = _ensure_legacy_db_ready()
-            with sqlite3.connect(db_path) as conn:
+            with _db_connection(db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_cdn_url) VALUES (?, ?, ?, ?, ?)",
@@ -1008,7 +1011,7 @@ def get_file():
             # Serve RELATIVE to the matched root. Passing target.name alone only
             # works for files at the root, so _library/, _photos/, _batch*/ and
             # generated/campaigns/… resolved here and then 404'd at send time.
-            return send_from_directory(str(base_dir), str(target.relative_to(base_dir)))
+            return send_from_directory(str(base_dir), target.relative_to(base_dir).as_posix())
 
     # Not on disk under any root: try the remote-storage CDN, then 404.
     cdn = _get_cdn_url_for_file(filename)
@@ -1042,7 +1045,7 @@ def _cookie_path_is_allowed(cookie_path: Path) -> bool:
 
 def _lookup_account_cookie_path(account_id: int) -> tuple[Path, str] | None:
     db_path = _current_db_path()
-    with sqlite3.connect(db_path) as conn:
+    with _db_connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
         legacy = conn.execute(
             "SELECT filePath FROM user_info WHERE id = ?",
@@ -1080,7 +1083,7 @@ def _cookie_path_owned_by_workspace(cookie_path: Path, workspace_id: str, db_pat
     # Legacy cookie accounts live in user_info, which carries workspace_id after
     # the tenant backfill.
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT filePath FROM user_info WHERE workspace_id = ?",
@@ -1137,8 +1140,8 @@ def upload_save():
         # 保存文件
         file.save(filepath)
 
-        db_path = Path(BASE_DIR / "db" / "database.db")
-        with sqlite3.connect(db_path) as conn:
+        db_path = _current_db_path()
+        with _db_connection(db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                                 INSERT INTO file_records (filename, filesize, file_path)
@@ -1178,7 +1181,7 @@ def get_all_files():
     try:
         db_path = _ensure_legacy_db_ready()
         # 使用 with 自动管理数据库连接
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row  # 允许通过列名访问结果
             cursor = conn.cursor()
 
@@ -1220,7 +1223,7 @@ def getAccounts():
     """快速获取所有账号信息，不进行cookie验证"""
     try:
         db_path = _ensure_legacy_db_ready()
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
@@ -1249,7 +1252,7 @@ def getAccounts():
 
 @app.route("/getValidAccounts",methods=['GET'])
 async def getValidAccounts():
-    with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+    with _db_connection(_current_db_path()) as conn:
         cursor = conn.cursor()
         cursor.execute('''
         SELECT * FROM user_info''')
@@ -1291,7 +1294,7 @@ def delete_file():
 
     try:
         # 获取数据库连接
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with _db_connection(_current_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -1322,7 +1325,7 @@ def delete_file():
 
             # Delete from remote storage if applicable
             if record.get('storage_key') and record.get('storage_backend_id'):
-                _delete_file_from_storage(record['storage_key'], record['storage_backend_id'], db_path=Path(BASE_DIR / "db" / "database.db"))
+                _delete_file_from_storage(record['storage_key'], record['storage_backend_id'], db_path=_current_db_path())
 
             # 删除数据库记录
             cursor.execute("DELETE FROM file_records WHERE id = ?", (file_id,))
@@ -1355,7 +1358,7 @@ def delete_files_batch():
     succeeded = []
     failed = []
     try:
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with _db_connection(_current_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             for file_id in ids:
@@ -1373,7 +1376,7 @@ def delete_files_batch():
                         except Exception:
                             pass
                     if record.get('storage_key') and record.get('storage_backend_id'):
-                        _delete_file_from_storage(record['storage_key'], record['storage_backend_id'], db_path=Path(BASE_DIR / "db" / "database.db"))
+                        _delete_file_from_storage(record['storage_key'], record['storage_backend_id'], db_path=_current_db_path())
                     cursor.execute("DELETE FROM file_records WHERE id = ?", (record['id'],))
                     succeeded.append(record['id'])
                 except Exception as e:
@@ -1407,7 +1410,7 @@ def delete_account():
 
     try:
         db_path = _current_db_path()
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -1625,7 +1628,7 @@ def updateUserinfo():
     userName = data.get('userName')
     try:
         # 获取数据库连接
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with _db_connection(_current_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -2144,219 +2147,10 @@ def _campaign_payload(campaign: campaign_store.Campaign, *, db_path: Path) -> di
     return payload
 
 
-def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> list[dict]:
-    raw_kinds = {"raw_remote_upload", "raw_local"}
-    # Context artifacts created by the prep pipeline are NOT publishable media.
-    # The backend auto-transcribes whenever the submit carried no transcript, so
-    # ``audio`` (the extracted WAV) and ``transcript`` (the .txt) are present on
-    # most campaigns. They have no ``metadata.role == "video"``, so they used to
-    # land in ``passthrough`` *before* the video part, and the worker's
-    # ``_prepared_artifact_local_paths()`` hands the uploader every path in
-    # order — which published the WAV instead of the clip on bluesky/telegram/
-    # nw_sw_blog (7 targets succeeded that way on 2026-10-18/19 and 357 more
-    # were queued). Twitter raises "Unsupported prepared Twitter media type"
-    # instead, which is how it surfaced. Never publish them.
-    context_kinds = {"audio", "transcript"}
-    if platform != profile_registry.PLATFORM_TIKTOK:
-        # Drop the un-prepared raw artifacts and, for every video source, pick
-        # the duration-safe cut(s) for this platform: the trimmed/split parts
-        # when they exist, otherwise the full _pub.mp4.
-        cleaned = [
-            a for a in artifacts
-            if a.get("artifact_kind") not in raw_kinds | context_kinds
-        ]
-        videos: dict[object, list[dict]] = {}
-        passthrough: list[dict] = []
-        for artifact in cleaned:
-            role = (artifact.get("metadata") or {}).get("role")
-            source_id = artifact.get("source_file_record_id")
-            if role == "video" and source_id is not None:
-                videos.setdefault(source_id, []).append(artifact)
-            else:
-                passthrough.append(artifact)
-        selected: list[dict] = []
-        for items in videos.values():
-            selected.extend(_select_videos_for_platform(items, platform))
-        return [*passthrough, *selected]
-
-    grouped: dict[tuple[object, object], list[dict]] = {}
-    passthrough: list[dict] = []
-    for artifact in artifacts:
-        kind = artifact.get("artifact_kind") or ""
-        if kind in context_kinds:
-            continue
-        source_id = artifact.get("source_file_record_id")
-        if kind in {"remote_upload", "raw_remote_upload", "local", "raw_local"} and source_id is not None:
-            role = ((artifact.get("metadata") or {}).get("role"))
-            grouped.setdefault((source_id, role), []).append(artifact)
-        elif kind not in {"watermarked_image", "watermarked_video"}:
-            passthrough.append(artifact)
-
-    selected = []
-    for items in grouped.values():
-        raw = next((item for item in items if item.get("artifact_kind") in {"raw_remote_upload", "raw_local"}), None)
-        selected.append(raw or items[0])
-    return [*passthrough, *selected]
-
-
-def _artifact_part_groups_for_platform(artifacts: list[dict], platform: str) -> list[list[dict]]:
-    """Group a platform's artifacts into one list per post.
-
-    A video too long for the platform is re-encoded into parts; each part is
-    its own post. Everything already inside the cap yields a single group, so a
-    caller that ignores this helper still publishes exactly as before.
-    """
-    selected = _artifact_payloads_for_platform(artifacts, platform)
-    video_items = [a for a in selected if (a.get("metadata") or {}).get("role") == "video"]
-    source_ids = {a.get("source_file_record_id") for a in video_items}
-    if len(video_items) <= 1 or len(source_ids) > 1:
-        return [selected]
-    parts = sorted(
-        (a for a in video_items if (a.get("metadata") or {}).get("part_index") is not None),
-        key=lambda a: int((a.get("metadata") or {}).get("part_index") or 0),
-    )
-    if len(parts) <= 1:
-        return [selected]
-    passthrough = [a for a in selected if (a.get("metadata") or {}).get("role") != "video"]
-    return [passthrough + [part] for part in parts]
-
-
-def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
-    """Pick the video artifact(s) whose duration fits ``platform``.
-
-    Returns every split part when the source was divided (one post each),
-    otherwise the largest trimmed variant under the cap, else the full artifact.
-    """
-    if not items:
-        return []
-    max_seconds = platform_limits.video_max_seconds(platform)
-    if max_seconds is None:
-        return [items[0]]
-    max_mb = platform_limits.media_max_mb(platform)
-
-    def _meta(artifact: dict) -> dict:
-        return artifact.get("metadata") or {}
-
-    def _fits(artifact: dict) -> bool:
-        meta = _meta(artifact)
-        seconds = meta.get("max_duration_seconds")
-        if seconds is not None and float(seconds) > float(max_seconds):
-            return False
-        mb = meta.get("max_media_mb")
-        if max_mb is not None and mb is not None and float(mb) > float(max_mb):
-            return False
-        return True
-
-    def _planned_for(artifact: dict) -> bool:
-        # A platform only picks up a split it asked for by default: a large-cap
-        # platform such as YouTube must not grab a small-cap platform's finer
-        # split. The untagged fallback below is the deliberate exception.
-        planned = _meta(artifact).get("split_for")
-        return not planned or platform in planned
-
-    def _largest_fitting_parts(candidates: list[dict]) -> list[dict]:
-        # Several split plans may exist (X 140s, Threads 300s, a size-only
-        # split); use the largest parts that still fit, never a finer split.
-        #
-        # Group by part_count rather than by an exact duration. ffmpeg gives the
-        # last part of an equal split a slightly different length (here 200.048s
-        # against 200.083s - 35ms, from frame-boundary rounding). Comparing
-        # durations for equality silently dropped that last part, so a third of
-        # the video never published: a 3-part Threads split selected only parts 1
-        # and 2. part_count identifies the same plan without depending on float
-        # equality, and the median picks the plan whose parts are the largest.
-        by_count: dict[int, list[dict]] = {}
-        for artifact in candidates:
-            count = int(_meta(artifact).get("part_count") or 0)
-            by_count.setdefault(count, []).append(artifact)
-        if not by_count:
-            return []
-
-        def _median_seconds(group: list[dict]) -> float:
-            values = sorted(
-                float(_meta(a).get("max_duration_seconds") or 0) for a in group
-            )
-            return values[len(values) // 2] if values else 0.0
-
-        best_count = max(by_count, key=lambda c: (_median_seconds(by_count[c]), c))
-        # A re-prep appends a fresh copy of every split part instead of
-        # replacing the previous one (campaign_artifacts keeps growing), so the
-        # same (part_count, part_index) can appear several times. Returning
-        # every copy made _artifact_part_groups_for_platform emit one post per
-        # copy: campaign 2602 queued each of its two X parts twice (4 posts per
-        # account) and 2603 queued each of five parts twice. Collapse to one
-        # artifact per index, preferring a copy that carries a public_url so a
-        # URL-fetching publisher (and the Sociamonials fallback) still sees the
-        # served copy.
-        deduped: dict[int, dict] = {}
-        for artifact in by_count[best_count]:
-            index = int(_meta(artifact).get("part_index") or 0)
-            current = deduped.get(index)
-            if current is None or (
-                not str(current.get("public_url") or "").strip()
-                and str(artifact.get("public_url") or "").strip()
-            ):
-                deduped[index] = artifact
-        return sorted(
-            deduped.values(),
-            key=lambda a: int(_meta(a).get("part_index") or 0),
-        )
-
-    part_artifacts = [a for a in items if _meta(a).get("part_index") is not None]
-    parts = [a for a in part_artifacts if _fits(a) and _planned_for(a)]
-    if parts:
-        return _largest_fitting_parts(parts)
-
-    # Untagged fallback. A platform can be missing from ``split_for`` (it was
-    # added after prep, or the prep-time probe read the source at/below its cap)
-    # while the full artifact later turns out to be over it. The full artifact
-    # carries no duration in its metadata, so ``_fits`` cannot reject it and the
-    # publisher's own guard is left to fail on the oversized file. Recover the
-    # source duration/size the split was built from (part value x part count)
-    # and, when it exceeds this platform's cap, use the fitting untagged parts
-    # instead of the full artifact. Gated on the inferred source so a large-cap
-    # platform still keeps the full video.
-    untagged = [a for a in part_artifacts if _fits(a) and not _planned_for(a)]
-    if untagged:
-        inferred_seconds = max(
-            float(_meta(a).get("max_duration_seconds") or 0)
-            * int(_meta(a).get("part_count") or 0)
-            for a in untagged
-        )
-        inferred_mb = max(
-            float(_meta(a).get("max_media_mb") or 0)
-            * int(_meta(a).get("part_count") or 0)
-            for a in untagged
-        )
-        over_time = bool(max_seconds and inferred_seconds and inferred_seconds > float(max_seconds))
-        over_size = bool(max_mb and inferred_mb and inferred_mb > float(max_mb))
-        if over_time or over_size:
-            return _largest_fitting_parts(untagged)
-
-    variants = [
-        a for a in items
-        if (a.get("metadata") or {}).get("max_duration_seconds")
-        and (a.get("metadata") or {}).get("part_index") is None
-    ]
-    fitting = [
-        a for a in variants
-        if float((a.get("metadata") or {}).get("max_duration_seconds")) <= float(max_seconds)
-    ]
-    if fitting:
-        return [max(
-            fitting,
-            key=lambda a: float((a.get("metadata") or {}).get("max_duration_seconds")),
-        )]
-    full = [a for a in items if not (a.get("metadata") or {}).get("max_duration_seconds")]
-    if not full:
-        return [items[0]]
-    # Several artifacts can describe the same full file: the watermarked_video
-    # row plus the ``local`` row that carries the served /getFile URL. They
-    # share a local_path, so _extract_media would merge them - but only one
-    # survives this selection. Prefer the one with a public_url so a
-    # link-capable platform (Reddit) posts a link instead of silently
-    # degrading to a text-only self post when a URL was available.
-    return [next((a for a in full if a.get("public_url")), full[0])]
+# Compatibility exports: web previews and workers use one policy implementation.
+_artifact_payloads_for_platform = publish_services._artifact_payloads_for_platform
+_artifact_part_groups_for_platform = publish_services._artifact_part_groups_for_platform
+_select_videos_for_platform = publish_services._select_videos_for_platform
 
 
 def _read_json_body() -> dict:
@@ -3270,7 +3064,7 @@ def _validate_account_payload(data: dict, *, db_path: Path, profile_id: int | No
 
 
 def _load_file_record(file_record_id: int, *, db_path: Path) -> dict:
-    with sqlite3.connect(db_path) as conn:
+    with _db_connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT * FROM file_records WHERE id = ?",
@@ -3283,7 +3077,7 @@ def _load_file_record(file_record_id: int, *, db_path: Path) -> dict:
 
 def _load_default_storage_backend(*, db_path: Path) -> dict | None:
     """Load the default storage_backends row, or None if not configured."""
-    with sqlite3.connect(db_path) as conn:
+    with _db_connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT * FROM storage_backends WHERE is_default = 1 AND enabled = 1"
@@ -3295,7 +3089,7 @@ def _get_cdn_url_for_file(filename: str) -> str | None:
     """Look up a file's CDN URL from file_records. Returns None if not found."""
     try:
         db_path = _ensure_legacy_db_ready()
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT storage_cdn_url, storage_key, storage_backend_id FROM file_records WHERE file_path = ?",
@@ -3320,7 +3114,7 @@ def _get_cdn_url_for_file_by_key(filename: str) -> str | None:
     """Look up a file's CDN URL by matching storage_key ending with filename."""
     try:
         db_path = _ensure_legacy_db_ready()
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT storage_cdn_url, storage_key FROM file_records WHERE storage_key LIKE ?",
@@ -3355,7 +3149,7 @@ def _upload_file_to_storage(file_path: Path, final_filename: str, file_record_id
         elif ext in (".webp",):
             content_type = "image/webp"
         cdn = client.upload_file(file_path, storage_key, content_type)
-        with sqlite3.connect(db_path) as conn:
+        with _db_connection(db_path) as conn:
             conn.execute(
                 "UPDATE file_records SET storage_backend_id = ?, storage_key = ?, storage_cdn_url = ? WHERE id = ?",
                 (backend_row["id"], storage_key, cdn, file_record_id),
@@ -3392,39 +3186,17 @@ def _delete_file_from_storage(storage_key: str, backend_id: int, *, db_path: Pat
 
 
 def _cleanup_local_files(*, db_path: Path, max_age_hours: int = 24) -> int:
-    """Remove local copies of files that have been uploaded to remote storage."""
-    removed = 0
-    try:
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute("""
-                SELECT id, file_path FROM file_records
-                WHERE storage_key IS NOT NULL
-                  AND local_cleaned_at IS NULL
-                  AND upload_time < datetime('now', ?)
-            """, (f"-{max_age_hours} hours",)).fetchall()
-            for row in rows:
-                local = _resolve_video_file_path_safely(row["file_path"])
-                if local and local.exists():
-                    try:
-                        local.unlink()
-                        removed += 1
-                    except Exception:
-                        continue
-                conn.execute(
-                    "UPDATE file_records SET local_cleaned_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (row["id"],),
-                )
-            conn.commit()
-    except Exception:
-        logging.getLogger(__name__).exception("Local file cleanup failed")
-    if removed:
-        logging.getLogger(__name__).info("Cleaned up %d local files already in storage", removed)
-    return removed
+    """Compatibility no-op: only the verified offloader may evict cache files.
+
+    A storage key alone is not proof of a durable remote copy. The old periodic
+    deleter also raced active preparations and provider-side media fetching.
+    offload_to_drive.sh owns verification, restore mapping, and active-use pins.
+    """
+    return 0
 
 
 def _ensure_file_record_for_path(file_path: str, *, db_path: Path) -> int:
-    with sqlite3.connect(db_path) as conn:
+    with _db_connection(db_path) as conn:
         row = conn.execute(
             "SELECT id FROM file_records WHERE file_path = ?",
             (file_path,),
@@ -3503,302 +3275,11 @@ def _prepare_campaign_media_artifacts(
     )
 
 
-def _fallback_generated_draft(
-    platform: str,
-    media_group: media_group_store.MediaGroup,
-    request_data: dict,
-    media_context: dict,
-) -> dict:
-    if request_data.get("_accountLanguage"):
-        raise RuntimeError(
-            "Account-language content generation requires an available LLM; "
-            "refusing to publish source-language fallback copy"
-        )
-    # Order by how likely the source is to be real copy. The media-group name
-    # and the batch importer's brief are deliberately NOT candidates: they are
-    # labels, not captions, and publishing them is a visible defect. The brief
-    # (``request_data['notes']``) is the operator's *instruction* to the LLM
-    # ("SFW invitation to ...", "adult, honest, 18+ only"), so echoing it as
-    # the caption produces exactly the generic copy the pre-publish guard
-    # rejects. Drop it from the candidate list entirely: when the LLM is down
-    # and there is no transcript, surface a real failure instead of queueing a
-    # placeholder that can never pass the guard.
-    transcript = str(media_context.get("transcriptText", "") or "").strip()
-    title = str(request_data.get("title", "") or "").strip()
-    message = ""
-    for candidate in (transcript, title):
-        if content_rules.is_usable_copy(candidate):
-            message = candidate
-            break
-    if not message:
-        raise RuntimeError(
-            "Cannot generate copy: the LLM is unavailable and there is no "
-            "usable transcript or explicit title to fall back to. The operator "
-            "brief is an instruction, not a caption, and is never published."
-        )
-    return {
-        "message": message[:1000],
-        "hashtags": request_data.get("hashtags") or [],
-        "firstComment": str(request_data.get("firstComment", "") or "").strip(),
-    }
-
-
-def _build_generation_prompt(
-    platform: str,
-    profile: profile_registry.Profile,
-    media_group: media_group_store.MediaGroup,
-    request_data: dict,
-    media_context: dict,
-) -> tuple[str, str]:
-    rule = content_rules.get_platform_rule(platform)
-    system_prompt = str((profile.settings or {}).get("systemPrompt", "") or "").strip()
-    if not system_prompt:
-        system_prompt = "You write concise, platform-native social media copy."
-    user_lines = [
-        f"Platform: {platform}",
-        f"Media group: {media_group.name}",
-        f"Max chars: {rule.max_chars if rule.max_chars is not None else 'none'}",
-        f"Required hashtag count: {rule.hashtag_count}",
-        f"Require emoji: {rule.require_emoji}",
-        f"Require contact details: {rule.require_contact_details}",
-        f"Require CTA: {rule.require_cta}",
-        f"Title: {request_data.get('title', '')}",
-        f"Notes: {request_data.get('notes', '')}",
-        f"Transcript: {media_context.get('transcriptText', '')}",
-        f"Contact details: {request_data.get('contactDetails', '')}",
-        f"CTA: {request_data.get('cta', '')}",
-    ]
-    if media_context.get("imageLocalPaths"):
-        user_lines.append(
-            "Attached image(s): describe what is actually visible (pose, setting, "
-            "mood) in the copy; do not invent details that are not in the frame."
-        )
-    # Humanizer rules apply to every language. They exist because generated
-    # copy reads as AI-written and the operator publishes it as their own voice.
-    user_lines.extend((
-        "",
-        "HUMANIZER RULES (apply in every language): write like a real person, not "
-        "a marketing bot. Use concrete, specific details from the media; vary the "
-        "sentence length; contractions are fine. NEVER use these AI tells: 'delve', "
-        "'in today's fast-paced world', 'unleash', 'elevate', 'embark', 'testament "
-        "to', 'tapestry', 'navigate the landscape', 'game-changer', 'seamlessly', "
-        "'leverage', 'utilize', 'it's not just X, it's Y', 'whether you're a X or a "
-        "Y', 'in conclusion', 'furthermore', 'moreover'. Do not force a neat "
-        "tricolon or a tidy moral. No emoji spam; one or two only if the platform "
-        "rule asks for emoji.",
-    ))
-    account_context = str(request_data.get("_accountContext") or "").strip()
-    if account_context:
-        user_lines.append("")
-        user_lines.append("Account context (apply any account-specific rules from the system prompt):")
-        user_lines.append(account_context)
-    language = str(request_data.get("_accountLanguage") or "").strip()
-    if language:
-        labels = content_generator._parse_languages(language)
-        if any("Chinese" in label for label in labels) or "zh" in language.lower():
-            user_lines.extend((
-                "",
-                "TAIWAN MANDARIN RULES: write Traditional Chinese as used in Taiwan. "
-                "Never output Simplified characters. Use Taiwan vocabulary and "
-                "punctuation: 影片(not 视频), 網路(not 网络), 資訊(not 信息), "
-                "軟體(not 软件), 品質(not 质量), 專案(not 项目), 透過(not 通过), "
-                "鏡頭, 拍照, 感受, 身體. Use full-width punctuation ，。！？、. Do not "
-                "write English sentences inside the Chinese copy.",
-            ))
-        if len(labels) == 1:
-            user_lines.extend((
-                "",
-                "LANGUAGE REQUIREMENT (highest priority): Write the entire output, "
-                f"including the message, in {labels[0]}. Do not use another language, "
-                "provide a translation, or mix languages.",
-            ))
-        elif len(labels) > 1:
-            primary, *secondary = labels
-            user_lines.extend((
-                "",
-                "LANGUAGE REQUIREMENT (highest priority): This account explicitly "
-                f"requests bilingual copy in {' and '.join(labels)}. Write the complete "
-                f"{primary} version first, then a standalone --- line, then the complete "
-                f"{' then '.join(secondary)} version. Do not omit either language.",
-            ))
-    if platform in ("nw_sw_blog", "teaching_blog"):
-        user_lines.extend((
-            "",
-            "BLOG ARTICLE REQUIREMENT: this platform publishes a long-form blog "
-            "article. The 'message' field MUST be a complete 700-1500 word Markdown "
-            "article: one # H1 title, several H2/H3 sections, short paragraphs, and "
-            "a conclusion. Never output a short social caption or just a title. "
-            "If the transcript/notes are thin, expand with original, on-topic "
-            "reasoning and concrete detail from the persona's life; do not repeat "
-            "the title as the body.",
-        ))
-    user_lines.append(
-        "Return JSON with keys: message, title, summary, description, altText, "
-        "hashtags, firstComment, contactDetails, cta. Every text field must follow "
-        "the language rules above and the writing rules that follow."
-    )
-    return system_prompt, "\n".join(user_lines)
-
-
-def _generate_platform_draft(
-    platform: str,
-    profile: profile_registry.Profile,
-    media_group: media_group_store.MediaGroup,
-    request_data: dict,
-    media_context: dict,
-) -> dict:
-    ai_config = _resolve_ai_config(profile)
-    has_ai = bool(
-        ai_config["api_base_url"] and ai_config["api_key"]
-    ) or bool(
-        os.environ.get("SAU_LLM_API_KEY") and os.environ.get("SAU_LLM_API_BASE_URL")
-    )
-    should_use_llm = bool(request_data.get("useLlm", True)) and has_ai
-    account_language = str(request_data.get("_accountLanguage") or "").strip()
-    if platform == "twitter" and len(content_generator._parse_languages(account_language)) > 1:
-        raise ValueError("X posts support one audience language per account; configure separate accounts for separate languages")
-    if account_language and not should_use_llm:
-        raise RuntimeError("An LLM is required for language-specific account copy; refusing source-language fallback")
-
-    raw_draft = None
-    if should_use_llm:
-        try:
-            system_prompt, user_prompt = _build_generation_prompt(
-                platform,
-                profile,
-                media_group,
-                request_data,
-                media_context,
-            )
-            kwargs = {}
-            if ai_config["api_base_url"]:
-                kwargs["api_base_url"] = ai_config["api_base_url"]
-            if ai_config["api_key"]:
-                kwargs["api_key"] = ai_config["api_key"]
-            if ai_config["model"]:
-                kwargs["model"] = ai_config["model"]
-            # Send the actual image(s) so the copy describes what is shown
-            # rather than inventing from the filename. Text-only models that
-            # reject the image parts fall through to the except below and the
-            # copy still generates from the transcript/notes.
-            vision_paths = [
-                str(path)
-                for path in (media_context.get("imageLocalPaths") or [])[:4]
-                if path and Path(str(path)).is_file()
-            ]
-            if vision_paths:
-                kwargs["images"] = vision_paths
-            result = llm_client.generate_chat_completion(system_prompt, user_prompt, **kwargs)
-            raw_draft = (
-                result.parsed_json
-                or llm_client.coerce_json_object(result.content)
-                or {"message": result.content}
-            )
-        except Exception as exc:  # noqa: BLE001
-            logging.getLogger(__name__).warning(
-                "LLM generation failed for %s: %s",
-                platform,
-                exc,
-            )
-
-    if not isinstance(raw_draft, dict):
-        raw_draft = _fallback_generated_draft(platform, media_group, request_data, media_context)
-
-    prepared = content_rules.prepare_platform_draft(
-        platform,
-        raw_draft,
-        contact_details=str(request_data.get("contactDetails", "") or "").strip(),
-        cta=str(request_data.get("cta", "") or "").strip(),
-        default_hashtags=request_data.get("hashtags") or [],
-    )
-    message = str(prepared.get("message") or "")
-    if not content_rules.is_usable_copy(message):
-        raise RuntimeError(
-            "Generated copy looks like a placeholder (media-group name, filename "
-            "or generic brief); refusing to queue it"
-        )
-    if platform in ("nw_sw_blog", "teaching_blog") and len(message.strip()) < 600:
-        raise RuntimeError(
-            "Generated blog article is too short "
-            f"({len(message.strip())} chars); refusing to queue an empty article"
-        )
-    if account_language and not content_rules.message_matches_language(
-        message, account_language
-    ):
-        raise RuntimeError(
-            f"Generated copy does not match the account language "
-            f"'{account_language}'; refusing to queue it"
-        )
-    return prepared
-
-
-def _account_audience_language(account, profile) -> str:
-    config = getattr(account, "config", None) or {}
-    language = config.get("audience_language") or config.get("audienceLanguage")
-    settings = getattr(profile, "settings", None) or {}
-    if isinstance(settings, dict):
-        language = language or settings.get("default_language") or settings.get("defaultLanguage")
-    else:
-        language = language or getattr(profile, "default_language", "")
-    return str(language or "").strip()
-
-
-def _generate_account_draft(
-    account: profile_registry.Account,
-    profile: profile_registry.Profile,
-    media_group: media_group_store.MediaGroup,
-    request_data: dict,
-    media_context: dict,
-    *,
-    regenerate: bool = False,
-) -> dict:
-    """Generate a draft for a specific account, honouring per-account
-    rules the user may have written in the profile's system prompt.
-
-    The user's system prompt may include a *Platform specification* (or
-    *Account specification*) section that lists per-platform or per-account
-    rules. We surface the account context to the LLM so it can apply those
-    rules. When ``regenerate`` is true a small randomised nonce is appended
-    to the user prompt so the LLM produces a fresh variation.
-
-    The account context is passed via a side channel
-    (``_accountContext``) that only the LLM prompt builder reads — never
-    via ``notes``, since the fallback path echoes ``notes`` directly into
-    the visible message body.
-    """
-    extended_data = dict(request_data or {})
-    nonce_suffix = ""
-    if regenerate:
-        nonce_suffix = f"\nRegeneration nonce: {uuid.uuid4().hex[:8]}"
-
-    account_context_lines = [
-        f"Platform: {account.platform}",
-        f"Account name: {account.account_name}",
-        "If the system prompt contains a 'Platform specification' or "
-        "'Account specification' section with rules for this account, follow them.",
-    ]
-    extended_data["_accountContext"] = "\n".join(account_context_lines) + nonce_suffix
-    extended_data["_accountLanguage"] = _account_audience_language(account, profile)
-    draft = _generate_platform_draft(
-        account.platform,
-        profile,
-        media_group,
-        extended_data,
-        media_context,
-    )
-    # Pass 2: the humanizer skills' deterministic check plus one bounded rewrite.
-    # A draft that fails to improve is returned untouched — this must never block
-    # a publish.
-    try:
-        humanize.humanize_fields(
-            draft,
-            language=_account_audience_language(account, profile),
-        )
-    except Exception:  # noqa: BLE001
-        logging.getLogger(__name__).warning(
-            "humanize pass failed for account %s", getattr(account, "id", "?"), exc_info=True
-        )
-    return draft
+_fallback_generated_draft = publish_services._fallback_generated_draft
+_build_generation_prompt = publish_services._build_generation_prompt
+_generate_platform_draft = publish_services._generate_platform_draft
+_account_audience_language = publish_services._account_audience_language
+_generate_account_draft = publish_services._generate_account_draft
 
 
 def _default_sheet_title(profile: profile_registry.Profile) -> str:
@@ -6564,6 +6045,9 @@ def jobs_run():
     endpoint entirely.
     """
 
+    from myUtils.runtime import embedded_enabled
+    if not embedded_enabled():
+        return jsonify({"code": 409, "msg": "Queue execution belongs to the dedicated worker", "data": None}), 409
     try:
         run_worker_drain(default_executor)
     except Exception as exc:  # noqa: BLE001
@@ -6842,6 +6326,9 @@ def _target_to_payload(target: job_runtime.Target) -> dict:
         "scheduleAt": target.schedule_at,
         "status": target.status,
         "attempts": target.attempts,
+        "nextAttemptAt": target.next_attempt_at,
+        "errorCategory": target.error_category,
+        "deliveryState": target.delivery_state,
         "lastError": _redact_entity_error(target.last_error),
         "startedAt": target.started_at,
         "finishedAt": target.finished_at,
@@ -7108,15 +6595,17 @@ def publish_center_regenerate():
 
 
 def _start_worker_drain_thread():
-    """Spawn a daemon thread to drain queued jobs (non-blocking)."""
-    if _worker_drain_lock.locked():
-        return  # worker already running
+    """Development-only embedded drain; production has a dedicated worker."""
+    from myUtils.runtime import embedded_enabled
+    if not embedded_enabled() or not _worker_drain_lock.acquire(blocking=False):
+        return
     def _run():
-        with _worker_drain_lock:
-            try:
-                run_worker_drain(default_executor)
-            except Exception:  # noqa: BLE001
-                logging.getLogger(__name__).exception("Background worker drain failed")
+        try:
+            run_worker_drain(default_executor)
+        except Exception:
+            logging.getLogger(__name__).exception("Background worker drain failed")
+        finally:
+            _worker_drain_lock.release()
     threading.Thread(target=_run, daemon=True).start()
 
 
@@ -7190,112 +6679,8 @@ def _maybe_start_publish_scheduler() -> None:
     _PUBLISH_SCHEDULER_THREAD.start()
 
 
-def _tg_review_cards(*, jobs: list[dict], db_path: Path) -> list[dict]:
-    """Build one Telegram review card per queued campaign post.
-
-    Read back from the DB rather than from the submit result: the job row
-    carries the draft that will actually be sent plus the artifacts that were
-    prepared, and its targets carry the schedule the worker will honour.
-    """
-    cards: list[dict] = []
-    for job in jobs or []:
-        job_id = job.get("id")
-        if job_id is None:
-            continue
-        try:
-            with sqlite3.connect(db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                row = conn.execute(
-                    "SELECT id, profile_id, platform, payload_json FROM publish_jobs WHERE id = ?",
-                    (int(job_id),),
-                ).fetchone()
-                if row is None:
-                    continue
-                targets = conn.execute(
-                    "SELECT account_ref, schedule_at FROM publish_job_targets "
-                    "WHERE job_id = ? ORDER BY id",
-                    (int(job_id),),
-                ).fetchall()
-        except Exception:  # noqa: BLE001 — a missing card must not break submit
-            logging.getLogger(__name__).debug("tg review: job read failed", exc_info=True)
-            continue
-
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except ValueError:
-            payload = {}
-        draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else {}
-        copy_text = str(draft.get("message") or payload.get("message") or "").strip()
-        artifacts = payload.get("artifacts") or []
-        first = artifacts[0] if artifacts else {}
-        media_path = str(first.get("local_path") or "")
-        public_url = str(first.get("public_url") or "")
-
-        labels: list[str] = []
-        schedules: list[str] = []
-        for target in targets:
-            ref = str(target["account_ref"] or "")
-            name = _account_display_name(ref)
-            labels.append(f"{row['platform']} — {name}" if name and name != ref else str(row["platform"]))
-            if target["schedule_at"]:
-                schedules.append(str(target["schedule_at"]))
-        try:
-            profile = profile_registry.get_profile(int(row["profile_id"]), db_path=db_path)
-            profile_label = f"{profile.name} (#{profile.id})"
-        except Exception:  # noqa: BLE001
-            profile_label = f"profile {row['profile_id']}"
-
-        # Deep link into the app so the operator can open this post, edit its
-        # copy, or pause it before it publishes.
-        app_url = None
-        try:
-            from myUtils import ops_alerts as _ops_alerts
-            origin = _ops_alerts.public_app_origin()
-            if origin:
-                mgid = None
-                cid = payload.get("campaignId")
-                if cid is not None:
-                    with sqlite3.connect(db_path) as _c:
-                        _r = _c.execute(
-                            "SELECT media_group_id FROM campaigns WHERE id = ?",
-                            (int(cid),),
-                        ).fetchone()
-                        if _r and _r[0] is not None:
-                            mgid = int(_r[0])
-                app_url = (
-                    f"{origin}/#/publish/queue?entity=mg-{mgid}"
-                    if mgid is not None
-                    else f"{origin}/#/publish/queue?job={int(row['id'])}"
-                )
-        except Exception:  # noqa: BLE001 — a missing link must not break submit
-            app_url = None
-
-        cards.append({
-            "job_id": int(row["id"]),
-            "campaign_id": payload.get("campaignId"),
-            "post_id": payload.get("campaignPostId"),
-            "profile_id": int(row["profile_id"]),
-            "profile_label": profile_label,
-            "schedule_label": (min(schedules) + " UTC") if schedules else "immediate",
-            "account_labels": sorted(set(labels)),
-            "copy_text": copy_text,
-            "media_path": media_path or None,
-            "media_label": Path(media_path).name if media_path else "",
-            "public_url": public_url,
-            "app_url": app_url,
-        })
-    return cards
-
-
-def _notify_tg_review(*, jobs: list[dict], db_path: Path) -> None:
-    """Queue the review cards off the request path (Telegram must not block)."""
-    try:
-        from myUtils import tg_review
-        cards = _tg_review_cards(jobs=jobs, db_path=db_path)
-        if cards:
-            tg_review.notify_async(cards=cards, db_path=db_path)
-    except Exception:  # noqa: BLE001
-        logging.getLogger(__name__).debug("tg review: notify skipped", exc_info=True)
+_tg_review_cards = publish_services._tg_review_cards
+_notify_tg_review = publish_services._notify_tg_review
 
 
 def _maybe_start_tg_review_poller() -> None:
@@ -7332,92 +6717,42 @@ def _maybe_start_tg_review_poller() -> None:
 @app.route("/publish-center/submit", methods=["POST"])
 def publish_center_submit():
     db_path = _current_db_path()
-    async_prep = _async_prep_enabled()
     try:
         data = _read_json_body()
-        profile_ids = [int(v) for v in (data.get("profileIds") or []) if v]
-        if not profile_ids:
-            raise ValueError("profileIds is required")
-        media_file_paths = data.get("mediaFilePaths") or []
-        if not media_file_paths:
-            raise ValueError("mediaFilePaths is required")
-        selected_account_ids = data.get("selectedAccountIds") or None
-        selected_account_ids = [int(v) for v in selected_account_ids] if selected_account_ids else None
-        brief = str(data.get("brief", "") or "")
-        options = data.get("options") or {}
-        schedule = data.get("schedule") or None
-        account_drafts = data.get("accountDrafts") or {}
-        tiktok_post_settings = data.get("tiktokPostSettings") or {}
-
-        if async_prep:
-            # Queue the campaign(s) in ``preparing`` and return before the
-            # heavy artifact prep runs. The worker's ``_prep_tick`` claims
-            # them and runs the same pipeline off-request, so a 900 s prep
-            # no longer dies at Cloudflare's ~100 s cap.
-            result = campaign_prep.submit_publish_async(
-                profile_ids=profile_ids,
-                selected_account_ids=selected_account_ids,
-                media_file_paths=[str(p) for p in media_file_paths],
-                brief=brief,
-                options=options,
-                schedule=schedule,
-                account_drafts=account_drafts,
-                tiktok_post_settings=tiktok_post_settings,
-                db_path=db_path,
-                ensure_file_record_for_path=_ensure_file_record_for_path,
-            )
-        else:
-            result = publish_orchestrator.submit_publish(
-                profile_ids=profile_ids,
-                selected_account_ids=selected_account_ids,
-                media_file_paths=[str(p) for p in media_file_paths],
-                brief=brief,
-                options=options,
-                schedule=schedule,
-                account_drafts=account_drafts,
-                tiktok_post_settings=tiktok_post_settings,
-                db_path=db_path,
-                prepare_artifacts=_prepare_campaign_media_artifacts,
-                generate_account_draft=_generate_account_draft,
-                ensure_file_record_for_path=_ensure_file_record_for_path,
-                artifact_payloads_for_platform=_artifact_payloads_for_platform,
-                artifact_part_groups_for_platform=_artifact_part_groups_for_platform,
-                job_to_payload=_job_to_payload,
-            )
+        result = publish_services.submit_publish(
+            profile_ids=data.get("profileIds") or [],
+            selected_account_ids=data.get("selectedAccountIds") or None,
+            media_file_paths=data.get("mediaFilePaths") or [],
+            brief=data.get("brief") or "",
+            options=data.get("options") or {},
+            schedule=data.get("schedule") or None,
+            account_drafts=data.get("accountDrafts") or {},
+            tiktok_post_settings=data.get("tiktokPostSettings") or {},
+            submission_id=data.get("submissionId"),
+            workspace_id=_workspace_scope(),
+            db_path=db_path,
+        )
+    except SubmissionConflict as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
     except LookupError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
-    except Exception as exc:  # noqa: BLE001
-        logging.getLogger(__name__).exception("publish-center submit failed")
+    except ValueError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
-    # Auto-trigger the worker in a daemon thread so jobs don't stay stuck at
-    # "queued". Under async prep the submit returns with jobs=[] but a live
-    # campaign in ``preparing``: ``campaign_ids`` (not ``jobs``) is the "work
-    # exists" signal, so key the trigger on either. Without this the prep
-    # queue is never drained from the submit path.
-    if result.jobs or result.campaign_ids:
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("publish-center admission failed")
+        return jsonify({"code": 500, "msg": "Submission could not be confirmed; retry with the same submission ID", "data": None}), 500
+    # This hook is a no-op except in explicitly selected embedded development.
+    if result.campaign_ids:
         _start_worker_drain_thread()
-
-    # Pre-publish review card in Telegram: the media itself, the exact copy and
-    # the destination, so the operator can approve or rewrite before the worker
-    # runs. Queued off the request path — Telegram latency must not hold up a
-    # submission. Under async prep there are no job rows yet, so the cards are
-    # emitted by the worker after prep finalises (see
-    # ``campaign_prep.make_default_prep_runner``) rather than built empty here.
-    if result.jobs:
-        _notify_tg_review(jobs=result.jobs, db_path=db_path)
-
-    response_data = {
-        "campaignIds": result.campaign_ids,
-        "jobs": result.jobs,
-        "skipped": result.skipped,
-    }
-    if async_prep:
-        response_data["status"] = "preparing"
     return jsonify({
-        "code": 200,
-        "msg": "queued",
-        "data": response_data,
-    }), 200
+        "code": 200, "msg": "queued", "data": {
+            "campaignIds": result.campaign_ids,
+            "jobs": result.jobs,
+            "skipped": result.skipped,
+            "submissionId": data.get("submissionId"),
+            "status": "preparing" if result.campaign_ids else "needs_review",
+        },
+    }), 202
 
 
 # ---------------------------------------------------------------------------
@@ -7640,7 +6975,7 @@ def _entity_read_conn(db_path: Path) -> sqlite3.Connection:
     outright ("database is locked"), mirroring the busy timeout the store
     modules' ``_connect`` helpers set.
     """
-    conn = sqlite3.connect(db_path, timeout=15)
+    conn = _db_connection(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 15000")
     return conn
@@ -8838,7 +8173,7 @@ def _sync_post_draft(
     draft_json = json.dumps(draft, ensure_ascii=False)
     payload_synced = False
 
-    with sqlite3.connect(db_path) as conn:
+    with _db_connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -9809,8 +9144,8 @@ def api_update_media_group(group_id):
         return jsonify({"error": "No valid fields"}), 400
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     values = list(updates.values()) + [group_id]
-    db_path = Path(BASE_DIR) / "db" / "database.db"
-    with sqlite3.connect(db_path) as conn:
+    db_path = _current_db_path()
+    with _db_connection(db_path) as conn:
         conn.execute(f"UPDATE media_groups SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", values)
         conn.commit()
     return jsonify({"ok": True})
@@ -9826,8 +9161,8 @@ def api_reorder_media_group_items(group_id):
     items = data.get("items", [])
     if not items:
         return jsonify({"error": "No items provided"}), 400
-    db_path = Path(BASE_DIR) / "db" / "database.db"
-    with sqlite3.connect(db_path) as conn:
+    db_path = _current_db_path()
+    with _db_connection(db_path) as conn:
         for item in items:
             conn.execute(
                 "UPDATE media_group_items SET sort_order = ? WHERE id = ? AND media_group_id = ?",
@@ -9845,7 +9180,7 @@ def api_campaign_generate(campaign_id):
     data = request.get_json(force=True) if request.is_json else {}
     platforms = data.get("platforms")
 
-    db_path = Path(BASE_DIR) / "db" / "database.db"
+    db_path = _current_db_path()
 
     try:
         campaign = campaign_store.get_campaign(
@@ -9990,7 +9325,7 @@ def api_campaign_validate(campaign_id):
         post_data = post.to_dict()
         errors = content_generator.validate_post(post.platform, post_data)
         media_reference = _first_media_reference_for_group(
-            getattr(post, "media_group_id", None), db_path=Path(BASE_DIR) / "db" / "database.db"
+            getattr(post, "media_group_id", None), db_path=_current_db_path()
         )
         if media_reference:
             verdict = media_copy_check.check_copy_against_media(
@@ -10161,15 +9496,6 @@ def api_list_sheet_exports():
     return jsonify({"code": 200, "msg": "ok", "data": [e.to_dict() for e in exports]})
 
 
-_maybe_start_account_maintenance_scheduler()
-_maybe_start_publish_scheduler()
-_maybe_start_tg_review_poller()
-
-# Ensure DO Spaces bucket exists on startup
-try:
-    do_spaces.ensure_bucket()
-except Exception:
-    logging.getLogger(__name__).warning("Failed to ensure DO Spaces bucket on startup")
 
 
 def _periodic_local_cleanup():
@@ -10178,14 +9504,13 @@ def _periodic_local_cleanup():
     while True:
         time.sleep(6 * 3600)  # every 6 hours
         try:
-            db = Path(BASE_DIR / "db" / "database.db")
+            db = _get_legacy_db_path()
             if db.exists():
                 _cleanup_local_files(db_path=db)
         except Exception:
             logging.getLogger(__name__).exception("Periodic local cleanup failed")
 
 
-threading.Thread(target=_periodic_local_cleanup, daemon=True, name="local-cleanup").start()
 
 
 # ====================================================================
@@ -10591,25 +9916,21 @@ def api_cookies_import():
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
 
 def _database_readiness_check():
-    """Readiness probe: confirm the legacy SQLite database is reachable.
-
-    Side-effect-free — if the database file does not exist yet (fresh install,
-    bootstrapped lazily on the first request) the instance is still considered
-    ready. When the file exists we open it and run a trivial query.
-    """
-
-    path = _get_legacy_db_path()
-    if not path.exists():
-        return ("uninitialized", True)
-    conn = sqlite3.connect(str(path), timeout=2)
-    try:
-        conn.execute("SELECT 1")
-    finally:
-        conn.close()
-    return ("ok", True)
+    from myUtils.health_checks import database_ready
+    return database_ready(_get_legacy_db_path())
 
 
 register_readiness_check(app, "database", _database_readiness_check)
+
+
+def _worker_readiness_check():
+    if os.environ.get("SAU_REQUIRE_WORKER_HEALTH", "0") != "1":
+        return ("not_required", True)
+    snapshot = job_runtime.worker_health(db_path=_get_legacy_db_path())
+    return ("ok" if snapshot.get("ok") else "worker_unavailable", bool(snapshot.get("ok")))
+
+
+register_readiness_check(app, "worker", _worker_readiness_check)
 
 
 # ---------------------------------------------------------------------------
@@ -10909,9 +10230,8 @@ def inbox_item_publish(item_id):
                         "data": None}), 404
 
     db_path = _current_db_path()
-    async_prep = _async_prep_enabled()
     try:
-        from myUtils.inbox_drive import remote_path_for_item, stage_remote_media
+        from myUtils.inbox_drive import remote_path_for_item, register_remote_source
         remote_path = remote_path_for_item(item)
         profile_ids = [int(v) for v in (data.get("profileIds") or item.get("profileIds") or []) if v]
         if not profile_ids:
@@ -10920,90 +10240,45 @@ def inbox_item_publish(item_id):
             profile_ids, item.get("sfwFlag"), db_path=db_path,
             media_file_paths=[str(item.get("sourcePath") or remote_path)],
         )
-        staged_path = stage_remote_media(remote_path)
-        publish_item = dict(item)
-        publish_item["sourcePath"] = staged_path
-        profile_ids, media_file_paths, brief, schedule = _inbox_publish_payload(
-            publish_item, data, db_path=db_path,
+        # Registration is deterministic and local-only. The preparation worker
+        # downloads this exact object; a request retry never stages another copy.
+        media_path = register_remote_source(
+            remote_path, db_path=db_path, workspace_id=_workspace_scope(),
         )
-        # Once the staged source is handed to the orchestrator, a failure can
-        # leave a partially-created campaign (e.g. profile 1 queued, profile 3
-        # missing): those rows reference the staged path, so the exception
-        # handlers below must not delete it. Only a failure *before* this point
-        # means the media was never referenced and is safe to discard.
-        orchestrator_invoked = True
-        if async_prep:
-            result = campaign_prep.submit_publish_async(
-                profile_ids=profile_ids,
-                selected_account_ids=selected_account_ids,
-                media_file_paths=media_file_paths,
-                brief=brief,
-                options={},
-                schedule=schedule,
-                account_drafts=None,
-                tiktok_post_settings=None,
-                db_path=db_path,
-                ensure_file_record_for_path=_ensure_file_record_for_path,
-                source="inbox",
-            )
-        else:
-            result = publish_orchestrator.submit_publish(
-                profile_ids=profile_ids,
-                selected_account_ids=selected_account_ids,
-                media_file_paths=media_file_paths,
-                brief=brief,
-                options={},
-                schedule=schedule,
-                account_drafts=None,
-                tiktok_post_settings=None,
-                db_path=db_path,
-                prepare_artifacts=_prepare_campaign_media_artifacts,
-                generate_account_draft=_generate_account_draft,
-                ensure_file_record_for_path=_ensure_file_record_for_path,
-                artifact_payloads_for_platform=_artifact_payloads_for_platform,
-                artifact_part_groups_for_platform=_artifact_part_groups_for_platform,
-                job_to_payload=_job_to_payload,
-            )
-        # A submission has started as soon as the orchestrator materialised a
-        # campaign, even if it has not queued any jobs yet. Under asynchronous
-        # prep ``result.jobs`` is legitimately empty while the campaign is
-        # still ``preparing``; deleting the staged source then would destroy
-        # the only local copy before prep ever reads it. Only a submission that
-        # produced no campaign at all genuinely failed to start.
-        submission_started = bool(result.campaign_ids)
-        if not submission_started:
-            (Path(BASE_DIR) / "videoFile" / staged_path).unlink(missing_ok=True)
+        result = publish_services.submit_publish(
+            profile_ids=profile_ids,
+            selected_account_ids=selected_account_ids,
+            media_file_paths=[media_path],
+            brief=str(data.get("brief") or item.get("brief") or "").strip(),
+            options={"sfwFlag": item.get("sfwFlag")},
+            schedule=data.get("schedule"),
+            account_drafts=None,
+            tiktok_post_settings=None,
+            submission_id=data.get("submissionId") or f"inbox:{item_id}",
+            source="inbox",
+            workspace_id=_workspace_scope(),
+            db_path=db_path,
+        )
+    except SubmissionConflict as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
     except LookupError as exc:
-        if "staged_path" in locals() and not locals().get("orchestrator_invoked", False):
-            (Path(BASE_DIR) / "videoFile" / staged_path).unlink(missing_ok=True)
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
-    except Exception as exc:  # noqa: BLE001
-        if "staged_path" in locals() and not locals().get("orchestrator_invoked", False):
-            (Path(BASE_DIR) / "videoFile" / staged_path).unlink(missing_ok=True)
-        logging.getLogger(__name__).exception("inbox publish failed")
+    except ValueError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
-    # A campaign in ``preparing`` (async prep) is live work even though no job
-    # has been queued yet; key the drain on either so the worker picks the
-    # campaign up. The review cards are emitted by the worker once prep has
-    # produced the job rows (see ``campaign_prep.make_default_prep_runner``).
-    if result.jobs or result.campaign_ids:
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("inbox admission failed")
+        return jsonify({"code": 500, "msg": "Submission could not be confirmed; retry the same inbox item", "data": None}), 500
+    if result.campaign_ids:
         _start_worker_drain_thread()
-
-    # Same review card as the publish center: one message per queued post, with
-    # the media and the copy the worker is about to send.
-    if result.jobs:
-        _notify_tg_review(jobs=result.jobs, db_path=db_path)
-    response_data = {
-        "campaignIds": result.campaign_ids,
-        "jobs": result.jobs,
-    }
-    if async_prep:
-        response_data["status"] = "preparing"
     return jsonify({
-        "code": 200,
-        "msg": "queued",
-        "data": response_data,
-    }), 200
+        "code": 200, "msg": "queued", "data": {
+            "campaignIds": result.campaign_ids,
+            "jobs": result.jobs,
+            "skipped": result.skipped,
+            "submissionId": data.get("submissionId") or f"inbox:{item_id}",
+            "status": "preparing" if result.campaign_ids else "needs_review",
+        },
+    }), 202
 
 
 @app.route("/api/system/health", methods=["GET"])
@@ -11098,7 +10373,7 @@ def publish_health():
 
     try:
         db_path = _current_db_path()
-        snapshot = _ph.publish_health_snapshot(db_path)
+        snapshot = _ph.publish_health_snapshot(db_path, workspace_id=_workspace_scope())
         return jsonify({"code": 200, "msg": "ok", "data": snapshot.to_dict()}), 200
     except Exception as exc:
         return jsonify({"code": 500, "msg": f"health check failed: {exc}"}), 500

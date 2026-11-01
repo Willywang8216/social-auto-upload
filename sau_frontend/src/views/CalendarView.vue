@@ -63,12 +63,13 @@
             :key="ev.eventId"
             class="cal-ev"
             :class="[`st-${ev.targetStatus}`, { err: ev.targetStatus === 'failed' }]"
-            :title="`${ev.time} · ${ev.destinationLabel} · ${ev.title}`"
+            :title="`${ev.time} · ${statusLabel(ev.targetStatus)} · ${ev.destinationLabel} · ${ev.title}`"
             @click="openEvent(ev)"
           >
             <span class="cd"></span>
             <span class="ct">{{ ev.time }}</span>
             <span class="cl">{{ ev.summary }}</span>
+            <span v-if="['blocked', 'awaiting_delivery', 'needs_review'].includes(ev.targetStatus)">{{ statusLabel(ev.targetStatus) }}</span>
             <button
               v-if="ev.hasMore"
               class="cal-ev-more"
@@ -137,11 +138,12 @@
             <div v-for="target in job.targets.filter((item) => item.fileRef === `campaign_post:${post.id}`)" :key="target.id" class="entity-target">
               <el-tag :type="statusTagType(target.status)" effect="plain">{{ statusLabel(target.status) }}</el-tag>
               <span>{{ target.accountName || '未設定帳號' }}</span><span>{{ target.scheduleAt || '立即發佈' }}</span>
-              <span v-if="target.lastError" class="ev-error">{{ target.lastError }}</span>
+              <span v-if="target.lastError || target.last_error" class="ev-error">{{ target.lastError || target.last_error }}</span>
+              <span v-if="targetReliabilityDetails(target)" class="target-reliability">{{ targetReliabilityDetails(target) }}</span>
               <el-date-picker v-if="target.status === 'pending' || target.status === 'retrying'" v-model="target._editSchedule" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DDTHH:mm:00" placeholder="選擇新時間" />
               <el-button v-if="target._editSchedule && (target.status === 'pending' || target.status === 'retrying')" size="small" @click="rescheduleEntityTarget(target)">儲存時間</el-button>
               <el-button v-if="target.status === 'pending' || target.status === 'retrying'" size="small" type="danger" @click="cancelEntityTarget(target)">取消排程</el-button>
-              <el-button v-if="target.status === 'failed'" size="small" type="warning" @click="resubmitEntityTarget(target)">重試發佈</el-button>
+              <el-button v-if="canRetryTarget(target)" size="small" type="warning" @click="resubmitEntityTarget(target)">重試發佈</el-button>
             </div>
           </div>
         </section>
@@ -167,6 +169,8 @@ import { useProfilesStore } from '@/stores/profiles'
 import { getPlatformLabel, getPlatformTagType, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
 import { mediaPreviewSource, mediaStateLabel } from '@/utils/mediaState'
 import { artifactLinks } from '@/utils/entityLinks'
+import { canRetryTarget, publishStatusLabel, publishStatusType, targetReliabilityDetails } from '@/utils/publish-status'
+import { showRequestError } from '@/utils/request'
 import {
   applyCalendarFiltersToQuery,
   currentMonthKey,
@@ -304,7 +308,7 @@ async function loadEvents() {
     const month = `${view.value.y}-${String(view.value.m + 1).padStart(2, '0')}`
     const result = await jobsStore.refreshEntities({
       month,
-      status: showAll.value ? 'scheduled,queued,publishing,failed,cancelled,published' : 'scheduled,queued,publishing',
+      status: showAll.value ? 'scheduled,queued,preparing,publishing,blocked,awaiting_delivery,needs_review,failed,cancelled,published' : 'scheduled,queued,preparing,publishing,blocked,awaiting_delivery,needs_review',
       profileIds: profileFilters.value.join(','),
       platforms: platformFilters.value.join(','),
       accountIds: accountFilters.value.join(','),
@@ -353,7 +357,7 @@ async function loadEvents() {
     })
   } catch (err) {
     if (sequence === requestSequence && err?.code !== 'ERR_CANCELED' && err?.name !== 'CanceledError') {
-      ElMessage.error(err?.message || '載入行事曆失敗')
+      showRequestError(err, err?.message || '載入行事曆失敗')
     }
   } finally {
     if (sequence === requestSequence) loading.value = false
@@ -409,7 +413,7 @@ async function openEvent(ev) {
   try {
     selectedEntity.value = await jobsStore.fetchEntity(ev.entityId)
   } catch (error) {
-    ElMessage.error(error?.message || 'Unable to load publish details')
+    showRequestError(error, error?.message || 'Unable to load publish details')
   } finally {
     detailLoading.value = false
   }
@@ -426,7 +430,7 @@ async function saveCopy(post) {
     ElMessage.success('Copy updated')
     await loadEvents()
   } catch (error) {
-    ElMessage.error(error?.message || 'Copy update failed')
+    showRequestError(error, error?.message || 'Copy update failed')
   }
 }
 
@@ -438,7 +442,7 @@ async function rescheduleEntityTarget(target) {
     await loadEvents()
     ElMessage.success('Schedule updated')
   } catch (error) {
-    ElMessage.error(error?.message || 'Rescheduling failed')
+    showRequestError(error, error?.message || 'Rescheduling failed')
   }
 }
 
@@ -449,7 +453,7 @@ async function cancelEntityTarget(target) {
     selectedEntity.value = await jobsStore.fetchEntity(selectedEntity.value.entityId)
     await loadEvents()
   } catch (error) {
-    if (error !== 'cancel' && error !== 'close') ElMessage.error(error?.message || 'Cancellation failed')
+    if (error !== 'cancel' && error !== 'close') showRequestError(error, error?.message || 'Cancellation failed')
   }
 }
 
@@ -460,7 +464,7 @@ async function resubmitEntityTarget(target) {
     await loadEvents()
     ElMessage.success('Target resubmitted')
   } catch (error) {
-    ElMessage.error(error?.message || 'Resubmission failed')
+    showRequestError(error, error?.message || 'Resubmission failed')
   }
 }
 
@@ -479,7 +483,7 @@ async function doReschedule() {
     dialogVisible.value = false
     await loadEvents()
   } catch (err) {
-    ElMessage.error(err?.message || '改期失敗')
+    showRequestError(err, err?.message || '改期失敗')
   }
 }
 
@@ -494,7 +498,7 @@ async function doCancelTarget() {
     dialogVisible.value = false
     await loadEvents()
   } catch (err) {
-    ElMessage.error(err?.message || '取消失敗')
+    showRequestError(err, err?.message || '取消失敗')
   }
 }
 
@@ -509,28 +513,14 @@ async function doResubmit() {
     dialogVisible.value = false
     await loadEvents()
   } catch (err) {
-    ElMessage.error(err?.message || '重新送出失敗')
+    showRequestError(err, err?.message || '重新送出失敗')
   }
 }
 
 const platformLabel = (p) => getPlatformLabel(p)
 const platformTagType = (p) => getPlatformTagType(p)
 
-const STATUS_LABELS = {
-  scheduled: '已排程',
-  queued: '佇列中',
-  publishing: '發佈中',
-  published: '已發佈',
-  prepared: '已準備',
-  needs_review: '需要檢查',
-  pending: '待處理',
-  running: '發佈中',
-  retrying: '重試中',
-  succeeded: '已完成',
-  failed: '失敗',
-  cancelled: '已取消'
-}
-function statusLabel(s) { return STATUS_LABELS[s] || s }
+const statusLabel = publishStatusLabel
 
 const activeFilterCount = computed(() =>
   profileFilters.value.length
@@ -546,18 +536,7 @@ function clearFilters() {
   keyword.value = ''
 }
 
-function statusTagType(s) {
-  switch (s) {
-    case 'published':
-    case 'succeeded': return 'success'
-    case 'failed': return 'danger'
-    case 'cancelled': return 'info'
-    case 'publishing':
-    case 'running':
-    case 'retrying': return 'warning'
-    default: return 'info'
-  }
-}
+const statusTagType = publishStatusType
 </script>
 
 <style scoped>
@@ -722,6 +701,8 @@ function statusTagType(s) {
 .cal-ev.st-failed .cd, .cal-ev.err .cd { background: var(--color-danger, #e74c3c); }
 .cal-ev.st-running .cd, .cal-ev.st-retrying .cd { background: var(--color-warning, #f39c12); }
 .cal-ev.st-cancelled .cd { background: var(--text-3, #999); }
+.cal-ev.st-blocked .cd, .cal-ev.st-needs_review .cd { background: var(--color-warning, #f39c12); }
+.cal-ev.st-awaiting_delivery .cd { background: var(--color-primary, #409eff); }
 
 .cal-ev .ct { color: var(--text-2); font-variant-numeric: tabular-nums; }
 
@@ -785,6 +766,7 @@ function statusTagType(s) {
 .entity-targets { display: grid; gap: 8px; margin-top: 12px; }
   .entity-target { display: grid; grid-template-columns: auto minmax(90px,1fr) minmax(120px,auto) minmax(100px,1fr) auto auto; gap: 8px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--raised); }
   .entity-target .ev-error { grid-column: 1 / -1; }
+.entity-target .target-reliability { grid-column: 1 / -1; overflow-wrap: anywhere; font-size: 12px; color: var(--text-2); }
   .entity-post { display: grid; gap: 12px; }
   .entity-post header { margin-bottom: 0; }
   .entity-post h3 { overflow-wrap: anywhere; }

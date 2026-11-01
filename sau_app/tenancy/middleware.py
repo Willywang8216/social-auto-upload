@@ -27,7 +27,7 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 def _resolve_session(config: AppConfig):
-    """Return ``(AuthContext, csrf_secret)`` for a valid session cookie, else None."""
+    """Return context only for a live, currently authorized Google session."""
     session_id = request.cookies.get(config.session_cookie_name)
     if not session_id:
         return None
@@ -39,20 +39,20 @@ def _resolve_session(config: AppConfig):
 
         Session = get_sessionmaker()
         with Session() as db:
-            row = SessionStore(db).get_active(session_id, idle_seconds=config.session_idle_seconds)
+            row = SessionStore(db).get_authorized(session_id, config=config)
             if row is None:
                 db.commit()
                 return None
-            role = "viewer"
-            if row.active_workspace_id:
-                member = db.scalars(
-                    select(WorkspaceMember).where(
-                        WorkspaceMember.workspace_id == row.active_workspace_id,
-                        WorkspaceMember.user_id == row.user_id,
-                    )
-                ).one_or_none()
-                if member is not None:
-                    role = member.role
+            member = db.scalars(
+                select(WorkspaceMember).where(
+                    WorkspaceMember.workspace_id == row.active_workspace_id,
+                    WorkspaceMember.user_id == row.user_id,
+                )
+            ).one_or_none()
+            if member is None:
+                db.commit()
+                return None
+            role = member.role
             ctx = AuthContext(
                 authenticated=True,
                 auth_method=METHOD_GOOGLE_SESSION,
