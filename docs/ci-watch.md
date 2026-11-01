@@ -87,6 +87,11 @@ its inode and ownership rather than trusting an environment-only bypass.
    Before pausing/stopping anything, the selected `/app/conf.py` bind source
    (including `SAU_CONF_FILE`) must resolve to a readable regular file. Valid
    symlinks are accepted; missing/unreadable paths are not guessed or created.
+   The runtime checkout must also ignore exactly `db/publish.pause`; the helper
+   checks this before creating the marker or stopping any service. New checkouts
+   carry `/db/publish.pause` in `.gitignore`. For an older initial deployment, add
+   that exact rule to `.git/info/exclude`, preserving its other entries. Never
+   hide all untracked changes to bypass the cleanliness check.
 4. Create a release-owned `db/publish.pause` marker. Wait for running/leased
    targets and leased prep work to finish, and for a fresh draining heartbeat.
    Pending retries and unclaimed prep requests are not executing work. Bad SQL,
@@ -104,6 +109,9 @@ its inode and ownership rather than trusting an environment-only bypass.
    web/worker pair without pulling/restarting dependencies.
    The image-owned bootstrap is outside the `/app/db` data bind mount; never
    use a potentially stale host `db/createTable.py` for container migrations.
+   Both rendered services must use `pull_policy: never` and the exact verified
+   local image ID. This keeps migration compatible with Compose 2.29.7, whose
+   `run` command does not support `--pull`; `up --pull never` remains explicit.
 8. Verify schema, image IDs, OCI/environment/HTTP revisions, and this container's
    fresh **draining** worker heartbeat while still paused. Safely fast-forward
    the still-clean host checkout so the next cron tick uses the tested scripts.
@@ -194,6 +202,15 @@ again. Preserve the current DB and snapshot for delivery reconciliation. A faile
 release does not become the recorded successful revision. After a rollback or
 failed drain, recover explicitly under the same lock; do not just delete the
 pause or start a legacy embedded worker.
+
+During a failed **legacy** transition, keep the deployment lock across every
+recovery phase until the tested watcher has replaced the old script. The old
+watcher can otherwise rebuild the old revision and replace only the web service,
+even while a new worker is paused. If the lock cannot remain held between recovery
+calls, privately save and temporarily comment only that application's deployment
+cron entry. Preserve unrelated entries and restore its exact schedule only after
+the matched release and tested watcher are installed. Do not clear the pause or
+restart the legacy publishers merely to silence an unhealthy status.
 
 Scheduled backup destinations/policy stay unchanged:
 

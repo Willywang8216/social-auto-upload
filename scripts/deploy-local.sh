@@ -241,6 +241,10 @@ PY
   wait_ready paused || fail 'Staged candidate is no longer safe to activate.'
 else
   [[ ! -e "$PAUSE" && ! -L "$PAUSE" && ! -e "$STAGED" ]] || fail 'Existing pause/staged release requires explicit operator recovery or --resume.'
+  # A runtime marker must not make the later fast-forward cleanliness check fail.
+  # Older checkouts can use the same exact rule in .git/info/exclude.
+  git -C "$RUNTIME" check-ignore -q -- db/publish.pause \
+    || fail 'Runtime db/publish.pause must be Git-ignored before rollout (see docs/ci-watch.md).'
   OLD_WEB="$(docker inspect -f '{{.Image}}' "$WEB")"
   OLD_WORKER="$(docker inspect -f '{{.Image}}' "$WORKER" 2>/dev/null || true)"
   if [[ -z "$OLD_WORKER" ]]; then
@@ -274,6 +278,7 @@ release, root = map(pathlib.Path, sys.argv[1:3])
 config = json.loads((release / 'candidate.compose.json').read_text())
 web, worker = (config['services'][name] for name in ('social-auto-upload', 'worker'))
 assert web['image'] == worker['image'] == sys.argv[3]
+assert web.get('pull_policy') == worker.get('pull_policy') == 'never'
 assert web['volumes'] == worker['volumes']
 assert web.get('env_file') == worker.get('env_file')
 shared_web = {k: v for k, v in web['environment'].items() if k not in {'SAU_PROCESS_ROLE', 'SAU_REQUIRE_WORKER_HEALTH'}}
@@ -351,7 +356,9 @@ PY
   COMPOSE=(docker compose --project-directory "$RUNTIME" -p "$PROJECT" -f "$RELEASE_DIR/candidate.compose.json")
   TOUCHED=1
   log 'Migrating explicitly in candidate image with both writers stopped and claims paused.'
-  "${COMPOSE[@]}" run --rm --no-deps --pull never --entrypoint python -e SAU_PROCESS_ROLE=web social-auto-upload -m myUtils.db_bootstrap >>"$DETAIL_LOG" 2>&1
+  # Compose 2.29 supports pull_policy but not `run --pull`. The validated frozen
+  # pair uses exact, locally verified image IDs and pull_policy: never instead.
+  "${COMPOSE[@]}" run --rm --no-deps --entrypoint python -e SAU_PROCESS_ROLE=web social-auto-upload -m myUtils.db_bootstrap >>"$DETAIL_LOG" 2>&1
   log 'Starting the matched web/worker pair (no pulls, no dependency restarts).'
   "${COMPOSE[@]}" up -d --force-recreate --pull never --no-deps social-auto-upload worker >>"$DETAIL_LOG" 2>&1
   LEGACY=0

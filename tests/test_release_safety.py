@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import runpy
 import sqlite3
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -307,6 +308,47 @@ def test_compose_roles_share_image_data_env_and_preserve_other_services():
     assert "./rclone-cache.conf:/app/rclone-cache.conf" in web["volumes"]
 
 
+def test_portable_migration_and_pause_preflight():
+    deploy = (ROOT / "scripts/deploy-local.sh").read_text()
+    migration = next(line for line in deploy.splitlines() if '"${COMPOSE[@]}" run ' in line)
+    assert "--pull" not in migration
+    assert "--rm --no-deps --entrypoint python" in migration
+    assert "social-auto-upload -m myUtils.db_bootstrap" in migration
+    policy = "assert web.get('pull_policy') == worker.get('pull_policy') == 'never'"
+    ignored = 'git -C "$RUNTIME" check-ignore -q -- db/publish.pause'
+    pause = deploy.index("(set -o noclobber;", deploy.index("Existing pause/staged release requires"))
+    assert deploy.index(policy) < pause
+    assert deploy.index(ignored) < pause
+
+
+@pytest.mark.parametrize("rule", ["tracked", "local-exclude", "missing"])
+def test_pause_marker_ignore_is_explicit_and_preserves_other_changes(tmp_path, rule):
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    empty_excludes = tmp_path / "empty-excludes"
+    empty_excludes.write_text("")
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-c", f"core.excludesFile={empty_excludes}", "-C", str(repo), *args],
+            capture_output=True, text=True, check=False,
+        )
+
+    if rule == "tracked":
+        (repo / ".gitignore").write_text((ROOT / ".gitignore").read_text())
+    elif rule == "local-exclude":
+        (repo / ".git/info/exclude").write_text("/db/publish.pause\n")
+    expected = 1 if rule == "missing" else 0
+    assert git("check-ignore", "-q", "--", "db/publish.pause").returncode == expected
+    (repo / "db").mkdir()
+    (repo / "db/publish.pause").write_text("a" * 40 + "\n")
+    (repo / "operator-change.txt").write_text("preserve this untracked work\n")
+    assert git("check-ignore", "-q", "--", "db/publish.pause").returncode == expected
+    status = git("status", "--porcelain", "--untracked-files=all")
+    assert status.returncode == 0 and "?? operator-change.txt" in status.stdout
+    assert ("?? db/publish.pause" in status.stdout) == (rule == "missing")
+
+
 def test_release_static_invariants():
     dockerfile = (ROOT / "Dockerfile").read_text()
     gates = (ROOT / "scripts/release-gates.sh").read_text()
@@ -417,7 +459,7 @@ def recovery_bundle(tmp_path):
     (runtime / "conf.py").write_bytes(b"# not the selected configuration\n")
     (runtime / ".env").write_text("SYNTHETIC_SECRET=fixture-only\n", encoding="utf-8")
     web = {
-        "image": _CANDIDATE_IMAGE, "init": True,
+        "image": _CANDIDATE_IMAGE, "init": True, "pull_policy": "never",
         "volumes": [
             {"type": "bind", "source": str(runtime / "db"), "target": "/app/db"},
             {"type": "bind", "source": str(selected), "target": "/app/conf.py"},
@@ -593,6 +635,27 @@ def _config_preflight_snippet():
     source = (ROOT / "scripts/deploy-local.sh").read_text(encoding="utf-8")
     return next(snippet for snippet in re.findall(r"<<'PY'\n(.*?)\nPY", source, flags=re.DOTALL)
                 if "conf_source = require_config_file" in snippet)
+
+
+@pytest.mark.parametrize("service", ["social-auto-upload", "worker"])
+@pytest.mark.parametrize("policy", [None, "always", "missing"])
+def test_config_preflight_rejects_unsafe_pull_policy(recovery_bundle, monkeypatch, service, policy):
+    bundle, runtime = recovery_bundle.path, recovery_bundle.runtime
+    config_path = bundle / "candidate.compose.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if policy == "missing":
+        config["services"][service].pop("pull_policy")
+    else:
+        config["services"][service]["pull_policy"] = policy
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    (bundle / "baseline/conf.py").unlink()
+    (bundle / "baseline/images.json").unlink()
+    monkeypatch.setattr(sys, "argv", ["-", str(bundle), str(runtime), _CANDIDATE_IMAGE, _PREVIOUS_IMAGE, _PREVIOUS_IMAGE])
+    with pytest.raises(AssertionError):
+        exec(compile(_config_preflight_snippet(), "deploy-local.sh:config-preflight", "exec"), {})
+    assert not (runtime / "db/publish.pause").exists()
+    assert not (bundle / "baseline/conf.py").exists()
+    assert not (bundle / "baseline/images.json").exists()
 
 
 @pytest.mark.parametrize("kind", ["missing", "directory", "unreadable"])

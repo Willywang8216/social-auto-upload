@@ -183,3 +183,30 @@ are now normalized after all COPY steps (directories/executables 0755, ordinary
 files 0644). No runtime secret mount is chmodded. The release helper's offline
 import smoke now runs as UID 65534 with ephemeral logs and checks the immutable
 bootstrap location; the paired non-root runtime smoke remains an additional gate.
+
+## First production activation and deployment compatibility
+
+Release `ca2010a32d1017eb225389c10a8669d1426c60b0` was activated on
+2026-11-01 at 18:38:35 UTC after both Linux Python matrices passed 2,439 tests
+and the frontend passed 122 tests plus its production build. The exact image
+passed the non-root, network-disabled web/worker smoke before touching services.
+Independent live checks confirmed matching healthy roles, schema 0024, SQLite
+quick_check, bearer access, anonymous rejection and disabled Google login.
+
+The guarded live transaction blocked 70 missing-account targets, corrected 1,096
+cached job summaries and repaired 38,880 unambiguous nullable references. It
+preserved all schedules, payloads, credentials and terminal history. The remaining
+605 historical orphan references and 1,044 review records were catalogued rather
+than guessed away. The sealed backup and actual reconciliation proof are recorded
+in the operational handoff; the transaction must not be repeated on resumption.
+
+Two deployment-only compatibility gaps surfaced on the real host. Compose 2.29.7
+rejects `run --pull`, so the portable migration command now relies on the validated
+frozen pair's `pull_policy: never` and exact local image IDs. Also, the release
+pause marker must be Git-ignored before any shutdown; a tracked rule and an early
+preflight prevent a late cleanliness failure. During recovery the legacy watcher
+briefly replaced only web with the old revision; its one cron entry was temporarily
+paused, then restored after the matched release and safer watcher were installed.
+No unrelated cron entry or credential was changed. The compatibility follow-up
+requires fresh exact-commit gates and a controlled promotion while this healthy
+release continues serving.

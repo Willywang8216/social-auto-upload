@@ -170,6 +170,8 @@ node_modules/
 # database
 db/database.db
 db/database.db.bak-*
+# Release-owned runtime state; never a source change.
+/db/publish.pause
 
 # 临时文件夹
 cookiesFile
