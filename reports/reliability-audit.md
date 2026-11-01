@@ -175,3 +175,11 @@ bootstrap ownership, paused/active readiness, bearer access and anonymous
 rejection, Chromium startup, matched image/revision, and web restart independent
 of the worker. No targets were created and the synthetic containers were removed.
 The final candidate must repeat the full gates and image checks after this change.
+
+The real release helper's private checkout also exposed a packaging permission
+defect: Git-created 0700/0600 source modes survived Docker COPY, so root imports
+passed while non-root workers could not read the code. Image-owned code/assets
+are now normalized after all COPY steps (directories/executables 0755, ordinary
+files 0644). No runtime secret mount is chmodded. The release helper's offline
+import smoke now runs as UID 65534 with ephemeral logs and checks the immutable
+bootstrap location; the paired non-root runtime smoke remains an additional gate.

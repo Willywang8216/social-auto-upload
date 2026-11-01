@@ -47,8 +47,11 @@ COPY --from=builder /app/dist /app/sau_frontend/dist
 COPY --from=builder /app/dist/index.html /app
 COPY --from=builder /app/dist/assets /app/assets
 COPY --from=builder /app/dist/vite.svg /app/assets
+# Private release checkouts use umask 077. Normalize image-owned source/assets
+# after all COPY steps; runtime bind mounts (including secrets) are not touched.
 RUN cp conf.example.py conf.py \
-    && mkdir -p /app/videoFile /app/cookiesFile /app/db
+    && mkdir -p /app/videoFile /app/cookiesFile /app/cookies /app/db \
+    && chmod -R u=rwX,go=rX /app
 EXPOSE 5409
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5409/readyz', timeout=3)"

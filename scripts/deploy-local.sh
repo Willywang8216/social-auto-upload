@@ -171,11 +171,14 @@ if [[ -z "$IMAGE_ID" ]] || ! "$PYTHON" "$CHECKS" verify --revision "$REVISION" -
     --build-arg BUILD_DATE="$(date -u +%FT%TZ)" "$BUILD_SCRATCH/source" >>"$DETAIL_LOG" 2>&1
   "$PYTHON" "$CHECKS" --root "$BUILD_SCRATCH/source" clean --revision "$REVISION" >/dev/null
   IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$IMAGE")"
-  # No production mounts, network or .env. This also catches missing runtime
-  # dependencies and accidental background startup during WSGI import.
-  docker run --rm --network none -e SAU_TESTING=1 -e APP_ENV=testing -e SAU_PROCESS_ROLE=web \
+  # No production mounts, network or .env. Use a non-root uid so a private
+  # checkout's permissions cannot produce a root-only application image.
+  docker run --rm --network none --user 65534:65534 \
+    --tmpfs /app/logs:rw,nosuid,nodev,mode=1777 --tmpfs /app/cookies:rw,nosuid,nodev,mode=1777 \
+    -e HOME=/tmp -e XDG_CACHE_HOME=/tmp/.cache \
+    -e SAU_TESTING=1 -e APP_ENV=testing -e SAU_PROCESS_ROLE=web \
     -e SAU_DB_PATH=/tmp/release-smoke.db --entrypoint python "$IMAGE_ID" -c \
-    'import os,sys,threading; before=set(threading.enumerate()); import wsgi; import myUtils.worker; assert set(threading.enumerate()) == before; assert os.environ["SAU_BUILD_REVISION"] == sys.argv[1]' \
+    'import os,sys,threading; assert os.getuid() != 0; before=set(threading.enumerate()); import wsgi; import myUtils.worker; from myUtils import db_bootstrap; assert db_bootstrap.__file__ == "/app/myUtils/db_bootstrap.py"; assert set(threading.enumerate()) == before; assert os.environ["SAU_BUILD_REVISION"] == sys.argv[1]' \
     "$REVISION" >>"$DETAIL_LOG" 2>&1
   "$PYTHON" "$CHECKS" record-build --revision "$REVISION" --receipts "$RECEIPTS" --image-id "$IMAGE_ID"
 fi

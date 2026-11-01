@@ -318,6 +318,10 @@ def test_release_static_invariants():
     assert "sys.version_info[:3] == (3, 10, 19)" in dockerfile
     assert re.search(r"^FROM ghcr\.io/willywang8216/sau-base:slim@sha256:[a-f0-9]{64}$", dockerfile, re.M)
     assert "COPY db/createTable.py ./myUtils/db_bootstrap.py" in dockerfile
+    assert dockerfile.index("chmod -R u=rwX,go=rX /app") > dockerfile.index("COPY --from=builder /app/dist/vite.svg")
+    assert "--user 65534:65534" in deploy and "--tmpfs /app/logs:rw,nosuid,nodev,mode=1777" in deploy
+    assert "assert os.getuid() != 0" in deploy
+    assert "--tmpfs /app/cookies:rw,nosuid,nodev,mode=1777" in deploy
     assert 'ENV SAU_BUILD_REVISION=${SAU_BUILD_REVISION}' in dockerfile
     assert 'org.opencontainers.image.revision="${SAU_BUILD_REVISION}"' in dockerfile
     assert "sau_frontend/package-lock.json" not in (ROOT / "Dockerfile.dockerignore").read_text().splitlines()
