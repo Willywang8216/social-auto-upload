@@ -32,10 +32,10 @@ from myUtils.env_loader import load_repo_env
 
 load_repo_env()
 
-DB_PATH = Path(__file__).resolve().parent / "database.db"
 
 # Alembic config lives at the workspace root.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = _PROJECT_ROOT / "db" / "database.db"
 ALEMBIC_INI_PATH = _PROJECT_ROOT / "alembic.ini"
 
 # The Alembic revision whose schema the raw ``CREATE TABLE`` block below fully
@@ -878,7 +878,11 @@ def _alembic_upgrade_head(db_path: Path = DB_PATH) -> None:
     command.upgrade(cfg, "head")
 
 
-if __name__ == "__main__":
+def main() -> None:
     target = Path(os.environ.get("SAU_DB_PATH", DB_PATH))
     _alembic_upgrade_head(target)
     print(f"OK alembic upgraded {target} to head")
+
+
+if __name__ == "__main__":
+    main()

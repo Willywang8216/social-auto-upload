@@ -312,7 +312,7 @@ def _ensure_legacy_db_ready() -> Path:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not db_path.exists() or _legacy_db_missing_required_tables(db_path):
-        from db.createTable import bootstrap
+        from myUtils.db_bootstrap import bootstrap
 
         bootstrap(db_path)
     return db_path

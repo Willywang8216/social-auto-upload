@@ -348,7 +348,7 @@ PY
   COMPOSE=(docker compose --project-directory "$RUNTIME" -p "$PROJECT" -f "$RELEASE_DIR/candidate.compose.json")
   TOUCHED=1
   log 'Migrating explicitly in candidate image with both writers stopped and claims paused.'
-  "${COMPOSE[@]}" run --rm --no-deps --pull never --entrypoint python -e SAU_PROCESS_ROLE=web social-auto-upload db/createTable.py >>"$DETAIL_LOG" 2>&1
+  "${COMPOSE[@]}" run --rm --no-deps --pull never --entrypoint python -e SAU_PROCESS_ROLE=web social-auto-upload -m myUtils.db_bootstrap >>"$DETAIL_LOG" 2>&1
   log 'Starting the matched web/worker pair (no pulls, no dependency restarts).'
   "${COMPOSE[@]}" up -d --force-recreate --pull never --no-deps social-auto-upload worker >>"$DETAIL_LOG" 2>&1
   LEGACY=0

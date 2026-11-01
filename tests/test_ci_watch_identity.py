@@ -136,7 +136,7 @@ class CiWatchDeferralTests(unittest.TestCase):
         self.assertNotIn("SAU_CI_WATCH_FORCE_DEPLOY", watcher)
         self.assertNotIn("deploying anyway (forced)", watcher)
         self.assertNotIn("--signal=KILL", deploy)
-        self.assertLess(deploy.index("wait_drained || fail"), deploy.index("social-auto-upload db/createTable.py"))
+        self.assertLess(deploy.index("wait_drained || fail"), deploy.index("social-auto-upload -m myUtils.db_bootstrap"))
 
     def test_build_passes_the_exact_commit_and_date_labels(self):
         source = (REPO / "scripts/deploy-local.sh").read_text(encoding="utf-8")

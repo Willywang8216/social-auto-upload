@@ -35,6 +35,9 @@ RUN uv export --frozen --no-dev --extra web --no-emit-project --format requireme
 ENV PATH=/opt/venv/bin:$PATH
 ENV PYTHONPATH=/app
 COPY . .
+# The db directory is a writable data bind mount in production. Keep its
+# canonical bootstrap implementation in image-owned code, never in that mount.
+COPY db/createTable.py ./myUtils/db_bootstrap.py
 RUN python scripts/release_checks.py static
 # Install the browser matching the locked patchright, rather than assuming the
 # base's cached browser revision is still the one this lock requires.

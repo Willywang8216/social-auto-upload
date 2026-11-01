@@ -158,3 +158,20 @@ install also reported development/build-tool advisories. This repair retains the
 locked graph; a separate dependency-maintenance pass should assess applicable
 advisories and retest upgrades. The audit is not a live exploitability certification.
 See the live handoff for the corrected candidate's complete gates and rollout status.
+
+## Data-mount bootstrap packaging gate
+
+The next full matrix passed 2,437 tests per Python version, but an empty-storage
+production-image smoke found that the `/app/db` data mount masked the image's
+`db/createTable.py`. Container migrations now use image-owned
+`python -m myUtils.db_bootstrap`. Source checkouts reuse the canonical bootstrap;
+Docker copies that implementation outside the mutable data mount. The legacy
+host CLI and the database location remain compatible.
+
+The packaging correction passed 148 focused tests (three platform-dependent
+skips) and a 438-file static scan. A non-release preview image passed a
+network-disabled, non-root web/worker smoke with empty synthetic storage:
+bootstrap ownership, paused/active readiness, bearer access and anonymous
+rejection, Chromium startup, matched image/revision, and web restart independent
+of the worker. No targets were created and the synthetic containers were removed.
+The final candidate must repeat the full gates and image checks after this change.

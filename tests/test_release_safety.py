@@ -317,6 +317,7 @@ def test_release_static_invariants():
     assert "pip install" not in dockerfile and "requirements.txt" not in dockerfile
     assert "sys.version_info[:3] == (3, 10, 19)" in dockerfile
     assert re.search(r"^FROM ghcr\.io/willywang8216/sau-base:slim@sha256:[a-f0-9]{64}$", dockerfile, re.M)
+    assert "COPY db/createTable.py ./myUtils/db_bootstrap.py" in dockerfile
     assert 'ENV SAU_BUILD_REVISION=${SAU_BUILD_REVISION}' in dockerfile
     assert 'org.opencontainers.image.revision="${SAU_BUILD_REVISION}"' in dockerfile
     assert "sau_frontend/package-lock.json" not in (ROOT / "Dockerfile.dockerignore").read_text().splitlines()
@@ -331,8 +332,8 @@ def test_release_static_invariants():
     assert '"$BACKUP" restore' not in deploy
     assert '"$BACKUP" snapshot' in deploy and "--restore-check" in deploy
     assert "--pull never --no-deps social-auto-upload worker" in deploy
-    assert deploy.index("wait_drained || fail") < deploy.index("social-auto-upload db/createTable.py")
-    assert deploy.index("social-auto-upload db/createTable.py") < deploy.index("wait_ready paused || fail 'Paused")
+    assert deploy.index("wait_drained || fail") < deploy.index("social-auto-upload -m myUtils.db_bootstrap")
+    assert deploy.index("social-auto-upload -m myUtils.db_bootstrap") < deploy.index("wait_ready paused || fail 'Paused")
     assert deploy.index('wait_ready active "$ACTIVE_SINCE"') < deploy.index('mv "$LOG_DIR/.ci-watch.state.$$"')
     assert "assert_offline" in restore and "--offline" in restore and "fuser" in restore
     ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
@@ -645,6 +646,6 @@ def test_resume_verification_and_config_preflight_precede_activation():
     normal = source.split('else\n  [[ ! -e "$PAUSE"', 1)[1]
     assert normal.index("conf_source = require_config_file") < normal.index('(set -o noclobber;') < normal.index('stop_gracefully "$WORKER"')
     assert normal.index('"$BACKUP" verify "$RELEASE_DIR/database.db" --restore-check') < normal.index('"$RECOVERY" seal')
-    assert normal.index('"$RECOVERY" seal') < normal.index("social-auto-upload db/createTable.py")
+    assert normal.index('"$RECOVERY" seal') < normal.index("social-auto-upload -m myUtils.db_bootstrap")
     assert source.index('"$RECOVERY" verify') < source.index('rm "$PAUSE"')
     assert '"$BACKUP" restore' not in source

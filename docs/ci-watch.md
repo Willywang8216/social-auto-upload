@@ -99,9 +99,11 @@ its inode and ownership rather than trusting an environment-only bypass.
    `database.db`/WAL copying is used. The snapshot stays with the baseline.
    Before migration, seal the required Compose/config/image baseline and SQLite
    snapshot/checksum in a private `recovery-manifest.json` of SHA256 hashes.
-7. Run `python db/createTable.py` explicitly **inside the candidate image** while
+7. Run `python -m myUtils.db_bootstrap` explicitly **inside the candidate image** while
    both writers are stopped and claims remain paused, then start the matched
    web/worker pair without pulling/restarting dependencies.
+   The image-owned bootstrap is outside the `/app/db` data bind mount; never
+   use a potentially stale host `db/createTable.py` for container migrations.
 8. Verify schema, image IDs, OCI/environment/HTTP revisions, and this container's
    fresh **draining** worker heartbeat while still paused. Safely fast-forward
    the still-clean host checkout so the next cron tick uses the tested scripts.

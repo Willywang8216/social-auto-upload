@@ -6,6 +6,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 import db.createTable as create_table
@@ -30,7 +31,7 @@ class AlembicBaselineTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _table_set(self, db_path: Path) -> set[str]:
-        with sqlite3.connect(db_path) as conn:
+        with closing(sqlite3.connect(db_path)) as conn:
             rows = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
@@ -106,7 +107,7 @@ class AlembicBaselineTests(unittest.TestCase):
 
     def test_bootstrap_stamps_alembic_head_version(self) -> None:
         create_table.bootstrap(self.db_path)
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             rows = conn.execute(
                 "SELECT version_num FROM alembic_version"
             ).fetchall()
@@ -117,7 +118,7 @@ class AlembicBaselineTests(unittest.TestCase):
         # Running upgrade head twice must succeed and not duplicate rows.
         create_table._alembic_upgrade_head(self.db_path)
         create_table._alembic_upgrade_head(self.db_path)
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             rows = conn.execute(
                 "SELECT COUNT(*) FROM alembic_version"
             ).fetchone()
@@ -142,7 +143,7 @@ class AlembicBaselineTests(unittest.TestCase):
         # newer migrations exist, bootstrap applies them up to head).
         create_table.bootstrap(self.db_path)
         head = self._current_head()
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         self.assertEqual(version, head)
 
@@ -166,7 +167,7 @@ class AlembicBaselineTests(unittest.TestCase):
         finally:
             os.chdir(original)
 
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             account_cols = {
                 row[1] for row in conn.execute("PRAGMA table_info(accounts)")
             }
