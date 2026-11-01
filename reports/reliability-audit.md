@@ -131,3 +131,30 @@ No credential rotation, mass retries, account guessing, content-policy relaxatio
 PostgreSQL migration, or re-enabling retired Reddit publishing is included. Revoked
 credentials, provider restrictions/credits, and ambiguous deleted destinations remain
 operator-dependent conditions; the application must contain and explain them.
+
+## Protected-copy history gate and dependency notices
+
+The first exact-commit backend gates passed 2,430 tests and 170 subtests on each
+of Linux Python 3.10.19 and 3.12.14 (two environment-dependent skips each).
+Nevertheless, protected-copy verification rejected that candidate: 878 existing
+terminal jobs had unknown finish timestamps, which aggregation would replace
+with the reconciliation time. Aggregation now preserves those unknown historical
+timestamps and catalogues them as `missing_terminal_timestamp`; actual new terminal
+transitions still record their completion time. Seven regression cases cover this.
+
+The correction passed 130 focused tests (one Linux-only skip) and a protected
+VPS-side copy check. Logical data from all 42 original tables survived restoration
+and migration. Schedules, payloads, credentials, 7,462 terminal targets and 6,656
+original terminal parent records were preserved. Safe copy repairs comprised 70
+blocked missing-account targets, 1,096 parent corrections, and 38,880 declared
+nullable SET NULL references. The remaining 605 historical orphans are catalogued,
+not deleted; 1,044 records need review, including unknown timestamps. A second
+reconciliation proposed no further safe changes. These are protected-copy results,
+not a claim that production reconciliation has already run.
+
+A read-only npm production-dependency audit reported zero critical and nine high
+advisories (Axios, Vue/server-renderer and related transitive packages). The full
+install also reported development/build-tool advisories. This repair retains the
+locked graph; a separate dependency-maintenance pass should assess applicable
+advisories and retest upgrades. The audit is not a live exploitability certification.
+See the live handoff for the corrected candidate's complete gates and rollout status.

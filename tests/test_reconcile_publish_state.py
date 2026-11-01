@@ -208,3 +208,28 @@ def test_accepts_online_sqlite_backup_without_changing_live_source(db_path, tmp_
     assert report["summary"]["dangling_account_targets"] == 1
     assert db_path.read_bytes() == before
     assert _rows(db_path, "SELECT status FROM publish_job_targets") == [("pending",)]
+
+
+@pytest.mark.parametrize("status", ["succeeded", "failed", "cancelled"])
+@pytest.mark.parametrize("unknown_finish", [None, ""])
+def test_recount_preserves_unknown_historical_finish_time(db_path, status, unknown_finish):
+    job = _job(db_path)
+    _execute(db_path, "UPDATE publish_job_targets SET status=?, finished_at='2020-01-01T00:00:00'", (status,))
+    _execute(db_path, "UPDATE publish_jobs SET status=?, finished_at=?, total_targets=99", (status, unknown_finish))
+    targets_before = _rows(db_path, "SELECT * FROM publish_job_targets")
+    report = reconcile.reconcile_publish_state(db_path, apply=True)
+    repaired = jobs.get_job(job.id, db_path=db_path)
+    assert repaired.status == status
+    assert repaired.finished_at == unknown_finish
+    assert repaired.total_targets == 1
+    assert "missing_terminal_timestamp" in report["needs_review"][0]["reasons"]
+    assert _rows(db_path, "SELECT * FROM publish_job_targets") == targets_before
+    assert reconcile.reconcile_publish_state(db_path, apply=True)["summary"]["job_corrections"] == 0
+
+
+def test_new_terminal_transition_still_records_completion_time():
+    result = jobs.aggregate_job_state({"status": "running", "finished_at": None}, {"succeeded": 1},
+                                      now="2030-01-01T12:00:00")
+    assert result["status"] == "succeeded"
+    assert result["finished_at"] == "2030-01-01T12:00:00"
+    assert "missing_terminal_timestamp" not in result["review_reasons"]

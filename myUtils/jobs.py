@@ -1390,13 +1390,20 @@ def aggregate_job_state(
         computed = JOB_SUCCEEDED
 
     status = computed
-    if job["status"] in JOB_TERMINAL and not allow_reopen:
+    preserve_terminal = job["status"] in JOB_TERMINAL and not allow_reopen
+    if preserve_terminal:
         status = job["status"]
         contradictory = (computed != status if status != JOB_CANCELLED else
                          total > completed + failed + cancelled or not cancelled)
         if contradictory:
             reasons.append("terminal_contradiction")
-    finished = (job["finished_at"] or now or _now_iso()) if status in JOB_TERMINAL else None
+        if not job["finished_at"]:
+            reasons.append("missing_terminal_timestamp")
+    # Recounting historical terminal rows is not a new delivery event. Keep an
+    # unknown timestamp unknown rather than fabricating today's completion time.
+    finished = None
+    if status in JOB_TERMINAL:
+        finished = job["finished_at"] if preserve_terminal else (job["finished_at"] or now or _now_iso())
     return {"total_targets": total, "completed_targets": completed, "failed_targets": failed,
             "status": status, "finished_at": finished, "computed_status": computed,
             "needs_review": bool(reasons), "review_reasons": reasons}
