@@ -2514,6 +2514,8 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
             token_state.commit_failure(account, exc, db_path=db_path, backoff_base=300)
             event_error = token_state.safe_error(exc)
             event_metadata.update(token_state.classify_failure(exc))
+            # Retain the diagnostic field consumed by existing status clients.
+            event_metadata['providerErrorCode'] = event_metadata.get('code')
         account_events.record_event(
             account_id=account.id,
             profile_id=account.profile_id,
@@ -3955,7 +3957,8 @@ def oauth_admin_status():
         metadata = payload.get('metadata') or {}
         # Historical events can contain another live flow's state/auth URL.
         # The initiating caller gets its state only from the bound request.
-        public_keys = {'timestamp', 'scope', 'scopes', 'redirectUri', 'accountId', 'profileId', 'platform', 'workspaceId'}
+        public_keys = {'timestamp', 'mode', 'scope', 'scopes', 'redirectUri', 'accountId', 'profileId', 'platform', 'workspaceId',
+                       'kind', 'terminal', 'code', 'subcode', 'httpStatus', 'providerErrorCode'}
         payload['metadata'] = {key: value for key, value in metadata.items() if key in public_keys} if isinstance(metadata, dict) else {}
         return payload
     last_start = next((event for event in events if event.action == 'oauth_start'), None)
