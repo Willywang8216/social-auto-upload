@@ -12,6 +12,8 @@ import secrets
 import urllib.parse
 from typing import Any
 
+
+from myUtils import token_state
 try:
     import requests
 except ModuleNotFoundError:  # pragma: no cover - environment-specific
@@ -45,8 +47,8 @@ CLIENT_SECRET_ENV = "META_APP_SECRET"
 REDIRECT_URI_ENV = "META_REDIRECT_URI"
 
 
-class MetaOAuthError(RuntimeError):
-    """Raised when Meta OAuth cannot complete."""
+class MetaOAuthError(token_state.CredentialError):
+    """Safe structured Meta OAuth failure (including code/subcode)."""
 
 
 def _get_session(session=None):
@@ -115,12 +117,7 @@ def exchange_code_for_token(*, code: str, redirect_uri: str, client_id_env: str 
         },
         timeout=120,
     )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get('error'):
-        message = payload.get('error', {}).get('message') if isinstance(payload.get('error'), dict) else payload.get('error')
-        raise MetaOAuthError(str(message or 'Meta token exchange failed'))
-    return payload
+    return token_state.response_payload(response, error_class=MetaOAuthError)
 
 
 def exchange_for_long_lived_token(*, access_token: str, client_id_env: str = CLIENT_ID_ENV, client_secret_env: str = CLIENT_SECRET_ENV, session=None) -> dict[str, Any]:
@@ -135,12 +132,7 @@ def exchange_for_long_lived_token(*, access_token: str, client_id_env: str = CLI
         },
         timeout=120,
     )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get('error'):
-        message = payload.get('error', {}).get('message') if isinstance(payload.get('error'), dict) else payload.get('error')
-        raise MetaOAuthError(str(message or 'Meta long-lived token exchange failed'))
-    return payload
+    return token_state.response_payload(response, error_class=MetaOAuthError)
 
 
 def refresh_instagram_user_token(*, access_token: str, session=None) -> dict[str, Any]:
@@ -158,33 +150,69 @@ def refresh_instagram_user_token(*, access_token: str, session=None) -> dict[str
         params={"grant_type": "ig_refresh_token", "access_token": access_token},
         timeout=120,
     )
-    if not getattr(response, "ok", True):
-        return exchange_for_long_lived_token(access_token=access_token, session=session)
     try:
-        payload = response.json()
-    except ValueError:
+        return token_state.response_payload(response, error_class=MetaOAuthError)
+    except MetaOAuthError as exc:
+        if exc.kind == 'transient':
+            raise
+        # Facebook Login tokens may be rejected by the IG-specific endpoint.
+        # The FB exchange still has to succeed; it cannot hide 429/5xx errors.
         return exchange_for_long_lived_token(access_token=access_token, session=session)
-    if payload.get("error"):
-        return exchange_for_long_lived_token(access_token=access_token, session=session)
-    return payload
 
 
-def fetch_managed_pages(*, access_token: str, session=None) -> dict[str, Any]:
+def fetch_managed_pages(*, access_token: str, session=None, max_pages: int = 25) -> dict[str, Any]:
+    """Fetch the complete bounded Page list, never a partial first-page result.
+
+    Follow cursors on our fixed endpoint, not a provider-supplied arbitrary URL.
+    Validate next links, reject cycles, conflicting identities and truncation.
+    """
+    import re
     http = _get_session(session)
-    response = http.get(
-        META_ME_ACCOUNTS_URL,
-        params={
-            'access_token': access_token,
-            'fields': 'id,name,access_token,picture.type(large),instagram_business_account{id,username,profile_picture_url}',
-        },
-        timeout=120,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get('error'):
-        message = payload.get('error', {}).get('message') if isinstance(payload.get('error'), dict) else payload.get('error')
-        raise MetaOAuthError(str(message or 'Meta pages query failed'))
-    return payload
+    params = {
+        'access_token': access_token, 'limit': 100,
+        'fields': 'id,name,access_token,picture.type(large),instagram_business_account{id,username,profile_picture_url}',
+    }
+    pages, seen_ids, seen_cursors = [], set(), set()
+    for _ in range(max(1, min(int(max_pages), 25))):
+        response = http.get(META_ME_ACCOUNTS_URL, params=dict(params), timeout=30)
+        payload = token_state.response_payload(response, error_class=MetaOAuthError)
+        rows = payload.get('data')
+        if not isinstance(rows, list):
+            raise MetaOAuthError('Meta returned an unreadable Page list')
+        if len(pages) + len(rows) > 2500:
+            raise MetaOAuthError('Meta Page enumeration exceeded the account safety limit')
+        for page in rows:
+            if not isinstance(page, dict) or not str(page.get('id') or '').strip():
+                raise MetaOAuthError('Meta returned a Page without a stable identity')
+            page_id = str(page['id'])
+            if page_id in seen_ids:
+                raise MetaOAuthError('Meta returned ambiguous duplicate Page identities')
+            seen_ids.add(page_id)
+            pages.append(page)
+        paging = payload.get('paging') or {}
+        if not isinstance(paging, dict):
+            raise MetaOAuthError('Meta returned invalid pagination')
+        next_url = paging.get('next')
+        if not next_url:
+            return {'data': pages}
+        try:
+            url = urllib.parse.urlsplit(str(next_url))
+            valid = (url.scheme == 'https' and url.hostname == 'graph.facebook.com'
+                     and url.port in (None, 443) and not url.username and not url.password
+                     and not url.fragment and re.fullmatch(r'/(?:v\d+\.\d+/)?(?:me|\d+)/accounts', url.path))
+            query = urllib.parse.parse_qs(url.query)
+            after = (query.get('after') or [None])[0]
+            cursor = (paging.get('cursors') or {}).get('after')
+        except (ValueError, TypeError, AttributeError):
+            valid, after, cursor = False, None, None
+        if not valid or (after and cursor and after != cursor):
+            raise MetaOAuthError('Meta returned an unsafe pagination link')
+        cursor = after or cursor
+        if not isinstance(cursor, str) or not cursor or len(cursor) > 4096 or cursor in seen_cursors:
+            raise MetaOAuthError('Meta returned a missing or repeated pagination cursor')
+        seen_cursors.add(cursor)
+        params['after'] = cursor
+    raise MetaOAuthError('Meta Page enumeration exceeded the safety limit; no credentials changed')
 
 
 def parse_signed_request(signed_request: str, *, app_secret: str) -> dict[str, Any]:
@@ -215,36 +243,26 @@ def parse_signed_request(signed_request: str, *, app_secret: str) -> dict[str, A
     return json.loads(payload_bytes.decode('utf-8'))
 
 
-# ---------------------------------------------------------------------------
-# Token-expiry resolution
-#
-# Facebook's ``debug_token`` is the source of truth for how long a token
-# lives. It returns ``expires_at`` as an epoch (``> 0``) for a token that
-# expires, and ``0`` for a token Facebook reports as *never* expiring. Some
-# Meta apps issue exactly such non-expiring tokens, and then also omit
-# ``expires_in`` from every token response. SAU's legacy assumption that a
-# Meta token is always a 60-day long-lived token that carries ``expires_in``
-# made those accounts look "expired / reconnect required" forever even though
-# the token never lapses. These helpers persist a *truthful* expiry instead:
-# exact ISO for expiring tokens, a far-future sentinel for never-expiring ones.
-# ---------------------------------------------------------------------------
-
+# Token and data-access expiry are separate provider facts. A non-expiring token
+# still needs periodic validation: scheduled expiry says nothing about revocation.
 DEBUG_TOKEN_URL = f"{META_GRAPH_ROOT}/debug_token"
-#: Years ahead used as the "never expires" sentinel (matches how the app's
-#: staleness / status code treats a far-future expiry: never stale, never
-#: flagged for reconnect).
+# Compatibility sentinel for consumers which still require an ISO expiry. Only
+# affirmative valid introspection with explicit zero may receive this sentinel.
 NON_EXPIRING_EXPIRY_YEARS = 10
 
 
-def debug_token_info(*, access_token: str, session=None) -> dict[str, Any]:
-    """Return the ``data`` block of the Graph ``debug_token`` endpoint.
+def _validate_debug_data(data: dict) -> dict:
+    if data.get('is_valid') is False or data.get('error'):
+        verdict = token_state.provider_error(data.get('error'), invalid=data.get('is_valid') is False)
+        raise MetaOAuthError(str(verdict), code=verdict.error_code, subcode=verdict.error_subcode,
+                             terminal=verdict.terminal, kind=verdict.kind)
+    return data
 
-    The debug call authenticates as the app itself (``app_id|app_secret``),
-    so it works for any token this app issued regardless of token type.
-    Raises :class:`MetaOAuthError` when Facebook reports the token invalid or
-    the request itself fails. Returns ``{}`` when the app's debug credentials
-    are not configured (so a resolver can fall back to ``expires_in`` instead
-    of treating a config gap as a token verdict).
+
+def debug_token_info(*, access_token: str, session=None) -> dict[str, Any]:
+    """Return introspection data; reject explicit invalid/error verdicts.
+
+    Missing app introspection credentials yield unknown, never a valid verdict.
     """
     http = _get_session(session)
     try:
@@ -256,12 +274,9 @@ def debug_token_info(*, access_token: str, session=None) -> dict[str, Any]:
         params={"input_token": access_token, "access_token": app_token},
         timeout=30,
     )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get("error"):
-        message = payload.get("error", {}).get("message") if isinstance(payload.get("error"), dict) else payload.get("error")
-        raise MetaOAuthError(str(message or "Meta debug_token failed"))
-    return payload.get("data") or {}
+    payload = token_state.response_payload(response, error_class=MetaOAuthError)
+    data = payload.get('data')
+    return _validate_debug_data(data) if isinstance(data, dict) else {}
 
 
 def _far_future_expiry_iso() -> str:
@@ -271,51 +286,64 @@ def _far_future_expiry_iso() -> str:
     ).isoformat(timespec="seconds")
 
 
-def resolve_access_token_expiry(*, access_token: str, expires_in: Any = None) -> dict[str, Any]:
-    """Resolve the truthful expiry to persist for a Meta user/page token.
-
-    Returns ``{"expires_at_iso": <naive-UTC ISO>, "mode": <str>,
-    "expires_at_epoch": <int>}`` where ``mode`` is:
-
-    * ``"expiring"`` — the token has a real deadline; persist its exact time.
-    * ``"never"`` — Facebook reports the token never expires (``expires_at ==
-      0``); persist a far-future sentinel so the 60-day refresh model cannot
-      mark it "expired / reconnect required".
-
-    ``expires_in`` (from a token response) is only a fallback for when the
-    debug call fails transiently; a genuine Facebook rejection
-    (:class:`MetaOAuthError`, e.g. an invalid token) is re-raised so callers
-    never fake an expiry for a dead credential.
-    """
+def _epoch(value) -> int | None:
+    if isinstance(value, bool):
+        return None
     try:
-        data = debug_token_info(access_token=access_token)
-    except MetaOAuthError:
-        raise
-    except Exception:  # noqa: BLE001 — transient network/parse: fall back below
-        data = {}
+        number = int(value)
+        if number >= 0 and str(number) == str(value):
+            return number
+    except (TypeError, ValueError):
+        pass
+    return None
 
-    raw_exp = data.get("expires_at")
-    if isinstance(raw_exp, int) and raw_exp > 0:
-        exp_dt = datetime.datetime.fromtimestamp(raw_exp, tz=datetime.timezone.utc).replace(tzinfo=None)
-        return {
-            "expires_at_iso": exp_dt.isoformat(timespec="seconds"),
-            "mode": "expiring",
-            "expires_at_epoch": raw_exp,
-        }
-    if expires_in not in (None, "", 0):
+
+def _epoch_iso(epoch: int | None) -> str:
+    if not epoch:
+        return ''
+    try:
+        return datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')
+    except (ValueError, OverflowError, OSError):
+        return ''
+
+
+def resolve_access_token_expiry(*, access_token: str, expires_in: Any = None,
+                                debug_data: dict | None = None, session=None) -> dict[str, Any]:
+    """Resolve expiring / verified-never / unknown, plus data-access expiry.
+
+    Valid explicit zero outranks expires_in. Unknown without a duration remains
+    unknown, and a provider-invalid token can never become a ten-year token.
+    All epoch arithmetic uses aware UTC (including the duration fallback).
+    """
+    if debug_data is None:
         try:
-            exp_dt = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(
-                seconds=int(expires_in)
-            )
-            return {
-                "expires_at_iso": exp_dt.isoformat(timespec="seconds"),
-                "mode": "expiring",
-                "expires_at_epoch": int(exp_dt.timestamp()),
-            }
-        except (TypeError, ValueError):
-            pass
-    return {
-        "expires_at_iso": _far_future_expiry_iso(),
-        "mode": "never",
-        "expires_at_epoch": 0,
+            data = debug_token_info(access_token=access_token, **({'session': session} if session is not None else {}))
+        except MetaOAuthError:
+            raise
+        except Exception:  # transport failure: duration is still a usable fact
+            data = {}
+    else:
+        data = debug_data
+    data = _validate_debug_data(data if isinstance(data, dict) else {})
+    raw_exp = _epoch(data.get('expires_at'))
+    data_exp = _epoch(data.get('data_access_expires_at'))
+    resolved = {
+        'expires_at_iso': '', 'mode': 'unknown', 'expires_at_epoch': None,
+        'data_access_expires_at_iso': _epoch_iso(data_exp),
+        'data_access_expires_at_epoch': data_exp,
+        'is_valid': data.get('is_valid') if isinstance(data.get('is_valid'), bool) else None,
     }
+    if raw_exp == 0 and data.get('is_valid') is True:
+        resolved.update(expires_at_iso=_far_future_expiry_iso(), mode='never', expires_at_epoch=0)
+    elif raw_exp and _epoch_iso(raw_exp):
+        resolved.update(expires_at_iso=_epoch_iso(raw_exp), mode='expiring', expires_at_epoch=raw_exp)
+    else:
+        duration = _epoch(expires_in)
+        if duration:
+            try:
+                expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=duration)
+                resolved.update(expires_at_iso=expires.replace(tzinfo=None).isoformat(timespec='seconds'),
+                                mode='expiring', expires_at_epoch=int(expires.timestamp()))
+            except (OverflowError, ValueError):
+                pass
+    return resolved

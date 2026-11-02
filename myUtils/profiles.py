@@ -148,6 +148,8 @@ class Account:
     # UI can show "Profile: NW" without a second roundtrip.
     profile_name: str = ""
     profile_slug: str = ""
+    # Used by credential CAS / OAuth binding; never changed by maintenance.
+    workspace_id: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -805,6 +807,7 @@ def update_account(
     cookie_path: str | Path | None = None,
     auth_type: str | None = None,
     config: dict | None = None,
+    config_patch: dict | None = None,
     enabled: bool | None = None,
     status: int | None = None,
     nickname: str | None = None,
@@ -814,47 +817,66 @@ def update_account(
 ) -> Account:
     """Update an account. When ``workspace_id`` is given, an account owned by
     another workspace raises ``LookupError`` and is left untouched."""
-    current = get_account(account_id, workspace_id=workspace_id, db_path=db_path)
-    next_profile_id = current.profile_id if profile_id is None else profile_id
-    next_account_name = current.account_name if account_name is None else account_name.strip()
-    next_auth_type = current.auth_type if auth_type is None else auth_type
-    next_config = current.config if config is None else config
-    next_enabled = current.enabled if enabled is None else enabled
-    next_status = current.status if status is None else status
-    next_nickname = current.nickname if nickname is None else nickname.strip()
-    next_account_group = current.account_group if account_group is None else account_group.strip()
-    next_cookie_path = current.cookie_path
-    if cookie_path is not None:
-        next_cookie_path = str(Path(cookie_path))
-    elif not next_cookie_path and (next_auth_type == "cookie" or platform_requires_cookie(current.platform)):
-        profile = get_profile(next_profile_id, db_path=db_path)
-        next_cookie_path = str(
-            resolve_cookie_path(current.platform, profile.slug, next_account_name)
-        )
-
+    if config is not None and config_patch is not None:
+        raise ValueError('Pass config or config_patch, not both')
     with _connect(db_path) as conn:
-        conn.execute(
-            """
-            UPDATE accounts
-            SET profile_id = ?, account_name = ?, cookie_path = ?, auth_type = ?, config_json = ?,
-                enabled = ?, status = ?, nickname = ?, account_group = ?
-            WHERE id = ?
-            """,
-            (
-                next_profile_id,
-                next_account_name,
-                next_cookie_path,
-                next_auth_type,
-                json.dumps(config_crypto.encrypt_config_secrets(next_config or {}), ensure_ascii=False),
-                int(next_enabled),
-                next_status,
-                next_nickname,
-                next_account_group,
-                account_id,
-            ),
-        )
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        if row is None or (workspace_id is not None and row["workspace_id"] != workspace_id):
+            raise LookupError(f"Account not found: id={account_id}")
+        current = _row_to_account(row)
+        next_profile_id = current.profile_id if profile_id is None else profile_id
+        if workspace_id is not None and profile_id is not None:
+            parent = conn.execute('SELECT workspace_id FROM profiles WHERE id = ?', (profile_id,)).fetchone()
+            if parent is None or parent['workspace_id'] != workspace_id:
+                raise LookupError(f'Profile not found: id={profile_id}')
+        next_account_name = current.account_name if account_name is None else account_name.strip()
+        next_auth_type = current.auth_type if auth_type is None else auth_type
+        next_cookie_path = current.cookie_path
+        if cookie_path is not None:
+            next_cookie_path = str(Path(cookie_path))
+        elif not next_cookie_path and (next_auth_type == "cookie" or platform_requires_cookie(current.platform)):
+            profile_row = conn.execute("SELECT * FROM profiles WHERE id = ?", (next_profile_id,)).fetchone()
+            if profile_row is None:
+                raise LookupError(f"Profile not found: id={next_profile_id}")
+            next_cookie_path = str(resolve_cookie_path(current.platform, profile_row["slug"], next_account_name))
+
+        # A metadata-only update must not write a previously read config back
+        # over a token rotated by another process. Read defaults under the same
+        # write transaction, and omit config_json entirely when config=None.
+        assignments = ["profile_id = ?", "account_name = ?", "cookie_path = ?", "auth_type = ?",
+                       "enabled = ?", "status = ?", "nickname = ?", "account_group = ?"]
+        values = [next_profile_id, next_account_name, next_cookie_path, next_auth_type,
+                  int(current.enabled if enabled is None else enabled),
+                  current.status if status is None else status,
+                  current.nickname if nickname is None else nickname.strip(),
+                  current.account_group if account_group is None else account_group.strip()]
+        if config_patch is not None:
+            from myUtils import token_state
+            config = dict(current.config or {})
+            config.update(config_patch)
+            changed = {key for key in config_patch if key in token_state.CREDENTIAL_KEYS
+                       and config_patch[key] != (current.config or {}).get(key)}
+            if changed:
+                # Manual input is configuration, NOT a successful live check.
+                config['_credentialRevision'] = token_state._count((current.config or {}).get('_credentialRevision')) + 1
+                config['_nativeCredentialState'] = 'unknown'
+                config.pop('_nativeCredentialCheckedAt', None)
+                config.pop('_lastTokenSelfCheckAt', None)
+                if 'accessToken' in changed or 'accessTokenEnv' in changed:
+                    config.update(accessTokenExpiryMode='unknown', accessTokenExpiresAtEpoch=None,
+                                  accessTokenExpiresAt=config_patch.get('accessTokenExpiresAt', ''),
+                                  dataAccessExpiresAt='', dataAccessExpiresAtEpoch=None)
+                if 'metaUserAccessToken' in changed:
+                    config.update(metaTokenExpiryMode='unknown', metaTokenExpiresAtEpoch=None,
+                                  metaUserAccessTokenExpiresAt=config_patch.get('metaUserAccessTokenExpiresAt', ''),
+                                  metaUserDataAccessExpiresAt='', metaUserDataAccessExpiresAtEpoch=None)
+        if config is not None:
+            assignments.append("config_json = ?")
+            values.append(json.dumps(config_crypto.encrypt_config_secrets(config), ensure_ascii=False))
+        conn.execute(f"UPDATE accounts SET {', '.join(assignments)} WHERE id = ?", (*values, account_id))
         conn.commit()
-    return get_account(account_id, db_path=db_path)
+    return get_account(account_id, workspace_id=workspace_id, db_path=db_path)
 
 
 def delete_account(account_id: int, *, workspace_id: str | None = None, db_path: Path = DB_PATH) -> None:

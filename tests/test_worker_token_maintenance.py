@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from myUtils import profiles as profile_registry
+from myUtils import token_state
 from myUtils.worker import PublishWorker, _persist_rotated_config
 
 
@@ -72,7 +73,8 @@ class WorkerStalenessTests(unittest.TestCase):
     def test_long_lived_platforms_not_stale_when_far_out(self) -> None:
         for platform, config in (
             ("facebook", {"metaUserAccessToken": "u", "accessToken": "p",
-                          "metaUserAccessTokenExpiresAt": _aware(timedelta(days=30))}),
+                          'metaUserAccessTokenExpiresAt': _aware(timedelta(days=30)),
+                          '_lastTokenSelfCheckAt': _aware(timedelta())}),
             ("threads", {"accessToken": "a", "accessTokenExpiresAt": _naive(timedelta(days=30))}),
         ):
             with self.subTest(platform=platform):
@@ -204,38 +206,37 @@ class MetaLiveSelfCheckTests(unittest.TestCase):
         # 2h ago with a recorded failure (1h retry) -> due
         self.assertTrue(_meta_self_check_due({'_lastTokenSelfCheckAt': self._ago(2), '_tokenSelfCheckFailures': '1'}))
 
-    def test_repeated_failures_flag_expired_and_alert_once(self):
+    def test_transient_failures_never_fabricate_expiry_and_terminal_alerts_once(self):
+        import tempfile
         from pathlib import Path
-        from myUtils import ops_alerts as _ops_alerts
-        from sau_backend import _record_meta_selfcheck_failure, _META_SELFCHECK_FAILURE_THRESHOLD
-
-        acct = profile_registry.Account(
-            id=99, profile_id=1, platform='facebook', account_name='t',
-            cookie_path='', auth_type='oauth', config={},
-        )
-        written: dict = {}
-        alerts = {'n': 0}
-        cfg: dict = {}
-        with patch.object(profile_registry, 'update_account', side_effect=lambda *a, **k: written.update(config=k.get('config', {}))):
-            with patch.object(_ops_alerts, 'send_ops_alert', side_effect=lambda *a, **k: alerts.__setitem__('n', alerts['n'] + 1)):
-                # below the threshold: counted but not yet "expired"
-                for _ in range(_META_SELFCHECK_FAILURE_THRESHOLD - 1):
-                    _record_meta_selfcheck_failure(account=acct, config=cfg, db_path=Path('/tmp/none.db'), error_text='boom')
-                    cfg = written.get('config', cfg)  # next tick re-reads the persisted row
-                self.assertEqual(alerts['n'], 0)
-                self.assertNotIn('_needsReconnect', written.get('config', {}))
-                # threshold failure -> expired + alert once
-                _record_meta_selfcheck_failure(account=acct, config=cfg, db_path=Path('/tmp/none.db'), error_text='boom')
-                self.assertEqual(alerts['n'], 1)
-                expired_cfg = written.get('config', {})
-                self.assertIs(expired_cfg.get('_needsReconnect'), True)
-                past = self._naive_now().isoformat(timespec='seconds')
-                self.assertLess(expired_cfg['metaUserAccessTokenExpiresAt'], past)
-                self.assertLess(expired_cfg['accessTokenExpiresAt'], past)
-                # further failures must not re-alert
-                cfg = expired_cfg
-                _record_meta_selfcheck_failure(account=acct, config=cfg, db_path=Path('/tmp/none.db'), error_text='boom')
-                self.assertEqual(alerts['n'], 1)
+        from db.createTable import bootstrap
+        from myUtils import ops_alerts
+        from sau_backend import _record_meta_selfcheck_failure
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / 'auth.db'
+            bootstrap(db_path)
+            profile = profile_registry.create_profile('Synthetic', db_path=db_path)
+            expiry = _aware(timedelta(days=30))
+            account = profile_registry.add_account(profile.id, 'facebook', 'synthetic', auth_type='oauth',
+                config={'pageId': 'p', 'accessToken': 'page', 'metaUserAccessToken': 'user',
+                        'accessTokenExpiresAt': expiry, 'metaUserAccessTokenExpiresAt': expiry}, db_path=db_path)
+            with patch.object(ops_alerts, 'send_ops_alert') as alert:
+                for _ in range(5):
+                    _record_meta_selfcheck_failure(account=account, config=account.config, db_path=db_path, exc=TimeoutError())
+                    account = profile_registry.get_account(account.id, db_path=db_path)
+                self.assertFalse(account.config.get('_needsReconnect'))
+                self.assertEqual(account.config['accessTokenExpiresAt'], expiry)
+                self.assertEqual(account.config['metaUserAccessTokenExpiresAt'], expiry)
+                alert.assert_not_called()
+                terminal = token_state.provider_error({'code': 190, 'error_subcode': 460})
+                # Even identical concurrent snapshots cannot alert twice.
+                for _ in range(2):
+                    _record_meta_selfcheck_failure(account=account, config=account.config, db_path=db_path, exc=terminal)
+                stored = profile_registry.get_account(account.id, db_path=db_path).config
+                self.assertTrue(stored['_needsReconnect'])
+                self.assertEqual(stored['accessTokenExpiresAt'], expiry)
+                self.assertEqual(stored['_nativeCredentialError']['subcode'], 460)
+                alert.assert_called_once()
 
 
 class PersistRotatedConfigTests(unittest.TestCase):
@@ -246,8 +247,8 @@ class PersistRotatedConfigTests(unittest.TestCase):
         account = _account("twitter", {})
         seen: dict = {}
         with patch.object(
-            profile_registry, "update_account",
-            side_effect=lambda *a, **k: seen.update(k),
+            token_state, 'commit_success',
+            side_effect=lambda account, changes, **k: seen.update(config=changes, **k) or account,
         ):
             _persist_rotated_config(
                 account, {"accessToken": "new"}, payload={"_db_path": "/tmp/tenant.db"},
@@ -255,19 +256,19 @@ class PersistRotatedConfigTests(unittest.TestCase):
         self.assertEqual(seen.get("db_path"), _Path("/tmp/tenant.db"))
         self.assertEqual(seen.get("config"), {"accessToken": "new"})
 
-    def test_omits_db_path_when_payload_has_none(self):
+    def test_uses_registry_db_when_payload_has_none(self):
         account = _account("twitter", {})
         seen: dict = {}
         with patch.object(
-            profile_registry, "update_account",
-            side_effect=lambda *a, **k: seen.update(k),
+            token_state, 'commit_success',
+            side_effect=lambda account, changes, **k: seen.update(config=changes, **k) or account,
         ):
             _persist_rotated_config(account, {"accessToken": "new"}, payload={})
-        self.assertNotIn("db_path", seen)
+        self.assertEqual(seen.get('db_path'), profile_registry.DB_PATH)
 
     def test_empty_config_is_a_noop(self):
         account = _account("twitter", {})
-        with patch.object(profile_registry, "update_account") as upd:
+        with patch.object(token_state, 'commit_success') as upd:
             _persist_rotated_config(account, {}, payload={"_db_path": "/tmp/x.db"})
         upd.assert_not_called()
 

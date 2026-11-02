@@ -43,6 +43,7 @@ from myUtils import media_remote_storage
 from myUtils import media_pipeline
 from myUtils import profiles as profile_registry
 from myUtils import prepared_publishers
+from myUtils import token_state, token_maintenance
 from myUtils import content_rules
 from myUtils import sociamonials_fallback
 from myUtils import sociamonials_reclaim
@@ -313,12 +314,12 @@ class PublishWorker:
 
     # After a refresh fails we back off exponentially instead of retrying every
     # tick — a dead credential used to be hammered hundreds of times a day.
-    # Base doubles per consecutive failure up to the cap; once the failure
-    # count crosses the threshold the account is flagged for manual reconnect
-    # (``_needsReconnect``) and skipped entirely until a human re-authorises it.
+    # Base doubles per consecutive failure up to the cap. Only a structured
+    # terminal credential/permission verdict requires manual reconnect; an
+    # arbitrary number of transport failures must remain retryable.
     _MAINTENANCE_BACKOFF_BASE_SECONDS: int = 30 * 60      # 30 min after 1st failure
     _MAINTENANCE_BACKOFF_CAP_SECONDS: int = 6 * 3600      # cap at 6 h
-    _MAINTENANCE_RECONNECT_THRESHOLD: int = 5             # give up → flag for human
+    _MAINTENANCE_RECONNECT_THRESHOLD: int = 5  # compatibility only; not a revocation verdict
 
     def __init__(
         self,
@@ -481,22 +482,11 @@ class PublishWorker:
             skew = max(skew, self._LONG_LIVED_REFRESH_MARGIN_SECONDS)
 
         if platform in {"facebook", "instagram"}:
-            meta_user_token = str(config.get("metaUserAccessToken") or "").strip()
-            if not meta_user_token:
-                return False
-            access_token = str(config.get("accessToken") or "").strip()
-            if not access_token:
-                return True
-            expires_at = self._parse_iso_datetime(
-                str(config.get("metaUserAccessTokenExpiresAt") or config.get("accessTokenExpiresAt") or "")
-            )
-            if expires_at is None:
-                # No expiry recorded (legacy/imported connect) — refresh once to
-                # establish one, otherwise the 60-day long-lived token silently
-                # dies because nothing ever renews it. Back-off keeps a failing
-                # refresh from looping.
-                return True
-            return expires_at <= (self._utc_now() + timedelta(seconds=skew))
+            # Includes periodic READ validation for non-expiring tokens and
+            # data-access deadlines; it does not force a token exchange.
+            return token_maintenance.meta_maintenance_due(config, margin_seconds=skew)
+        if platform == 'threads' and not token_maintenance.threads_refresh_allowed(config):
+            return False
 
         access_token = str(config.get("accessToken") or "").strip()
         if not access_token:
@@ -606,87 +596,11 @@ class PublishWorker:
                     )
 
             elif platform == "threads":
-                access_token = str(config.get("accessToken") or "").strip()
-                if not access_token:
-                    return
-                from myUtils import threads_auth
-                refreshed = threads_auth.refresh_long_lived_token(access_token=access_token)
-                config.update({
-                    "accessToken": str(refreshed.get("access_token") or access_token),
-                    "accessTokenUpdatedAt": now,
-                    "lastAutoRefreshAt": now,
-                })
-                expires_in = refreshed.get("expires_in")
-                if expires_in:
-                    config["accessTokenExpiresAt"] = prepared_publishers._token_expiry_from_payload(
-                        {"expires_in": expires_in}, "expires_in"
-                    )
+                config.update(token_maintenance.maintain_threads(config, mode='auto'))
 
             elif platform in {"facebook", "instagram"}:
-                meta_user_token = str(config.get("metaUserAccessToken") or "").strip()
-                if not meta_user_token:
-                    return
-                from myUtils import meta_auth
-                if platform == "instagram":
-                    refreshed = meta_auth.refresh_instagram_user_token(access_token=meta_user_token)
-                else:
-                    refreshed = meta_auth.exchange_for_long_lived_token(access_token=meta_user_token)
-                new_user_token = str(refreshed.get("access_token") or meta_user_token)
-                config["metaUserAccessToken"] = new_user_token
-                # Persist a truthful expiry. Some Meta apps issue never-expiring
-                # tokens (debug_token ``expires_at == 0``) and omit ``expires_in``
-                # from every response; the old 60-day model then left a stale/past
-                # expiry that read as "expired / reconnect required" forever.
-                resolved_expiry = meta_auth.resolve_access_token_expiry(
-                    access_token=new_user_token,
-                    expires_in=refreshed.get("expires_in"),
-                )
-                config["metaUserAccessTokenExpiresAt"] = resolved_expiry["expires_at_iso"]
-                config["metaTokenExpiryMode"] = resolved_expiry["mode"]
-                config["metaTokenExpiresAtEpoch"] = resolved_expiry["expires_at_epoch"]
-
-                # Re-derive the page-level access_token from the freshly-refreshed
-                # user token. Page tokens inherit the user token's lifecycle, so
-                # without this publishing breaks ~60 days after connect.
-                try:
-                    pages_payload = meta_auth.fetch_managed_pages(access_token=new_user_token)
-                    pages = pages_payload.get("data", []) if isinstance(pages_payload, dict) else []
-                    if isinstance(pages, list) and pages:
-                        target_page = None
-                        if platform == "facebook":
-                            wanted = str(config.get("pageId") or "").strip()
-                            if wanted:
-                                target_page = next(
-                                    (p for p in pages if str(p.get("id") or "") == wanted),
-                                    None,
-                                )
-                            if target_page is None:
-                                target_page = pages[0]
-                        else:  # instagram
-                            wanted_ig = str(config.get("igUserId") or "").strip()
-                            for p in pages:
-                                ig = p.get("instagram_business_account") if isinstance(p, dict) else None
-                                if not isinstance(ig, dict):
-                                    continue
-                                if wanted_ig and str(ig.get("id") or "") == wanted_ig:
-                                    target_page = p
-                                    break
-                                if not wanted_ig and target_page is None:
-                                    target_page = p
-                        if target_page is not None:
-                            page_token = str(target_page.get("access_token") or "").strip()
-                            if page_token:
-                                config["accessToken"] = page_token
-                            if platform == "instagram" and target_page.get("id"):
-                                config["pageId"] = str(target_page["id"])
-                except Exception as exc:
-                    _logger.warning(
-                        f"worker self-maintenance: failed to re-derive page token "
-                        f"for {platform} account id={account.id}: {exc}"
-                    )
-
-                config["accessTokenUpdatedAt"] = now
-                config["lastAutoRefreshAt"] = now
+                config.update(token_maintenance.maintain_meta(
+                    config, platform, mode='auto', margin_seconds=self._LONG_LIVED_REFRESH_MARGIN_SECONDS))
 
             elif platform == "twitter":
                 refresh_token = str(config.get("refreshToken") or "").strip()
@@ -696,13 +610,9 @@ class PublishWorker:
                     return
 
                 def _persist_twitter(updated_config: dict) -> None:
-                    profile_registry.update_account(
-                        account.id,
-                        config=updated_config,
-                        auth_type="oauth",
-                        status=1,
-                        db_path=self._db_path,
-                    )
+                    token_state.require_saved(token_state.commit_success(
+                        account, token_state.credential_changes(account.config or {}, updated_config),
+                        db_path=self._db_path))
 
                 # Single-flight: the rotated refresh token is persisted inside
                 # the lock before another maintenance pass can read the old one.
@@ -723,23 +633,12 @@ class PublishWorker:
             else:
                 return  # unknown platform
 
-            # Success: clear any prior failure / back-off / reconnect markers so
-            # the account returns to the normal refresh cadence.
-            for _key in (
-                "_maintenanceFailures", "_nextMaintenanceAttemptAt",
-                "_lastMaintenanceError", "_lastMaintenanceAttemptAt",
-                "_needsReconnect", "_reconnectAlertedAt",
-            ):
-                config.pop(_key, None)
-            # Persist updated config back to the database
-            profile_registry.update_account(
-                account.id,
-                config=config,
-                auth_type="oauth",
-                status=1,
-                db_path=self._db_path,
-            )
-            _logger.info(f"worker self-maintenance: refreshed {platform} account id={account.id}")
+            # Cross-process CAS: a reconnect (even with the same token) wins
+            # over stale maintenance; route and operator fields merge intact.
+            updated = token_state.commit_success(
+                account, token_state.credential_changes(account.config or {}, config), db_path=self._db_path)
+            if updated is not None:
+                _logger.info(f"worker self-maintenance: validated {platform} account id={account.id}")
 
         except Exception as exc:
             self._handle_refresh_failure(account, config, exc)
@@ -747,69 +646,31 @@ class PublishWorker:
     def _handle_refresh_failure(
         self, account: profile_registry.Account, config: dict, exc: Exception
     ) -> None:
-        """Record a failed refresh: bump the failure count, schedule an
-        exponential back-off, and after ``_MAINTENANCE_RECONNECT_THRESHOLD``
-        consecutive failures flag the account for manual reconnect and alert
-        the operator (once). All state lives in ``config_json`` so no schema
-        migration is needed."""
-        now_dt = self._utc_now()
-        now_iso = now_dt.isoformat(timespec="seconds")
-        # Base the failure state on the account's CURRENT row, not the snapshot
-        # read before the refresh attempt. A single-use refresh token is rotated
-        # by the token endpoint, so if a publish-path refresh succeeded while
-        # this attempt was in flight, writing our stale snapshot back would
-        # discard the fresh token and strand the account permanently. Re-read
-        # and only overlay the failure markers.
+        """Only a structured terminal rejection requires reconnect.
+
+        Timeouts/429/5xx/unknown errors back off indefinitely without changing
+        scheduled expiry. A failure of an old credential generation is ignored.
+        """
         try:
-            latest = profile_registry.get_account(account.id, db_path=self._db_path)
-            merged = dict(latest.config or {})
-        except Exception:  # noqa: BLE001 - fall back to the snapshot we have
-            merged = dict(config)
-        failures = int(merged.get("_maintenanceFailures") or 0) + 1
-        backoff = min(
-            self._MAINTENANCE_BACKOFF_BASE_SECONDS * (2 ** (failures - 1)),
-            self._MAINTENANCE_BACKOFF_CAP_SECONDS,
-        )
-        merged["_maintenanceFailures"] = failures
-        merged["_lastMaintenanceError"] = str(exc)[:300]
-        merged["_lastMaintenanceAttemptAt"] = now_iso
-        merged["_nextMaintenanceAttemptAt"] = (
-            now_dt + timedelta(seconds=backoff)
-        ).isoformat(timespec="seconds")
-
-        credential_rejected = False
-        if account.platform == "twitter":
-            # A rejected X refresh token is terminal: no number of retries can
-            # recover it, so surface "reconnect required" immediately instead of
-            # waiting for the (much larger) failure threshold.
-            credential_rejected = prepared_publishers._twitter_refresh_requires_reconnect(exc)
-        needs_reconnect = (
-            failures >= self._MAINTENANCE_RECONNECT_THRESHOLD or credential_rejected
-        )
-        should_alert = needs_reconnect and not merged.get("_reconnectAlertedAt")
-        if needs_reconnect:
-            merged["_needsReconnect"] = True
-        if should_alert:
-            merged["_reconnectAlertedAt"] = now_iso
-
-        try:
-            profile_registry.update_account(
-                account.id, config=merged, db_path=self._db_path,
+            alert_state = {}
+            updated = token_state.commit_failure(
+                account, exc, db_path=self._db_path,
+                self_check=account.platform in {'facebook', 'instagram'},
+                backoff_base=self._MAINTENANCE_BACKOFF_BASE_SECONDS,
+                backoff_cap=self._MAINTENANCE_BACKOFF_CAP_SECONDS,
+                alert_state=alert_state,
             )
-        except Exception as persist_exc:  # noqa: BLE001
-            _logger.error(
-                f"worker self-maintenance: could not persist failure state for "
-                f"account id={account.id}: {persist_exc!r}"
-            )
-
-        _logger.warning(
-            f"worker self-maintenance: failed to refresh {account.platform} "
-            f"{account.nickname or account.account_name} (account:{account.id}) "
-            f"(attempt {failures}, retry in {backoff}s"
-            f"{', FLAGGED for reconnect' if needs_reconnect else ''}): {exc}"
-        )
-        if should_alert:
-            self._alert_needs_reconnect(account, failures, exc)
+        except Exception as persist_exc:
+            _logger.error(f"worker self-maintenance: could not persist failure for account id={account.id}: {token_state.safe_error(persist_exc)}")
+            return
+        if updated is None:
+            return
+        merged = updated.config or {}
+        failures = int(merged.get('_maintenanceFailures') or 0)
+        reason = token_state.safe_error(exc)
+        _logger.warning(f"worker self-maintenance: {account.platform} account id={account.id}, attempt {failures}: {reason}")
+        if alert_state.get('needed'):
+            self._alert_needs_reconnect(account, failures, token_state.CredentialError(reason))
 
     def _alert_needs_reconnect(
         self, account: profile_registry.Account, failures: int, exc: Exception
@@ -834,7 +695,7 @@ class PublishWorker:
     async def _run_maintenance_tick(self) -> None:
         """Background scan-and-refresh for stale OAuth accounts."""
         try:
-            accounts = profile_registry.list_accounts(enabled=True, db_path=self._db_path)
+            accounts = await asyncio.to_thread(profile_registry.list_accounts, enabled=True, db_path=self._db_path)
         except Exception as exc:
             _logger.warning(f"worker self-maintenance: could not list accounts: {exc}")
             return
@@ -2811,14 +2672,13 @@ def _persist_rotated_config(account, updated_config, *, payload: dict | None = N
     """
     if not (isinstance(updated_config, dict) and updated_config):
         return
-    db_path = None
-    raw = (payload or {}).get("_db_path")
-    if raw:
-        db_path = Path(raw)
-    kwargs = {"db_path": db_path} if db_path is not None else {}
-    profile_registry.update_account(
-        account.id, config=updated_config, auth_type="oauth", **kwargs
-    )
+    raw = (payload or {}).get('_db_path')
+    db_path = Path(raw) if raw else profile_registry.DB_PATH
+    changes = token_state.credential_changes(account.config or {}, updated_config)
+    if changes:
+        # Final publisher writeback may follow an already-persisted rotation
+        # or a reconnect. Discard stale state without failing a delivered post.
+        token_state.commit_success(account, changes, db_path=db_path)
 
 
 async def _publish_prepared_twitter(

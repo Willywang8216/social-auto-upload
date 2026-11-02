@@ -265,8 +265,8 @@
         </div>
         <div class="acct-body">
           <div class="acct-stat">
-            <div class="n" style="font-size:13px">{{ acct.connectionLabel }}</div>
-            <div class="l">Status</div>
+            <div class="n" style="font-size:13px" :title="acct.publishingRoute?.reason">{{ publishingRouteLabel(acct) }}</div>
+            <div class="l">{{ acct.publishingRoute ? 'Publishing route' : 'Status' }}</div>
           </div>
           <div class="acct-stat">
             <div class="n" style="font-size:13px">{{ acct.platform }}</div>
@@ -274,13 +274,19 @@
           </div>
           <div class="acct-stat">
             <div class="n" style="font-size:13px">{{ expiryLabel(acct) }}</div>
-            <div class="l">Cookie</div>
+            <div class="l">{{ acct.nativeCredentials ? 'Native token expiry' : 'Cookie' }}</div>
           </div>
+        </div>
+        <div v-if="acct.nativeCredentials" class="acct-handle" style="padding:0 14px 10px" :title="acct.nativeCredentials.reason">
+          <div>Native: {{ cookieStatusLabel(acct) }} · {{ acct.nativeCredentials.reason }}</div>
+          <div>{{ nativeExpiryDetails(acct) }}</div>
+          <div>Last checked: {{ acct.nativeCredentials.lastCheckedAt || 'not checked' }}</div>
+          <div v-if="acct.publishingRoute?.provider === 'sociamonials'">Managed connection / availability: not validated by this configuration</div>
         </div>
         <div class="acct-actions" @click.stop>
           <button class="mini-btn" :class="{ accent: cookieStatusClass(acct) !== 'ck-valid' }" @click="onReauth(acct)">
             <component :is="icons.oauth" :width="13" :height="13" />
-            {{ acct.connectionLabel === 'Ready' ? 'Re-auth' : 'Reconnect' }}
+            {{ acct.reconnectRequired ? 'Reconnect native' : 'Re-auth' }}
           </button>
           <button v-if="acct.authType === 'oauth' && (acct.isExpiringWithin24h || acct.isExpiringWithin7d)" class="mini-btn" @click="onRefreshToken(acct)">
             <component :is="icons.spark" :width="13" :height="13" /> Refresh
@@ -311,7 +317,7 @@
             <component :is="icons.oauth" :width="18" :height="18" />
           </div>
           <div>
-            <h2>{{ connectData.account ? 'Re-authorize account' : 'Connect an account' }}</h2>
+            <h2>{{ connectData.accountId != null ? 'Re-authorize account' : 'Connect an account' }}</h2>
             <div class="ms">Capture &amp; encrypt a platform session</div>
           </div>
           <button class="modal-x" @click="showConnect = false">✕</button>
@@ -326,7 +332,7 @@
               :key="p.slug"
               class="plat-pick"
               :class="{ on: connectData.platform === p.slug }"
-              @click="connectData.platform = p.slug"
+              @click="connectData.accountId == null && (connectData.platform = p.slug)"
             >
               <div class="acct-logo" :style="{ background: p.color, width: '32px', height: '32px', borderRadius: '9px', fontSize: '13px' }">
                 {{ p.short }}
@@ -339,13 +345,13 @@
             <div style="display:flex;gap:12px;margin-top:18px">
               <div class="field" style="flex:1;margin-top:0">
                 <label>Account name</label>
-                <input class="input" placeholder="e.g. acme.official" v-model="connectData.account" />
+                <input class="input" placeholder="e.g. acme.official" v-model="connectData.account" :disabled="connectData.accountId != null" />
               </div>
               <div class="field" style="flex:1;margin-top:0">
                 <label>Profile</label>
-                <select class="input" v-model="connectData.profileId">
+                <select class="input" v-model="connectData.profileId" :disabled="connectData.accountId != null">
                   <option :value="null">— pick profile —</option>
-                  <option v-for="p in profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
+                  <option v-for="p in connectProfiles" :key="p.id" :value="p.id">{{ p.name }}</option>
                 </select>
               </div>
             </div>
@@ -396,7 +402,7 @@
                 <p>Click "Connect with OAuth" to open {{ platformLabel(connectData.platform) }}'s authorization page. You'll grant API access — no cookies or passwords needed. Tokens are stored encrypted and auto-refreshed.</p>
                 <div class="note">
                   <component :is="icons.about" />
-                  <p>OAuth is the recommended auth method. Your credentials never pass through this app — only the platform's official authorization flow is used.</p>
+                  <p>Your platform password is never sent to Socialupload. OAuth credentials stay on the server; connection success is shown only after they are verified and saved.</p>
                 </div>
                 <!-- Google-specific notice. Google's OAuth verification requires the
                      app to surface, in the product itself, what Google user data it
@@ -487,8 +493,8 @@
           <button
             v-if="connectMethod === 'oauth'"
             class="btn-primary"
-            :disabled="!connectData.platform || !connectData.account || oauthBusy"
-            :style="{ opacity: (!connectData.platform || !connectData.account || oauthBusy) ? 0.5 : 1 }"
+            :disabled="!connectData.platform || !connectData.account || connectData.profileId == null || oauthBusy"
+            :style="{ opacity: (!connectData.platform || !connectData.account || connectData.profileId == null || oauthBusy) ? 0.5 : 1 }"
             @click="doOAuthConnect"
           >
             {{ oauthBusy ? 'Connecting…' : 'Connect with OAuth' }}
@@ -526,7 +532,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useAccountStore } from '@/stores/account'
 import { accountApi } from '@/api/account'
 import { profilesApi } from '@/api/profiles'
@@ -537,6 +543,7 @@ import { youtubeApi } from '@/api/youtube'
 import { twitterApi } from '@/api/twitter'
 import { redditApi } from '@/api/reddit'
 import { icons } from '@/utils/icons'
+import { getApiBaseUrl } from '@/utils/api-url'
 import {
   telegramFieldDefs,
   redditFieldDefs,
@@ -892,11 +899,17 @@ const platformLabel = (slug) => PLATFORM_META[slug]?.label || slug
 const defaultAvatar = (name) => `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random&size=84&bold=true`
 
 const cookieStatusClass = (acct) => {
+  if (acct.nativeCredentials) {
+    if (['reconnect_required', 'expired', 'missing'].includes(acct.nativeCredentials.state)) return 'ck-exp'
+    return acct.nativeCredentials.state === 'valid' ? 'ck-valid' : 'ck-soon'
+  }
   if (acct.isOverdue || acct.reconnectRequired || acct.connectionLabel === 'Missing' || acct.connectionLabel === 'Token expired') return 'ck-exp'
   if (acct.isExpiringWithin24h || acct.isExpiringWithin7d) return 'ck-soon'
   return 'ck-valid'
 }
 const cookieStatusLabel = (acct) => {
+  if (acct.nativeCredentials) return nativeStateLabel(acct.nativeCredentials.state)
+  if (acct.reconnectRequired && !acct.isOverdue) return 'Reconnect required'
   const cls = cookieStatusClass(acct)
   const isOAuth = acct.authType === 'oauth'
   if (cls === 'ck-exp') return isOAuth ? 'Token expired' : 'Expired'
@@ -904,12 +917,39 @@ const cookieStatusLabel = (acct) => {
   return isOAuth ? 'Connected' : 'Valid'
 }
 const expiryLabel = (acct) => {
+  if (acct.nativeCredentials) return tokenExpiryLabel(acct.nativeCredentials.token)
   if (acct.isOverdue) return acct.authType === 'oauth' ? 'token expired' : 'expired'
   if (acct.secondsRemaining != null) {
     const d = Math.floor(acct.secondsRemaining / 86400)
     return d > 0 ? `in ${d}d` : `in ${Math.floor(acct.secondsRemaining / 3600)}h`
   }
   return acct.connectionLabel === 'Ready' ? (acct.authType === 'oauth' ? 'token' : 'session') : '—'
+}
+const nativeStateLabel = (state) => ({
+  reconnect_required: 'Reconnect required', expired: 'Token / data access expired',
+  missing: 'Native credentials missing', warning: 'Validation warning',
+  unknown: 'Not validated', expiring: 'Native expiry approaching', valid: 'Validated at last check',
+}[state] || 'Not validated')
+const tokenExpiryLabel = (token) => token?.mode === 'never' ? 'No scheduled expiry'
+  : token?.mode === 'unknown' || !token?.expiresAt ? 'Unknown' : token.expiresAt.slice(0, 10)
+const nativeExpiryDetails = (acct) => {
+  const native = acct.nativeCredentials
+  const parts = [`${native.userToken ? 'Page' : 'Token'} expiry: ${tokenExpiryLabel(native.token)}`]
+  if (native.userToken) parts.push(`User expiry: ${tokenExpiryLabel(native.userToken)}`)
+  for (const [label, token] of [['Page/token', native.token], ['User', native.userToken]]) {
+    if (!token) continue
+    const deadline = token.dataAccessExpiresAt?.slice(0, 10)
+      || (token.dataAccessExpiresAtEpoch === 0 ? 'No scheduled deadline' : 'Unknown')
+    parts.push(`${label} data access: ${deadline}`)
+  }
+  return parts.join(' · ')
+}
+const publishingRouteLabel = (acct) => {
+  const route = acct.publishingRoute
+  if (!route) return acct.connectionLabel
+  if (!route.enabled) return 'Disabled'
+  const label = route.provider === 'sociamonials' ? 'Managed' : 'Native'
+  return `${label} ${route.configured ? 'configured' : 'not configured'}`
 }
 
 /* Actions */
@@ -925,6 +965,7 @@ const onReauth = (acct) => {
     account: acct.accountName,
     profile: acct.profileName || acct.profileNameLegacy || '',
     profileId: acct.profileId,
+    accountId: acct.id,
   })
 }
 const onRefreshToken = async (acct) => {
@@ -937,14 +978,15 @@ const onRefreshToken = async (acct) => {
 const onRefreshAll = async () => {
   refreshAllBusy.value = true
   try {
-    const oauthAccounts = accounts.value.filter(a => a.authType === 'oauth')
+    const oauthAccounts = accounts.value.filter(a => a.authType === 'oauth' && a.enabled !== false)
     if (oauthAccounts.length === 0) {
       flash('No OAuth accounts to refresh')
       return
     }
     const ids = oauthAccounts.map(a => a.id)
-    await profilesApi.batchRefreshTokens(ids)
-    flash(`Refreshed ${ids.length} OAuth account(s)`)
+    const response = await profilesApi.batchRefreshTokens(ids)
+    const result = response?.data || {}
+    flash(`Refresh: ${result.succeeded ?? 0} succeeded, ${result.failed ?? 0} failed`)
     await loadAccounts()
   } catch (e) { flash('Refresh all failed: ' + e.message) }
   finally { refreshAllBusy.value = false }
@@ -980,7 +1022,9 @@ const runHealthCheck = async () => {
 /* Connect modal */
 const showConnect = ref(false)
 const connectMethod = ref('qr')
-const connectData = ref({ platform: null, account: '', profile: '', profileId: null, paste: '', config: {} })
+const connectData = ref({ platform: null, account: '', accountId: null, profile: '', profileId: null, paste: '', config: {} })
+const connectProfiles = ref([])
+let oauthCleanup = null
 const importBusy = ref(false)
 const oauthBusy = ref(false)
 const manualBusy = ref(false)
@@ -1022,9 +1066,11 @@ const loginStatusLabel = computed(() => {
 })
 
 const openConnect = (initial = {}) => {
+  oauthCleanup?.()
   connectData.value = {
     platform: initial.platform || null,
     account: initial.account || '',
+    accountId: initial.accountId ?? null,
     // Prefer the explicit profile id when the caller has one (e.g. onReauth
     // from an existing card) — that way the modal lands on the right profile
     // immediately, not the first profile in the list.
@@ -1055,105 +1101,103 @@ const onConfigFieldUpdate = ({ key, value }) => {
 
 /* Start OAuth flow for supported platforms */
 const doOAuthConnect = async () => {
-  if (!connectData.value.platform) return
+  if (!connectData.value.platform || oauthBusy.value) return
   oauthBusy.value = true
   try {
-    const platform = connectData.value.platform
-    const accountName = connectData.value.account || `${platform}-oauth`
-    const profileName = connectData.value.profile || ''
-
-    // Step 1: Get profiles. If the modal already has a profileId (e.g.
-    // reauth from an existing card), prefer that exact id — otherwise fall
-    // back to matching by name, and finally the first profile in the list.
+    const { platform, accountId: clickedId } = connectData.value
+    const accountName = connectData.value.account.trim()
     const profilesRes = await profilesApi.list()
     const allProfiles = profilesRes?.data || profilesRes || []
-    let profileId = null
-    if (connectData.value.profileId != null) {
-      const matched = allProfiles.find(p => p.id === connectData.value.profileId)
-      if (matched) profileId = matched.id
-    }
-    if (profileId == null && profileName) {
-      const matched = allProfiles.find(p => p.name === profileName || p.slug === profileName)
-      if (matched) profileId = matched.id
-    }
-    if (profileId == null && allProfiles.length > 0) profileId = allProfiles[0].id
-    if (!profileId) throw new Error('No profiles available — create a profile first')
-
-    // Step 2: Find existing account or create new one
-    let accountId = null
-    const existingAccount = accounts.value.find(
-      a => a.platformSlug === platform && a.accountName === accountName
-    )
-
-    if (existingAccount) {
-      // Reuse existing account for reauth
-      accountId = existingAccount.id
+    const profile = allProfiles.find(p => String(p.id) === String(connectData.value.profileId))
+    if (!profile || !accountName) throw new Error('Select a specific profile and account name first')
+    const profileId = profile.id
+    let accountId = clickedId
+    if (clickedId != null) {
+      // Reconnect only the clicked card. Never infer a target by platform/name.
+      const exact = accounts.value.find(a => String(a.id) === String(clickedId))
+      if (!exact || exact.platformSlug !== platform || String(exact.profileId) !== String(profileId) || exact.accountName !== accountName) {
+        throw new Error('The selected account/profile changed — reload Accounts and reconnect that exact card')
+      }
     } else {
-      // Create new account — backend uses the profile id as the parent.
-      const createRes = await profilesApi.createAccount(profileId, {
-        accountName,
-        platform,
-        authType: 'oauth',
-        profile: profileName,
-      })
-      const newAccount = createRes?.data || createRes
-      accountId = newAccount?.id
+      // A new connection is explicitly scoped to this profile. A same-name
+      // record is not an implicit reconnect, especially in another profile.
+      if (accounts.value.some(a => a.platformSlug === platform && a.accountName === accountName && String(a.profileId) === String(profileId))) {
+        throw new Error('This account already exists in the selected profile — use its Re-auth button')
+      }
+      const created = await profilesApi.createAccount(profileId, { accountName, platform, authType: 'oauth' })
+      accountId = (created?.data || created)?.id
       if (!accountId) throw new Error('Failed to create account')
+      connectData.value.accountId = accountId
+      await loadAccounts()
     }
 
-    // Step 3: Start OAuth flow
-    let oauthRes
     const payload = { accountId, accountName, profileId }
-    if (platform === 'tiktok') {
-      oauthRes = await tiktokApi.startOAuth(payload)
-    } else if (platform === 'facebook' || platform === 'instagram') {
-      oauthRes = await metaApi.startOAuth(payload)
-    } else if (platform === 'threads') {
-      oauthRes = await threadsApi.startOAuth(payload)
-    } else if (platform === 'youtube') {
-      oauthRes = await youtubeApi.startOAuth(payload)
-    } else if (platform === 'twitter') {
-      oauthRes = await twitterApi.startOAuth(payload)
-    } else if (platform === 'reddit') {
-      oauthRes = await redditApi.startOAuth(payload)
-    }
-
+    const api = { tiktok: tiktokApi, facebook: metaApi, instagram: metaApi, threads: threadsApi,
+      youtube: youtubeApi, twitter: twitterApi, reddit: redditApi }[platform]
+    if (!api) throw new Error('OAuth is not supported for this platform')
+    const oauthRes = await api.startOAuth(payload)
     const authorizeUrl = oauthRes?.data?.authorizeUrl
-    if (!authorizeUrl) throw new Error('No authorize URL returned')
-
-    // Step 4: Open OAuth popup
+    const state = oauthRes?.data?.state
+    if (!authorizeUrl || !state) throw new Error('No authorization URL/state returned')
+    const callbackOrigin = new URL(oauthRes?.data?.callbackOrigin || getApiBaseUrl() || window.location.origin, window.location.origin).origin
     const popup = window.open(authorizeUrl, 'oauth-popup', 'width=600,height=700,scrollbars=yes')
     if (!popup) throw new Error('Popup blocked — please allow popups for this site')
-
-    // Step 5: Listen for the OAuth callback postMessage
-    // Backend sends: { type: 'sau:{platform}-oauth', ok: true/false, data/error }
-    const expectedType = `sau:${platform === 'facebook' || platform === 'instagram' ? 'meta' : platform}-oauth`
-    const handler = (event) => {
-      if (event.data?.type === expectedType) {
-        window.removeEventListener('message', handler)
-        popup.close()
-        if (event.data.ok) {
-          flash(existingAccount ? `Re-authenticated ${accountName}` : `Connected ${accountName} via OAuth`)
-          showConnect.value = false
-        } else {
-          flash('OAuth failed: ' + (event.data.error || 'Unknown error'))
+    const isMeta = platform === 'facebook' || platform === 'instagram'
+    const expectedType = `sau:${isMeta ? 'meta' : platform}-oauth`
+    let selecting = false
+    let checkClosed, expiryTimer
+    const cleanup = () => {
+      clearInterval(checkClosed)
+      clearTimeout(expiryTimer)
+      window.removeEventListener('message', handler)
+      oauthCleanup = null
+      oauthBusy.value = false
+    }
+    const saved = async (result) => {
+      if (result?.status !== 'ok' || String(result.accountId) !== String(accountId) || result.state !== state) {
+        throw new Error('Server did not confirm the selected account was saved')
+      }
+      cleanup()
+      popup.close()
+      flash(clickedId != null ? `Re-authenticated ${accountName}` : `Connected ${accountName} via OAuth`)
+      showConnect.value = false
+      await loadAccounts()
+    }
+    const handler = async (event) => {
+      if (event.source !== popup || event.origin !== callbackOrigin) return
+      const message = event.data
+      const result = message?.data
+      const legacyError = !isMeta && platform !== 'threads' && message?.type === expectedType
+        && message.ok === false && result?.state == null
+      if (result?.state !== state && !legacyError) return
+      if (isMeta && message.type === 'sau:meta-oauth-selection') {
+        if (selecting || typeof result.selectedId !== 'string') return
+        selecting = true
+        try {
+          const response = await metaApi.completeSelection({ state, selectedId: result.selectedId })
+          if (response?.code !== 200) throw new Error(response?.msg || 'Selection was not saved')
+          await saved(response.data)
+        } catch (e) { flash('Selection not saved: ' + e.message) }
+        finally { selecting = false }
+      } else if (message.type === expectedType) {
+        if (message.ok && !result.selectedPage && !result.tokenData) {
+          try { await saved(result) } catch (e) { flash('OAuth not saved: ' + e.message) }
+        } else if (!message.ok) {
+          cleanup()
+          popup.close()
+          flash('OAuth failed: ' + (result?.error || message.error || 'Unknown error'))
+          await loadAccounts()
         }
-        loadAccounts()
       }
     }
     window.addEventListener('message', handler)
-
-    // Cleanup if popup is closed manually
-    const checkClosed = setInterval(() => {
-      if (popup.closed) {
-        clearInterval(checkClosed)
-        window.removeEventListener('message', handler)
-        // Refresh accounts in case OAuth completed
-        loadAccounts()
-      }
+    checkClosed = setInterval(() => {
+      if (popup.closed) { cleanup(); loadAccounts() }
     }, 1000)
+    expiryTimer = setTimeout(() => { cleanup(); popup.close(); flash('OAuth selection expired — reconnect to try again') }, 15 * 60 * 1000)
+    oauthCleanup = cleanup
   } catch (e) { flash('OAuth failed: ' + e.message) }
-  finally { oauthBusy.value = false }
+  finally { if (!oauthCleanup) oauthBusy.value = false }
 }
 
 const doImport = async () => {
@@ -1174,35 +1218,28 @@ const doManualConnect = async () => {
   manualBusy.value = true
   try {
     const platform = connectData.value.platform
-    const accountName = connectData.value.account || `${platform}-manual`
-    const profileName = connectData.value.profile || ''
+    const accountName = connectData.value.account.trim()
 
     const profilesRes = await profilesApi.list()
     const allProfiles = profilesRes?.data || profilesRes || []
-    let profileId = null
-    if (connectData.value.profileId != null) {
-      const matched = allProfiles.find(p => p.id === connectData.value.profileId)
-      if (matched) profileId = matched.id
-    }
-    if (profileId == null && profileName) {
-      const matched = allProfiles.find(p => p.name === profileName || p.slug === profileName)
-      if (matched) profileId = matched.id
-    }
-    if (profileId == null && allProfiles.length > 0) profileId = allProfiles[0].id
-    if (!profileId) throw new Error('No profiles available — create a profile first')
+    const profile = allProfiles.find(p => String(p.id) === String(connectData.value.profileId))
+    if (!profile || !accountName) throw new Error('Select a specific profile and account name first')
+    const profileId = profile.id
 
     // Filter empty values so we don't push blanks into config_json.
     const config = Object.fromEntries(
       Object.entries(connectData.value.config || {}).filter(([, v]) => String(v || '').trim() !== '')
     )
 
-    await profilesApi.createAccount(profileId, {
-      accountName,
-      platform,
-      authType: 'manual',
-      profile: profileName,
-      config,
-    })
+    if (connectData.value.accountId != null) {
+      const exact = accounts.value.find(a => String(a.id) === String(connectData.value.accountId))
+      if (!exact || exact.platformSlug !== platform || String(exact.profileId) !== String(profileId) || exact.accountName !== accountName) {
+        throw new Error('The selected account/profile changed — reload Accounts')
+      }
+      await profilesApi.updateAccount(exact.id, { config })
+    } else {
+      await profilesApi.createAccount(profileId, { accountName, platform, authType: 'manual', config })
+    }
     flash(`Saved ${accountName} · ${platformLabel(platform)} (manual)`)
     showConnect.value = false
     await loadAccounts()
@@ -1219,8 +1256,9 @@ const loadAccounts = async () => {
     // Map to the shape the component expects (merge with PLATFORM_META)
     accounts.value = list.map(a => {
       const isOAuth = a.authType === 'oauth'
-      const isExpired = a.cookieStatus === 'expired'
-      const isSoon = a.cookieStatus === 'soon'
+      const native = a.nativeCredentials || null
+      const isExpired = native ? native.state === 'expired' : a.cookieStatus === 'expired'
+      const isSoon = native ? native.state === 'expiring' : a.cookieStatus === 'soon'
       return {
         avatarUrl: a.avatarUrl || '',
         id: a.id,
@@ -1231,7 +1269,7 @@ const loadAccounts = async () => {
         platform: PLATFORM_META[a.platform]?.label || a.platform,
         authType: a.authType || 'cookie',
         // For OAuth accounts, show "Token expired" instead of "Missing"
-        connectionLabel: isExpired ? (isOAuth ? 'Token expired' : 'Missing') : 'Ready',
+        connectionLabel: native ? nativeStateLabel(native.state) : isExpired ? (isOAuth ? 'Token expired' : 'Missing') : 'Ready',
         connectionDetail: a.handle || '',
         // Profile metadata — id is the join key, name/slug come straight from
         // the profiles table so the UI can show "Profile: NW" instead of the
@@ -1243,10 +1281,13 @@ const loadAccounts = async () => {
         isOverdue: isExpired,
         isExpiringWithin24h: isSoon,
         isExpiringWithin7d: isSoon,
-        reconnectRequired: isExpired,
+        reconnectRequired: native ? native.reconnectRequired : isExpired,
         secondsRemaining: null,
         cookieStatus: a.cookieStatus,
         expiresAt: a.expiresAt,
+        nativeCredentials: native,
+        publishingRoute: a.publishingRoute || null,
+        enabled: a.enabled !== false,
       }
     })
   } catch (e) { console.warn('Failed to load accounts:', e) }
@@ -1263,6 +1304,8 @@ const loadProfiles = async () => {
   try {
     const res = await accountApi.getAccountProfiles()
     profiles.value = (res?.data || res || []).slice().sort((a, b) => a.name.localeCompare(b.name))
+    const all = await profilesApi.list()
+    connectProfiles.value = (all?.data || all || []).slice().sort((a, b) => a.name.localeCompare(b.name))
   } catch (e) { console.warn('Failed to load profiles:', e) }
 }
 
@@ -1273,6 +1316,7 @@ const accounts = ref([])
 onMounted(async () => {
   await Promise.all([loadAccounts(), loadGroups(), loadProfiles()])
 })
+onBeforeUnmount(() => oauthCleanup?.())
 </script>
 
 <style scoped>

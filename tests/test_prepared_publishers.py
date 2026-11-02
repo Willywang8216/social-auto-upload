@@ -1051,7 +1051,7 @@ class PreparedPublisherTests(unittest.TestCase):
         })
         with patch("myUtils.meta_auth.fetch_managed_pages", return_value={
             "data": [{
-                "id": "p2",
+                "id": "p1",
                 "name": "Brand Page",
                 "access_token": "new-page-token",
                 "instagram_business_account": {"id": "ig-1", "username": "brand_ig"},
@@ -1070,7 +1070,7 @@ class PreparedPublisherTests(unittest.TestCase):
             )
         self.assertIsInstance(result, dict)
         self.assertEqual(result["updated_config"]["accessToken"], "new-page-token")
-        self.assertEqual(result["updated_config"]["pageId"], "p2")
+        self.assertEqual(result["updated_config"]["pageId"], "p1")
 
     def test_is_recoverable_oauth_error_detects_subcode(self):
         from myUtils.prepared_publishers import _is_recoverable_oauth_error, PreparedPublishError

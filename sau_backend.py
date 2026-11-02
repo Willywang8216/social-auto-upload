@@ -64,6 +64,7 @@ from myUtils import analytics_sync
 from myUtils import analytics_advisor
 from myUtils import meta_auth
 from myUtils import meta_review
+from myUtils import token_state, token_maintenance, oauth_state
 from myUtils import reddit_auth
 from myUtils import reddit_review
 from myUtils import youtube_auth
@@ -2220,7 +2221,12 @@ def _event_payload_to_status(event: tiktok_review.TikTokReviewEvent | None) -> d
 def _oauth_request_to_status(request_state) -> dict | None:
     if request_state is None:
         return None
-    payload = dict(request_state.result or {})
+    # Pending OAuth state contains server-only candidate credentials. Never
+    # expose bindings, candidate tokens or stored picker HTML in status APIs.
+    public_keys = {'state', 'status', 'accountId', 'accountName', 'profileId', 'platform',
+                   'pageId', 'facebookPageName', 'igUserId', 'instagramUserName',
+                   'threadUserId', 'threadsUserName', 'availableCount', 'avatarUrl'}
+    payload = {key: value for key, value in (request_state.result or {}).items() if key in public_keys}
     payload.setdefault('state', request_state.state_token)
     payload['status'] = request_state.status
     payload['requestedAt'] = request_state.requested_at
@@ -2241,20 +2247,27 @@ def _run_account_connection_check(*, account_id: int, db_path: Path):
     account = profile_registry.get_account(account_id, db_path=db_path)
     config = dict(account.config or {})
     now = datetime.now().isoformat(timespec='seconds')
+    guarded_credentials = account.platform in {'facebook', 'instagram', 'threads'} or (
+        account.platform == 'twitter' and profile_registry.effective_auth_type(config, account.auth_type, 'twitter') != 'cookie')
 
     try:
-        if account.platform == profile_registry.PLATFORM_FACEBOOK:
-            result = prepared_publishers.validate_facebook_config_live(config)
-            config['facebookPageName'] = result.get('name', config.get('facebookPageName', ''))
-            summary = f"Facebook page: {config.get('facebookPageName') or account.account_name}"
-        elif account.platform == profile_registry.PLATFORM_INSTAGRAM:
-            result = prepared_publishers.validate_instagram_config_live(config)
-            config['instagramUserName'] = result.get('username', config.get('instagramUserName', ''))
-            summary = f"Instagram user: {config.get('instagramUserName') or account.account_name}"
-        elif account.platform == profile_registry.PLATFORM_THREADS:
-            result = prepared_publishers.validate_threads_config_live(config)
-            config['threadsUserName'] = result.get('username', config.get('threadsUserName', ''))
-            summary = f"Threads user: {config.get('threadsUserName') or account.account_name}"
+        if account.platform in {'facebook', 'instagram'} and config.get('metaUserAccessToken'):
+            config.update(token_maintenance.maintain_meta(config, account.platform, read_only=True))
+            summary = f"{account.platform} native credentials checked"
+        elif account.platform in {'facebook', 'instagram', 'threads'}:
+            # Imported/env-backed publish credentials remain checkable without
+            # inventing a missing user-token dependency or changing identity.
+            validators = {'facebook': prepared_publishers.validate_facebook_config_live,
+                          'instagram': prepared_publishers.validate_instagram_config_live,
+                          'threads': prepared_publishers.validate_threads_config_live}
+            result = validators[account.platform](config)
+            identity_key = {'facebook': 'pageId', 'instagram': 'igUserId', 'threads': 'threadUserId'}[account.platform]
+            wanted = str(config.get(identity_key) or (config.get('userId') if account.platform == 'threads' else '') or '')
+            if not wanted or str(result.get('id') or '') != wanted:
+                raise token_maintenance.identity_error('Connection check returned a different identity; no credentials changed')
+            name_key = {'facebook': 'facebookPageName', 'instagram': 'instagramUserName', 'threads': 'threadsUserName'}[account.platform]
+            config[name_key] = str(result.get('name' if account.platform == 'facebook' else 'username') or config.get(name_key) or '')
+            summary = f"{account.platform} native credential checked"
         elif account.platform == profile_registry.PLATFORM_TELEGRAM:
             result = prepared_publishers.validate_telegram_config_live(config)
             config['telegramBotName'] = result.get('bot', {}).get('result', {}).get('username', config.get('telegramBotName', ''))
@@ -2296,6 +2309,9 @@ def _run_account_connection_check(*, account_id: int, db_path: Path):
             else:
                 result = prepared_publishers.validate_twitter_config_live(config)
                 twitter_data = result.get('data', {})
+                expected_user = str(config.get('twitterUserId') or '')
+                if expected_user and str(twitter_data.get('id') or '') != expected_user:
+                    raise token_maintenance.identity_error('Connection check returned a different X identity; no credentials changed')
                 config['twitterUserId'] = twitter_data.get('id', config.get('twitterUserId', ''))
                 config['twitterUserName'] = twitter_data.get('username', config.get('twitterUserName', ''))
                 config['twitterDisplayName'] = twitter_data.get('name', config.get('twitterDisplayName', ''))
@@ -2304,12 +2320,13 @@ def _run_account_connection_check(*, account_id: int, db_path: Path):
             raise ValueError('Connection check is implemented only for Facebook, Instagram, Threads, Telegram, Discord, and Twitter')
 
         config['lastConnectionCheckAt'] = now
-        updated = profile_registry.update_account(
-            account_id,
-            config=config,
-            auth_type=account.auth_type,
-            db_path=db_path,
-        )
+        if guarded_credentials:
+            updated = token_state.require_saved(token_state.commit_validation(
+                account, token_state.credential_changes(account.config or {}, config), db_path=db_path))
+        else:
+            updated = profile_registry.update_account(
+                account_id, config_patch={key: value for key, value in config.items()
+                                          if (account.config or {}).get(key) != value}, db_path=db_path)
         account_events.record_event(
             account_id=updated.id,
             profile_id=updated.profile_id,
@@ -2323,6 +2340,9 @@ def _run_account_connection_check(*, account_id: int, db_path: Path):
         )
         return updated
     except Exception as exc:
+        if guarded_credentials:
+            _record_meta_selfcheck_failure(account=account, config=account.config or {}, db_path=db_path, exc=exc)
+            exc = token_state.CredentialError(token_state.safe_error(exc))
         account_events.record_event(
             account_id=account.id,
             profile_id=account.profile_id,
@@ -2335,7 +2355,7 @@ def _run_account_connection_check(*, account_id: int, db_path: Path):
             metadata={'timestamp': now},
             db_path=db_path,
         )
-        raise
+        raise exc
 
 
 def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "manual"):
@@ -2359,13 +2379,8 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 'avatarUrl': user_info.get('data', {}).get('user', {}).get('avatar_url') or config.get('avatarUrl') or '',
                 ('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt'): now,
             })
-            updated = profile_registry.update_account(
-                account_id,
-                config=config,
-                auth_type='oauth',
-                status=1,
-                db_path=db_path,
-            )
+            updated = token_state.require_saved(token_state.commit_success(
+                account, token_state.credential_changes(account.config or {}, config), db_path=db_path))
             _append_tiktok_review_event(
                 'refresh',
                 {
@@ -2403,13 +2418,8 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 config['accessTokenExpiresAt'] = (
                     datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
                 ).isoformat(timespec='seconds')
-            updated = profile_registry.update_account(
-                account_id,
-                config=config,
-                auth_type='oauth',
-                status=1,
-                db_path=db_path,
-            )
+            updated = token_state.require_saved(token_state.commit_success(
+                account, token_state.credential_changes(account.config or {}, config), db_path=db_path))
             summary = f"Reddit refreshed: {config.get('redditUserName') or updated.account_name}"
         elif account.platform == profile_registry.PLATFORM_YOUTUBE:
             refreshed = prepared_publishers.refresh_youtube_access_token(config)
@@ -2430,185 +2440,28 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
                 avatar_url = snippet.get('thumbnails', {}).get('default', {}).get('url')
                 if avatar_url:
                     config['avatarUrl'] = avatar_url
-            updated = profile_registry.update_account(
-                account_id,
-                config=config,
-                auth_type='oauth',
-                status=1,
-                db_path=db_path,
-            )
+            updated = token_state.require_saved(token_state.commit_success(
+                account, token_state.credential_changes(account.config or {}, config), db_path=db_path))
             summary = f"YouTube refreshed: {config.get('channelTitle') or updated.account_name}"
         elif account.platform == profile_registry.PLATFORM_THREADS:
-            access_token = str(config.get('accessToken') or '').strip()
-            if not access_token:
-                raise ValueError('Threads account is missing accessToken')
-            refreshed = threads_auth.refresh_long_lived_token(access_token=access_token)
-            next_access_token = str(refreshed.get('access_token') or access_token)
-            me_payload = threads_auth.fetch_me(access_token=next_access_token, fields=('id', 'username', 'threads_profile_picture_url')) if next_access_token else {}
-            config.update({
-                'accessToken': next_access_token,
-                'accessTokenUpdatedAt': now,
-                ('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt'): now,
-                'threadUserId': str(me_payload.get('id') or config.get('threadUserId') or config.get('userId') or ''),
-                'userId': str(me_payload.get('id') or config.get('userId') or config.get('threadUserId') or ''),
-                'threadsUserName': str(me_payload.get('username') or config.get('threadsUserName') or ''),
-            })
-            if me_payload.get('threads_profile_picture_url'):
-                config['avatarUrl'] = str(me_payload.get('threads_profile_picture_url'))
-            expires_in = refreshed.get('expires_in')
-            if expires_in:
-                config['accessTokenExpiresAt'] = (
-                    datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
-                ).isoformat(timespec='seconds')
-            updated = profile_registry.update_account(
-                account_id,
-                config=config,
-                auth_type='oauth',
-                status=1,
-                db_path=db_path,
-            )
+            patch = token_maintenance.maintain_threads(config, mode=mode)
+            updated = token_state.require_saved(token_state.commit_success(account, patch, db_path=db_path))
+            config = updated.config or {}
             summary = f"Threads refreshed: {config.get('threadsUserName') or updated.account_name}"
         elif account.platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
-            # Live self-check + refresh for Meta accounts. Facebook reports some
-            # app tokens as never-expiring (debug_token expires_at == 0) and omits
-            # expires_in from every response; the old code only refreshed when a
-            # *stored* expiry was near/past, so those accounts were never live-
-            # verified and a revoked token surfaced only at publish time. Here the
-            # token is checked against Facebook:
-            #   * valid + never-expiring (or far from expiry) -> no rotation, just
-            #     re-derive the page token and record a successful self-check;
-            #   * invalid or within the expiry margin -> re-exchange the token;
-            #   * refresh keeps failing -> the account is flagged "expired" (past
-            #     expiry so the UI shows Token expired) and the operator alerted.
-            try:
-                platform_label = account.platform.capitalize()
-                meta_user_access_token = str(config.get('metaUserAccessToken') or '').strip()
-                if not meta_user_access_token:
-                    raise ValueError(f"{platform_label} account is missing metaUserAccessToken; reconnect required")
-
-                debug = None
-                try:
-                    debug = meta_auth.debug_token_info(access_token=meta_user_access_token)
-                except meta_auth.MetaOAuthError:
-                    debug = {'is_valid': False}  # Facebook rejected the token outright
-                except Exception:  # noqa: BLE001 — transient; fall back to stored expiry
-                    debug = None
-
-                needs_rotate = False
-                if debug:  # non-empty, authoritative debug payload
-                    is_valid = debug.get('is_valid', True) is not False
-                    exp = debug.get('expires_at')
-                    if not is_valid:
-                        needs_rotate = True
-                    elif isinstance(exp, int) and exp > 0 and exp <= (int(datetime.now(timezone.utc).timestamp()) + _LONG_LIVED_REFRESH_MARGIN_SECONDS):
-                        needs_rotate = True
-                    # valid + expires_at == 0 (never-expiring) -> nothing to rotate
-                else:
-                    # Cannot live-verify right now (transient debug failure, or the
-                    # app's debug credentials are unavailable, e.g. in tests). Fall
-                    # back to the stored expiry: an already-past stored expiry keeps
-                    # its meaning ("expired; reconnect required"), while a far /
-                    # missing expiry proceeds without rotating — a healthy
-                    # never-expiring token must not be churned just because one
-                    # verification call could not run.
-                    stored_exp = prepared_publishers._parse_iso_datetime(str(config.get('metaUserAccessTokenExpiresAt') or config.get('accessTokenExpiresAt') or ''))
-                    if stored_exp is not None and stored_exp <= prepared_publishers._utc_now():
-                        raise ValueError(f"{platform_label} Meta user access token expired; reconnect required")
-                    needs_rotate = stored_exp is None or stored_exp <= (prepared_publishers._utc_now() + timedelta(seconds=_LONG_LIVED_REFRESH_MARGIN_SECONDS))
-
-                refreshed_payload = {}
-                if needs_rotate:
-                    if account.platform == profile_registry.PLATFORM_INSTAGRAM:
-                        refreshed_payload = meta_auth.refresh_instagram_user_token(access_token=meta_user_access_token)
-                    else:
-                        refreshed_payload = meta_auth.exchange_for_long_lived_token(access_token=meta_user_access_token)
-                    new_user_token = str(refreshed_payload.get('access_token') or meta_user_access_token).strip()
-                    config['metaUserAccessToken'] = new_user_token
-                    meta_user_access_token = new_user_token
-
-                pages_payload = meta_auth.fetch_managed_pages(access_token=meta_user_access_token)
-                pages = pages_payload.get('data', []) if isinstance(pages_payload, dict) else []
-                if not isinstance(pages, list):
-                    pages = []
-                config['accessTokenUpdatedAt'] = now
-                config[('lastAutoRefreshAt' if mode == 'auto' else 'lastManualRefreshAt')] = now
-                if account.platform == profile_registry.PLATFORM_FACEBOOK:
-                    wanted_page_id = str(config.get('pageId') or '').strip()
-                    selected_page = next((page for page in pages if str(page.get('id') or '') == wanted_page_id), None) if wanted_page_id else None
-                    if selected_page is None and pages:
-                        selected_page = pages[0]
-                    if selected_page is None:
-                        raise ValueError('Meta refresh did not return any manageable Facebook Pages')
-                    config['pageId'] = str(selected_page.get('id') or config.get('pageId') or '')
-                    config['facebookPageName'] = str(selected_page.get('name') or config.get('facebookPageName') or '')
-                    config['accessToken'] = str(selected_page.get('access_token') or config.get('accessToken') or '')
-                    # Fetch Facebook page profile picture
-                    try:
-                        import requests as _requests
-                        pic_resp = _requests.get(f"{meta_auth.META_GRAPH_ROOT}/{config['pageId']}", params={"fields": "picture.type(large)", "access_token": config['accessToken']}, timeout=15)
-                        pic_url = pic_resp.json().get("picture", {}).get("data", {}).get("url")
-                        if pic_url:
-                            config['avatarUrl'] = pic_url
-                    except Exception:  # noqa: BLE001
-                        pass
-                else:
-                    wanted_ig_user_id = str(config.get('igUserId') or '').strip()
-                    selected_pair = None
-                    for page in pages:
-                        ig_user = page.get('instagram_business_account') if isinstance(page, dict) else None
-                        if not isinstance(ig_user, dict):
-                            continue
-                        if wanted_ig_user_id and str(ig_user.get('id') or '') != wanted_ig_user_id:
-                            continue
-                        selected_pair = (page, ig_user)
-                        break
-                    if selected_pair is None:
-                        for page in pages:
-                            ig_user = page.get('instagram_business_account') if isinstance(page, dict) else None
-                            if isinstance(ig_user, dict):
-                                selected_pair = (page, ig_user)
-                                break
-                    if selected_pair is None:
-                        raise ValueError('Meta refresh did not return a page-linked Instagram business account')
-                    page, ig_user = selected_pair
-                    config['pageId'] = str(page.get('id') or config.get('pageId') or '')
-                    config['facebookPageName'] = str(page.get('name') or config.get('facebookPageName') or '')
-                    config['igUserId'] = str(ig_user.get('id') or config.get('igUserId') or '')
-                    config['instagramUserName'] = str(ig_user.get('username') or config.get('instagramUserName') or '')
-                    if ig_user.get('profile_picture_url'):
-                        config['avatarUrl'] = str(ig_user.get('profile_picture_url'))
-                    config['accessToken'] = str(page.get('access_token') or config.get('accessToken') or '')
-
-                # Persist a truthful expiry (never-expiring -> far-future sentinel).
-                resolved = meta_auth.resolve_access_token_expiry(
-                    access_token=meta_user_access_token,
-                    expires_in=refreshed_payload.get('expires_in'),
-                )
-                config['metaUserAccessTokenExpiresAt'] = resolved['expires_at_iso']
-                config['accessTokenExpiresAt'] = resolved['expires_at_iso']
-                config['metaTokenExpiryMode'] = resolved['mode']
-                config['metaTokenExpiresAtEpoch'] = resolved['expires_at_epoch']
-                # Successful self-check: clear failure / reconnect markers.
-                _clear_meta_selfcheck_markers(config)
-                config['_lastTokenSelfCheckAt'] = _utc_now_naive().isoformat(timespec='seconds')
-                updated = profile_registry.update_account(account_id, config=config, auth_type='oauth', status=1, db_path=db_path)
-                summary = f"{platform_label} credentials re-synced: {config.get('facebookPageName') or config.get('instagramUserName') or updated.account_name}"
-            except Exception as exc:  # noqa: BLE001 — record the failure, then re-raise
-                _record_meta_selfcheck_failure(account=account, config=config, db_path=db_path, error_text=str(exc))
-                raise
+            patch = token_maintenance.maintain_meta(
+                config, account.platform, mode=mode, margin_seconds=_LONG_LIVED_REFRESH_MARGIN_SECONDS)
+            updated = token_state.require_saved(token_state.commit_success(account, patch, db_path=db_path))
+            config = updated.config or {}
+            summary = f"{account.platform.capitalize()} native credentials validated and synced"
         elif account.platform == profile_registry.PLATFORM_TWITTER:
             twitter_auth_type = str(config.get("twitterAuthType") or account.auth_type or "cookie").strip().lower()
             if twitter_auth_type == "cookie":
                 raise ValueError("Twitter cookie accounts do not support token refresh; use OAuth 2.0 API mode instead")
 
             def _persist_twitter_refresh(updated_config):
-                profile_registry.update_account(
-                    account_id,
-                    config=updated_config,
-                    auth_type='oauth',
-                    status=1,
-                    db_path=db_path,
-                )
+                token_state.require_saved(token_state.commit_success(
+                    account, token_state.credential_changes(account.config or {}, updated_config), db_path=db_path))
 
             # Single-flight with the worker/publish paths: re-read under the
             # lock, skip if another refresher already rotated the token, and
@@ -2641,6 +2494,10 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
         )
         return updated
     except Exception as exc:
+        if account.platform in {'facebook', 'instagram', 'threads'}:
+            _record_meta_selfcheck_failure(account=account, config=account.config or {}, db_path=db_path, exc=exc)
+            # Do not leak HTTP URLs or raw token endpoint bodies through the API.
+            exc = token_state.CredentialError(token_state.safe_error(exc))
         if account.platform == profile_registry.PLATFORM_TIKTOK:
             _append_tiktok_review_event(
                 'refresh',
@@ -2654,26 +2511,9 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
         event_error = str(exc)
         event_metadata = {'timestamp': now, 'mode': mode}
         if account.platform == profile_registry.PLATFORM_TWITTER:
-            failure_count = int(config.get('_maintenanceFailures') or 0) + 1
-            delay_seconds = min(300 * (2 ** (failure_count - 1)), 21600)
-            failed_at = _utc_now_naive()
-            config['_maintenanceFailures'] = failure_count
-            config['_lastMaintenanceError'] = event_error[:300]
-            config['_lastMaintenanceAttemptAt'] = failed_at.isoformat(timespec='seconds')
-            config['_nextMaintenanceAttemptAt'] = (
-                failed_at + timedelta(seconds=delay_seconds)
-            ).isoformat(timespec='seconds')
-            if getattr(exc, 'error_code', '') in {'invalid_grant', 'invalid_token', 'refresh_token_revoked'}:
-                config['_needsReconnect'] = True
-                config['_reconnectAlertedAt'] = failed_at.isoformat(timespec='seconds')
-            profile_registry.update_account(
-                account.id, config=config, auth_type='oauth', db_path=db_path,
-            )
-            event_metadata.update({
-                'providerStatus': getattr(exc, 'status_code', None),
-                'providerErrorCode': getattr(exc, 'error_code', ''),
-                'retryAfterSeconds': delay_seconds,
-            })
+            token_state.commit_failure(account, exc, db_path=db_path, backoff_base=300)
+            event_error = token_state.safe_error(exc)
+            event_metadata.update(token_state.classify_failure(exc))
         account_events.record_event(
             account_id=account.id,
             profile_id=account.profile_id,
@@ -2686,7 +2526,7 @@ def _run_account_token_refresh(*, account_id: int, db_path: Path, mode: str = "m
             metadata=event_metadata,
             db_path=db_path,
         )
-        raise
+        raise exc
 
 
 def _batch_account_operation(*, account_ids: list[int], db_path: Path, operation: str) -> dict:
@@ -2760,17 +2600,9 @@ except ValueError:
     _LONG_LIVED_REFRESH_MARGIN_SECONDS = 7 * 24 * 3600
 
 # ---------------------------------------------------------------------------
-# Live token self-check for Meta (Facebook / Instagram) accounts.
-#
-# Facebook reports some app tokens as never-expiring (``expires_at == 0``), so
-# SAU stores a far-future expiry and the expiry-based staleness scan never
-# fires again. That is correct for healthy tokens, but it means a token that is
-# later revoked / de-authorised at the Meta end would only surface when a
-# publish fails. To close that gap the maintenance loop live-verifies each Meta
-# user token against Facebook on a regular cadence (``debug_token``), refreshes
-# (re-exchanges) the token when it is invalid or about to expire, and only when
-# refresh keeps failing does it flag the account "expired" (past expiry so the
-# UI shows Token expired) and alerts the operator once.
+# Live Meta validation is shared with the standalone worker. Periodic checks
+# do not imply token rotation; only explicit provider rejection requires reauth.
+# Transport failures use persisted backoff and never fabricate a past expiry.
 # ---------------------------------------------------------------------------
 try:
     _META_SELFCHECK_HOURS = int(os.environ.get('SAU_META_SELFCHECK_HOURS', '12') or '12')
@@ -2785,12 +2617,7 @@ try:
 except ValueError:
     _META_SELFCHECK_FAILURE_THRESHOLD = 3
 
-#: Config markers managed by the live self-check (kept together so callers can
-#: reset them on any successful connect / refresh).
-_META_SELFCHECK_MARKER_KEYS = (
-    '_lastTokenSelfCheckAt', '_tokenSelfCheckFailures', '_needsReconnect',
-    '_reconnectAlertedAt',
-)
+_META_SELFCHECK_MARKER_KEYS = token_state.FAILURE_KEYS
 
 
 def _utc_now_naive() -> datetime:
@@ -2798,61 +2625,29 @@ def _utc_now_naive() -> datetime:
 
 
 def _meta_self_check_due(config: dict) -> bool:
-    """Local (no network) decision: is this Meta account due a live check?
-
-    Healthy accounts (no recorded failures) are re-verified every
-    ``SAU_META_SELFCHECK_HOURS``; accounts whose last attempt failed are
-    retried sooner (``SAU_META_SELFCHECK_RETRY_HOURS``) so a genuinely dead
-    token reaches the "expired" state within a few hours instead of days.
-    """
-    failures = int(config.get('_tokenSelfCheckFailures') or 0)
-    interval_hours = _META_SELFCHECK_RETRY_HOURS if failures else _META_SELFCHECK_HOURS
-    last = prepared_publishers._parse_iso_datetime(str(config.get('_lastTokenSelfCheckAt') or ''))
-    if last is None:
-        return True
-    # prepared_publishers helpers are aware-UTC; compare against its _utc_now().
-    return (prepared_publishers._utc_now() - last) >= timedelta(hours=interval_hours)
+    return token_maintenance.self_check_due(
+        config, healthy_hours=_META_SELFCHECK_HOURS, retry_hours=_META_SELFCHECK_RETRY_HOURS)
 
 
 def _clear_meta_selfcheck_markers(config: dict) -> None:
-    for key in _META_SELFCHECK_MARKER_KEYS:
-        config.pop(key, None)
+    token_state.clear_failure_markers(config)
 
 
-def _record_meta_selfcheck_failure(*, account, config: dict, db_path: Path, error_text: str) -> None:
-    """Persist one failed live self-check; flag the account expired + alert once
-    after ``_META_SELFCHECK_FAILURE_THRESHOLD`` consecutive failures."""
-    cfg = dict(config)
-    failures = int(cfg.get('_tokenSelfCheckFailures') or 0) + 1
-    cfg['_tokenSelfCheckFailures'] = str(failures)
-    cfg['_lastTokenSelfCheckAt'] = _utc_now_naive().isoformat(timespec='seconds')
-    if failures >= _META_SELFCHECK_FAILURE_THRESHOLD:
-        cfg['_needsReconnect'] = True
-        # Persist a *past* expiry so /api/accounts (which derives status purely
-        # from the stored expiry) shows "Token expired" until the operator
-        # reconnects. The `_needsReconnect` flag keeps the maintenance loop
-        # from hammering the dead credential every interval.
-        past = (_utc_now_naive() - timedelta(seconds=1)).isoformat(timespec='seconds')
-        cfg['metaUserAccessTokenExpiresAt'] = past
-        cfg['accessTokenExpiresAt'] = past
-        if not cfg.get('_reconnectAlertedAt'):
-            cfg['_reconnectAlertedAt'] = _utc_now_naive().isoformat(timespec='seconds')
-            try:
-                from myUtils import ops_alerts
-                ops_alerts.send_ops_alert(
-                    subject=f"[SAU] {account.platform} account #{account.id} token expired",
-                    body=(
-                        f"Account #{account.id} ({account.platform}, {account.account_name}) failed "
-                        f"{failures} live token self-checks in a row and has been marked expired. "
-                        f"Re-authorise it via the Connect button.\n\nLast error: {error_text[:500]}"
-                    ),
-                )
-            except Exception:  # noqa: BLE001 — alerting must never break maintenance
-                pass
-    try:
-        profile_registry.update_account(account.id, config=cfg, auth_type='oauth', status=1, db_path=db_path)
-    except Exception:  # noqa: BLE001 — persistence is best-effort here
-        pass
+def _record_meta_selfcheck_failure(*, account, config: dict, db_path: Path,
+                                   error_text: str = '', exc: Exception | None = None) -> None:
+    failure = exc if exc is not None else RuntimeError(error_text)
+    alert_state = {}
+    updated = token_state.commit_failure(account, failure, db_path=db_path, alert_state=alert_state,
+                                         self_check=account.platform in {'facebook', 'instagram'})
+    if updated is not None and alert_state.get('needed'):
+        try:
+            from myUtils import ops_alerts
+            ops_alerts.send_ops_alert(
+                subject=f"[SAU] {account.platform} account #{account.id} needs reconnect",
+                body=f"Native credential validation failed for account #{account.id}. {token_state.safe_error(failure)}",
+            )
+        except Exception:
+            pass
 
 
 def _effective_refresh_skew(platform: str, skew_seconds: int) -> int:
@@ -2885,24 +2680,7 @@ def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_sec
             return False
         return expires_at <= (prepared_publishers._utc_now() + timedelta(seconds=skew_seconds))
     if account.platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
-        # Accounts flagged for manual reconnect are waiting on a human — never
-        # auto-refresh them (mirrors myUtils.worker).
-        if config.get('_needsReconnect'):
-            return False
-        meta_user_access_token = str(config.get('metaUserAccessToken') or '').strip()
-        if not meta_user_access_token:
-            return False
-        # Live self-check cadence: even a far-future stored expiry (never-
-        # expiring token) must come back for a real verification regularly.
-        if _meta_self_check_due(config):
-            return True
-        access_token = str(config.get('accessToken') or '').strip()
-        if not access_token:
-            return True
-        expires_at = prepared_publishers._parse_iso_datetime(str(config.get('metaUserAccessTokenExpiresAt') or config.get('accessTokenExpiresAt') or ''))
-        if expires_at is None:
-            return False
-        return expires_at <= (prepared_publishers._utc_now() + timedelta(seconds=effective_skew))
+        return token_maintenance.meta_maintenance_due(config, margin_seconds=effective_skew)
     # Cookie-based accounts don't have API tokens to refresh. Use the shared
     # normalizer for both Reddit and X so DB-only and mixed-case auth modes are
     # treated consistently by backend maintenance and the worker.
@@ -2910,6 +2688,8 @@ def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_sec
         config, account.auth_type, account.platform
     )
     if auth_type == "cookie":
+        return False
+    if account.platform == 'threads' and not token_maintenance.threads_refresh_allowed(config):
         return False
     if account.platform == profile_registry.PLATFORM_TWITTER:
         # X access tokens live ~2h; this helper interprets legacy naive-local
@@ -3286,50 +3066,66 @@ def _default_sheet_title(profile: profile_registry.Profile) -> str:
     return f"{datetime.now().strftime('%Y-%m-%d')}-{profile.slug}"
 
 
-@app.route('/oauth/meta/start', methods=['POST'])
-def meta_oauth_start():
+def _oauth_principal_id():
+    return getattr(getattr(g, 'auth_ctx', None), 'user_id', None)
+
+
+def _record_bound_oauth_event(account, *, action, status, db_path, error=None):
+    # An event-sink error cannot turn a committed OAuth success into a failure.
+    try:
+        account_events.record_event(
+            account_id=account.id, profile_id=account.profile_id, platform=account.platform,
+            account_name=account.account_name, action=action, status=status,
+            summary=f"{account.platform} OAuth {status}",
+            error_text=token_state.safe_error(error) if error else None,
+            metadata=token_state.classify_failure(error) if error else {}, db_path=db_path,
+        )
+    except Exception:
+        pass
+
+
+def _start_bound_oauth(provider):
+    from urllib.parse import urlsplit
     db_path = _current_db_path()
     try:
         data = _read_json_body()
-        raw_account_id = data.get('accountId')
-        if raw_account_id in (None, ''):
-            raise ValueError('Please save the Meta account before connecting OAuth')
-        account_id = int(raw_account_id)
-        account = profile_registry.get_account(account_id, db_path=db_path)
-        if account.platform not in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
-            raise ValueError('OAuth connect is only available for Facebook and Instagram accounts on this route')
-        state_token = meta_auth.build_state_token()
-        redirect_uri = str(data.get('redirectUri') or _meta_callback_base_url() or meta_auth.default_redirect_uri()).strip()
-        scopes = data.get('scopes') if isinstance(data.get('scopes'), list) and data.get('scopes') else list(meta_auth.default_scopes_for_platform(account.platform))
-        authorize_url = meta_auth.build_authorize_url_from_env(
-            state=state_token,
-            redirect_uri=redirect_uri,
-            scopes=tuple(str(scope) for scope in scopes),
-        )
-        meta_review.create_oauth_request(
-            state_token=state_token,
-            profile_id=account.profile_id,
-            account_id=account.id,
-            account_name=account.account_name,
-            platform=account.platform,
-            redirect_uri=redirect_uri,
-            scopes=[str(scope) for scope in scopes],
-            db_path=db_path,
-        )
-        account_events.record_event(
-            account_id=account.id,
-            profile_id=account.profile_id,
-            platform=account.platform,
-            account_name=account.account_name,
-            action='oauth_start',
-            status='ok',
-            summary=f"{account.platform} OAuth flow started",
-            metadata={'state': state_token, 'redirectUri': redirect_uri, 'scopes': scopes},
-            db_path=db_path,
-        )
-    except Exception as exc:  # noqa: BLE001
+        if data.get('accountId') in (None, ''):
+            raise ValueError('Save and select the exact account before connecting OAuth')
+        account = profile_registry.get_account(int(data['accountId']), workspace_id=_workspace_scope(), db_path=db_path)
+        if data.get('profileId') not in (None, '') and int(data['profileId']) != account.profile_id:
+            raise ValueError('OAuth account does not belong to the selected profile')
+        auth = meta_auth if provider == 'meta' else threads_auth
+        allowed = {'facebook', 'instagram'} if provider == 'meta' else {'threads'}
+        if account.platform not in allowed:
+            raise ValueError('OAuth target platform mismatch')
+        redirect_uri = (_meta_callback_base_url() if provider == 'meta' else _threads_callback_base_url()) or auth.default_redirect_uri()
+        if data.get('redirectUri') and str(data['redirectUri']).strip() != redirect_uri:
+            raise ValueError('OAuth redirect URI must match the configured server callback')
+        scopes = data.get('scopes')
+        if not isinstance(scopes, list) or not scopes:
+            scopes = list(meta_auth.default_scopes_for_platform(account.platform) if provider == 'meta' else threads_auth.DEFAULT_SCOPES)
+        scopes = [str(scope) for scope in scopes]
+        state_token = auth.build_state_token()
+        authorize_url = auth.build_authorize_url_from_env(state=state_token, redirect_uri=redirect_uri, scopes=tuple(scopes))
+        oauth_state.create(provider, account, state_token=state_token, redirect_uri=redirect_uri,
+                           scopes=scopes, principal_id=_oauth_principal_id(), db_path=db_path)
+        _record_bound_oauth_event(account, action='oauth_start', status='ok', db_path=db_path)
+        callback = urlsplit(redirect_uri)
+        return jsonify({'code': 200, 'msg': 'ok', 'data': {
+            'authorizeUrl': authorize_url, 'state': state_token,
+            'callbackOrigin': f'{callback.scheme}://{callback.netloc}',
+        }}), 200
+    except LookupError:
+        return jsonify({'code': 404, 'msg': 'Account not found', 'data': None}), 404
+    except (ValueError, TypeError) as exc:
         return jsonify({'code': 400, 'msg': str(exc), 'data': None}), 400
-    return jsonify({'code': 200, 'msg': 'ok', 'data': {'authorizeUrl': authorize_url, 'state': state_token}}), 200
+    except Exception as exc:
+        return jsonify({'code': 400, 'msg': token_state.safe_error(exc), 'data': None}), 400
+
+
+@app.route('/oauth/meta/start', methods=['POST'])
+def meta_oauth_start():
+    return _start_bound_oauth('meta')
 
 
 def _render_oauth_closer(*, ok: bool, message: str, data=None, msg_type: str = 'sau:meta-oauth') -> str:
@@ -3344,7 +3140,7 @@ def _render_oauth_closer(*, ok: bool, message: str, data=None, msg_type: str = '
     ``window.close()`` from a non-script top frame.
     """
     import json as _json
-    data_json = _json.dumps(data or {}, ensure_ascii=False).replace('</', '<\\/')
+    data_json = _html_safe_json(data or {})
     ok_js = 'true' if ok else 'false'
     origin_js = _json.dumps(_oauth_post_message_origin())
     return f"""<html><head><meta charset="utf-8"></head><body>
@@ -3368,344 +3164,115 @@ def _render_oauth_closer(*, ok: bool, message: str, data=None, msg_type: str = '
 </body></html>"""
 
 
+def _render_meta_picker(state_token, platform, candidates):
+    # Only public identity labels reach the popup. It requests selection, never
+    # announces success; the authenticated opener must persist the selection.
+    labels = []
+    for page in candidates:
+        name = page.get('name') if platform == 'facebook' else page['instagram_business_account'].get('username')
+        labels.append({'id': token_maintenance.candidate_id(page, platform), 'name': str(name or '')})
+    return f'''<html><head><meta charset="utf-8"></head><body>
+<h2>Select the {platform} identity to connect</h2><div id="choices"></div><p id="status"></p>
+<script>
+const choices = {_html_safe_json(labels)};
+const state = {_html_safe_json(state_token)};
+choices.forEach(function(choice) {{
+  const button = document.createElement('button');
+  button.textContent = choice.name + ' (ID ' + choice.id + ')';
+  button.onclick = function() {{
+    if (!window.opener || window.opener.closed) {{
+      document.getElementById('status').textContent = 'Return to Accounts and restart authorization.';
+      return;
+    }}
+    window.opener.postMessage({{type: 'sau:meta-oauth-selection', data: {{state: state, selectedId: choice.id}}}}, {_html_safe_json(_oauth_post_message_origin())});
+    document.getElementById('status').textContent = 'Selection sent. Waiting for the server to save; see Accounts for any error.';
+  }};
+  document.getElementById('choices').appendChild(button);
+}});
+</script></body></html>'''
+
+
 @app.route('/oauth/meta/callback', methods=['GET'])
 def meta_oauth_callback():
     db_path = _current_db_path()
-    state_token = str(request.args.get('state', '') or '')
-    code = str(request.args.get('code', '') or '')
-    error = str(request.args.get('error', '') or '')
-    request_state = meta_review.get_oauth_request(state_token, db_path=db_path)
-    if not request_state:
-        return Response('Unknown Meta OAuth state', status=400, mimetype='text/plain')
-
-    print(f"🔍 Meta callback: state={state_token[:12]}... status={request_state.status} account_id={request_state.account_id} platform={request_state.platform}")
-
-    # Idempotency: if already completed (e.g. duplicate callback), return success
-    if request_state.status in ('completed', 'pending_page_selection', 'pending_ig_selection'):
-        # For picker statuses, re-render the picker HTML so the duplicate
-        # callback doesn't kill the popup with a postMessage containing empty data.
-        if request_state.status in ('pending_page_selection', 'pending_ig_selection'):
-            result = {}
-            try:
-                result = json.loads(request_state.result_json or '{}')
-            except Exception:
-                pass
-            picker_html = result.get('picker_html', '')
-            if picker_html:
-                return Response(picker_html, mimetype='text/html')
-            # Fallback: just tell the user to use the existing picker
-            return Response('<html><body><p style="font-family:sans-serif;padding:20px;text-align:center">Please make your selection in the previous window. You may close this tab.</p></body></html>', mimetype='text/html')
-        result = {}
-        try:
-            result = json.loads(request_state.result_json or '{}')
-        except Exception:
-            pass
-        # Remove picker_html from the result before sending to frontend
-        result.pop('picker_html', None)
-        return Response(
-            _render_oauth_closer(ok=True, message="Already connected ✓ You can close this window.", data=result),
-            mimetype='text/html',
-        )
-
-    if error:
-        meta_review.complete_oauth_request(state_token, status='error', error_text=error, result={'state': state_token, 'error': error}, db_path=db_path)
-        if request_state.account_id:
-            account_events.record_event(
-                account_id=request_state.account_id,
-                profile_id=request_state.profile_id,
-                platform=request_state.platform,
-                account_name=request_state.account_name or '',
-                action='oauth_callback',
-                status='error',
-                summary='Meta OAuth callback failed',
-                error_text=error,
-                metadata={'state': state_token},
-                db_path=db_path,
-            )
-        return Response(
-            _render_oauth_closer(ok=False, message=f"Authorization failed: {error}", data={'error': error}),
-            mimetype='text/html',
-        )
-
+    state_token = str(request.args.get('state') or '')
+    account = None
     try:
-        if not request_state.account_id:
-            raise ValueError('Meta OAuth request is missing accountId')
-        account = profile_registry.get_account(int(request_state.account_id), db_path=db_path)
-        config = dict(account.config or {})
-        token_payload = meta_auth.exchange_code_for_token(code=code, redirect_uri=request_state.redirect_uri)
-        short_lived_access_token = str(token_payload.get('access_token') or '')
-        try:
-            long_lived_payload = meta_auth.exchange_for_long_lived_token(access_token=short_lived_access_token) if short_lived_access_token else {}
-        except Exception as ll_exchange_err:
-            print(f"⚠️ Meta long-lived token exchange failed: {ll_exchange_err}")
-            long_lived_payload = {}
-        user_access_token = str(long_lived_payload.get('access_token') or short_lived_access_token)
-        print(f"🔍 Meta token exchange: short_lived={'present' if short_lived_access_token else 'MISSING'} long_lived={'present' if long_lived_payload.get('access_token') else 'FALLBACK_TO_SHORT'} expires_in={long_lived_payload.get('expires_in') or token_payload.get('expires_in') or 'NOT_SET'}")
-        pages_payload = meta_auth.fetch_managed_pages(access_token=user_access_token) if user_access_token else {}
-        pages = pages_payload.get('data', []) if isinstance(pages_payload, dict) else []
-        if not isinstance(pages, list):
-            pages = []
-        selected_page = None
-        if account.platform == profile_registry.PLATFORM_FACEBOOK:
-            wanted_page_id = str(config.get('pageId') or '').strip()
-            if wanted_page_id:
-                selected_page = next((page for page in pages if str(page.get('id') or '') == wanted_page_id), None)
-            if selected_page is None and len(pages) == 1:
-                selected_page = pages[0]
-            if selected_page is None and len(pages) > 1:
-                savable_pages = [
-                    {'id': str(p.get('id') or ''), 'name': str(p.get('name') or ''), 'access_token': str(p.get('access_token') or ''), 'pictureUrl': str(p.get('picture', {}).get('data', {}).get('url') or '')}
-                    for p in pages if isinstance(p, dict)
-                ]
-                pages_json = _html_safe_json(savable_pages)
-                html = f"""<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-            <style>body{{font-family:-apple-system,system-ui,sans-serif;padding:20px;max-width:560px;margin:0 auto;background:#f4f6f8}}
-            h2{{text-align:center;color:#1d2129}}.card{{background:#fff;border:2px solid #e4e6eb;border-radius:12px;padding:16px;margin:10px 0;cursor:pointer;transition:all .15s}}
-            .card:hover{{border-color:#1877f2;box-shadow:0 2px 8px rgba(24,119,242,.15)}}
-            .card h3{{margin:0 0 4px;color:#1877f2}}.card p{{margin:0;color:#65676b;font-size:13px}}</style></head><body>
-            <h2>{len(savable_pages)} pages available</h2><p style="text-align:center;color:#65676b">Select the page to connect:</p>
-            <div id="cards"></div>
-            <script>
-            var PAGES = {pages_json};
-            var TOKEN_DATA = {{userAccessToken: {json.dumps(user_access_token)}, expiresIn: {json.dumps(long_lived_payload.get('expires_in') or token_payload.get('expires_in') or '')}}};
-            var ACCOUNT_ID = {request_state.account_id};
-            var cards = document.getElementById('cards');
-            PAGES.forEach(function(p) {{
-              var card = document.createElement('div');
-              card.className = 'card';
-              var h3 = document.createElement('h3');
-              h3.textContent = p.name;
-              var pId = document.createElement('p');
-              pId.textContent = 'ID ' + p.id;
-              card.appendChild(h3);
-              card.appendChild(pId);
-              card.onclick = function() {{ selectPage(p); }};
-              cards.appendChild(card);
-            }});
-            function selectPage(p) {{
-              try {{
-                if (window.opener && !window.opener.closed) {{
-                  window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'facebook',accountId:ACCOUNT_ID,selectedPage:p,pages:PAGES,tokenData:TOKEN_DATA}}}}, {json.dumps(_oauth_post_message_origin())});
-                }}
-              }} catch (e) {{}}
-              window.close();
-            }}
-            </script>
-            </body></html>"""
-                meta_review.complete_oauth_request(state_token, status='pending_page_selection', result={'available_page_count': len(savable_pages), 'picker_html': html}, db_path=db_path)
-                return Response(html, mimetype='text/html')
-            if selected_page is None and not pages:
-                raise ValueError('Meta OAuth did not return any manageable Facebook Pages')
-            merged_config = dict(config)
-            # A successful (re)connect supersedes any earlier live self-check
-            # failure: clear the expired / reconnect markers.
-            _clear_meta_selfcheck_markers(merged_config)
-            merged_config['pageId'] = str(selected_page.get('id') or merged_config.get('pageId') or '')
-            merged_config['facebookPageName'] = str(selected_page.get('name') or merged_config.get('facebookPageName') or '')
-            merged_config['accessToken'] = str(selected_page.get('access_token') or user_access_token or '')
-            # Fetch Facebook page profile picture
-            try:
-                import requests as _requests
-                page_token = selected_page.get('access_token') or user_access_token
-                pic_resp = _requests.get(f"{meta_auth.META_GRAPH_ROOT}/{merged_config['pageId']}", params={"fields": "picture.type(large)", "access_token": page_token}, timeout=15)
-                pic_data = pic_resp.json()
-                pic_url = pic_data.get("picture", {}).get("data", {}).get("url")
-                if pic_url:
-                    merged_config['avatarUrl'] = pic_url
-            except Exception:
-                pass
-            merged_config['metaUserAccessToken'] = user_access_token
-            now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')
-            merged_config['accessTokenUpdatedAt'] = now_utc
-            # Persist a *truthful* expiry: this Meta app reports tokens as
-            # never-expiring (expires_at == 0) and omits expires_in, so the
-            # legacy 60-day model left a stale/past expiry that made the
-            # account read "Token expired" forever. Resolve from debug_token.
-            resolved_expiry = meta_auth.resolve_access_token_expiry(
-                access_token=user_access_token,
-                expires_in=long_lived_payload.get('expires_in') or token_payload.get('expires_in'),
-            )
-            merged_config['metaUserAccessTokenExpiresAt'] = resolved_expiry['expires_at_iso']
-            merged_config['accessTokenExpiresAt'] = resolved_expiry['expires_at_iso']
-            merged_config['metaTokenExpiryMode'] = resolved_expiry['mode']
-            merged_config['metaTokenExpiresAtEpoch'] = resolved_expiry['expires_at_epoch']
-            merged_config['connectedAt'] = merged_config.get('connectedAt') or now_utc
-            updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
-            callback_payload = {
-                'platform': updated.platform,
-                'state': state_token,
-                'status': 'ok',
-                'accountId': updated.id,
-                'accountName': updated.account_name,
-                'pageId': merged_config.get('pageId', ''),
-                'facebookPageName': merged_config.get('facebookPageName', ''),
-                'accessToken': merged_config.get('accessToken', ''),
-                'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
-                'connectedAt': merged_config.get('connectedAt', ''),
-                'avatarUrl': merged_config.get('avatarUrl', ''),
-            }
-            persisted = {
-                'platform': updated.platform,
-                'state': state_token,
-                'status': 'ok',
-                'accountId': updated.id,
-                'accountName': updated.account_name,
-                'pageId': merged_config.get('pageId', ''),
-                'facebookPageName': merged_config.get('facebookPageName', ''),
-                'avatarUrl': merged_config.get('avatarUrl', ''),
-            }
-            summary = f"Facebook connected: {merged_config.get('facebookPageName') or updated.account_name}"
-        else:
-            # Collect all Instagram business accounts from pages
-            ig_accounts = []
-            for page in pages:
-                ig_user = page.get('instagram_business_account') if isinstance(page, dict) else None
-                if not isinstance(ig_user, dict):
-                    continue
-                ig_accounts.append({
-                    'igUserId': str(ig_user.get('id') or ''),
-                    'instagramUserName': str(ig_user.get('username') or ''),
-                    'profilePictureUrl': str(ig_user.get('profile_picture_url') or ''),
-                    'pageId': str(page.get('id') or ''),
-                    'facebookPageName': str(page.get('name') or ''),
-                    'pageAccessToken': str(page.get('access_token') or ''),
-                })
+        request_state, account = oauth_state.claim('meta', state_token, db_path=db_path)
+        if request.args.get('error'):
+            raise oauth_state.OAuthStateError('Meta authorization was denied or canceled; existing credentials were not changed')
+        code = str(request.args.get('code') or '')
+        if not code:
+            raise oauth_state.OAuthStateError('Meta callback did not include an authorization code')
+        short_payload = meta_auth.exchange_code_for_token(code=code, redirect_uri=request_state.redirect_uri)
+        short_token = str(short_payload.get('access_token') or '').strip()
+        if not short_token:
+            raise meta_auth.MetaOAuthError('Meta code exchange returned no access token')
+        # A failed long-lived exchange is actionable, not silent success with a
+        # one-hour credential. No existing token is modified before final CAS.
+        long_payload = meta_auth.exchange_for_long_lived_token(access_token=short_token)
+        user_token = str(long_payload.get('access_token') or '').strip()
+        if not user_token:
+            raise meta_auth.MetaOAuthError('Meta long-lived exchange returned no credential; retry authorization')
+        user_expiry = meta_auth.resolve_access_token_expiry(access_token=user_token, expires_in=long_payload.get('expires_in'))
+        pages = meta_auth.fetch_managed_pages(access_token=user_token).get('data')
+        candidates = token_maintenance.meta_candidates(pages, account.platform, account.config or {})
+        if len(candidates) > 1:
+            oauth_state.store_candidates(state_token, candidates=candidates, user_token=user_token,
+                                         user_expiry=user_expiry, db_path=db_path)
+            return Response(_render_meta_picker(state_token, account.platform, candidates), mimetype='text/html')
+        patch = token_maintenance.meta_credential_patch(
+            account.config or {}, account.platform, page=candidates[0], user_token=user_token, user_expiry=user_expiry)
+        patch['connectedAt'] = (account.config or {}).get('connectedAt') or token_state.iso_now()
+        patch['scope'] = ' '.join(request_state.scopes)
+        updated, result = oauth_state.finish('meta', state_token, patch, db_path=db_path)
+        _record_bound_oauth_event(updated, action='oauth_callback', status='ok', db_path=db_path)
+        return Response(_render_oauth_closer(ok=True, message='Authorization saved. You can close this window.', data=result), mimetype='text/html')
+    except Exception as exc:
+        if account is not None:  # only this callback's claimed state may fail
+            oauth_state.fail('meta', state_token, exc, db_path=db_path)
+            _record_bound_oauth_event(account, action='oauth_callback', status='error', error=exc, db_path=db_path)
+        reason = 'Authorization was not saved. ' + token_state.safe_error(exc) + ' Start OAuth again.'
+        return Response(_render_oauth_closer(ok=False, message=reason, data={'state': state_token, 'error': reason}), status=400, mimetype='text/html')
 
-            wanted_ig_user_id = str(config.get('igUserId') or '').strip()
-            selected_ig = None
-            if wanted_ig_user_id:
-                selected_ig = next((ig for ig in ig_accounts if ig['igUserId'] == wanted_ig_user_id), None)
-            if selected_ig is None and len(ig_accounts) == 1:
-                selected_ig = ig_accounts[0]
 
-            if selected_ig is None and len(ig_accounts) > 1:
-                # Show picker page (same pattern as Facebook page selector)
-                ig_json = json.dumps(ig_accounts)
-                _picker_expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
-                _token_data_expires_json = json.dumps((datetime.now(tz=timezone.utc).replace(tzinfo=None) + timedelta(seconds=int(_picker_expires_in))).isoformat(timespec='seconds')) if _picker_expires_in else json.dumps('')
-                html = f"""<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-            <style>body{{font-family:-apple-system,system-ui,sans-serif;padding:20px;max-width:560px;margin:0 auto;background:#f4f6f8}}
-            h2{{text-align:center;color:#1d2129}}.card{{background:#fff;border:2px solid #e4e6eb;border-radius:12px;padding:16px;margin:10px 0;cursor:pointer;transition:all .15s}}
-            .card:hover{{border-color:#E1306C;box-shadow:0 2px 8px rgba(225,48,108,.15)}}
-            .card h3{{margin:0 0 4px;color:#E1306C}}.card p{{margin:0;color:#65676b;font-size:13px}}</style></head><body>
-            <h2>{len(ig_accounts)} Instagram accounts available</h2><p style="text-align:center;color:#65676b">Select the Instagram account to connect:</p>
-            <div id="cards"></div>
-            <script>
-            var IG_ACCOUNTS = {ig_json};
-            var TOKEN_DATA = {{userAccessToken: {json.dumps(user_access_token)}, metaUserAccessTokenExpiresAt: {_token_data_expires_json}}};
-            var ACCOUNT_ID = {request_state.account_id};
-            var cards = document.getElementById('cards');
-            IG_ACCOUNTS.forEach(function(ig) {{
-              var card = document.createElement('div');
-              card.className = 'card';
-              card.innerHTML = '<h3>@' + ig.instagramUserName + '</h3><p>' + ig.facebookPageName + ' (Page ID: ' + ig.pageId + ')</p>';
-              card.onclick = function() {{ selectIG(ig); }};
-              cards.appendChild(card);
-            }});
-            function selectIG(ig) {{
-              try {{
-                if (window.opener && !window.opener.closed) {{
-                  window.opener.postMessage({{type:'sau:meta-oauth',ok:true,data:{{platform:'instagram',accountId:ACCOUNT_ID,selectedPage:{{id:ig.pageId,name:ig.facebookPageName,access_token:ig.pageAccessToken,igUserId:ig.igUserId,instagramUserName:ig.instagramUserName}},tokenData:TOKEN_DATA}}}}, {json.dumps(_oauth_post_message_origin())});
-                }}
-              }} catch (e) {{}}
-              window.close();
-            }}
-            </script>
-            </body></html>"""
-                meta_review.complete_oauth_request(state_token, status='pending_ig_selection', result={'available_ig_count': len(ig_accounts), 'picker_html': html}, db_path=db_path)
-                return Response(html, mimetype='text/html')
-
-            if selected_ig is None:
-                raise ValueError('Meta OAuth did not return a page-linked Instagram business account')
-
-            merged_config = dict(config)
-            # A successful (re)connect supersedes any earlier live self-check
-            # failure: clear the expired / reconnect markers.
-            _clear_meta_selfcheck_markers(merged_config)
-            merged_config['pageId'] = selected_ig['pageId']
-            merged_config['facebookPageName'] = selected_ig['facebookPageName']
-            merged_config['igUserId'] = selected_ig['igUserId']
-            merged_config['instagramUserName'] = selected_ig['instagramUserName']
-            if selected_ig.get('profilePictureUrl'):
-                merged_config['avatarUrl'] = selected_ig['profilePictureUrl']
-            merged_config['accessToken'] = selected_ig['pageAccessToken'] or user_access_token
-            merged_config['metaUserAccessToken'] = user_access_token
-            now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')
-            merged_config['accessTokenUpdatedAt'] = now_utc
-            # Persist a truthful expiry (same rationale as the Facebook branch):
-            # never-expiring Meta tokens must not be left with no / past expiry.
-            resolved_expiry = meta_auth.resolve_access_token_expiry(
-                access_token=user_access_token,
-                expires_in=long_lived_payload.get('expires_in') or token_payload.get('expires_in'),
-            )
-            merged_config['metaUserAccessTokenExpiresAt'] = resolved_expiry['expires_at_iso']
-            merged_config['accessTokenExpiresAt'] = resolved_expiry['expires_at_iso']
-            merged_config['metaTokenExpiryMode'] = resolved_expiry['mode']
-            merged_config['metaTokenExpiresAtEpoch'] = resolved_expiry['expires_at_epoch']
-            merged_config['connectedAt'] = merged_config.get('connectedAt') or now_utc
-            print(f"🔍 Meta callback IG: saving config for account {account.id}: igUserId={merged_config.get('igUserId')} accessToken={'present' if merged_config.get('accessToken') else 'MISSING'} keys={list(merged_config.keys())}")
-            updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
-            print(f"✅ Meta callback IG: saved account {updated.id} status={updated.status} config_keys={list((updated.config or {}).keys())}")
-            callback_payload = {
-                'platform': updated.platform,
-                'state': state_token,
-                'status': 'ok',
-                'accountId': updated.id,
-                'accountName': updated.account_name,
-                'pageId': merged_config.get('pageId', ''),
-                'facebookPageName': merged_config.get('facebookPageName', ''),
-                'igUserId': merged_config.get('igUserId', ''),
-                'instagramUserName': merged_config.get('instagramUserName', ''),
-                'accessToken': merged_config.get('accessToken', ''),
-                'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
-                'connectedAt': merged_config.get('connectedAt', ''),
-                'avatarUrl': merged_config.get('avatarUrl', ''),
-            }
-            persisted = {
-                'platform': updated.platform,
-                'state': state_token,
-                'status': 'ok',
-                'accountId': updated.id,
-                'accountName': updated.account_name,
-                'pageId': merged_config.get('pageId', ''),
-                'facebookPageName': merged_config.get('facebookPageName', ''),
-                'igUserId': merged_config.get('igUserId', ''),
-                'instagramUserName': merged_config.get('instagramUserName', ''),
-            }
-            summary = f"Instagram connected: {merged_config.get('instagramUserName') or updated.account_name}"
-
-        meta_review.complete_oauth_request(state_token, status='completed', result=persisted, db_path=db_path)
-        account_events.record_event(
-            account_id=updated.id,
-            profile_id=updated.profile_id,
-            platform=updated.platform,
-            account_name=updated.account_name,
-            action='oauth_callback',
-            status='ok',
-            summary=summary,
-            metadata={'state': state_token},
-            db_path=db_path,
-        )
-        return Response(
-            _render_oauth_closer(ok=True, message="Authorization completed ✓ You can close this window.", data=callback_payload),
-            mimetype='text/html',
-        )
-    except Exception as exc:  # noqa: BLE001
-        meta_review.complete_oauth_request(state_token, status='error', error_text=str(exc), result={'state': state_token, 'error': str(exc)}, db_path=db_path)
-        if request_state.account_id:
-            account_events.record_event(
-                account_id=request_state.account_id,
-                profile_id=request_state.profile_id,
-                platform=request_state.platform,
-                account_name=request_state.account_name or '',
-                action='oauth_callback',
-                status='error',
-                summary='Meta OAuth callback failed',
-                error_text=str(exc),
-                metadata={'state': state_token},
-                db_path=db_path,
-            )
-        return Response(f"<html><body><p>Meta callback failed: {_html_escape(str(exc))}</p></body></html>", status=500, mimetype='text/html')
+@app.route('/oauth/meta/select', methods=['POST'])
+def meta_oauth_select():
+    # Deliberately NOT a public callback: bearer/Google + CSRF/tenant gates apply.
+    db_path = _current_db_path()
+    try:
+        data = _read_json_body()
+        if set(data) != {'state', 'selectedId'} or not all(isinstance(data[key], str) and data[key] for key in ('state', 'selectedId')):
+            raise ValueError('Selection accepts only state and selectedId')
+        state_token, selected_id = data['state'], data['selectedId']
+        request_state, account = oauth_state.pending('meta', state_token, db_path=db_path,
+                                                     workspace_id=_workspace_scope(), principal_id=_oauth_principal_id())
+        stored = request_state.result
+        candidates = token_maintenance.meta_candidates(stored.get('candidates'), account.platform, account.config or {})
+        matches = [page for page in candidates if token_maintenance.candidate_id(page, account.platform) == selected_id]
+        if len(matches) != 1:
+            raise ValueError('Selected identity is not one of this authorization request\'s verified candidates')
+        user_token = stored['userAccessToken']
+        # Revalidate at selection time; the popup may have been open for minutes.
+        user_expiry = meta_auth.resolve_access_token_expiry(access_token=user_token)
+        if user_expiry['mode'] == 'unknown' and stored.get('userExpiry', {}).get('mode') == 'expiring':
+            # A known absolute deadline from this exact token's exchange is
+            # still a fact; do not recalculate its duration from selection time.
+            user_expiry = dict(stored['userExpiry'])
+        patch = token_maintenance.meta_credential_patch(
+            account.config or {}, account.platform, page=matches[0], user_token=user_token, user_expiry=user_expiry)
+        patch['connectedAt'] = (account.config or {}).get('connectedAt') or token_state.iso_now()
+        patch['scope'] = ' '.join(request_state.scopes)
+        updated, result = oauth_state.finish('meta', state_token, patch, db_path=db_path, selection=True,
+                                             workspace_id=_workspace_scope(), principal_id=_oauth_principal_id())
+        _record_bound_oauth_event(updated, action='oauth_callback', status='ok', db_path=db_path)
+        return jsonify({'code': 200, 'msg': 'saved', 'data': result}), 200
+    except LookupError:
+        return jsonify({'code': 404, 'msg': 'Account not found', 'data': None}), 404
+    except (ValueError, TypeError) as exc:
+        return jsonify({'code': 400, 'msg': str(exc), 'data': None}), 400
+    except Exception as exc:
+        return jsonify({'code': 409, 'msg': token_state.safe_error(exc), 'data': None}), 409
 
 
 @app.route('/oauth/youtube/start', methods=['POST'])
@@ -3833,7 +3400,8 @@ def youtube_oauth_callback():
             merged_config['avatarUrl'] = avatar_url
         merged_config['scope'] = str(token_payload.get('scope') or merged_config.get('scope') or ' '.join(request_state.scopes))
         merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
-        updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
+        updated = token_state.require_saved(token_state.commit_success(
+            account, token_state.credential_changes(account.config or {}, merged_config), db_path=db_path))
         callback_payload = {
             'state': state_token,
             'status': 'ok',
@@ -4018,12 +3586,8 @@ def reddit_oauth_callback():
         merged_config['redditAuthType'] = 'api'
         merged_config['scope'] = str(token_payload.get('scope') or merged_config.get('scope') or ' '.join(request_state.scopes))
         merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
-        updated = profile_registry.update_account(
-            account.id,
-            config=merged_config,
-            auth_type='oauth',
-            db_path=db_path,
-        )
+        updated = token_state.require_saved(token_state.commit_success(
+            account, token_state.credential_changes(account.config or {}, merged_config), db_path=db_path))
         callback_payload = {
             'state': state_token,
             'status': 'ok',
@@ -4226,13 +3790,8 @@ def twitter_oauth_callback():
             '_lastMaintenanceAttemptAt',
         ):
             merged_config.pop(marker, None)
-        updated = profile_registry.update_account(
-            account.id,
-            config=merged_config,
-            auth_type='oauth',
-            status=1,
-            db_path=db_path,
-        )
+        updated = token_state.require_saved(token_state.commit_success(
+            account, token_state.credential_changes(account.config or {}, merged_config), db_path=db_path))
         callback_payload = {
             'state': state_token,
             'status': 'ok',
@@ -4319,278 +3878,165 @@ def _default_scopes_for_platform(platform: str) -> list[str]:
 def oauth_admin_status():
     db_path = _current_db_path()
     platform = str(request.args.get('platform', '') or '').strip().lower()
-    raw_account_id = request.args.get('accountId')
-    account_id = int(raw_account_id) if raw_account_id not in (None, '') and str(raw_account_id).isdigit() else None
     if not platform:
         return jsonify({'code': 200, 'msg': 'ok', 'data': {}}), 200
-
-    # Auto-discover account when none specified
-    if account_id is None and platform:
-        try:
-            all_accounts = profile_registry.list_accounts(db_path=db_path)
-            for acc in all_accounts:
-                if acc.platform == platform and acc.auth_type == 'oauth':
-                    account_id = acc.id
-                    break
-        except Exception:
-            pass
-    if platform not in {
-        profile_registry.PLATFORM_REDDIT,
-        profile_registry.PLATFORM_YOUTUBE,
-        profile_registry.PLATFORM_FACEBOOK,
-        profile_registry.PLATFORM_INSTAGRAM,
-        profile_registry.PLATFORM_THREADS,
-        profile_registry.PLATFORM_TWITTER,
-        profile_registry.PLATFORM_TIKTOK,
-    }:
+    if platform not in {'reddit', 'youtube', 'facebook', 'instagram', 'threads', 'twitter', 'tiktok'}:
         return jsonify({'code': 400, 'msg': 'Unsupported platform for OAuth status', 'data': None}), 400
+    raw_account_id = request.args.get('accountId')
+    if raw_account_id not in (None, '') and (not str(raw_account_id).isdigit() or int(raw_account_id) <= 0):
+        return jsonify({'code': 400, 'msg': 'Invalid accountId', 'data': None}), 400
+    account_id = int(raw_account_id) if raw_account_id not in (None, '') else None
+    workspace_id = _workspace_scope()
+    account = None
+    if account_id is not None:
+        try:
+            account = profile_registry.get_account(account_id, workspace_id=workspace_id, db_path=db_path)
+        except LookupError:
+            return jsonify({'code': 404, 'msg': 'Account not found', 'data': None}), 404
+        if account.platform != platform:
+            return jsonify({'code': 404, 'msg': 'Account not found', 'data': None}), 404
+    else:
+        # No global discovery or latest-request query can precede tenant scope.
+        account = next((item for item in profile_registry.list_accounts(
+            platform=platform, workspace_id=workspace_id, db_path=db_path) if item.auth_type == 'oauth'), None)
+        account_id = account.id if account is not None else None
 
     redirect_uri = ''
     request_state = None
     products = []
-    if platform == profile_registry.PLATFORM_REDDIT:
+    if platform == 'reddit':
         redirect_uri = _reddit_callback_base_url()
-        request_state = reddit_review.latest_oauth_request(account_id=account_id, db_path=db_path)
+        review = reddit_review
         products = ['Reddit OAuth']
-    elif platform == profile_registry.PLATFORM_YOUTUBE:
+    elif platform == 'youtube':
         redirect_uri = _youtube_callback_base_url()
-        request_state = youtube_review.latest_oauth_request(account_id=account_id, db_path=db_path)
+        review = youtube_review
         products = ['Google OAuth', 'YouTube Data API']
-    elif platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
+    elif platform in {'facebook', 'instagram'}:
         redirect_uri = _meta_callback_base_url()
-        request_state = meta_review.latest_oauth_request(account_id=account_id, db_path=db_path)
+        review = meta_review
         products = ['Meta Graph API OAuth']
-    elif platform == profile_registry.PLATFORM_THREADS:
+    elif platform == 'threads':
         redirect_uri = _threads_callback_base_url()
-        request_state = threads_review.latest_oauth_request(account_id=account_id, db_path=db_path)
+        review = threads_review
         products = ['Threads API OAuth']
-    elif platform == profile_registry.PLATFORM_TWITTER:
+    elif platform == 'twitter':
         redirect_uri = _twitter_callback_base_url()
-        request_state = x_review.latest_oauth_request(account_id=account_id, db_path=db_path)
+        review = x_review
         products = ['Twitter/X OAuth 2.0']
-    elif platform == profile_registry.PLATFORM_TIKTOK:
+    else:
         redirect_uri = _tiktok_callback_base_url() or tiktok_auth.default_redirect_uri()
-        request_state = tiktok_review.latest_oauth_request(account_id=account_id, db_path=db_path)
+        review = tiktok_review
         products = ['TikTok Login Kit', 'Content Posting API']
+    if account is not None:
+        request_state = review.latest_oauth_request(account_id=account.id, db_path=db_path)
+    if request_state is not None and request_state.status not in {'completed', 'error', 'expired', 'canceled', 'cancelled', 'failed'}:
+        binding = (request_state.result or {}).get('binding') or {}
+        if binding:
+            visible = (binding.get('accountId') == account.id
+                       and binding.get('profileId') == account.profile_id
+                       and binding.get('workspaceId') == account.workspace_id
+                       and binding.get('platform') == account.platform
+                       and binding.get('principalId') == _oauth_principal_id()
+                       and binding.get('fingerprint') == token_state.fingerprint(account))
+        else:
+            # Legacy unbound flows are visible only to the existing unscoped
+            # operator path, never to a Google-session tenant/principal.
+            visible = workspace_id is None and _oauth_principal_id() is None
+        if not visible:
+            request_state = None
 
-    events = account_events.list_events(limit=25, account_id=account_id, platform=platform, workspace_id=_workspace_scope(), db_path=db_path)
+    events = account_events.list_events(limit=25, account_id=account_id, platform=platform,
+                                       workspace_id=workspace_id, db_path=db_path)
+    def event_payload(event):
+        if event is None:
+            return None
+        payload = event.to_dict()
+        metadata = payload.get('metadata') or {}
+        # Historical events can contain another live flow's state/auth URL.
+        # The initiating caller gets its state only from the bound request.
+        public_keys = {'timestamp', 'scope', 'scopes', 'redirectUri', 'accountId', 'profileId', 'platform', 'workspaceId'}
+        payload['metadata'] = {key: value for key, value in metadata.items() if key in public_keys} if isinstance(metadata, dict) else {}
+        return payload
     last_start = next((event for event in events if event.action == 'oauth_start'), None)
     last_callback = next((event for event in events if event.action == 'oauth_callback'), None)
     last_refresh = next((event for event in events if event.action == 'refresh_token'), None)
-
-    account_payload = None
+    account_payload = _account_payload(account) if account is not None else None
+    native = token_state.native_state(account) if account is not None else None
+    route = token_state.publishing_route(account, native) if native is not None else None
     expiry = None
     recommended_action = ''
     reconnect_required = False
-    if account_id is not None:
-        try:
-            account = profile_registry.get_account(account_id, db_path=db_path)
-            account_payload = _account_payload(account)
-            config = dict(account.config or {})
-            if platform in {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM}:
-                expiry = str(config.get('metaUserAccessTokenExpiresAt') or config.get('accessTokenExpiresAt') or '')
-                expires_at = prepared_publishers._parse_iso_datetime(expiry)
-                reconnect_required = bool(expires_at and expires_at <= prepared_publishers._utc_now())
-                recommended_action = 'reconnect' if reconnect_required else ('refresh' if config.get('metaUserAccessToken') else 'connect')
-            else:
-                expiry = str(config.get('accessTokenExpiresAt') or '')
-                expires_at = prepared_publishers._parse_iso_datetime(expiry)
-                if expiry and expires_at and expires_at <= prepared_publishers._utc_now():
-                    recommended_action = 'reconnect'
-                    reconnect_required = True
-                elif expiry and expires_at:
-                    recommended_action = 'refresh'
-                else:
-                    recommended_action = 'refresh' if config.get('accessToken') else 'connect'
-        except LookupError:
-            account_payload = None
+    if native is not None:
+        deadlines = []
+        for token in (native['token'], native.get('userToken')):
+            if not token:
+                continue
+            values = [token.get('dataAccessExpiresAt')]
+            if token['mode'] != 'never':
+                values.append(token.get('expiresAt'))
+            for value in values:
+                parsed = token_state.parse_time(value)
+                if parsed is not None:
+                    deadlines.append((parsed, value))
+        expiry = min(deadlines, key=lambda item: item[0])[1] if deadlines else ''
+        reconnect_required = native['reconnectRequired']
+        recommended_action = 'reconnect' if reconnect_required else 'refresh' if native['configured'] else 'connect'
 
-    return jsonify({
-        'code': 200,
-        'msg': 'ok',
-        'data': {
-            'platform': platform,
-            'accountId': account_id,
-            'redirectUri': redirect_uri,
-            'selectedProducts': products,
-            'selectedScopes': request_state.scopes if request_state and request_state.scopes else _default_scopes_for_platform(platform),
-            'lastRequest': _oauth_request_to_status(request_state),
-            'lastStart': last_start.to_dict() if last_start else None,
-            'lastCallback': last_callback.to_dict() if last_callback else None,
-            'lastRefresh': last_refresh.to_dict() if last_refresh else None,
-            'account': account_payload,
-            'expiresAt': expiry,
-            'reconnectRequired': reconnect_required,
-            'recommendedAction': recommended_action,
-            'recentEvents': [event.to_dict() for event in events],
-        },
-    }), 200
+    return jsonify({'code': 200, 'msg': 'ok', 'data': {
+        'platform': platform, 'accountId': account_id, 'redirectUri': redirect_uri,
+        'selectedProducts': products,
+        'selectedScopes': request_state.scopes if request_state and request_state.scopes else _default_scopes_for_platform(platform),
+        'lastRequest': _oauth_request_to_status(request_state),
+        'lastStart': event_payload(last_start), 'lastCallback': event_payload(last_callback),
+        'lastRefresh': event_payload(last_refresh), 'account': account_payload,
+        'expiresAt': expiry, 'reconnectRequired': reconnect_required,
+        'recommendedAction': recommended_action, 'nativeCredentials': native, 'publishingRoute': route,
+        'recentEvents': [event_payload(event) for event in events],
+    }}), 200
 
 
 @app.route('/oauth/threads/start', methods=['POST'])
 def threads_oauth_start():
-    db_path = _current_db_path()
-    try:
-        data = _read_json_body()
-        raw_account_id = data.get('accountId')
-        if raw_account_id in (None, ''):
-            raise ValueError('Please save the Threads account before connecting OAuth')
-        account_id = int(raw_account_id)
-        account = profile_registry.get_account(account_id, db_path=db_path)
-        if account.platform != profile_registry.PLATFORM_THREADS:
-            raise ValueError('OAuth connect is only available for Threads accounts on this route')
-        state_token = threads_auth.build_state_token()
-        redirect_uri = str(data.get('redirectUri') or _threads_callback_base_url() or threads_auth.default_redirect_uri()).strip()
-        scopes = data.get('scopes') if isinstance(data.get('scopes'), list) and data.get('scopes') else list(threads_auth.DEFAULT_SCOPES)
-        authorize_url = threads_auth.build_authorize_url_from_env(
-            state=state_token,
-            redirect_uri=redirect_uri,
-            scopes=tuple(str(scope) for scope in scopes),
-        )
-        threads_review.create_oauth_request(
-            state_token=state_token,
-            profile_id=account.profile_id,
-            account_id=account.id,
-            account_name=account.account_name,
-            redirect_uri=redirect_uri,
-            scopes=[str(scope) for scope in scopes],
-            db_path=db_path,
-        )
-        account_events.record_event(
-            account_id=account.id,
-            profile_id=account.profile_id,
-            platform=account.platform,
-            account_name=account.account_name,
-            action='oauth_start',
-            status='ok',
-            summary='Threads OAuth flow started',
-            metadata={'state': state_token, 'redirectUri': redirect_uri, 'scopes': scopes},
-            db_path=db_path,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return jsonify({'code': 400, 'msg': str(exc), 'data': None}), 400
-    return jsonify({'code': 200, 'msg': 'ok', 'data': {'authorizeUrl': authorize_url, 'state': state_token}}), 200
+    return _start_bound_oauth('threads')
 
 
 @app.route('/oauth/threads/callback', methods=['GET'])
 def threads_oauth_callback():
     db_path = _current_db_path()
-    state_token = str(request.args.get('state', '') or '')
-    code = str(request.args.get('code', '') or '')
-    error = str(request.args.get('error', '') or '')
-    request_state = threads_review.get_oauth_request(state_token, db_path=db_path)
-    if not request_state:
-        return Response('Unknown Threads OAuth state', status=400, mimetype='text/plain')
-
-    if error:
-        threads_review.complete_oauth_request(state_token, status='error', error_text=error, result={'state': state_token, 'error': error}, db_path=db_path)
-        if request_state.account_id:
-            account_events.record_event(
-                account_id=request_state.account_id,
-                profile_id=request_state.profile_id,
-                platform=profile_registry.PLATFORM_THREADS,
-                account_name=request_state.account_name or '',
-                action='oauth_callback',
-                status='error',
-                summary='Threads OAuth callback failed',
-                error_text=error,
-                metadata={'state': state_token},
-                db_path=db_path,
-            )
-        return Response(f"""<html><body><script>
-            if (window.opener) {{
-              window.opener.postMessage({{ type: 'sau:threads-oauth', ok: false, error: {_html_safe_json(error)} }}, {_oauth_post_message_origin()!r});
-            }}
-            window.close();
-            </script><p>Threads authorization failed. You may close this window.</p></body></html>""" , mimetype='text/html')
-
+    state_token = str(request.args.get('state') or '')
+    account = None
     try:
-        if not request_state.account_id:
-            raise ValueError('Threads OAuth request is missing accountId')
-        account = profile_registry.get_account(int(request_state.account_id), db_path=db_path)
-        token_payload = threads_auth.exchange_code_for_token(code=code, redirect_uri=request_state.redirect_uri)
-        short_lived_access_token = str(token_payload.get('access_token') or '')
-        long_lived_payload = threads_auth.exchange_for_long_lived_token(access_token=short_lived_access_token) if short_lived_access_token else {}
-        access_token = str(long_lived_payload.get('access_token') or short_lived_access_token)
-        me_payload = threads_auth.fetch_me(access_token=access_token, fields=('id', 'username', 'threads_profile_picture_url')) if access_token else {}
-        merged_config = dict(account.config or {})
-        if access_token:
-            merged_config['accessToken'] = access_token
-        user_id = token_payload.get('user_id') or me_payload.get('id')
-        if user_id:
-            merged_config['threadUserId'] = str(user_id)
-            merged_config['userId'] = str(user_id)
-        if me_payload.get('username'):
-            merged_config['threadsUserName'] = str(me_payload.get('username') or '')
-        if me_payload.get('threads_profile_picture_url'):
-            merged_config['avatarUrl'] = str(me_payload.get('threads_profile_picture_url'))
-        merged_config['accessTokenUpdatedAt'] = datetime.now().isoformat(timespec='seconds')
-        expires_in = long_lived_payload.get('expires_in') or token_payload.get('expires_in')
-        if expires_in not in (None, ''):
-            merged_config['accessTokenExpiresAt'] = (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))).isoformat(timespec='seconds')
-        merged_config['scope'] = str(merged_config.get('scope') or ' '.join(request_state.scopes))
-        merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
-        updated = profile_registry.update_account(account.id, config=merged_config, auth_type='oauth', status=1, db_path=db_path)
-        callback_payload = {
-            'state': state_token,
-            'status': 'ok',
-            'accountId': updated.id,
-            'accountName': updated.account_name,
-            'accessToken': merged_config.get('accessToken', ''),
-            'threadUserId': merged_config.get('threadUserId', ''),
-            'threadsUserName': merged_config.get('threadsUserName', ''),
-            'accessTokenExpiresAt': merged_config.get('accessTokenExpiresAt', ''),
-            'accessTokenUpdatedAt': merged_config.get('accessTokenUpdatedAt', ''),
-            'connectedAt': merged_config.get('connectedAt', ''),
-            'avatarUrl': merged_config.get('avatarUrl', ''),
-        }
-        threads_review.complete_oauth_request(
-            state_token,
-            status='completed',
-            result={
-                'state': state_token,
-                'status': 'ok',
-                'accountId': updated.id,
-                'accountName': updated.account_name,
-                'threadUserId': merged_config.get('threadUserId', ''),
-                'threadsUserName': merged_config.get('threadsUserName', ''),
-            },
-            db_path=db_path,
-        )
-        account_events.record_event(
-            account_id=updated.id,
-            profile_id=updated.profile_id,
-            platform=updated.platform,
-            account_name=updated.account_name,
-            action='oauth_callback',
-            status='ok',
-            summary=f"Threads connected: {merged_config.get('threadsUserName') or updated.account_name}",
-            metadata={'state': state_token},
-            db_path=db_path,
-        )
-        html = f"""<html><body><script>
-        if (window.opener) {{
-          window.opener.postMessage({{ type: 'sau:threads-oauth', ok: true, data: {_html_safe_json(callback_payload)} }}, {_oauth_post_message_origin()!r});
-        }}
-        window.close();
-        </script><p>Threads authorization completed. You may close this window.</p></body></html>"""
-        return Response(html, mimetype='text/html')
-    except Exception as exc:  # noqa: BLE001
-        threads_review.complete_oauth_request(state_token, status='error', error_text=str(exc), result={'state': state_token, 'error': str(exc)}, db_path=db_path)
-        if request_state.account_id:
-            account_events.record_event(
-                account_id=request_state.account_id,
-                profile_id=request_state.profile_id,
-                platform=profile_registry.PLATFORM_THREADS,
-                account_name=request_state.account_name or '',
-                action='oauth_callback',
-                status='error',
-                summary='Threads OAuth callback failed',
-                error_text=str(exc),
-                metadata={'state': state_token},
-                db_path=db_path,
-            )
-        return Response(f"<html><body><p>Threads callback failed: {_html_escape(str(exc))}</p></body></html>", status=500, mimetype='text/html')
+        request_state, account = oauth_state.claim('threads', state_token, db_path=db_path)
+        if request.args.get('error'):
+            raise oauth_state.OAuthStateError('Threads authorization was denied or canceled; existing credentials were not changed')
+        code = str(request.args.get('code') or '')
+        if not code:
+            raise oauth_state.OAuthStateError('Threads callback did not include an authorization code')
+        short_payload = threads_auth.exchange_code_for_token(code=code, redirect_uri=request_state.redirect_uri)
+        short_token = str(short_payload.get('access_token') or '').strip()
+        if not short_token:
+            raise threads_auth.ThreadsOAuthError('Threads code exchange returned no access token')
+        long_payload = threads_auth.exchange_for_long_lived_token(access_token=short_token)
+        access_token = str(long_payload.get('access_token') or '').strip()
+        if not access_token:
+            raise threads_auth.ThreadsOAuthError('Threads long-lived exchange returned no credential; retry authorization')
+        me = threads_auth.fetch_me(access_token=access_token, fields=('id', 'username', 'threads_profile_picture_url'))
+        patch = token_maintenance.threads_credential_patch(
+            account.config or {}, long_payload, me, reconnect=True, short_user_id=short_payload.get('user_id'))
+        patch['connectedAt'] = (account.config or {}).get('connectedAt') or token_state.iso_now()
+        patch['scope'] = ' '.join(request_state.scopes)
+        updated, result = oauth_state.finish('threads', state_token, patch, db_path=db_path)
+        _record_bound_oauth_event(updated, action='oauth_callback', status='ok', db_path=db_path)
+        return Response(_render_oauth_closer(ok=True, message='Threads authorization saved. You can close this window.',
+                                            data=result, msg_type='sau:threads-oauth'), mimetype='text/html')
+    except Exception as exc:
+        if account is not None:
+            oauth_state.fail('threads', state_token, exc, db_path=db_path)
+            _record_bound_oauth_event(account, action='oauth_callback', status='error', error=exc, db_path=db_path)
+        reason = 'Authorization was not saved. ' + token_state.safe_error(exc) + ' Start OAuth again.'
+        return Response(_render_oauth_closer(ok=False, message=reason, data={'state': state_token, 'error': reason},
+                                            msg_type='sau:threads-oauth'), status=400, mimetype='text/html')
 
 
 @app.route('/oauth/tiktok/start', methods=['POST'])
@@ -4710,6 +4156,8 @@ def tiktok_oauth_callback():
         )
 
     try:
+        account_id = request_state.account_id
+        account = profile_registry.get_account(int(account_id), db_path=db_path) if account_id else None
         token_payload = tiktok_auth.exchange_code_for_token(
             code=code,
             redirect_uri=request_state.redirect_uri,
@@ -4721,9 +4169,7 @@ def tiktok_oauth_callback():
         user_info = tiktok_auth.fetch_user_info(access_token=access_token) if access_token else {}
         if not isinstance(user_info, dict):
             user_info = {}
-        account_id = request_state.account_id
         if account_id:
-            account = profile_registry.get_account(int(account_id), db_path=db_path)
             merged_config = dict(account.config or {})
             merged_config = prepared_publishers._apply_tiktok_token_payload(merged_config, token_payload, user_info)
             merged_config.update({
@@ -4731,12 +4177,8 @@ def tiktok_oauth_callback():
                 'scope': token_payload.get('scope') or ','.join(request_state.scopes),
                 'connectedAt': merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds'),
             })
-            profile_registry.update_account(
-                int(account_id),
-                config=merged_config,
-                auth_type='oauth',
-                db_path=db_path,
-            )
+            token_state.require_saved(token_state.commit_success(
+                account, token_state.credential_changes(account.config or {}, merged_config), db_path=db_path))
         callback_payload = {
             'state': state_token,
             'status': 'ok',
@@ -4999,7 +4441,8 @@ def tiktok_creator_info(account_id):
     # Persist refreshed token if _ensure_tiktok_access_token rotated it.
     if updated_config is not None:
         try:
-            profile_registry.update_account(account_id, config=updated_config, db_path=db_path)
+            token_state.require_saved(token_state.commit_success(
+                account, token_state.credential_changes(account.config or {}, updated_config), db_path=db_path))
         except Exception:
             logging.getLogger(__name__).debug('Could not persist refreshed token for account %s', account_id, exc_info=True)
         config = updated_config
@@ -5141,6 +4584,12 @@ def profile_accounts_create(profile_id):
         # Drop any round-tripped redaction sentinels so they are never persisted.
         if isinstance(data.get("config"), dict):
             data["config"] = secret_redaction.strip_redaction_sentinels(data["config"])
+            data['config'] = {key: value for key, value in data['config'].items()
+                              if not key.startswith('_') and key not in {
+                                  'accessTokenExpiryMode', 'metaTokenExpiryMode',
+                                  'accessTokenExpiresAtEpoch', 'metaTokenExpiresAtEpoch',
+                                  'dataAccessExpiresAt', 'dataAccessExpiresAtEpoch',
+                                  'metaUserDataAccessExpiresAt', 'metaUserDataAccessExpiresAtEpoch'}}
         account_name = str(data.get("accountName", "")).strip()
         platform = str(data.get("platform", "")).strip().lower()
         if not account_name:
@@ -5454,8 +4903,16 @@ def accounts_patch(account_id):
         incoming_config = data.get("config")
         if isinstance(incoming_config, dict):
             incoming_config = secret_redaction.strip_redaction_sentinels(incoming_config)
+            # Client config is not evidence of provider validation/revocation.
+            incoming_config = {key: value for key, value in incoming_config.items()
+                               if not key.startswith('_') and key not in {
+                                   'accessTokenExpiryMode', 'metaTokenExpiryMode',
+                                   'accessTokenExpiresAtEpoch', 'metaTokenExpiresAtEpoch',
+                                   'dataAccessExpiresAt', 'dataAccessExpiresAtEpoch',
+                                   'metaUserDataAccessExpiresAt', 'metaUserDataAccessExpiresAtEpoch'}}
             existing_config.update(incoming_config)
-        print(f"🔍 PATCH /accounts/{account_id}: incoming_keys={list(incoming_config.keys()) if isinstance(incoming_config, dict) else 'NONE'} merged_keys={list(existing_config.keys())} authType={data.get('authType')} status={data.get('status')}")
+        if new_profile_id != existing.profile_id:
+            profile_registry.get_profile(int(new_profile_id), workspace_id=_workspace_scope(), db_path=_current_db_path())
         merged = {
             "platform": existing.platform,
             "authType": data.get("authType", existing.auth_type),
@@ -5465,18 +4922,19 @@ def accounts_patch(account_id):
         validation = _validate_account_payload(merged, db_path=_current_db_path(), profile_id=new_profile_id)
         if not validation.valid:
             raise ValueError("; ".join(validation.errors))
-        resolved_auth_type = data.get("authType", existing.auth_type)
+        resolved_auth_type = data.get("authType")
         account = profile_registry.update_account(
             account_id,
-            profile_id=new_profile_id,
+            profile_id=data.get('profileId'),
             account_name=data.get("accountName"),
             cookie_path=data.get("cookiePath"),
             auth_type=resolved_auth_type,
-            config=existing_config,
+            config_patch=incoming_config if isinstance(incoming_config, dict) else None,
             enabled=data.get("enabled"),
             status=data.get("status"),
             nickname=data.get("nickname"),
             account_group=data.get("accountGroup"),
+            workspace_id=_workspace_scope(),
             db_path=_current_db_path(),
         )
     except LookupError:
@@ -8532,12 +7990,8 @@ def patreon_oauth_callback():
 
         merged_config['patreonAuthType'] = 'api'
         merged_config['connectedAt'] = merged_config.get('connectedAt') or datetime.now().isoformat(timespec='seconds')
-        updated = profile_registry.update_account(
-            account.id,
-            config=merged_config,
-            auth_type='oauth',
-            db_path=db_path,
-        )
+        updated = token_state.require_saved(token_state.commit_success(
+            account, token_state.credential_changes(account.config or {}, merged_config), db_path=db_path))
         callback_payload = {
             'state': state_token,
             'status': 'ok',
@@ -9664,13 +9118,17 @@ def api_accounts():
                             expires_human = f"in {d} days"
             except Exception:
                 pass
-        # A Meta account that holds an access token but has no recorded expiry
-        # is deliberately NOT force-labelled "expired". Tokens issued by some
-        # Meta apps never expire (debug_token ``expires_at == 0``) and carry no
-        # ``expires_in``; the OAuth callback now resolves and persists a
-        # truthful expiry (far-future sentinel for never-expiring tokens), so a
-        # missing field is at most a legacy row — flagging it "reauth needed"
-        # was what made healthy accounts demand a reconnect forever.
+        native = token_state.native_state(a) if platform in {'facebook', 'instagram', 'threads'} else None
+        route = token_state.publishing_route(a, native) if native is not None else None
+        if native is not None:
+            cookie_status = {'reconnect_required': 'invalid', 'expired': 'expired', 'missing': 'missing',
+                             'unknown': 'unknown', 'warning': 'unknown', 'expiring': 'soon', 'valid': 'valid'}[native['state']]
+            # Keep legacy fields, without a fake ten-year or expired label for
+            # unknown/revoked credentials. Separate page/user facts are below.
+            if native['token']['mode'] == 'never':
+                expires_human = 'never (provider-verified)'
+            elif native['token']['mode'] == 'unknown':
+                expires_human = 'unknown'
 
         # Extract avatar URL from config (stored by OAuth callbacks / token refreshes)
         avatar_url = config.get("avatarUrl") or config.get("avatar_url") or config.get("profileImageUrl") or ""
@@ -9696,6 +9154,9 @@ def api_accounts():
             "posts": 0,
             "cookieStatus": cookie_status,
             "expiresAt": expires_human,
+            'enabled': bool(a.enabled),
+            'nativeCredentials': native,
+            'publishingRoute': route,
         })
     return jsonify({"code": 200, "data": out, "msg": "ok"})
 

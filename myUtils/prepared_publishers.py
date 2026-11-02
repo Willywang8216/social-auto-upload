@@ -555,6 +555,12 @@ def refresh_twitter_token_single_flight(
     with lock:
         latest = _read_account_config(account_id, db_path)
         merged = {**config, **latest} if latest is not None else dict(config)
+        # A different credential generation won while this caller waited. Do
+        # not rotate that generation using a stale caller's persistence guard.
+        if latest is not None and any(config.get(key) != latest.get(key) for key in (
+            'accessToken', 'refreshToken', '_credentialRevision',
+        )):
+            return merged, False
         if not _x_access_token_stale(merged, skew_seconds=skew_seconds):
             return merged, False
         result = refresh_twitter_access_token(merged, session=session)
@@ -1457,35 +1463,37 @@ def validate_facebook_config_live(config: dict[str, Any], *, session=None) -> di
         params={"fields": "id,name", "access_token": access_token},
         timeout=120,
     )
-    _raise_for_status(response)
-    return _response_payload(response)
+    from myUtils import token_state
+    return token_state.response_payload(response)
 
 
 def _check_meta_token_not_expired(config: dict[str, Any], platform: str) -> None:
-    """Raise early if the Meta user access token is expired."""
-    from datetime import datetime, timezone
-    expires_at = str(config.get("metaUserAccessTokenExpiresAt") or config.get("accessTokenExpiresAt") or "").strip()
-    if expires_at:
-        try:
-            exp = datetime.fromisoformat(expires_at)
-            now = datetime.now(timezone.utc) if exp.tzinfo else datetime.now()
-            if now >= exp:
-                raise PreparedPublishError(
-                    f"{platform} token expired at {expires_at}. Reconnect the account via OAuth."
-                )
-        except (ValueError, TypeError):
-            pass
+    """Fail native auth on real deadlines/revocation, never manufacture expiry."""
+    from myUtils import token_state
+    if config.get('_needsReconnect'):
+        raise PreparedPublishError(f'{platform} native credentials require reconnect', retryable=False)
+    for key, mode_key in (('metaUserAccessTokenExpiresAt', 'metaTokenExpiryMode'),
+                          ('accessTokenExpiresAt', 'accessTokenExpiryMode'),
+                          ('metaUserDataAccessExpiresAt', None), ('dataAccessExpiresAt', None)):
+        if mode_key and config.get(mode_key) == 'never':
+            continue
+        expires = token_state.parse_time(config.get(key))
+        if expires and expires <= token_state.utc_now():
+            raise PreparedPublishError(f'{platform} native token or data access expired. Reconnect via OAuth.', retryable=False)
 
 
 def _is_meta_token_stale(config: dict[str, Any], *, skew_seconds: int = 300) -> bool:
-    """Return True if the Meta user access token is missing or expires within skew_seconds."""
-    expires_at_str = str(config.get("metaUserAccessTokenExpiresAt") or config.get("accessTokenExpiresAt") or "").strip()
-    if not expires_at_str:
-        return False  # no expiry tracked → assume ok
-    expires_at = _parse_iso_datetime(expires_at_str)
-    if expires_at is None:
-        return False
-    return expires_at <= (_utc_now() + timedelta(seconds=skew_seconds))
+    """Publishing checks actual deadlines; periodic reads belong to maintenance."""
+    from myUtils import token_state
+    for key, mode_key in (('metaUserAccessTokenExpiresAt', 'metaTokenExpiryMode'),
+                          ('accessTokenExpiresAt', 'accessTokenExpiryMode'),
+                          ('metaUserDataAccessExpiresAt', None), ('dataAccessExpiresAt', None)):
+        if mode_key and config.get(mode_key) == 'never':
+            continue
+        expires = token_state.parse_time(config.get(key))
+        if expires and expires <= token_state.utc_now() + timedelta(seconds=skew_seconds):
+            return True
+    return False
 
 
 def _is_youtube_refresh_token_expired(config: dict[str, Any]) -> bool:
@@ -1508,92 +1516,26 @@ def _is_youtube_refresh_token_expired(config: dict[str, Any]) -> bool:
 
 
 def _maybe_refresh_meta_token(config: dict[str, Any], platform: str, *, session=None) -> dict[str, Any]:
-    """Refresh the Meta user access token for Facebook or Instagram if stale.
-
-    Uses the long-lived token exchange endpoint (fb_exchange_token) which returns
-    a new long-lived token valid for 60 days. Stores metaUserAccessToken and
-    metaUserAccessTokenExpiresAt in the config for future checks.
-    """
-    from myUtils import meta_auth as _meta_auth
-    meta_user_token = str(config.get("metaUserAccessToken") or "").strip()
-    if not meta_user_token:
-        return config  # no user token to refresh
-
-    if not _is_meta_token_stale(config):
-        return config  # still valid
-
-    try:
-        if platform == "instagram":
-            refreshed = _meta_auth.refresh_instagram_user_token(access_token=meta_user_token, session=session)
-        else:
-            refreshed = _meta_auth.exchange_for_long_lived_token(access_token=meta_user_token, session=session)
-    except Exception:
-        return config  # best-effort: keep using the old token
-
-    if not refreshed or not refreshed.get("access_token"):
+    """Refresh and verify the full exact-identity credential set, or change none."""
+    if not config.get('metaUserAccessToken') or not _is_meta_token_stale(config):
         return config
-
-    updated = dict(config)
-    updated["metaUserAccessToken"] = refreshed["access_token"]
-    expires_in = refreshed.get("expires_in")
-    if expires_in not in (None, ""):
-        updated["metaUserAccessTokenExpiresAt"] = _token_expiry_from_payload(
-            {"expires_in": expires_in}, "expires_in"
-        )
-    updated["accessTokenUpdatedAt"] = _utc_now().replace(microsecond=0).isoformat()
-    return updated
+    from myUtils import token_maintenance
+    patch = token_maintenance.maintain_meta(config, platform, mode='auto', margin_seconds=300, session=session)
+    return {**config, **patch}
 
 
 def _rederive_meta_page_token(config: dict[str, Any], platform: str, *, session=None) -> dict[str, Any]:
-    """Re-derive the page-level access_token from the current user token.
-
-    Page tokens inherit the lifecycle of the user token that minted them, so
-    whenever the user token rotates we must fetch a fresh page token via
-    /me/accounts. Updates ``config["accessToken"]`` in place and returns the
-    updated dict. Returns the config unchanged on any failure (best-effort).
-    """
-    from myUtils import meta_auth as _meta_auth
-
-    user_token = str(config.get("metaUserAccessToken") or "").strip()
+    """Re-derive only the configured Page/IG identity; fail closed on partial sync."""
+    from myUtils import meta_auth, token_maintenance
+    user_token = str(config.get('metaUserAccessToken') or '').strip()
     if not user_token:
         return config
-    try:
-        payload = _meta_auth.fetch_managed_pages(access_token=user_token, session=session)
-    except Exception:
-        return config
-    pages = payload.get("data", []) if isinstance(payload, dict) else []
-    if not isinstance(pages, list) or not pages:
-        return config
-
-    target = None
-    if platform == "facebook":
-        wanted = str(config.get("pageId") or "").strip()
-        if wanted:
-            target = next((p for p in pages if str(p.get("id") or "") == wanted), None)
-        if target is None:
-            target = pages[0]
-    else:  # instagram
-        wanted_ig = str(config.get("igUserId") or "").strip()
-        for page in pages:
-            ig = page.get("instagram_business_account") if isinstance(page, dict) else None
-            if not isinstance(ig, dict):
-                continue
-            if wanted_ig and str(ig.get("id") or "") == wanted_ig:
-                target = page
-                break
-            if not wanted_ig and target is None:
-                target = page
-
-    if target is None:
-        return config
-
-    updated = dict(config)
-    page_token = str(target.get("access_token") or "").strip()
-    if page_token:
-        updated["accessToken"] = page_token
-    if platform == "instagram" and target.get("id"):
-        updated["pageId"] = str(target["id"])
-    return updated
+    pages = meta_auth.fetch_managed_pages(access_token=user_token, session=session).get('data')
+    page = token_maintenance.meta_candidates(pages, platform, config, require_identity=True)[0]
+    expiry = meta_auth.resolve_access_token_expiry(access_token=user_token, session=session)
+    patch = token_maintenance.meta_credential_patch(config, platform, page=page, user_token=user_token,
+                                                   user_expiry=expiry, session=session)
+    return {**config, **patch}
 
 
 _OAUTH_RETRY_SUBCODES = {460, 463, 467}
@@ -1631,10 +1573,10 @@ def _maybe_refresh_instagram_token(config: dict[str, Any], *, session=None) -> d
 def publish_facebook_sync(account, payload: dict, *, session=None) -> dict[str, Any]:
     operations = generic_delivery.Operations(payload, "facebook")
     config = dict(account.config or {})
-    prior_user_token = str(config.get("metaUserAccessToken") or "").strip()
-    prior_page_token = str(config.get("accessToken") or "").strip()
     config = _maybe_refresh_facebook_token(config, session=session)
-    if (config.get("metaUserAccessToken") != prior_user_token) or not prior_page_token:
+    # Refresh now returns a fully verified Page/user pair. Derive separately
+    # only when no publish credential exists, not a second time after refresh.
+    if not str(_config_value(config, 'accessToken') or '').strip():
         config = _rederive_meta_page_token(config, "facebook", session=session)
     payload["_updated_config"] = config  # transient; the worker persists credentials separately
     _check_meta_token_not_expired(config, "Facebook")
@@ -1873,8 +1815,8 @@ def validate_instagram_config_live(config: dict[str, Any], *, session=None) -> d
         params={"fields": "id,username", "access_token": access_token},
         timeout=120,
     )
-    _raise_for_status(response)
-    return _response_payload(response)
+    from myUtils import token_state
+    return token_state.response_payload(response)
 
 
 def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
@@ -1882,10 +1824,8 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
     from myUtils.meta_delivery import finish_container
     generic_delivery.Operations(payload, "instagram", allow_receipt=True)
     config = dict(account.config or {})
-    prior_user_token = str(config.get("metaUserAccessToken") or "").strip()
-    prior_page_token = str(config.get("accessToken") or "").strip()
     config = _maybe_refresh_instagram_token(config, session=session)
-    if (config.get("metaUserAccessToken") != prior_user_token) or not prior_page_token:
+    if not str(_config_value(config, 'accessToken') or '').strip():
         config = _rederive_meta_page_token(config, "instagram", session=session)
     payload["_updated_config"] = config
     _check_meta_token_not_expired(config, "Instagram")
@@ -2063,43 +2003,21 @@ def validate_threads_config_live(config: dict[str, Any], *, session=None) -> dic
         params={"fields": "id,username", "access_token": access_token},
         timeout=120,
     )
-    _raise_for_status(response)
-    return _response_payload(response)
+    from myUtils import token_state
+    return token_state.response_payload(response)
 
 
 def _maybe_refresh_threads_token(config: dict[str, Any], *, session=None) -> dict[str, Any]:
-    """Refresh Threads long-lived token if expired or about to expire."""
-    from myUtils import threads_auth as _threads_auth
-    # Resolve through _config_value so an env-backed ``accessTokenEnv`` account
-    # is refreshed too, not silently skipped because the literal key is empty.
-    access_token = str(_config_value(config, "accessToken") or "").strip()
-    if not access_token:
+    """Refresh only a known-near-expiry, at-least-24h-old Threads token."""
+    from myUtils import token_maintenance, token_state
+    access_token = str(_config_value(config, 'accessToken') or '').strip()
+    expires = token_state.parse_time(config.get('accessTokenExpiresAt'))
+    if not access_token or expires is None or expires > token_state.utc_now() + timedelta(seconds=300):
         return config
-    expires_at = str(config.get("accessTokenExpiresAt") or "").strip()
-    if expires_at:
-        from datetime import datetime, timedelta, timezone
-        try:
-            exp = datetime.fromisoformat(expires_at)
-            now = datetime.now(timezone.utc) if exp.tzinfo else datetime.now()
-            if now < exp - timedelta(seconds=300):
-                return config
-        except (ValueError, TypeError):
-            pass
-    try:
-        refreshed = _threads_auth.refresh_long_lived_token(access_token=access_token, session=session)
-    except Exception:
+    if not token_maintenance.threads_refresh_allowed(config):
         return config
-    if not refreshed or not refreshed.get("access_token"):
-        return config
-    updated = dict(config)
-    updated["accessToken"] = refreshed["access_token"]
-    expires_in = refreshed.get("expires_in")
-    if expires_in not in (None, ""):
-        updated["accessTokenExpiresAt"] = _token_expiry_from_payload(
-            {"expires_in": expires_in}, "expires_in"
-        )
-    updated["accessTokenUpdatedAt"] = _utc_now().replace(microsecond=0).isoformat()
-    return updated
+    patch = token_maintenance.maintain_threads({**config, 'accessToken': access_token}, mode='auto', session=session)
+    return {**config, **patch}
 
 
 def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
@@ -2942,6 +2860,7 @@ def _maybe_refresh_twitter_token(
     *,
     session=None,
     on_refresh=None,
+    on_refresh_failure=None,
     account_id: object = None,
     db_path: object = None,
 ) -> dict[str, Any]:
@@ -2980,7 +2899,9 @@ def _maybe_refresh_twitter_token(
         raise
     except Exception as exc:
         reconnect_required = _twitter_refresh_requires_reconnect(exc)
-        if reconnect_required and on_refresh is not None:
+        if on_refresh_failure is not None:
+            on_refresh_failure(exc)
+        elif reconnect_required and on_refresh is not None:
             failed_config = dict(config)
             failed_config["_needsReconnect"] = True
             failed_config["_lastMaintenanceError"] = "X OAuth 2.0 refresh token was rejected; reconnect required"
@@ -3050,22 +2971,31 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
     # A rotated refresh token is single-use; persist it immediately so any later
     # media/tweet failure does not strand the account on the already-dead token.
     def _persist_refreshed(updated_config: dict[str, Any]) -> None:
-        from myUtils import profiles as profile_registry
-        account_id = getattr(account, "id", None)
-        if account_id is None:
+        from myUtils import profiles as profile_registry, token_state
+        if getattr(account, 'id', None) is None:
             return
-        # Write to the database the account was read from, not the process
-        # default — see myUtils.worker._persist_rotated_config.
-        raw_db_path = (payload or {}).get("_db_path")
-        kwargs = {"db_path": Path(raw_db_path)} if raw_db_path else {}
-        profile_registry.update_account(
-            account_id, config=updated_config, auth_type="oauth", **kwargs
-        )
+        raw_db_path = (payload or {}).get('_db_path')
+        db_path = Path(raw_db_path) if raw_db_path else profile_registry.DB_PATH
+        saved = token_state.require_saved(token_state.commit_success(
+            account, token_state.credential_changes(account.config or {}, updated_config), db_path=db_path))
+        # Keep the final post-delivery writeback on the committed generation.
+        account.config = dict(saved.config or {})
+
+    def _persist_refresh_failure(exc: Exception) -> None:
+        from myUtils import profiles as profile_registry, token_state
+        if getattr(account, 'id', None) is None:
+            return
+        raw_db_path = (payload or {}).get('_db_path')
+        db_path = Path(raw_db_path) if raw_db_path else profile_registry.DB_PATH
+        # Keep the original structured rejection. A stale failure is ignored by
+        # the credential CAS and must never be routed through commit_success.
+        token_state.commit_failure(account, exc, db_path=db_path)
 
     config = _maybe_refresh_twitter_token(
         config,
         session=session,
         on_refresh=_persist_refreshed,
+        on_refresh_failure=_persist_refresh_failure,
         account_id=getattr(account, "id", None),
         db_path=(payload or {}).get("_db_path"),
     )

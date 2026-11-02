@@ -636,6 +636,32 @@ class ProfileTenantIsolationTests(unittest.TestCase):
             rb = self._client(self.sid_b).get("/downloadCookie", base_url="https://localhost", query_string=qs)
             self.assertEqual(rb.status_code, 200)
 
+    def test_oauth_status_is_scoped_before_account_and_live_state_lookup(self) -> None:
+        from myUtils import oauth_state
+        profile_b = prof.create_profile(name='Private OAuth B', workspace_id=self.ws_b, db_path=self.db_path)
+        account_b = prof.add_account(profile_b.id, 'facebook', 'Private Facebook B', auth_type='oauth',
+                                     config={'pageId': 'private-page-b', 'accessToken': 'synthetic-b'}, db_path=self.db_path)
+        Session = sau_db.get_sessionmaker()
+        with Session() as db:
+            principal_b = db.get(SessionRow, self.sid_b).user_id
+        state = uuid.uuid4().hex
+        oauth_state.create('meta', account_b, state_token=state,
+                           redirect_uri='https://up.example.com/oauth/meta/callback', scopes=[],
+                           principal_id=principal_b, db_path=self.db_path)
+        client_a, client_b = self._client(self.sid_a), self._client(self.sid_b)
+        denied = self._get(client_a, f'/admin/oauth/status?platform=facebook&accountId={account_b.id}')
+        self.assertEqual(denied.status_code, 404)
+        self.assertNotIn(state, denied.get_data(as_text=True))
+        discovered = self._get(client_a, '/admin/oauth/status?platform=facebook')
+        self.assertEqual(discovered.status_code, 200)
+        self.assertIsNone(discovered.get_json()['data']['account'])
+        self.assertIsNone(discovered.get_json()['data']['lastRequest'])
+        self.assertNotIn('Private Facebook B', discovered.get_data(as_text=True))
+        self.assertNotIn(state, discovered.get_data(as_text=True))
+        own = self._get(client_b, f'/admin/oauth/status?platform=facebook&accountId={account_b.id}')
+        self.assertEqual(own.status_code, 200)
+        self.assertEqual(own.get_json()['data']['lastRequest']['state'], state)
+
     def test_legacy_token_is_unscoped_admin_path(self) -> None:
         # A legacy bearer token (no session) is not workspace-scoped: it sees all
         # profiles. This is the documented single-tenant/admin compatibility path.

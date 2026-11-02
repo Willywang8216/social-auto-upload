@@ -1177,12 +1177,10 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with closing(sqlite3.connect(self.db_path)) as conn, conn:
-            conn.execute(
-                'INSERT INTO meta_oauth_requests (state_token, profile_id, account_id, account_name, platform, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                ('meta-state-1', profile_id, account_id, 'brand-facebook', 'facebook', 'https://up.iamwillywang.com/oauth/meta/callback', '["pages_show_list"]', 'started'),
-            )
-            conn.commit()
+        self.sau_backend.oauth_state.create('meta',
+            self.sau_backend.profile_registry.get_account(account_id, db_path=self.db_path),
+            state_token='meta-state-1', redirect_uri='https://up.iamwillywang.com/oauth/meta/callback',
+            scopes=['pages_show_list'], db_path=self.db_path)
         with patch.object(self.sau_backend.meta_auth, 'exchange_code_for_token', return_value={'access_token': 'short-token', 'expires_in': 3600}),              patch.object(self.sau_backend.meta_auth, 'exchange_for_long_lived_token', return_value={'access_token': 'long-token', 'expires_in': 5184000}),              patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '123', 'name': 'Brand Page', 'access_token': 'page-token'}]}):
             response = self.client.get('/oauth/meta/callback?state=meta-state-1&code=demo-code')
         self.assertEqual(response.status_code, 200)
@@ -1204,12 +1202,10 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with closing(sqlite3.connect(self.db_path)) as conn, conn:
-            conn.execute(
-                'INSERT INTO meta_oauth_requests (state_token, profile_id, account_id, account_name, platform, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                ('meta-state-2', profile_id, account_id, 'brand-instagram', 'instagram', 'https://up.iamwillywang.com/oauth/meta/callback', '["instagram_basic"]', 'started'),
-            )
-            conn.commit()
+        self.sau_backend.oauth_state.create('meta',
+            self.sau_backend.profile_registry.get_account(account_id, db_path=self.db_path),
+            state_token='meta-state-2', redirect_uri='https://up.iamwillywang.com/oauth/meta/callback',
+            scopes=['instagram_basic'], db_path=self.db_path)
         with patch.object(self.sau_backend.meta_auth, 'exchange_code_for_token', return_value={'access_token': 'short-token', 'expires_in': 3600}),              patch.object(self.sau_backend.meta_auth, 'exchange_for_long_lived_token', return_value={'access_token': 'long-token', 'expires_in': 5184000}),              patch.object(self.sau_backend.meta_auth, 'fetch_managed_pages', return_value={'data': [{'id': '321', 'name': 'Brand Page', 'access_token': 'page-token', 'instagram_business_account': {'id': 'ig-1', 'username': 'brand_ig'}}]}):
             response = self.client.get('/oauth/meta/callback?state=meta-state-2&code=demo-code')
         self.assertEqual(response.status_code, 200)
@@ -1272,12 +1268,10 @@ class CampaignApiTests(unittest.TestCase):
             },
         )
         account_id = account_response.get_json()['data']['id']
-        with closing(sqlite3.connect(self.db_path)) as conn, conn:
-            conn.execute(
-                'INSERT INTO threads_oauth_requests (state_token, profile_id, account_id, account_name, redirect_uri, scopes_json, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                ('threads-state-1', profile_id, account_id, 'brand-threads', 'https://up.iamwillywang.com/oauth/threads/callback', '["threads_basic", "threads_content_publish"]', 'started'),
-            )
-            conn.commit()
+        self.sau_backend.oauth_state.create('threads',
+            self.sau_backend.profile_registry.get_account(account_id, db_path=self.db_path),
+            state_token='threads-state-1', redirect_uri='https://up.iamwillywang.com/oauth/threads/callback',
+            scopes=['threads_basic', 'threads_content_publish'], db_path=self.db_path)
         with patch.object(self.sau_backend.threads_auth, 'exchange_code_for_token', return_value={
             'access_token': 'threads-short',
             'user_id': 'th-1',
@@ -1518,19 +1512,15 @@ class CampaignApiTests(unittest.TestCase):
             '?grant_type=fb_exchange_token&client_id=123'
             '&client_secret=SUPERSECRETVALUE&fb_exchange_token=meta-user-token'
         )
-        with patch.object(self.sau_backend.meta_auth, 'debug_token_info', return_value={'is_valid': False}), \
-                patch.object(self.sau_backend.meta_auth, 'exchange_for_long_lived_token',
-                             side_effect=RuntimeError(leaky_message)):
+        with patch.object(self.sau_backend.meta_auth, 'debug_token_info', side_effect=RuntimeError(leaky_message)):
             response = self.client.post(f'/accounts/{account_id}/refresh-token')
 
         self.assertEqual(response.status_code, 400)
         body = response.get_json()['msg']
         self.assertNotIn('SUPERSECRETVALUE', body)
-        self.assertIn('client_secret=[redacted]', body)
-        self.assertIn('fb_exchange_token=[redacted]', body)
-        # The harmless query parameter must survive so the operator can still read
-        # what failed.
-        self.assertIn('grant_type=fb_exchange_token', body)
+        self.assertNotIn('meta-user-token', body)
+        self.assertNotIn('https://graph.facebook.com', body)
+        self.assertIn('retry scheduled', body)
 
     def test_accounts_maintenance_run_resyncs_facebook_credentials(self) -> None:
         profile_response = self.client.post('/profiles', json={'name': 'Meta Brand'})

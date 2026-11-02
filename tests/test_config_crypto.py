@@ -117,7 +117,8 @@ class ProfilesIntegrationTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _raw_config_json(self, account_id: int) -> str:
-        with sqlite3.connect(self.db_path) as conn:
+        from contextlib import closing
+        with closing(sqlite3.connect(self.db_path)) as conn:
             row = conn.execute(
                 "SELECT config_json FROM accounts WHERE id = ?", (account_id,)
             ).fetchone()
@@ -157,8 +158,8 @@ class ProfilesIntegrationTests(unittest.TestCase):
             acct = profiles.add_account(
                 p.id, "youtube", "yt", config={"accessToken": "tok1"}, db_path=self.db_path
             )
-            # config not passed -> update_account reuses the decrypted current
-            # config and re-encrypts; the stored secret must survive intact.
+            # config not passed -> metadata-only update leaves the encrypted
+            # blob intact, even if another process rotated it concurrently.
             profiles.update_account(acct.id, account_name="renamed", db_path=self.db_path)
             got = profiles.get_account(acct.id, db_path=self.db_path)
             self.assertEqual(got.config["accessToken"], "tok1")

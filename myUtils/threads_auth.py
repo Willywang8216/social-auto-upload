@@ -7,6 +7,8 @@ import secrets
 import urllib.parse
 from typing import Any
 
+from myUtils import token_state
+
 try:
     import requests
 except ModuleNotFoundError:  # pragma: no cover - environment-specific
@@ -28,8 +30,8 @@ CLIENT_SECRET_ENV = "THREADS_APP_SECRET"
 REDIRECT_URI_ENV = "THREADS_REDIRECT_URI"
 
 
-class ThreadsOAuthError(RuntimeError):
-    """Raised when Threads OAuth cannot complete."""
+class ThreadsOAuthError(token_state.CredentialError):
+    """Safe structured Threads failure (including provider code/subcode)."""
 
 
 def _get_session(session=None):
@@ -94,12 +96,7 @@ def exchange_code_for_token(*, code: str, redirect_uri: str, client_id_env: str 
         },
         timeout=120,
     )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get('error'):
-        message = payload.get('error', {}).get('message') if isinstance(payload.get('error'), dict) else payload.get('error')
-        raise ThreadsOAuthError(str(message or 'Threads token exchange failed'))
-    return payload
+    return token_state.response_payload(response, error_class=ThreadsOAuthError)
 
 
 def exchange_for_long_lived_token(*, access_token: str, client_secret_env: str = CLIENT_SECRET_ENV, session=None) -> dict[str, Any]:
@@ -113,12 +110,7 @@ def exchange_for_long_lived_token(*, access_token: str, client_secret_env: str =
         },
         timeout=120,
     )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get('error'):
-        message = payload.get('error', {}).get('message') if isinstance(payload.get('error'), dict) else payload.get('error')
-        raise ThreadsOAuthError(str(message or 'Threads long-lived token exchange failed'))
-    return payload
+    return token_state.response_payload(response, error_class=ThreadsOAuthError)
 
 
 def refresh_long_lived_token(*, access_token: str, session=None) -> dict[str, Any]:
@@ -131,12 +123,7 @@ def refresh_long_lived_token(*, access_token: str, session=None) -> dict[str, An
         },
         timeout=120,
     )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get('error'):
-        message = payload.get('error', {}).get('message') if isinstance(payload.get('error'), dict) else payload.get('error')
-        raise ThreadsOAuthError(str(message or 'Threads long-lived token refresh failed'))
-    return payload
+    return token_state.response_payload(response, error_class=ThreadsOAuthError)
 
 
 def fetch_me(*, access_token: str, fields: tuple[str, ...] | list[str] = ('id', 'username'), session=None) -> dict[str, Any]:
@@ -146,9 +133,4 @@ def fetch_me(*, access_token: str, fields: tuple[str, ...] | list[str] = ('id', 
         params={'fields': ','.join(fields), 'access_token': access_token},
         timeout=120,
     )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get('error'):
-        message = payload.get('error', {}).get('message') if isinstance(payload.get('error'), dict) else payload.get('error')
-        raise ThreadsOAuthError(str(message or 'Threads profile query failed'))
-    return payload
+    return token_state.response_payload(response, error_class=ThreadsOAuthError)
