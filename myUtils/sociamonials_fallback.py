@@ -386,6 +386,30 @@ def resolve_mapping(
     return None
 
 
+def prefers_sociamonials(account: Any, *, platform: str) -> bool:
+    """Explicit per-account routing; never infer it from a revoked direct token.
+
+    A primary managed route requires one operator-verified destination in the
+    account config. Receipt resumption is handled separately by the worker.
+    """
+    config = _account_value(account, "config", None) or {}
+    if not isinstance(config, Mapping):
+        raise SociamonialsNotConfigured("Invalid publishing route configuration")
+    provider = str(config.get("publishingProvider") or "direct").strip().lower()
+    if provider == "direct":
+        return False
+    if provider != "sociamonials":
+        raise SociamonialsNotConfigured("Unsupported configured publishing provider")
+    mapping = _normalise_entry(config.get("sociamonials"))
+    network = _platform_network(platform)
+    if (not network or not mapping or mapping.get("network") != network
+            or len(mapping["profile_refs"]) != 1):
+        raise SociamonialsNotConfigured(
+            "Primary Sociamonials route requires one explicit matching-platform destination"
+        )
+    return True
+
+
 def _platform_network(platform: str | None) -> str | None:
     mapping = {
         "facebook": "fb",
@@ -1407,6 +1431,12 @@ def publish_via_sociamonials(
         # forever and the target could never recover (observed: post_id
         # 10689041 on every retry of X target 3391).
         suffix = str(idempotency_suffix or "").strip()
+        if not suffix:
+            generation = delivery_state.state(payload).get("recovery_generation")
+            if generation is not None:
+                if not isinstance(generation, str) or not re.fullmatch(r"[0-9a-f]{64}", generation):
+                    raise SociamonialsFallbackError("Invalid recovery generation; refusing an unstable post key")
+                suffix = "recovery-" + generation
         body["idempotency_key"] = (
             f"sau-target-{target_id}" + (f"-{suffix}" if suffix else "")
         )
@@ -1494,6 +1524,11 @@ def publish_via_sociamonials(
                 )
                 image_refs = image_refs[:max_images]
             body["image_urls"] = image_refs
+
+    if (payload.get("artifacts") or media_paths) and not (body.get("video_url") or body.get("image_urls")):
+        raise SociamonialsFallbackError(
+            "Declared media could not be attached; refusing a text-only replacement"
+        )
 
     if network in _MEDIA_REQUIRED_NETWORKS and not (body.get("video_url") or body.get("image_urls")):
         raise SociamonialsFallbackError(

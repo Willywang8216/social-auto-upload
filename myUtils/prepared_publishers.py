@@ -259,10 +259,12 @@ def _raise_for_status(response) -> None:
         if isinstance(status, int) and status < 400:
             raise
         detail = ""
+        provider_error = {}
         try:
             body = response.json()
             err = body.get("error") if isinstance(body, dict) else None
             if isinstance(err, dict):
+                provider_error = err
                 bits = [str(err.get("message") or "").strip()]
                 for key in ("code", "error_subcode", "type"):
                     value = err.get(key)
@@ -287,6 +289,27 @@ def _raise_for_status(response) -> None:
         )
         retry_after = (getattr(response, "headers", None) or {}).get("Retry-After")
         details = {"retryAfter": str(retry_after)[:128]} if retry_after is not None else {}
+        # Meta uses HTTP 400 for both permanent and explicitly transient API
+        # errors. Preserve structured diagnostics instead of classifying by HTTP
+        # status alone; a revoked token is never made retryable by this hint.
+        if provider_error:
+            for source, destination in (("code", "providerErrorCode"),
+                                        ("error_subcode", "providerErrorSubcode")):
+                value = provider_error.get(source)
+                if isinstance(value, (int, str)) and not isinstance(value, bool):
+                    details[destination] = str(value)[:64]
+            for source, destination in (("type", "providerErrorType"),
+                                        ("fbtrace_id", "providerTraceId"),
+                                        ("error_user_title", "providerErrorTitle"),
+                                        ("error_user_msg", "providerErrorMessage")):
+                value = provider_error.get(source)
+                if isinstance(value, str) and value:
+                    from myUtils.secret_redaction import redact_text
+                    details[destination] = redact_text(value)[:500]
+            if type(provider_error.get("is_transient")) is bool:
+                details["providerIsTransient"] = provider_error["is_transient"]
+                if provider_error["is_transient"] and str(provider_error.get("code")) != "190":
+                    retryable = True
         if detail:
             raise PreparedPublishError(
                 f"HTTP {status}: {detail}", retryable=retryable, details=details
@@ -1751,7 +1774,7 @@ def _wait_for_container_status(
     platform: str,
     timeout: float = 180.0,
     interval: float = 2.0,
-) -> None:
+) -> str:
     """Poll a created media container until it is FINISHED (or PUBLISHED).
 
     Meta (Instagram) and Threads video / carousel containers take a few
@@ -1805,7 +1828,10 @@ def _wait_for_container_status(
                     "check the media against the platform's duration/size limits"
                 )
             raise PreparedPublishError(
-                f"{platform.title()} container {container_id} failed to process: {detail}", retryable=False
+                f"{platform.title()} container {container_id} failed to process: {detail}", retryable=False,
+                details={"provider": platform, "containerStatus": status,
+                         "containerError": _redact_tokens(detail)[:500],
+                         "definitiveNonDelivery": True},
             )
         # Never sleep past the deadline; cap the nap to the time remaining.
         sleep_for = min(interval, max(0.0, deadline - time.monotonic()))

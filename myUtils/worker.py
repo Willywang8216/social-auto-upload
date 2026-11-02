@@ -1149,7 +1149,15 @@ class PublishWorker:
             job = jobs.get_job(target.job_id, db_path=self._db_path)
             payload = self._target_payload(target, job)
             self._payloads[target.id] = payload
-            fallback_only = job.platform == "twitter" and not _x_direct_publish_enabled()
+            receipt = delivery.state(payload).get("provider_receipt") or {}
+            # A saved receipt owns its provider even if the configured route
+            # changed. Never send through a second provider to resume a receipt.
+            fallback_only = receipt.get("provider") == "sociamonials"
+            if not receipt:
+                fallback_only = job.platform == "twitter" and not _x_direct_publish_enabled()
+                if not fallback_only and target.account_ref.startswith("account:"):
+                    route_account = pre_flight._resolve_account(target.account_ref, self._db_path)
+                    fallback_only = sociamonials_fallback.prefers_sociamonials(route_account, platform=job.platform)
             check = pre_flight.run_pre_flight(
                 account_ref=target.account_ref, job_id=job.id, platform=job.platform,
                 payload=payload, db_path=self._db_path, validate_credentials=not fallback_only)
@@ -1190,7 +1198,7 @@ class PublishWorker:
                 if receipt.get("provider") == "sociamonials" or fallback_only:
                     if await self._try_sociamonials_fallback(target, "Configured Sociamonials route", log):
                         return
-                    raise _fc.ClassifiedFailure("Sociamonials route is not configured", _fc.PERMANENT)
+                    raise sociamonials_fallback.SociamonialsNotConfigured("Configured Sociamonials route is unavailable")
                 if job.platform == "reddit" and not _reddit_publishing_enabled():
                     self._transition(target, jobs.mark_target_blocked, "Reddit publishing is disabled by the operator")
                     return
@@ -1248,6 +1256,10 @@ class PublishWorker:
             return
         if isinstance(exc, delivery.DeliveryUnknown):
             if self._transition(target, jobs.mark_target_needs_review, message):
+                self._alert_publish_failure(target, message)
+            return
+        if isinstance(exc, sociamonials_fallback.SociamonialsNotConfigured):
+            if self._transition(target, jobs.mark_target_blocked, message):
                 self._alert_publish_failure(target, message)
             return
         # Transport failure after an irreversible request may hide acceptance.

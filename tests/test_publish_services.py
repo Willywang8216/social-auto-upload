@@ -95,7 +95,8 @@ def test_context_artifacts_are_never_published_and_tiktok_keeps_raw():
         selected = services._artifact_payloads_for_platform(artifacts, platform)
         assert all(a["artifact_kind"] not in {"audio", "transcript"} for a in selected)
         assert selected
-        assert [a["id"] for a in selected] == ([4] if platform == "tiktok" else [3])
+        expected = 4 if platform == "tiktok" else (3 if services.platform_limits.video_max_seconds(platform) is None else 5)
+        assert [a["id"] for a in selected] == [expected]
 
 
 def test_multiple_sources_remain_one_post_group_and_images_pass_through():
@@ -279,3 +280,23 @@ def test_review_cards_resolve_names_from_each_supplied_db_and_notify_async(tmp_p
     notify.assert_not_called()
     notify.side_effect = RuntimeError("Telegram unavailable")
     services._notify_tg_review(jobs=[{"id": job.id}], db_path=path)  # Fail-soft.
+
+
+def test_prepared_full_video_and_its_public_alias_beat_stale_raw_full():
+    stale = _video(5501, artifact_kind="local", local_path="/media/extensionless-old-source")
+    prepared = _video(5542, artifact_kind="watermarked_video", local_path="/media/prepared_pub.mp4", public_url=None)
+    served = _video(5545, artifact_kind="local", local_path=prepared["local_path"], public_url="https://cdn.example/prepared.mp4")
+    assert services._select_videos_for_platform([stale, prepared, served], "instagram") == [served]
+    assert services._select_videos_for_platform([stale, prepared], "instagram") == [prepared]
+
+
+def test_video_variant_must_fit_recorded_size_as_well_as_duration():
+    oversized = _video(1, metadata={"role": "video", "max_duration_seconds": 600, "max_media_mb": 450})
+    fitting = _video(2, metadata={"role": "video", "max_duration_seconds": 500, "max_media_mb": 200})
+    assert services._select_videos_for_platform([oversized, fitting], "instagram") == [fitting]
+
+
+def test_prepared_full_never_displaces_existing_platform_split():
+    prepared = _video(1, artifact_kind="watermarked_video")
+    parts = [_part(2, 1), _part(3, 2), _part(4, 3)]
+    assert services._select_videos_for_platform([prepared, *parts], "threads") == parts

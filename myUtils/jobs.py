@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from myUtils.account_identity import canonical_account_key
 from myUtils.secret_redaction import is_secret_key
@@ -148,16 +148,21 @@ def _resolve_db_path(db_path: Path | None) -> Path:
 
 
 @contextmanager
-def _connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
+def _connect(db_path: Path | None = None, *, must_exist: bool = False) -> Iterator[sqlite3.Connection]:
     resolved = _resolve_db_path(db_path)
-    resolved.parent.mkdir(parents=True, exist_ok=True)
+    if must_exist:
+        if not resolved.is_file():
+            raise FileNotFoundError("Recovery database must be an existing regular file")
+    else:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
     # A long UI read and the worker's write can overlap; without a generous
     # busy timeout the loser of that race fails immediately ("database is
     # locked"), which the browser surfaces as a schedule request that never
     # loads. Waits instead of erroring. (journal_mode stays the default
     # "delete": the backup/offload scripts copy database.db as a plain file,
     # and WAL content lives in side files those copies would miss.)
-    conn = sqlite3.connect(resolved, timeout=15)
+    database = resolved.resolve().as_uri() + "?mode=rw" if must_exist else resolved
+    conn = sqlite3.connect(database, timeout=15, uri=must_exist)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 15000")
@@ -168,8 +173,9 @@ def _connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 @contextmanager
-def _transaction(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
-    with _connect(db_path) as conn:
+def _transaction(db_path: Path | None = None, *, must_exist: bool = False) -> Iterator[sqlite3.Connection]:
+    connection = _connect(db_path, must_exist=True) if must_exist else _connect(db_path)
+    with connection as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             yield conn
@@ -1278,6 +1284,126 @@ def _reset_target(conn, row, schedule_at) -> Target:
     return _row_to_target(conn.execute(
         "SELECT * FROM publish_job_targets WHERE id = ?", (row["id"],),
     ).fetchone())
+
+
+def _recovery_json_object(text: str) -> dict:
+    """Strict recovery-only decoding; ambiguous/corrupt evidence is never empty."""
+    def invalid(*_args):
+        raise ValueError("Invalid recovery metadata")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                invalid()
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(text, object_pairs_hook=unique_object, parse_constant=invalid)
+        if isinstance(value, dict):
+            return value
+    except (TypeError, ValueError, RecursionError):
+        pass
+    raise ValueError("Invalid recovery metadata; expected a JSON object")
+
+
+def _recovery_has_submission_evidence(text: str, delivery_state: str | None = None) -> bool:
+    """Fail closed on receipts, partial operations and malformed checkpoints.
+
+    Only an operation *plan* with no items is pre-submission evidence. Never
+    reinterpret a failed provider receipt as permission to create a new post.
+    Kept separate from the deliberately more permissive explicit retry APIs.
+    """
+    if delivery_state not in {None, "", "failed"}:
+        return True
+
+    def evidence(value):
+        if isinstance(value, float) and not math.isfinite(value):
+            return True
+        if isinstance(value, list):
+            return any(evidence(item) for item in value)
+        if not isinstance(value, dict):
+            return False
+        if "provider_receipt" in value:
+            return True
+        if "_delivery" in value and not isinstance(value["_delivery"], dict):
+            return True
+        for key in ("submission_started", "checkpoint_invalid"):
+            if key in value and value[key] is not False:
+                return True
+        if any(value.get(key) for key in (
+            "operation", "operation_started_at", "telegramCompletedByDelivery",
+        )):
+            return True
+        operations = value.get("provider_operations", {})
+        if not isinstance(operations, dict):
+            return True
+        for progress in operations.values():
+            if (not isinstance(progress, dict) or set(progress) - {"plan", "items"}
+                    or progress.get("items", {}) != {}):
+                return True
+            plan = progress.get("plan", [])
+            if not isinstance(plan, list) or any(not isinstance(item, str) for item in plan):
+                return True
+        return any(evidence(item) for item in value.values())
+
+    try:
+        return evidence(_recovery_json_object(text))
+    except (ValueError, RecursionError):
+        return True
+
+
+def reschedule_failed_target(
+    target_id: int, schedule_at: str, *, expected_fingerprint: str,
+    revalidate: Callable[[sqlite3.Connection], str],
+    workspace_id: str | None = None, db_path: Path | None = None,
+) -> Target:
+    """Guarded recovery, not an explicit resubmit or delivery-reconciliation API.
+
+    The mandatory read-only ``revalidate`` callback must recheck account, intent,
+    policy and duplicate guards and return the freshly computed plan fingerprint.
+    It runs under the SAME BEGIN IMMEDIATE as the failed -> pending reset/recount.
+    Missing DBs, stale plans, changed states and submission evidence are refused;
+    no receipt override exists. Other resubmit/reschedule semantics are unchanged.
+    """
+    if type(target_id) is not int or not 0 < target_id <= 2**63 - 1:
+        raise ValueError("target_id must be a positive SQLite integer")
+    if (not isinstance(expected_fingerprint, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_fingerprint)
+            or not callable(revalidate)):
+        raise ValueError("A recovery fingerprint and read-only validator are required")
+    candidate = _utc_datetime(schedule_at)
+    with _transaction(db_path, must_exist=True) as conn:
+        row = _target_context(conn, target_id, workspace_id=workspace_id)
+        if row["status"] != TARGET_FAILED:
+            raise ValueError("Recovery target is no longer failed")
+        if row["job_status"] not in {
+            JOB_FAILED, JOB_PENDING, JOB_RUNNING, JOB_BLOCKED, JOB_AWAITING_DELIVERY, JOB_NEEDS_REVIEW,
+        }:
+            raise ValueError("Recovery parent intent is terminal or invalid")
+        if any(row[key] is not None for key in ("lease_owner", "lease_token", "lease_expires_at")):
+            raise ValueError("Recovery target still has a lease")
+        payload = conn.execute("SELECT payload_json FROM publish_jobs WHERE id=?", (row["job_id"],)).fetchone()[0]
+        if (_recovery_has_submission_evidence(row["checkpoint_json"], row["delivery_state"])
+                or _recovery_has_submission_evidence(payload)):
+            raise ValueError("Submission evidence exists; reconcile delivery separately")
+        if candidate <= _utc_datetime(_now_iso()):
+            raise ValueError("scheduleAt must be in the future")
+        before = conn.total_changes
+        observed = revalidate(conn)
+        if conn.total_changes != before:
+            raise ValueError("Recovery validator must be read-only")
+        if not isinstance(observed, str) or not secrets.compare_digest(observed, expected_fingerprint):
+            raise ValueError("Stale recovery plan; regenerate it")
+        _reset_target(conn, row, candidate.isoformat())
+        # A deliberate, validated recovery is a new provider submission intent.
+        # Automatic retries retain this value, so their idempotency key is stable.
+        conn.execute("UPDATE publish_job_targets SET checkpoint_json=? WHERE id=?",
+                     (json.dumps({"recovery_generation": expected_fingerprint}), target_id))
+        return _row_to_target(conn.execute(
+            "SELECT * FROM publish_job_targets WHERE id=?", (target_id,),
+        ).fetchone())
 
 
 def reschedule_target(

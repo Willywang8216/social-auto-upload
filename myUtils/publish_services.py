@@ -221,7 +221,7 @@ def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
     ]
     fitting = [
         a for a in variants
-        if float((a.get("metadata") or {}).get("max_duration_seconds")) <= float(max_seconds)
+        if _fits(a)
     ]
     if fitting:
         return [max(
@@ -231,13 +231,17 @@ def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
     full = [a for a in items if not (a.get("metadata") or {}).get("max_duration_seconds")]
     if not full:
         return [items[0]]
-    # Several artifacts can describe the same full file: the watermarked_video
-    # row plus the ``local`` row that carries the served /getFile URL. They
-    # share a local_path, so _extract_media would merge them - but only one
-    # survives this selection. Prefer the one with a public_url so a
-    # link-capable platform (Reddit) posts a link instead of silently
-    # degrading to a text-only self post when a URL was available.
-    return [next((a for a in full if a.get("public_url")), full[0])]
+    # A re-prep can leave an older extensionless/raw full row beside a prepared
+    # watermarked MP4 and its served alias. Prefer the prepared file, then the
+    # URL-bearing row for that SAME path, not an older raw URL merely listed first.
+    prepared_paths = {
+        str(a.get("local_path") or "") for a in full
+        if a.get("artifact_kind") == "watermarked_video" and _fits(a)
+        and str(a.get("local_path") or "").lower().endswith((".mp4", ".mov", ".m4v"))
+    }
+    prepared = [a for a in full if str(a.get("local_path") or "") in prepared_paths and _fits(a)]
+    choices = prepared or [a for a in full if _fits(a)] or full
+    return [next((a for a in choices if a.get("public_url")), choices[0])]
 
 
 def _ensure_file_record_for_path(file_path: str, *, db_path: Path) -> int:
