@@ -444,3 +444,34 @@ def test_publish_entity_candidates_are_sql_bounded(env):
     jobs = backend._load_publish_entity_jobs(db_path=env.db, workspace_id=None)
 
     assert 0 < len(jobs) <= backend._ENTITY_JOB_SCAN_LIMIT
+
+
+def test_fetch_rejects_a_truncated_body(monkeypatch):
+    """A short body must not be accepted as a complete object.
+
+    The pre-rewrite implementation compared the received byte count against
+    Content-Length; a rewrite of this function must not lose that check.
+    """
+    from myUtils import outbound_http
+
+    _allow_public(monkeypatch)
+    session = _FakeSession([
+        _FakeResponse(headers={"Content-Length": "100"}, body=b"short"),
+    ])
+    with pytest.raises(outbound_http.OutboundUrlError):
+        outbound_http.fetch_public_bytes(
+            "https://storage.example.com/a.mp4", session=session,
+        )
+
+
+def test_fetch_accepts_an_exact_length_match(monkeypatch):
+    from myUtils import outbound_http
+
+    _allow_public(monkeypatch)
+    payload = b"exactly-right"
+    session = _FakeSession([
+        _FakeResponse(headers={"Content-Length": str(len(payload))}, body=payload),
+    ])
+    assert outbound_http.fetch_public_bytes(
+        "https://storage.example.com/a.mp4", session=session,
+    ) == payload

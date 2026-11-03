@@ -211,15 +211,45 @@ def test_account_deletion_refuses_unresolved_delivery(setup):
 
 
 def test_public_restore_keeps_original_on_partial_download(tmp_path, monkeypatch):
-    import urllib.request
+    """A truncated download must not replace the existing file.
+
+    The restore path now validates the host before fetching, so the resolver is
+    stubbed to a public address. The subject of the test — the original bytes
+    survive a bad download — is unchanged.
+    """
+    from myUtils import outbound_http
+
     target = tmp_path / "media.mp4"
     target.write_bytes(b"existing-good-bytes")
-    class Response(io.BytesIO):
-        status = 200
+
+    monkeypatch.setattr(
+        outbound_http.socket, "getaddrinfo",
+        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
+
+    class Response:
+        status_code = 200
         headers = {"Content-Length": "100"}
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Response(b"short"))
+        is_redirect = False
+        is_permanent_redirect = False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size=0):
+            yield b"short"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(outbound_http.requests, "get", lambda *a, **k: Response())
+
     with pytest.raises(media_remote_storage.RemoteStorageError, match="incomplete"):
         media_remote_storage.download_public_url("https://media.example/file.mp4", target)
+
     assert target.read_bytes() == b"existing-good-bytes"
     assert not list(tmp_path.glob("*.part"))
 

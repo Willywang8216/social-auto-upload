@@ -103,7 +103,8 @@ def fetch_public_bytes(
                 continue
             response.raise_for_status()
             declared = response.headers.get("Content-Length")
-            if declared and declared.isdigit() and int(declared) > max_bytes:
+            declared_bytes = int(declared) if declared and str(declared).isdigit() else None
+            if declared_bytes is not None and declared_bytes > max_bytes:
                 raise OutboundUrlError(
                     f"object is larger than the {max_bytes}-byte limit"
                 )
@@ -122,6 +123,13 @@ def fetch_public_bytes(
                 chunks.append(chunk)
             if received == 0:
                 raise OutboundUrlError("object was empty")
+            # A truncated body must never be written out as if it were whole.
+            # The previous implementation compared against Content-Length; that
+            # check has to survive any rewrite of this function.
+            if declared_bytes is not None and received != declared_bytes:
+                raise OutboundUrlError(
+                    f"object was incomplete: got {received} of {declared_bytes} bytes"
+                )
             return b"".join(chunks)
     raise OutboundUrlError("too many redirects")
 

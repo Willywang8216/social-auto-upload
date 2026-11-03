@@ -274,11 +274,38 @@ class UploadRegisterKeyValidationTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_valid_key_accepted(self):
+        """A well-formed key is accepted once the object verifies.
+
+        Registration now HEAD-verifies the object and derives the URL from the
+        configured backend, so the storage layer is stubbed here. The subject of
+        the test — key-format validation — is unchanged.
+        """
         import uuid
+        from unittest.mock import patch as _patch
+
         key = f"uploads/{uuid.uuid4()}_video.mp4"
-        resp = self.client.post("/upload/register", json={
-            "filename": "video.mp4", "key": key, "public_url": "https://cdn.example.com/video.mp4", "size": 1024,
-        })
+
+        class _Head:
+            bucket = "synthetic"
+
+            def _get_client(self):
+                class _S3:
+                    def head_object(self, **_kwargs):
+                        return {"ContentLength": 1024}
+
+                return _S3()
+
+            def cdn_url_for(self, name):
+                return "https://cdn.example.com/" + name
+
+        with _patch.object(
+            self.sau_backend, "_load_default_storage_backend",
+            lambda **kwargs: {"provider": "do_spaces"},
+        ), _patch("myUtils.do_spaces.client_from_row", lambda row: _Head()):
+            resp = self.client.post("/upload/register", json={
+                "filename": "video.mp4", "key": key,
+                "public_url": "https://cdn.example.com/video.mp4", "size": 1024,
+            })
         self.assertEqual(resp.status_code, 200)
 
     def test_rejects_not_a_uuid(self):
