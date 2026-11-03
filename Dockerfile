@@ -9,9 +9,10 @@ ENV PATH=/app/node_modules/.bin:$PATH
 RUN npm run build
 
 # Production runtime is the base image's Python (3.12.14), asserted below.
-# Base rebuilt on Python 3.12.14. The digest is pinned deliberately: rebuilding
-# Dockerfile.base changes it, and this line must be updated in the same change.
-FROM ghcr.io/willywang8216/sau-base:slim@sha256:56377973c90f44fafdd0a99b022f0e1b51c5de1e92cb3cdfbf8ed738769b618e
+# Base rebuilt on Python 3.12.14 and pushed to GHCR. The digest below is the
+# REGISTRY MANIFEST digest (not the local image id) - rebuilding Dockerfile.base
+# and pushing changes it, and this line must be updated in the same change.
+FROM ghcr.io/willywang8216/sau-base:slim@sha256:d079eec1ead101cc957eedbab2cf460ab865ee5d79ed7ebace81aa8aa7684746
 ARG GIT_SHA=""
 ARG SAU_BUILD_REVISION=${GIT_SHA}
 ARG BUILD_DATE=""
