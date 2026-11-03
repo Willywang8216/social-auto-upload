@@ -132,6 +132,20 @@ reports `stdlib v1.27.2` (CVE-2026-111943), the Go runtime rclone 1.75.2 was
 compiled with. It cannot be rebuilt in place, and no newer rclone release exists
 yet.
 
+### Debian security updates applied at build time
+
+The base image is pinned by digest, so its OS packages froze at base-build time.
+The scan showed **55 findings that already had a published Debian fix** - the
+image simply predated it - including four HIGH in `openssl` (`libssl3t64`,
+`openssl`, `openssl-provider-legacy`) and `libpcre2-8-0`. The Dockerfile now
+runs `apt-get upgrade -y` alongside its package install, so every build picks up
+the current Debian security updates instead of inheriting a frozen set.
+
+That trades a little build reproducibility (package versions follow the mirror
+at build time) for not shipping known-fixed CVEs, which is the right way round
+for a pinned base. The remaining OS findings have no published Debian fix at
+all.
+
 ### Gate policy
 
 `scripts/audit/image_cve_scan.sh` gates on CRITICAL or HIGH in **`python-pkg`

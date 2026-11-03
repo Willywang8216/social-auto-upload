@@ -27,7 +27,12 @@ COPY --from=uv /uv /usr/local/bin/uv
 # (CVE-2026-41176 and CVE-2026-41179 among them). Take the upstream static
 # binary instead, pinned by image digest so the build stays reproducible.
 COPY --from=rclone/rclone:1.75.2@sha256:2687085f718d3c628f7fdfb77c52a1d344332aed543110bb88088f2c70d43eb5 /usr/local/bin/rclone /usr/local/bin/rclone
+# Debian publishes security fixes after the base image is built, and the base is
+# pinned by digest, so without an explicit upgrade the OS packages freeze at
+# base-build time. The image scan found 55 findings that already had a published
+# Debian fix, including four HIGH in openssl and libpcre2.
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends fonts-noto-cjk libcups2t64 \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
