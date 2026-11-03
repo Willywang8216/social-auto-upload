@@ -57,31 +57,36 @@ critical, 0 high, 0 moderate, 0 low. The earlier "9 high" figure in this file
 was stale - it predates the Phase 3 dependency pass that cleared the production
 graph - and is corrected here.
 
-**Dev-only toolchain: 6 advisories** (2 critical, 1 high, 3 moderate), all in the
-Vitest/Vite test toolchain: `vitest` and `tinypool` critical, `vite` high,
-`@vitest/mocker`, `esbuild` and `vite-node` moderate. None of it ships; the
-production bundle is clean.
-
-The fix is bounded, and it was measured rather than guessed:
+**Dev-only toolchain: fixed.** The 6 dev-only advisories (2 critical, 1 high, 3
+moderate) sat in the Vitest/Vite test toolchain: `vitest` and `tinypool`
+critical, `vite` high, `@vitest/mocker`, `esbuild` and `vite-node` moderate.
+They are gone. The frontend now runs **vitest 4.1.12 + vite 7 +
+`@vitejs/plugin-vue` 6** with `happy-dom`, and `npm audit` reports **0 across
+the board** while all 130 tests and the production build pass.
 
 | Combination | Audit | `npm test` | `npm run build` |
 |---|---|---|---|
-| vitest 2.1.9 + vite 6.4.5 (current) | 6 | 130 passed | ok |
-| vitest 5.1.0 + vite 8.3.5 | 0 | **22 failed** | **failed** - `manualChunks is not a function`, vite 8 is rolldown-based |
-| vitest 4.1.12 + vite 7 + plugin-vue 6 | **0** | **22 failed** | ok |
+| vitest 2.1.9 + vite 6.4.5 (before) | 6 | 130 passed | ok |
+| vitest 5.1.0 + vite 8.3.5 | 0 | **22 failed** | **failed** - `manualChunks is not a function`; vite 8 is rolldown-based |
+| vitest 4.1.12 + vite 7 + plugin-vue 6, `environment: node` | 0 | **22 failed** | ok |
+| vitest 4.1.12 + vite 7 + plugin-vue 6, `environment: happy-dom` | **0** | **130 passed** | ok |
 
-Both major combinations clear the audit, and both break the same 22 tests: the
-three suites that render components through the hand-rolled in-memory renderer
-in `sau_frontend/src/components/__tests__/test-renderer.js`. They fail with
-`Cannot read properties of undefined (reading 'modules')` raised inside a
-component's `setup`. Vue is unchanged (3.5.44 in both lockfiles), so the trigger
-is the Vitest 4 transform/mock boundary, not a dependency bump.
+### Why the first attempt broke 22 tests
 
-**Deliberately not shipped.** Trading 6 dev-only advisories for 22 lost
-regression tests is a bad exchange on a production system. This stays an
-explicit follow-up: migrate Vitest 4 + Vite 7 + `@vitejs/plugin-vue` 6 together,
-repair the in-memory renderer, and confirm all 130 tests plus the production
-build before promoting.
+Vitest 3 deprecated and Vitest 4 **removed** `test.testTransformMode`, which the
+config used to mark the component suites as web transforms. With the key
+ignored, `@vitejs/plugin-vue` compiled those SFCs in **SSR mode** and emitted
+`useSSRContext()`. The hand-rolled in-memory renderer provides no SSR context,
+so every `setup` threw `Cannot read properties of undefined (reading
+'modules')`. Vue was never the problem: it is 3.5.44 in both lockfiles.
+
+The supported replacement is to let the environment pick the transform mode.
+`environment: 'happy-dom'`, with `happy-dom` as a devDependency, restores the
+web transform. The renderer itself is unchanged and still touches no DOM; the
+environment only decides how SFCs compile.
+
+Vite 7 rather than 8: vite 8 moved to rolldown and rejects the `manualChunks`
+object in `vite.config.js` that the production build relies on.
 
 ## Container image
 

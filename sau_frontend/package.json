@@ -28,8 +28,9 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
-    "@vitejs/plugin-vue": "^5.2.3",
-    "vite": "^6.3.5",
-    "vitest": "^2.1.9"
+    "@vitejs/plugin-vue": "^6",
+    "happy-dom": "^21.0.4",
+    "vite": "^7",
+    "vitest": "^4.1.12"
   }
 }

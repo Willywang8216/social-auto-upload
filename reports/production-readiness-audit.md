@@ -133,35 +133,33 @@ live schema is at `0025_file_record_path_indexes` and the live query plan uses
 | Area | Before | After |
 |---|---|---|
 | `rclone` in the image | Debian 1.60.1: 2 CRITICAL and 9 HIGH advisories, no Debian fix | upstream static **1.75.2**, pinned by image digest and asserted at build time |
-| Frontend advisory claim | recorded as "9 high in the production graph" | **production graph is 0**; the 6 remaining are dev-only toolchain |
+| Frontend production graph | recorded as "9 high" | **0 advisories** |
+| Frontend dev toolchain | 6 advisories (2 critical, 1 high, 3 moderate) | **0** - vitest 4.1.12 + vite 7 + plugin-vue 6 + happy-dom, with all 130 tests and the build still passing |
 | Host image pruning | unattributed | two weekly Docker prune jobs found and read: both use `-f`, never `-a`, so neither can untag a referenced image |
 | Stale agent sessions | 4 unarchived sessions left running since 20-29 October | archived and killed; 0 running/unarchived remain |
 | Image gate policy | CRITICAL/HIGH in *any* language package | CRITICAL/HIGH in `python-pkg`/`node-pkg` only; OS packages and vendored binaries recorded, never gated |
 | Whole-image CRITICAL count | 3 | **1** (`libxml2`, CVE-2026-6653, no Debian fix) |
 
-The frontend dev-only advisories (vitest, tinypool, vite) are removable, and both
-candidate upgrades were measured: vitest 4.1.12 + vite 7 + plugin-vue 6 clears
-the audit and builds, but breaks the same 22 tests as vitest 5 + vite 8. They are
-**deliberately not shipped**; the table and the failure are in
-`reports/security-advisories-2026-11-03.md`.
+The frontend upgrade is worth recording because the first two attempts failed.
+vitest 5 + vite 8 broke the production build (`manualChunks` under rolldown), and
+vitest 4 + vite 7 broke 22 tests because Vitest 4 removed `testTransformMode`, so
+the SFCs compiled in SSR mode and called `useSSRContext()`. Setting
+`environment: 'happy-dom'` restores the web transform; the renderer itself never
+changed. The comparison table is in `reports/security-advisories-2026-11-03.md`.
 
 ## Still open
 
-1. **Frontend dev-only advisories** (2 critical, 1 high, 3 moderate) in the
-   Vitest/Vite test toolchain. Cleared by vitest 4.1.12 + vite 7 + plugin-vue 6,
-   which breaks 22 tests in the hand-rolled in-memory renderer, so that renderer
-   must be repaired in the same change.
-2. **Debian OS advisories**, now down to one CRITICAL (`libxml2`, CVE-2026-6653)
+1. **Debian OS advisories**, now down to one CRITICAL (`libxml2`, CVE-2026-6653)
    plus the `ffmpeg`, `util-linux` and `cJSON` HIGH set. No published Debian fix;
    recorded by the scan rather than gated on.
-3. **p95/p99 latency under concurrency** - still unmeasured; needs a load
+2. **p95/p99 latency under concurrency** - still unmeasured; needs a load
    generator.
-4. **The watcher cannot deploy.** `ci-watch.sh` fetches `origin/main`, and the
+3. **The watcher cannot deploy.** `ci-watch.sh` fetches `origin/main`, and the
    live checkout is ahead of it, so every tick logs "local HEAD has unpublished/
    divergent history; refusing to overwrite it". That is the intended
    protection, but it means releases run through a manual `deploy-local.sh`
    invocation until the history is pushed with authorization.
-5. **Untagging is still unattributed.** The two weekly Docker prune jobs on this
+4. **Untagging is still unattributed.** The two weekly Docker prune jobs on this
    host use `docker image prune -f` (dangling only), which cannot untag a
    referenced image, so they do not explain the missing `:previous` tag or the
    five pruned release snapshots. The four stale agent sessions were the most
