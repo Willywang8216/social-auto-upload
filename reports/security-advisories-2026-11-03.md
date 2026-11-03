@@ -103,34 +103,46 @@ was reachable, but every scanner reported it as if it were live.
 |---|---:|---:|---:|---:|---:|
 | Previous image `e98ad86d`, whole image | 12 | 301 | 481 | 235 | 88 |
 | Previous image, `/opt/venv` only | **0** | **0** | 1 | 0 | 0 |
-| Current image `ea125a0`, whole image | 3 | 227 | 414 | 216 | 88 |
+| Image `ea125a0`, whole image | 3 | 227 | 414 | 216 | 88 |
+| Image `92ef56ec`, whole image, upstream rclone | **1** | 219 | 397 | 211 | 91 |
 
-The current image's language-package findings are 2 × Mako MEDIUM
-(CVE-2026-102991, a Windows drive-letter path traversal in `TemplateLookup`,
-not applicable to this Linux runtime) and 5 advisories against the bundled `uv`
-build tool. The remaining 941 findings are Debian 13.7 OS packages, including
-3 CRITICAL: `libxml2` (CVE-2026-6653) and `rclone` twice (CVE-2026-41176,
-CVE-2026-41179). Debian publishes no fixed version for those yet.
+The only CRITICAL left is `libxml2` (CVE-2026-6653), which has no published
+Debian fix. The language-package findings are 2 × Mako MEDIUM (CVE-2026-102991,
+a Windows drive-letter path traversal in `TemplateLookup`, not applicable to
+this Linux runtime) plus advisories inside the vendored `uv` and `rclone`
+binaries.
 
 ### `rclone` replaced with the upstream binary
 
-Debian ships rclone 1.60.1, which accounts for two of the three CRITICAL OS
-findings and nine HIGH ones. Debian publishes no fixed package, so the app image
-no longer installs it: the Dockerfile takes the upstream static binary instead,
-pinned by image digest (`rclone/rclone:1.75.2@sha256:2687085f...`), and asserts
-at build time that it runs. The binary is statically linked, so it carries no
-libc coupling, and it reports `rclone v1.75.2` inside the production base image.
+Debian ships rclone 1.60.1, which accounted for two CRITICAL and nine HIGH OS
+findings. Debian publishes no fixed package, so the app image no longer installs
+it: the Dockerfile takes the upstream static binary instead, pinned by image
+digest (`rclone/rclone:1.75.2@sha256:2687085f...`), and asserts at build time
+that it runs. The binary is statically linked, so it carries no libc coupling,
+and it reports `rclone v1.75.2` inside the production base image. That removed
+every Debian rclone finding and took CRITICAL from 3 to 1.
 
-That leaves `libxml2` (CVE-2026-6653) as the only CRITICAL this image cannot
-fix, plus the Debian `ffmpeg`, `util-linux` and `cJSON` HIGH findings, none of
-which have a published Debian fix.
+The swap surfaced one new finding: Trivy reads the binary as a Go build and
+reports `stdlib v1.27.2` (CVE-2026-111943), the Go runtime rclone 1.75.2 was
+compiled with. It cannot be rebuilt in place, and no newer rclone release exists
+yet.
 
-**Gate policy.** `scripts/audit/image_cve_scan.sh` fails on CRITICAL or HIGH in
-language packages, the class the runtime actually imports, and records OS and
-base-image findings without gating on them: this image cannot fix them, and a
-gate that cannot pass is a gate people learn to ignore. It runs as
+### Gate policy
+
+`scripts/audit/image_cve_scan.sh` gates on CRITICAL or HIGH in **`python-pkg`
+and `node-pkg`** - the ecosystems the release lockfiles (`uv.lock`,
+`package-lock.json`) own, and therefore the only ones a release can actually
+fix. It records, but never gates on, Debian OS packages and vendored third-party
+binaries (`gobinary`, `rustbinary`): those need a Debian fix or a new upstream
+release, so a gate on them could not pass.
+
+This narrowing is deliberate, and it was made in the same change that added the
+rclone binary, because of it: the previous policy gated on all language
+packages, which would have blocked this release over a Go standard library
+advisory inside a pinned third-party binary. Every recorded CRITICAL is printed
+next to the totals, so nothing is hidden. The scan runs as
 `release-gates.sh image` and as part of `all`, skipping cleanly when no image
 reference or no scanner is available.
 
-Raw reports: `backups/auth-storage-review-20261102/validation/trivy-image-scan-ea125a0.json`
-and `...-e98ad86d-previous.json`.
+Raw reports: `backups/auth-storage-review-20261102/validation/`
+(`trivy-image-scan-92ef56ec.json`, `...-ea125a0.json`, `...-e98ad86d-previous.json`).

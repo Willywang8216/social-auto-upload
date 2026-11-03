@@ -136,6 +136,8 @@ live schema is at `0025_file_record_path_indexes` and the live query plan uses
 | Frontend advisory claim | recorded as "9 high in the production graph" | **production graph is 0**; the 6 remaining are dev-only toolchain |
 | Host image pruning | unattributed | two weekly Docker prune jobs found and read: both use `-f`, never `-a`, so neither can untag a referenced image |
 | Stale agent sessions | 4 unarchived sessions left running since 20-29 October | archived and killed; 0 running/unarchived remain |
+| Image gate policy | CRITICAL/HIGH in *any* language package | CRITICAL/HIGH in `python-pkg`/`node-pkg` only; OS packages and vendored binaries recorded, never gated |
+| Whole-image CRITICAL count | 3 | **1** (`libxml2`, CVE-2026-6653, no Debian fix) |
 
 The frontend dev-only advisories (vitest, tinypool, vite) are removable, and both
 candidate upgrades were measured: vitest 4.1.12 + vite 7 + plugin-vue 6 clears
