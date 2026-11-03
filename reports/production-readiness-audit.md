@@ -128,17 +128,41 @@ live schema is at `0025_file_record_path_indexes` and the live query plan uses
 `campaigns`, `campaign_posts`, `file_records`, `accounts`, `media_groups` and
 `publish_submissions`.
 
+## Third pass (2026-11-03, later still)
+
+| Area | Before | After |
+|---|---|---|
+| `rclone` in the image | Debian 1.60.1: 2 CRITICAL and 9 HIGH advisories, no Debian fix | upstream static **1.75.2**, pinned by image digest and asserted at build time |
+| Frontend advisory claim | recorded as "9 high in the production graph" | **production graph is 0**; the 6 remaining are dev-only toolchain |
+| Host image pruning | unattributed | two weekly Docker prune jobs found and read: both use `-f`, never `-a`, so neither can untag a referenced image |
+| Stale agent sessions | 4 unarchived sessions left running since 20-29 October | archived and killed; 0 running/unarchived remain |
+
+The frontend dev-only advisories (vitest, tinypool, vite) are removable, and both
+candidate upgrades were measured: vitest 4.1.12 + vite 7 + plugin-vue 6 clears
+the audit and builds, but breaks the same 22 tests as vitest 5 + vite 8. They are
+**deliberately not shipped**; the table and the failure are in
+`reports/security-advisories-2026-11-03.md`.
+
 ## Still open
 
-1. **Frontend advisory graph** (9 high, transitive). `npm audit fix --force`
-   broke 22 frontend tests, so it needs its own reviewed increment.
-2. **Debian OS advisories in the base image**, including 3 CRITICAL
-   (`libxml2`, `rclone` ×2). Debian publishes no fixed version yet; they are
+1. **Frontend dev-only advisories** (2 critical, 1 high, 3 moderate) in the
+   Vitest/Vite test toolchain. Cleared by vitest 4.1.12 + vite 7 + plugin-vue 6,
+   which breaks 22 tests in the hand-rolled in-memory renderer, so that renderer
+   must be repaired in the same change.
+2. **Debian OS advisories**, now down to one CRITICAL (`libxml2`, CVE-2026-6653)
+   plus the `ffmpeg`, `util-linux` and `cJSON` HIGH set. No published Debian fix;
    recorded by the scan rather than gated on.
 3. **p95/p99 latency under concurrency** - still unmeasured; needs a load
    generator.
 4. **The watcher cannot deploy.** `ci-watch.sh` fetches `origin/main`, and the
-   live checkout is 15 commits ahead of it, so every tick logs "local HEAD has
-   unpublished/divergent history; refusing to overwrite it". That is the
-   intended protection, but it means releases currently run through a manual
-   `deploy-local.sh` invocation until the history is pushed with authorization.
+   live checkout is ahead of it, so every tick logs "local HEAD has unpublished/
+   divergent history; refusing to overwrite it". That is the intended
+   protection, but it means releases run through a manual `deploy-local.sh`
+   invocation until the history is pushed with authorization.
+5. **Untagging is still unattributed.** The two weekly Docker prune jobs on this
+   host use `docker image prune -f` (dangling only), which cannot untag a
+   referenced image, so they do not explain the missing `:previous` tag or the
+   five pruned release snapshots. The four stale agent sessions were the most
+   likely source of unattributed host edits and are now gone; the Claude daemon
+   and its resumed session from 20 October were left alone because they belong
+   to another tool and are idle.

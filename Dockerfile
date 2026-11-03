@@ -23,10 +23,15 @@ WORKDIR /app
 COPY --from=uv /uv /usr/local/bin/uv
 
 # Preserve CJK rendering and the existing writable rclone-cache mount.
+# Debian ships rclone 1.60.1, which carries unpatched advisories
+# (CVE-2026-41176 and CVE-2026-41179 among them). Take the upstream static
+# binary instead, pinned by image digest so the build stays reproducible.
+COPY --from=rclone/rclone:1.75.2@sha256:2687085f718d3c628f7fdfb77c52a1d344332aed543110bb88088f2c70d43eb5 /usr/local/bin/rclone /usr/local/bin/rclone
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fonts-noto-cjk rclone libcups2t64 \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk libcups2t64 \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
+RUN rclone version
 RUN python3 -c "import sys; assert sys.version_info[:3] == (3, 12, 14), 'production requires Python 3.12.14'"
 COPY pyproject.toml uv.lock ./
 # Export only the locked runtime graph, with hashes. A separate venv prevents

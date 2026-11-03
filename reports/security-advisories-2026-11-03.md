@@ -48,17 +48,40 @@ the follow-up pass once the full suites could be re-run:
 
 With those two, the exported locked runtime graph carries **0 advisories**.
 
-## Frontend (production dependencies)
+## Frontend
 
-`npm audit --omit=dev`: **0 critical, 9 high, 0 moderate, 0 low.**
+Measured with `npm audit` inside the pinned Node 22.21.1 release toolchain.
 
-The nine are transitive in the Vue/Element Plus render graph and were already
-recorded in `reports/reliability-audit.md`. They are **not remediated here**:
-`npm audit fix --force` broke 22 frontend tests, so a forced upgrade of that
-graph needs its own build + browser-test verification.
+**Production dependencies: 0 advisories.** `npm audit --omit=dev` reports 0
+critical, 0 high, 0 moderate, 0 low. The earlier "9 high" figure in this file
+was stale - it predates the Phase 3 dependency pass that cleared the production
+graph - and is corrected here.
 
-**Required follow-up:** upgrade the frontend graph on a branch, run `npm test` +
-the production build + the browser journeys, and record the delta.
+**Dev-only toolchain: 6 advisories** (2 critical, 1 high, 3 moderate), all in the
+Vitest/Vite test toolchain: `vitest` and `tinypool` critical, `vite` high,
+`@vitest/mocker`, `esbuild` and `vite-node` moderate. None of it ships; the
+production bundle is clean.
+
+The fix is bounded, and it was measured rather than guessed:
+
+| Combination | Audit | `npm test` | `npm run build` |
+|---|---|---|---|
+| vitest 2.1.9 + vite 6.4.5 (current) | 6 | 130 passed | ok |
+| vitest 5.1.0 + vite 8.3.5 | 0 | **22 failed** | **failed** - `manualChunks is not a function`, vite 8 is rolldown-based |
+| vitest 4.1.12 + vite 7 + plugin-vue 6 | **0** | **22 failed** | ok |
+
+Both major combinations clear the audit, and both break the same 22 tests: the
+three suites that render components through the hand-rolled in-memory renderer
+in `sau_frontend/src/components/__tests__/test-renderer.js`. They fail with
+`Cannot read properties of undefined (reading 'modules')` raised inside a
+component's `setup`. Vue is unchanged (3.5.44 in both lockfiles), so the trigger
+is the Vitest 4 transform/mock boundary, not a dependency bump.
+
+**Deliberately not shipped.** Trading 6 dev-only advisories for 22 lost
+regression tests is a bad exchange on a production system. This stays an
+explicit follow-up: migrate Vitest 4 + Vite 7 + `@vitejs/plugin-vue` 6 together,
+repair the in-memory renderer, and confirm all 130 tests plus the production
+build before promoting.
 
 ## Container image
 
@@ -88,6 +111,19 @@ not applicable to this Linux runtime) and 5 advisories against the bundled `uv`
 build tool. The remaining 941 findings are Debian 13.7 OS packages, including
 3 CRITICAL: `libxml2` (CVE-2026-6653) and `rclone` twice (CVE-2026-41176,
 CVE-2026-41179). Debian publishes no fixed version for those yet.
+
+### `rclone` replaced with the upstream binary
+
+Debian ships rclone 1.60.1, which accounts for two of the three CRITICAL OS
+findings and nine HIGH ones. Debian publishes no fixed package, so the app image
+no longer installs it: the Dockerfile takes the upstream static binary instead,
+pinned by image digest (`rclone/rclone:1.75.2@sha256:2687085f...`), and asserts
+at build time that it runs. The binary is statically linked, so it carries no
+libc coupling, and it reports `rclone v1.75.2` inside the production base image.
+
+That leaves `libxml2` (CVE-2026-6653) as the only CRITICAL this image cannot
+fix, plus the Debian `ffmpeg`, `util-linux` and `cJSON` HIGH findings, none of
+which have a published Debian fix.
 
 **Gate policy.** `scripts/audit/image_cve_scan.sh` fails on CRITICAL or HIGH in
 language packages, the class the runtime actually imports, and records OS and
