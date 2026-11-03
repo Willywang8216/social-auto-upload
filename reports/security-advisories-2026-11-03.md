@@ -137,7 +137,11 @@ yet.
 The base image is pinned by digest, so its OS packages froze at base-build time.
 The scan showed **55 findings that already had a published Debian fix** - the
 image simply predated it - including four HIGH in `openssl` (`libssl3t64`,
-`openssl`, `openssl-provider-legacy`) and `libpcre2-8-0`. The Dockerfile now
+`openssl`, `openssl-provider-legacy`) and `libpcre2-8-0`. Measured after the
+change: **43 findings cleared** (4 HIGH, 30 MEDIUM, 6 LOW, 3 UNKNOWN), taking the
+image from 12/301/481 to 1/215/367 CRITICAL/HIGH/MEDIUM. The 12 findings that
+remain "fixable" all sit inside vendored binaries - the Go stdlib in `rclone`,
+plus `uv`, `rustls` and `Mako` - which `apt` cannot reach. The Dockerfile now
 runs `apt-get upgrade -y` alongside its package install, so every build picks up
 the current Debian security updates instead of inheriting a frozen set.
 
