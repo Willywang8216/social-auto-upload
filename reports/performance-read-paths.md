@@ -42,9 +42,45 @@ inserts `_ENTITY_JOB_SCAN_LIMIT + 25` jobs and asserts the loader returns no
 more than the bound — so a future change that removes the SQL `LIMIT` fails the
 suite rather than silently reintroducing a full scan.
 
+## Broader query-plan audit (2026-11-03, live database)
+
+`EXPLAIN QUERY PLAN` over the interactive read paths, run against a read-only
+copy of the production database (111.6 MB; 3,690 `file_records`, 11,369
+`publish_jobs`, 11,312 `publish_job_targets`, 2,979 `campaigns`).
+
+Clean, no change needed:
+
+* `files.page` and `jobs.page` — `ORDER BY id DESC LIMIT n` walks the rowid
+  b-tree backwards and stops after the page, so the reported `SCAN` is O(page),
+  not O(table).
+* `jobs.by_account_ref`, `jobs.by_platform`, `targets.status_by_job`,
+  `campaigns.page_ws`, `backends.default`, `files.by_id`, `jobs.payload_by_id`,
+  `targets.status_counts`, `jobs.status_counts` — indexed or covering-index
+  lookups.
+* `jobs.by_schedule` — scans `publish_jobs` but probes the indexed
+  `publish_job_targets(job_id)` per row and stops at the 500-row bound.
+* `files.by_storage_key_like` — a leading-wildcard `LIKE` cannot use an index by
+  construction; it stays a bounded scan.
+
+Fixed. `file_records.file_path` and `file_records.filename` carried no index, so
+every media resolution full-scanned the table. Measured over 60 references
+sampled randomly from the production table:
+
+| Lookup | Before | After | Gain |
+|---|---:|---:|---:|
+| `SELECT id FROM file_records WHERE file_path = ?` (60 lookups) | 21.44 ms | 0.46 ms | **46×** |
+| entity `file_path = ? OR filename = ? LIMIT 1` (60 refs) | 11.35 ms | 0.67 ms | **17×** |
+
+Migration `0025_file_record_path_indexes` adds both indexes additively. The OR
+query now reports `MULTI-INDEX OR`; the equality query uses a covering index.
+An earlier sample drawn from the *first* 60 rows made this look like a 1.2×
+gain, because those rows match early and the scan stops; sampling across the
+table is what makes the number honest.
+
 ## Not measured
 
 * p95/p99 latency and memory under real concurrency (single-process web tier;
   needs a load generator, which was out of scope for this pass).
-* `EXPLAIN QUERY PLAN` review of every query. The two paths named in the plan
-  were the targets; a broader query-plan audit remains open work.
+* Write-path cost of the two new indexes. At 3,690 rows it is not measurable,
+  and `file_records` is append-mostly, so it stays negligible until the table
+  grows by orders of magnitude.

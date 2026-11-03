@@ -34,9 +34,18 @@ COPY pyproject.toml uv.lock ./
 RUN uv export --frozen --no-dev --extra web --no-emit-project --format requirements-txt --output-file /tmp/runtime.lock \
     && uv venv --python /usr/local/bin/python3 /opt/venv \
     && uv pip sync --python /opt/venv/bin/python --require-hashes /tmp/runtime.lock \
-    && rm /tmp/runtime.lock
+    && rm /tmp/runtime.lock \
+    && rm -rf /usr/local/lib/python3.12/site-packages /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12
 ENV PATH=/opt/venv/bin:$PATH
 ENV PYTHONPATH=/app
+
+# sau-base pip-installs requirements.txt into the system interpreter. The app
+# venv cannot import that environment (include-system-site-packages is false),
+# but it still carried 1,295 stale distributions - old Pillow, Authlib, aiohttp,
+# cryptography among them - that image scanners reported as if they were live.
+# It is deleted above; this asserts the application really cannot see it.
+RUN test ! -e /usr/local/lib/python3.12/site-packages \
+    && python -c "import sys; assert not [p for p in sys.path if p.endswith('local/lib/python3.12/site-packages')], sys.path"
 COPY . .
 # The db directory is a writable data bind mount in production. Keep its
 # canonical bootstrap implementation in image-owned code, never in that mount.

@@ -13,10 +13,10 @@ while (( $# )); do
   case "$1" in
     --python) VERSION="$2"; shift 2 ;;
     --receipts) RECEIPTS="$2"; shift 2 ;;
-    *) echo "usage: release-gates.sh [all|backend|frontend|verify] [--python 3.12|3.13] --receipts DIR" >&2; exit 2 ;;
+    *) echo "usage: release-gates.sh [all|backend|frontend|verify|image] [--python 3.12|3.13] --receipts DIR" >&2; exit 2 ;;
   esac
 done
-[[ "$MODE" =~ ^(all|backend|frontend|verify)$ ]] || exit 2
+[[ "$MODE" =~ ^(all|backend|frontend|verify|image)$ ]] || exit 2
 REVISION="$("$PYTHON" "$ROOT/scripts/release_checks.py" --root "$ROOT" clean)"
 RECEIPTS="${RECEIPTS:-$ROOT/logs/releases/gates/$REVISION}"
 mkdir -p "$RECEIPTS"
@@ -66,10 +66,24 @@ frontend() {
   run_clean "$PYTHON" scripts/release_checks.py clean --revision "$REVISION" >/dev/null
   run_clean "$PYTHON" scripts/release_checks.py record --revision "$REVISION" --receipts "$RECEIPTS" --component frontend
 }
+# Image CVE evidence and policy gate. It needs a built image, so it takes an
+# explicit reference and skips cleanly when the image or the scanner is absent:
+# a machine without docker must not fail an otherwise complete release.
+image_scan() {
+  local image="${SAU_SCAN_IMAGE:-}"
+  if [[ -z "$image" ]]; then
+    echo 'image-scan: SAU_SCAN_IMAGE is unset; skipping the image CVE scan.' >&2
+    return 0
+  fi
+  SAU_SCAN_OUT="$RECEIPTS/image-cve-scan.json" \
+    bash "$ROOT/scripts/audit/image_cve_scan.sh" "$image" "$RECEIPTS/image-cve-scan.json"
+}
+
 case "$MODE" in
-  all) backend 3.12; backend 3.13; frontend ;;
+  all) backend 3.12; backend 3.13; frontend; image_scan ;;
   backend) [[ "$VERSION" == 3.12 || "$VERSION" == 3.13 ]] || exit 2; backend "$VERSION" ;;
   frontend) frontend ;;
+  image) image_scan ;;
 esac
 "$PYTHON" "$ROOT/scripts/release_checks.py" --root "$ROOT" clean --revision "$REVISION" >/dev/null
 if [[ "$MODE" == all ]]; then
