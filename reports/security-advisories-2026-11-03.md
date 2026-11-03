@@ -34,39 +34,19 @@ suites re-run (**545 passed**):
 | joserfc | 1.7.3 | 1.7.7 |
 | opentelemetry-api | 1.44.0 | 1.45.2 |
 
-Post-remediation: **2 remaining**.
+Post-remediation: **2 remaining**, both delivered later the same day (below).
 
-## Remaining — explicitly accepted, not silently ignored
+## Deferred majors, then delivered
 
-Both require a **major** version bump, and both sit on a path where an
-unverified change is worse than a known-and-tracked advisory.
+Both were deferred in this pass because they are major bumps, then completed in
+the follow-up pass once the full suites could be re-run:
 
-### `pillow 11.2.1` → 12.3.0
+| Package | From | To | Verification |
+|---|---|---|---|
+| `pillow` | 11.2.1 | **13.0.0** | full media-prep, watermark and campaign-artifact suites, plus an isolated non-root image smoke |
+| `fastmcp` | 3.4.7 | **4.1.2** | MCP server and containment suites pass unchanged; no tool-registration API migration was needed |
 
-Pillow is the image engine for media prep: downscaling, watermarking, format
-detection and the platform size checks. A major bump can change decoder
-behaviour, default encoders and deprecations across that whole path.
-
-**Accepted because** verifying it properly means re-running the media-prep,
-watermark and campaign-artifact suites *and* an isolated image smoke on the
-built release image — work that belongs in its own reviewed increment.
-
-**Required follow-up:** upgrade on a branch, run the full media suites plus a
-release-image smoke, and only then promote.
-
-### `fastmcp 3.4.7` → 4.1.2
-
-Powers the optional MCP server (`sau-mcp`). A major bump can change the
-tool-registration API and the transport contract.
-
-**Accepted because** the MCP surface is opt-in, not part of the publishing
-path, and a 3→4 migration needs its own tool-by-tool verification.
-
-**Required follow-up:** migrate on a branch with `tests/test_mcp_server.py` and
-`tests/test_mcp_containment.py` extended, and confirm stdio + loopback HTTP.
-
-Neither is exposed to the public internet: the MCP server binds loopback by
-default and refuses a non-loopback bind without `SAU_MCP_ALLOW_REMOTE=1`.
+With those two, the exported locked runtime graph carries **0 advisories**.
 
 ## Frontend (production dependencies)
 
@@ -74,17 +54,47 @@ default and refuses a non-loopback bind without `SAU_MCP_ALLOW_REMOTE=1`.
 
 The nine are transitive in the Vue/Element Plus render graph and were already
 recorded in `reports/reliability-audit.md`. They are **not remediated here**:
-the frontend lockfile is shared with the release build, and a forced upgrade of
-that graph needs its own build + browser-test verification.
+`npm audit fix --force` broke 22 frontend tests, so a forced upgrade of that
+graph needs its own build + browser-test verification.
 
-**Required follow-up:** upgrade the frontend graph on a branch, run
-`npm test` + the production build + the browser journeys, and record the delta.
+**Required follow-up:** upgrade the frontend graph on a branch, run `npm test` +
+the production build + the browser journeys, and record the delta.
 
-## Container / base image
+## Container image
 
-The base image (`ghcr.io/willywang8216/sau-base:slim`) and the app image were
-not scanned with an image CVE scanner in this pass — no scanner is configured
-on this host. **This is a gap, not a clean result.**
+Trivy 0.76.1 against the running production image, driven by
+`scripts/audit/image_cve_scan.sh`. The script flattens the image into a single
+export and scans that as a rootfs, because Trivy's own layer-by-layer export
+needs roughly 4 GB of scratch space and failed repeatedly on this host's full
+disk.
 
-**Required follow-up:** add an image scan (e.g. Trivy/Grype) to the release
-gate so base-OS packages are covered too, not just Python and npm.
+**The first scan found a real defect.** The app image carried two Python
+environments: the application venv at `/opt/venv`, and the base image's own
+site-packages at `/usr/local/lib/python3.12/site-packages` holding **1,295 stale
+distributions** - old Pillow 11.2.1, Authlib 1.7.2, aiohttp 3.9.5, cryptography
+46.0.0 among them. The venv could not import any of it
+(`include-system-site-packages = false`, and `sys.path` confirms), so none of it
+was reachable, but every scanner reported it as if it were live.
+
+| Scan | CRITICAL | HIGH | MEDIUM | LOW | UNKNOWN |
+|---|---:|---:|---:|---:|---:|
+| Previous image `e98ad86d`, whole image | 12 | 301 | 481 | 235 | 88 |
+| Previous image, `/opt/venv` only | **0** | **0** | 1 | 0 | 0 |
+| Current image `ea125a0`, whole image | 3 | 227 | 414 | 216 | 88 |
+
+The current image's language-package findings are 2 × Mako MEDIUM
+(CVE-2026-102991, a Windows drive-letter path traversal in `TemplateLookup`,
+not applicable to this Linux runtime) and 5 advisories against the bundled `uv`
+build tool. The remaining 941 findings are Debian 13.7 OS packages, including
+3 CRITICAL: `libxml2` (CVE-2026-6653) and `rclone` twice (CVE-2026-41176,
+CVE-2026-41179). Debian publishes no fixed version for those yet.
+
+**Gate policy.** `scripts/audit/image_cve_scan.sh` fails on CRITICAL or HIGH in
+language packages, the class the runtime actually imports, and records OS and
+base-image findings without gating on them: this image cannot fix them, and a
+gate that cannot pass is a gate people learn to ignore. It runs as
+`release-gates.sh image` and as part of `all`, skipping cleanly when no image
+reference or no scanner is available.
+
+Raw reports: `backups/auth-storage-review-20261102/validation/trivy-image-scan-ea125a0.json`
+and `...-e98ad86d-previous.json`.

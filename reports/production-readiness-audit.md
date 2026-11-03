@@ -71,15 +71,74 @@ live. Against the pre-release backup: **0 missing targets, 0 changed schedules,
 0 changed successful/cancelled history, 0 changed target destinations or media
 references, 0 changed account identity/routing bindings.**
 
+## Follow-up pass (2026-11-03, later)
+
+Closed the four gaps this audit left open.
+
+| Area | Before | After |
+|---|---|---|
+| Production runtime | Python 3.10.19 (end-of-life Oct 2026) | **3.12.14**; base rebuilt and pushed, `requires-python >=3.12,<3.14`, gate matrix 3.12 + 3.13 |
+| `pillow` / `fastmcp` | 11.2.1 / 3.4.7, majors deferred | **13.0.0 / 4.1.2**; the exported locked runtime graph is now at **0 advisories** |
+| Container image scanning | no scanner; recorded as a gap | `scripts/audit/image_cve_scan.sh` plus a `release-gates.sh image` mode, also run by `all` |
+| Query plans | only the two paths named in the plan | `EXPLAIN QUERY PLAN` audit of the interactive reads; `file_records(file_path)` and `(filename)` indexed - **46×** and **17×** faster |
+
+### The image scan found a real defect
+
+The app image carried a second, unreachable Python environment: the base image
+installs its own pinned dependency list into the system interpreter, and 1,295
+stale distributions survived into the final image. The app venv could not import
+any of it, but scanners reported it as live. The Dockerfile now deletes it and
+asserts at build time that the app's `sys.path` cannot see it.
+
+Scoped to what the runtime actually imports (`/opt/venv`), the previous image
+had **0 CRITICAL and 0 HIGH**. The current image's whole-image totals fall from
+12/301/481 to 3/227/414 (CRITICAL/HIGH/MEDIUM); everything left is Debian 13.7
+OS packages plus the bundled `uv` build tool. Details and the gate policy are in
+`reports/security-advisories-2026-11-03.md`.
+
+### Deployment (2026-11-03, later)
+
+**Deployed and verified.** Both roles run
+`ea125a0ded166979e223bbf703d388c1323e8d38`, image
+`sha256:97eec960f970efbb3987957caa7a7a74dcd05f3011085b06db9d18221570af46`.
+
+| Gate | Result |
+|---|---|
+| Linux Python 3.12.14 | 2,859 passed, 2 skipped, 170 subtests |
+| Linux Python 3.13.15 | 2,859 passed, 2 skipped, 170 subtests |
+| Pinned Node 22.21.1 frontend | 130 tests, production build |
+| Maintained Python static checks | 459 files, 0 errors |
+| Image CVE scan | 0 CRITICAL/HIGH in language packages |
+| Non-root, network-disabled image smoke | passed |
+
+**The gate earned its keep again.** It caught three real consequences of the new
+migration: two tests pin the Alembic head deliberately and needed updating, and
+`test_release_static_invariants` rejects the literal strings `pip install` and
+`requirements.txt` anywhere in the app Dockerfile - the explanatory comment
+about the base image tripped it, so the comment was reworded rather than
+relaxing the guard.
+
+Live checks after activation: both roles healthy on the matched image and
+revision; `readyz` reports database and worker ok; `release_probe` passes for
+both roles; anonymous `/getFiles` rejected (401); Google login disabled
+(`SAU_GOOGLE_LOGIN_ENABLED=false`, `SAU_AUTH_MODE=legacy`); claims unpaused; the
+live schema is at `0025_file_record_path_indexes` and the live query plan uses
+`COVERING INDEX idx_fr_file_path`. Against the pre-release snapshot: **0 added,
+0 removed, 0 changed rows** across `publish_jobs`, `publish_job_targets`,
+`campaigns`, `campaign_posts`, `file_records`, `accounts`, `media_groups` and
+`publish_submissions`.
+
 ## Still open
 
-1. **Python 3.12 as the production runtime.** The suite passes on 3.12, but the
-   production image and its base still build on 3.10.19. Moving the runtime
-   needs a base-image rebuild and its own verification.
-2. **`pillow` 11→12 and `fastmcp` 3→4** — major bumps, explicitly accepted with
-   rationale in `reports/security-advisories-2026-11-03.md`.
-3. **Frontend advisory graph** (9 high, transitive) — recorded, not upgraded.
-4. **Container image CVE scanning** — no scanner configured on this host; a gap,
-   not a clean result.
-5. **Broader query-plan audit** — only the two paths named in the plan were
-   measured; see `reports/performance-read-paths.md`.
+1. **Frontend advisory graph** (9 high, transitive). `npm audit fix --force`
+   broke 22 frontend tests, so it needs its own reviewed increment.
+2. **Debian OS advisories in the base image**, including 3 CRITICAL
+   (`libxml2`, `rclone` ×2). Debian publishes no fixed version yet; they are
+   recorded by the scan rather than gated on.
+3. **p95/p99 latency under concurrency** - still unmeasured; needs a load
+   generator.
+4. **The watcher cannot deploy.** `ci-watch.sh` fetches `origin/main`, and the
+   live checkout is 15 commits ahead of it, so every tick logs "local HEAD has
+   unpublished/divergent history; refusing to overwrite it". That is the
+   intended protection, but it means releases currently run through a manual
+   `deploy-local.sh` invocation until the history is pushed with authorization.
