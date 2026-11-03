@@ -99,7 +99,7 @@
               <span class="desc">列出所有已上傳的檔案</span>
             </div>
             <div class="endpoint">
-              <span class="method get">GET</span>
+              <span class="method delete">DELETE</span>
               <code>/deleteFile?id=&lt;id&gt;</code>
               <span class="desc">刪除單一檔案（本地 + 遠端儲存空間）</span>
             </div>
@@ -122,7 +122,7 @@ curl https://socialupload.iamwillywang.com/getFile?filename=abc123_video.mp4 \
   -H "Authorization: Bearer YOUR_TOKEN" -o video.mp4
 
 # 刪除檔案
-curl "https://socialupload.iamwillywang.com/deleteFile?id=1" \
+curl -X DELETE "https://socialupload.iamwillywang.com/deleteFile?id=1" \
   -H "Authorization: Bearer YOUR_TOKEN"
 
 # 批次刪除

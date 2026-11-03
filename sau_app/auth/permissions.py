@@ -14,17 +14,21 @@ PROFILES_READ = "profiles:read"
 PROFILES_WRITE = "profiles:write"
 ACCOUNTS_READ = "accounts:read"
 ACCOUNTS_CONNECT = "accounts:connect"
+MEDIA_READ = "media:read"
 MEDIA_WRITE = "media:write"
 PUBLISH_WRITE = "publish:write"
 ANALYTICS_READ = "analytics:read"
 MEMBERS_MANAGE = "members:manage"
 WORKSPACE_MANAGE = "workspace:manage"
-CREDENTIALS_EXPORT = "credentials:export"  # owner-only, off by default
-
-_VIEWER = frozenset({PROFILES_READ, ACCOUNTS_READ, ANALYTICS_READ})
+# Handing over a decrypted session cookie is the most sensitive read the app
+# offers, so it is owner-only. Cross-workspace isolation is enforced
+# separately by the route's workspace scoping (a foreign account resolves as
+# 404, never 403), which is what the tenant-isolation suite pins.
+CREDENTIALS_EXPORT = "credentials:export"  # owner-only
+_VIEWER = frozenset({PROFILES_READ, ACCOUNTS_READ, ANALYTICS_READ, MEDIA_READ})
 _EDITOR = _VIEWER | {PROFILES_WRITE, ACCOUNTS_CONNECT, MEDIA_WRITE, PUBLISH_WRITE}
 _ADMIN = _EDITOR | {MEMBERS_MANAGE}
-_OWNER = _ADMIN | {WORKSPACE_MANAGE}
+_OWNER = _ADMIN | {WORKSPACE_MANAGE, CREDENTIALS_EXPORT}
 
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     ROLE_OWNER: frozenset(_OWNER),

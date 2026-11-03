@@ -23,19 +23,56 @@ from myUtils import profiles as profile_registry
 _DEFAULT_DB_ENV = "SAU_MCP_DB_PATH"
 
 
+def _testing() -> bool:
+    """Tests legitimately point tools at a throwaway database."""
+    return str(os.environ.get("SAU_TESTING", "")).strip().lower() in {"1", "true", "yes"}
+
+
+def _allowed_db_roots() -> tuple[Path, ...]:
+    """Directories an explicit ``db_path`` may resolve inside.
+
+    Defaults to the directory holding the project's own database. An operator
+    who genuinely needs another location can widen this with
+    ``SAU_MCP_ALLOWED_DB_ROOTS`` (``os.pathsep``-separated) instead of the
+    server accepting any path a caller names.
+    """
+    roots = [Path(profile_registry.DB_PATH).parent]
+    for raw in (os.environ.get("SAU_MCP_ALLOWED_DB_ROOTS") or "").split(os.pathsep):
+        candidate = raw.strip()
+        if candidate:
+            roots.append(Path(candidate))
+    return tuple(root.resolve() for root in roots)
+
+
 def resolve_db_path(explicit: str | os.PathLike[str] | None = None) -> Path:
     """Pick a DB path for this tool call.
 
-    Resolution order: explicit argument > ``SAU_MCP_DB_PATH`` env > the
-    project default (``myUtils.profiles.DB_PATH``). Tests pass an explicit
-    path; production callers leave it unset and let the project default win.
+    Resolution order: explicit argument > ``SAU_MCP_DB_PATH`` env > the project
+    default (``myUtils.profiles.DB_PATH``).
+
+    An explicit/env path is a **capability**, not a convenience: without a
+    guard, an MCP caller could aim every tool at an arbitrary SQLite file on
+    the host. Outside the test suite a requested path must therefore resolve
+    inside :func:`_allowed_db_roots`, or the call is refused.
     """
+    requested: Path | None = None
     if explicit is not None and str(explicit) != "":
-        return Path(explicit)
-    env = os.environ.get(_DEFAULT_DB_ENV)
-    if env:
-        return Path(env)
-    return Path(profile_registry.DB_PATH)
+        requested = Path(explicit)
+    else:
+        env = os.environ.get(_DEFAULT_DB_ENV)
+        if env:
+            requested = Path(env)
+    if requested is None:
+        return Path(profile_registry.DB_PATH)
+    if _testing():
+        return requested
+    resolved = requested.resolve()
+    if not any(resolved.is_relative_to(root) for root in _allowed_db_roots()):
+        raise PermissionError(
+            "db_path must resolve inside the configured database directory; "
+            "set SAU_MCP_ALLOWED_DB_ROOTS to widen the allowed roots"
+        )
+    return resolved
 
 
 def error_payload(exc: BaseException) -> dict[str, Any]:

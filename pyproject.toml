@@ -28,7 +28,8 @@ dependencies = [
   "patchright==1.58.2",
   "pillow==11.2.1",
   "qrcode==8.2",
-  "requests==2.32.3",
+  # 2.33.0 carries the fixes for PYSEC-2026-1872 / PYSEC-2026-2275.
+  "requests==2.33.0",
   "segno==1.6.6",
   # `alembic` drives the SQLite schema migrations under migrations/.
   # `db/createTable.py` is now a thin wrapper around `alembic upgrade head`.
@@ -50,7 +51,8 @@ sau-mcp = "mcp_server.server:main"
 
 [project.optional-dependencies]
 web = [
-  "Flask[async]==3.1.1",
+  # 3.1.3 carries the fix for PYSEC-2026-2151.
+  "Flask[async]==3.1.3",
   "flask-cors==6.0.0",
   # Production WSGI server. The dev server (app.run) remains the local path;
   # production serves the app via `gunicorn wsgi:app`.

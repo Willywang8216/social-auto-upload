@@ -391,7 +391,7 @@ class LegacyDbBootstrapEndpointTests(unittest.TestCase):
             account_id = cursor.lastrowid
             conn.commit()
 
-        response = self.client.get(f"/deleteAccount?id={account_id}")
+        response = self.client.delete(f"/deleteAccount?id={account_id}")
         self.assertEqual(response.status_code, 200)
         self.assertFalse(cookie_path.exists())
 

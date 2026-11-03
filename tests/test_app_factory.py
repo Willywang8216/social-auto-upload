@@ -195,18 +195,28 @@ class ErrorSchemaTests(unittest.TestCase):
 
 @unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")
 class FactoryTests(unittest.TestCase):
-    def test_create_app_is_idempotent_and_wires_extensions(self) -> None:
+    def test_create_app_returns_a_fully_wired_independent_instance(self) -> None:
+        """Each call builds a distinct, completely wired application.
+
+        This deliberately replaced the earlier contract, where ``create_app()``
+        handed back the monolith's module-global app. A factory that always
+        returns the same object cannot give a caller its own configuration.
+        """
         from sau_app import create_app
         from sau_app.config import AppConfig
 
         app1 = create_app()
         app2 = create_app()
-        self.assertIs(app1, app2)  # wraps the module-global monolith app
-        self.assertIsInstance(app1.config.get("SAU_APP_CONFIG"), AppConfig)
-        self.assertIn("sau_health", app1.blueprints)
-        # Blueprint registered exactly once despite multiple create_app calls.
-        health_rules = [r for r in app1.url_map.iter_rules() if r.endpoint.startswith("sau_health.")]
-        self.assertEqual(len(health_rules), 2)
+        self.assertIsNot(app1, app2)
+        for app in (app1, app2):
+            self.assertIsInstance(app.config.get("SAU_APP_CONFIG"), AppConfig)
+            self.assertIn("sau_health", app.blueprints)
+            # Registered exactly once per instance, not once per process.
+            health_rules = [
+                r for r in app.url_map.iter_rules()
+                if r.endpoint.startswith("sau_health.")
+            ]
+            self.assertEqual(len(health_rules), 2)
 
     def test_init_extensions_does_not_double_register(self) -> None:
         from sau_app import init_extensions

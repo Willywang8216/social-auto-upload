@@ -197,42 +197,20 @@ def download_public_url(url: str, destination: Path) -> Path:
     """Fetch a stored object from its public HTTPS URL onto local disk.
 
     Used for backends that register a URL rather than an S3/R2 key (the share
-    backend), where there is no key for an object client to fetch. Best-effort
-    and streaming: a large video must not be buffered in memory.
-    """
-    import tempfile
-    import urllib.request
-    from urllib.parse import urlsplit
+    backend), where there is no key for an object client to fetch.
 
-    if urlsplit(url).scheme not in {"http", "https"}:
-        raise RemoteStorageError("public URL restore requires HTTP(S)")
-    destination = Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(url, headers={"User-Agent": "sau-media-restore/1.0"})
-    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".part", dir=destination.parent)
-    temporary = Path(temporary)
+    Delegates to :mod:`myUtils.outbound_http` so every caller shares ONE
+    policy: HTTPS only, every resolved address must be globally routable,
+    every redirect hop is re-validated, and the transfer is bounded by size
+    and total time. This previously used a bare ``urllib`` request, which
+    would happily fetch a loopback or private host named by stored data.
+    """
+    from myUtils import outbound_http
+
     try:
-        with os.fdopen(fd, "wb") as handle:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                status = int(getattr(response, "status", 200) or 200)
-                if status >= 400:
-                    raise RemoteStorageError(f"public URL restore failed with HTTP {status}")
-                expected = response.headers.get("Content-Length") if hasattr(response, "headers") else None
-                count = 0
-                while True:
-                    chunk = response.read(1024 * 256)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
-                    count += len(chunk)
-                if count == 0 or (expected and count != int(expected)):
-                    raise RemoteStorageError("public URL restore returned an empty or incomplete object")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
-        return destination
-    finally:
-        temporary.unlink(missing_ok=True)
+        return outbound_http.download_public_file(url, Path(destination))
+    except outbound_http.OutboundUrlError as exc:
+        raise RemoteStorageError(f"public URL restore refused: {exc}") from exc
 
 
 def is_any_backend_configured() -> bool:

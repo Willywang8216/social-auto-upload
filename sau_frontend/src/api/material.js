@@ -15,8 +15,10 @@ export const materialApi = {
   },
   
   // 删除素材
+  // Delete one media record. DELETE (not GET): a read must never mutate, and
+  // the server rejects the old GET form with 405.
   deleteMaterial: (id) => {
-    return http.get(`/deleteFile?id=${id}`)
+    return http.delete('/deleteFile', { id })
   },
 
   // 批量删除素材

@@ -16,6 +16,11 @@ from flask import Flask
 from . import observability
 from .config import AppConfig, load_config
 from .health import READINESS_CHECKS_KEY, health_bp
+from .security import (
+    install_authorization,
+    install_rate_limiting,
+    install_security_headers,
+)
 
 _INIT_FLAG = "SAU_EXTENSIONS_INITIALIZED"
 _LOGGER = logging.getLogger("sau.extensions")
@@ -47,6 +52,13 @@ def init_extensions(app: Flask, *, environ: Mapping[str, str] | None = None) -> 
 
     observability.install(app, header_name=config.request_id_header)
 
+    # Hardening. Registered here (before the legacy bearer gate, which
+    # sau_backend installs later) so an unauthenticated flood is throttled
+    # rather than answered with a cheap 401. Headers use setdefault, so a
+    # route that already set one of them keeps its value.
+    install_security_headers(app)
+    install_rate_limiting(app)
+
     # Tenancy middleware resolves the per-request AuthContext and (only for
     # session-cookie requests) enforces CSRF/Origin. Inert under the default
     # legacy mode. Registered after request-id so its before_request runs early,
@@ -55,6 +67,10 @@ def init_extensions(app: Flask, *, environ: Mapping[str, str] | None = None) -> 
 
     install_tenancy(app)
 
+    # Role enforcement for session callers. Registered after tenancy (so
+    # ``g.auth_ctx`` is resolved) and before the legacy bearer gate, so a
+    # permission failure surfaces as 403 instead of being masked by a 401.
+    install_authorization(app)
     if "sau_health" not in app.blueprints:
         app.register_blueprint(health_bp)
 

@@ -59,17 +59,46 @@ def build_server() -> FastMCP:
     return mcp
 
 
+def _is_loopback(host: str) -> bool:
+    """True for a host that is only reachable from this machine."""
+    if host in {"localhost", "::1"}:
+        return True
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _remote_bind_allowed() -> bool:
+    return str(os.environ.get("SAU_MCP_ALLOW_REMOTE", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def main(argv: list[str] | None = None) -> None:
     """Console-script entrypoint: ``sau-mcp``.
 
     Selects transport from ``SAU_MCP_TRANSPORT`` (default ``stdio``). When
     ``http``, reads ``SAU_MCP_HOST`` / ``SAU_MCP_PORT`` (default
     ``127.0.0.1:8765``) and binds there.
+
+    A non-loopback HTTP bind is refused unless ``SAU_MCP_ALLOW_REMOTE=1``:
+    this server exposes the full account/media/job surface and has no
+    authentication of its own, so publishing it on a network interface is a
+    deliberate operator decision, not a default.
     """
     transport = os.environ.get("SAU_MCP_TRANSPORT", "stdio").strip().lower()
     kwargs: dict[str, Any] = {}
     if transport in ("http", "streamable-http", "sse"):
         host = os.environ.get("SAU_MCP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+        if not _is_loopback(host) and not _remote_bind_allowed():
+            raise SystemExit(
+                f"sau-mcp: refusing to bind {host!r}: this server has no "
+                "authentication. Bind a loopback address, or set "
+                "SAU_MCP_ALLOW_REMOTE=1 to accept the exposure explicitly."
+            )
         port_raw = os.environ.get("SAU_MCP_PORT", "8765").strip() or "8765"
         try:
             port = int(port_raw)

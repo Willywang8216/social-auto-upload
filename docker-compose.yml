@@ -16,12 +16,19 @@ services:
         SAU_GID: ${SAU_GID:-1000}
     container_name: sau-stt
     restart: always
-    env_file:
-      - .env
+    # Deliberately NO ``env_file: .env``. This service reads only
+    # SAU_STT_LOCAL_* (see scripts/local_stt_server.py) and has no business
+    # holding the application's provider tokens, database keys or session
+    # secret. Values are interpolated from the project .env at compose time and
+    # passed as named variables, so the container still gets what it needs.
     environment:
       - SAU_STT_LOCAL_THREADS=${SAU_STT_LOCAL_THREADS:-3}
       - SAU_STT_LOCAL_PORT=9099
       - SAU_STT_LOCAL_CACHE=/cache
+      - SAU_STT_LOCAL_MODEL=${SAU_STT_LOCAL_MODEL:-tiny}
+      - SAU_STT_LOCAL_DEVICE=${SAU_STT_LOCAL_DEVICE:-cpu}
+      - SAU_STT_LOCAL_COMPUTE=${SAU_STT_LOCAL_COMPUTE:-int8}
+      - SAU_STT_LOCAL_TOKEN=${SAU_STT_LOCAL_TOKEN:-}
     volumes:
       - sau-stt-cache:/cache
     # Published on loopback so host-run tooling (the language backfill, the test

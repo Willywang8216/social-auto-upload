@@ -45,6 +45,9 @@ from myUtils.submissions import SubmissionConflict
 from myUtils import publish_templates as template_store
 from myUtils import account_events
 from myUtils import secret_redaction
+from myUtils import asset_lifecycle
+from myUtils.asset_lifecycle import AssetInUse
+from myUtils import media_serving
 from myUtils import rclone_storage
 from myUtils import media_remote_storage
 from myUtils import campaign_prep
@@ -403,7 +406,9 @@ def _enforce_auth():
     the browser EventSource API cannot send custom headers.
     """
 
-    policy = app.config['SECURITY_POLICY']
+    # current_app, not the module global: the same handler must serve every
+    # application instance this process builds (see sau_app.create_app).
+    policy = current_app.config['SECURITY_POLICY']
     if policy.open_mode:
         return None
     if request.method == "OPTIONS":
@@ -432,7 +437,7 @@ def _enforce_auth():
 def whoami():
     """Cheap health check used by the frontend login screen to validate a token."""
 
-    policy = app.config['SECURITY_POLICY']
+    policy = current_app.config['SECURITY_POLICY']
     return jsonify({
         "code": 200,
         "msg": "ok",
@@ -738,17 +743,17 @@ def upload_file_to_spaces():
             public_url = do_spaces.upload_file(tmp_path, key, content_type)
             filesize_mb = round(_os.path.getsize(tmp_path) / (1024 * 1024), 2)
 
-            # Save record to file_records so it appears in 素材庫
-            try:
-                db_path = _ensure_legacy_db_ready()
-                with _db_connection(db_path) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_cdn_url) VALUES (?, ?, ?, ?, ?)",
-                        (safe_name, filesize_mb, key, key, public_url),
-                    )
-            except Exception:
-                logging.getLogger(__name__).warning("Failed to save file_records entry for %s", key)
+            # The bytes are in storage; the library row must land too, or the
+            # file is invisible to the product while the caller believes the
+            # upload succeeded. A failure here is REPORTED, not logged and
+            # ignored — that silent success was the bug.
+            db_path = _ensure_legacy_db_ready()
+            with _db_connection(db_path) as conn:
+                conn.execute(
+                    "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_cdn_url) VALUES (?, ?, ?, ?, ?)",
+                    (safe_name, filesize_mb, key, key, public_url),
+                )
+                conn.commit()
 
             return jsonify({
                 "code": 200,
@@ -762,19 +767,52 @@ def upload_file_to_spaces():
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
 
 
+def _verified_stored_object(key: str, *, db_path: Path) -> tuple[int, str]:
+    """HEAD a directly-uploaded object and return ``(size_bytes, cdn_url)``.
+
+    A direct presigned PUT happens entirely in the browser, so the client's
+    reported ``public_url`` and ``size`` are assertions, not evidence. Verifying
+    against the bucket is what makes "the upload is complete" mean anything —
+    and the URL is derived from the configured backend rather than echoed from
+    the request, so a caller cannot register an arbitrary address for the app
+    to serve or fetch later.
+    """
+    from myUtils import do_spaces
+
+    backend_row = _load_default_storage_backend(db_path=db_path)
+    if not backend_row:
+        raise ValueError(
+            "no default storage backend is configured; the upload cannot be verified"
+        )
+    client = do_spaces.client_from_row(backend_row)
+    try:
+        head = client._get_client().head_object(Bucket=client.bucket, Key=key)
+    except Exception as exc:  # noqa: BLE001 - reported as a refusal, not a crash
+        raise ValueError(
+            f"the uploaded object could not be verified ({type(exc).__name__})"
+        ) from exc
+    size = int(head.get("ContentLength") or 0)
+    if size <= 0:
+        raise ValueError("the uploaded object is empty")
+    return size, client.cdn_url_for(key)
+
+
 @app.route('/upload/register', methods=['POST'])
 def upload_register():
-    """Register a file uploaded directly to DO Spaces in file_records.
+    """Register a file that was uploaded directly to object storage.
 
     Called after a direct presigned PUT succeeds, so the file appears in 素材庫.
-    POST {filename, key, public_url, size}
+    POST {filename, key}.
+
+    ``public_url`` and ``size`` from the client are deliberately IGNORED: the
+    object is HEAD-verified and the URL is derived from the configured backend.
+    Otherwise a caller could register an arbitrary address for the app to serve
+    (or fetch later) and a size that was never actually uploaded.
     """
     try:
         data = _read_json_body()
         filename = str(data.get("filename", "")).strip()
         key = str(data.get("key", "")).strip()
-        public_url = str(data.get("public_url", "")).strip()
-        size = data.get("size", 0)
         if not key or not filename:
             return jsonify({"code": 400, "msg": "filename and key required", "data": None}), 400
 
@@ -783,19 +821,16 @@ def upload_register():
             return jsonify({"code": 400, "msg": "invalid key format: must be uploads/<uuid>_<filename>", "data": None}), 400
 
         safe_name = _safe_upload_filename(filename)
-        try:
-            filesize_mb = round(float(size) / (1024 * 1024), 2)
-        except (TypeError, ValueError):
-            filesize_mb = 0
-
         db_path = _ensure_legacy_db_ready()
+        size_bytes, verified_url = _verified_stored_object(key, db_path=db_path)
+        filesize_mb = round(size_bytes / (1024 * 1024), 2)
         with _db_connection(db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
+            conn.execute(
                 "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_cdn_url) VALUES (?, ?, ?, ?, ?)",
-                (safe_name, filesize_mb, key, key, public_url),
+                (safe_name, filesize_mb, key, key, verified_url),
             )
-        return jsonify({"code": 200, "msg": "ok", "data": None}), 200
+            conn.commit()
+        return jsonify({"code": 200, "msg": "ok", "data": {"size": size_bytes}}), 200
     except ValueError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     except Exception as exc:
@@ -902,20 +937,20 @@ def multipart_upload_complete():
         client = do_spaces._default_client()
         public_url = client.complete_multipart_upload(key, upload_id, parts)
 
-        # Save record to file_records so it appears in 素材庫
-        try:
-            filename = key.split('_', 1)[1] if '_' in key else key.split('/')[-1]
-            size = data.get("size", 0)
-            filesize_mb = round(size / (1024 * 1024), 2) if size else 0
-            db_path = _ensure_legacy_db_ready()
-            with _db_connection(db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_cdn_url) VALUES (?, ?, ?, ?, ?)",
-                    (filename, filesize_mb, key, key, public_url),
-                )
-        except Exception:
-            logging.getLogger(__name__).warning("Failed to save file_records entry for multipart %s", key)
+        # Verify the assembled object, then persist the library row. Both must
+        # succeed before this reports completion: the swallowed insert left the
+        # file invisible while the caller believed the upload had finished, and
+        # the URL is re-derived rather than echoed from the request.
+        filename = key.split('_', 1)[1] if '_' in key else key.split('/')[-1]
+        db_path = _ensure_legacy_db_ready()
+        size_bytes, public_url = _verified_stored_object(key, db_path=db_path)
+        filesize_mb = round(size_bytes / (1024 * 1024), 2)
+        with _db_connection(db_path) as conn:
+            conn.execute(
+                "INSERT INTO file_records (filename, filesize, file_path, storage_key, storage_cdn_url) VALUES (?, ?, ?, ?, ?)",
+                (filename, filesize_mb, key, key, public_url),
+            )
+            conn.commit()
 
         return jsonify({"code": 200, "msg": "ok", "data": {"public_url": public_url}}), 200
     except Exception as exc:
@@ -1012,7 +1047,16 @@ def get_file():
             # Serve RELATIVE to the matched root. Passing target.name alone only
             # works for files at the root, so _library/, _photos/, _batch*/ and
             # generated/campaigns/… resolved here and then 404'd at send time.
-            return send_from_directory(str(base_dir), target.relative_to(base_dir).as_posix())
+            relative = target.relative_to(base_dir).as_posix()
+            # Only approved, non-executable media is served inline. Anything
+            # else (an uploaded .html/.svg, an unknown extension) is sent as an
+            # opaque download so a browser cannot execute it on this origin.
+            return send_from_directory(
+                str(base_dir),
+                relative,
+                mimetype=media_serving.content_type_for(relative),
+                as_attachment=not media_serving.should_serve_inline(relative),
+            )
 
     # Not on disk under any root: try the remote-storage CDN, then 404.
     cdn = _get_cdn_url_for_file(filename)
@@ -1177,41 +1221,62 @@ def upload_save():
             "data": None
         }), 500
 
+#: Media-library listing bounds. The table grows without limit, so the API
+#: pages rather than returning everything; the default stays generous enough
+#: for the current library while still being an actual bound.
+_FILES_DEFAULT_LIMIT = 500
+_FILES_MAX_LIMIT = 2000
+
 @app.route('/getFiles', methods=['GET'])
 def get_all_files():
+    """List the media library, bounded and newest-first.
+
+    This used to ``SELECT * FROM file_records`` with no limit, so the response
+    grew with the whole table (3.6k rows and climbing) and every caller paid
+    for all of it. It now pages in SQL, reports the total, and tells the caller
+    when it is looking at a truncated view.
+    """
     try:
-        db_path = _ensure_legacy_db_ready()
-        # 使用 with 自动管理数据库连接
-        with _db_connection(db_path) as conn:
-            conn.row_factory = sqlite3.Row  # 允许通过列名访问结果
-            cursor = conn.cursor()
-
-            # 查询所有记录
-            cursor.execute("SELECT * FROM file_records")
-            rows = cursor.fetchall()
-
-            # 将结果转为字典列表，并提取UUID
-            data = []
-            for row in rows:
-                row_dict = dict(row)
-                # 从 file_path 中提取 UUID (文件名的第一部分，下划线前)
-                if row_dict.get('file_path'):
-                    file_path_parts = row_dict['file_path'].split('_', 1)  # 只分割第一个下划线
-                    if len(file_path_parts) > 0:
-                        row_dict['uuid'] = file_path_parts[0]  # UUID 部分
-                    else:
-                        row_dict['uuid'] = ''
-                else:
-                    row_dict['uuid'] = ''
-                data.append(row_dict)
-
+        try:
+            limit = int(request.args.get("limit", _FILES_DEFAULT_LIMIT))
+            offset = int(request.args.get("offset", "0"))
+        except (TypeError, ValueError):
             return jsonify({
-                "code": 200,
-                "msg": "success",
-                "data": data
-            }), 200
+                "code": 400, "msg": "limit and offset must be integers", "data": None,
+            }), 400
+        if limit < 1:
+            return jsonify({"code": 400, "msg": "limit must be >= 1", "data": None}), 400
+        limit = min(limit, _FILES_MAX_LIMIT)
+        offset = max(0, offset)
+
+        db_path = _ensure_legacy_db_ready()
+        with _db_connection(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            total = int(conn.execute("SELECT COUNT(*) FROM file_records").fetchone()[0])
+            rows = conn.execute(
+                "SELECT * FROM file_records ORDER BY id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+
+        data = []
+        for row in rows:
+            row_dict = dict(row)
+            # 從 file_path 取出 UUID（底線前第一段）
+            file_path = row_dict.get("file_path") or ""
+            row_dict["uuid"] = file_path.split("_", 1)[0] if file_path else ""
+            data.append(row_dict)
+
+        return jsonify({
+            "code": 200,
+            "msg": "success",
+            "data": data,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "hasMore": offset + len(data) < total,
+        }), 200
     except Exception as e:
-        print(f"get files failed: {e}")
+        logging.getLogger(__name__).exception("get files failed")
         return jsonify({
             "code": 500,
             "msg": f"get file failed: {e}",
@@ -1282,109 +1347,125 @@ async def getValidAccounts():
                             "data": rows_list
                         }),200
 
-@app.route('/deleteFile', methods=['GET'])
-def delete_file():
-    file_id = request.args.get('id')
+def _remove_local_media_best_effort(record: dict) -> tuple[bool, str]:
+    """Remove a file record's local bytes, AFTER its row has been deleted.
 
-    if not file_id or not file_id.isdigit():
-        return jsonify({
-            "code": 400,
-            "msg": "Invalid or missing file ID",
-            "data": None
-        }), 400
-
+    Returns ``(removed, note)``. The row is already gone by the time this
+    runs, so a failure here only leaves an orphaned file on disk. The previous
+    order removed the bytes first and deleted the row second, which could
+    leave a live row pointing at bytes that no longer existed.
+    """
+    raw = str(record.get("file_path") or "").strip()
+    if not raw:
+        return True, ""
     try:
-        # 获取数据库连接
-        with _db_connection(_current_db_path()) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
+        file_path = _resolve_video_file_path_safely(raw)
+    except Exception:  # noqa: BLE001 - an unusable path is reported, not raised
+        return False, "unresolved path"
+    if not file_path or not file_path.exists():
+        return True, ""
+    try:
+        file_path.unlink()
+        return True, ""
+    except OSError as exc:
+        logging.getLogger(__name__).warning("could not remove media bytes %s: %s", raw, exc)
+        return False, "local bytes remain"
 
-            # 查询要删除的记录
-            cursor.execute("SELECT * FROM file_records WHERE id = ?", (file_id,))
-            record = cursor.fetchone()
 
-            if not record:
-                return jsonify({
-                    "code": 404,
-                    "msg": "File not found",
-                    "data": None
-                }), 404
+def _delete_file_record(file_record_id: int, *, db_path: Path) -> dict:
+    """Delete one ``file_records`` row and then its bytes.
 
-            record = dict(record)
+    The order is the point:
 
-            # 获取文件路径并删除实际文件 (safe path resolution)
-            file_path = _resolve_video_file_path_safely(record['file_path'])
-            if file_path and file_path.exists():
-                try:
-                    file_path.unlink()  # 删除文件
-                    print(f"✅ 实际文件已删除: {file_path}")
-                except Exception as e:
-                    print(f"⚠️ 删除实际文件失败: {e}")
-                    # 即使删除文件失败，也要继续删除数据库记录，避免数据不一致
-            else:
-                print(f"⚠️ 实际文件不存在或路径不安全: {record.get('file_path')}")
+    1. load the row (missing -> ``LookupError``),
+    2. refuse while unresolved work still references it,
+    3. delete and COMMIT the row,
+    4. only then remove local bytes and the remote object, best-effort.
 
-            # Delete from remote storage if applicable
-            if record.get('storage_key') and record.get('storage_backend_id'):
-                _delete_file_from_storage(record['storage_key'], record['storage_backend_id'], db_path=_current_db_path())
+    A step-4 failure leaves a recoverable orphan; the old order could leave a
+    live row whose bytes were already gone.
+    """
+    with _db_connection(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        record = asset_lifecycle.load_file_record(conn, file_record_id)
+        if record is None:
+            raise LookupError("File not found")
+        asset_lifecycle.assert_file_deletable(
+            conn,
+            file_record_id=file_record_id,
+            file_path=record.get("file_path"),
+            filename=record.get("filename"),
+        )
+        conn.execute("DELETE FROM file_records WHERE id = ?", (int(file_record_id),))
+        conn.commit()
 
-            # 删除数据库记录
-            cursor.execute("DELETE FROM file_records WHERE id = ?", (file_id,))
-            conn.commit()
+    removed, note = _remove_local_media_best_effort(record)
+    if record.get("storage_key") and record.get("storage_backend_id"):
+        _delete_file_from_storage(
+            record["storage_key"], record["storage_backend_id"], db_path=db_path
+        )
+    return {
+        "id": record.get("id"),
+        "filename": record.get("filename"),
+        "bytesRemoved": removed,
+        "cleanupPending": bool(note),
+        "cleanupNote": note,
+    }
 
-        return jsonify({
-            "code": 200,
-            "msg": "File deleted successfully",
-            "data": {
-                "id": record['id'],
-                "filename": record['filename']
-            }
-        }), 200
 
-    except Exception as e:
-        print(f"delete file failed: {e}")
-        return jsonify({
-            "code": 500,
-            "msg": f"delete failed: {e}",
-            "data": None
-        }), 500
+@app.route('/deleteFile', methods=['DELETE'])
+def delete_file():
+    """Delete one media record.
+
+    DELETE only. A GET must never mutate, and the tenancy middleware treats
+    GET as a CSRF-safe method, so the old GET delete was reachable from a
+    cross-site request.
+    """
+    raw_id = request.args.get('id')
+    if not raw_id or not str(raw_id).isdigit():
+        return jsonify({"code": 400, "msg": "Invalid or missing file ID", "data": None}), 400
+    try:
+        result = _delete_file_record(int(raw_id), db_path=_current_db_path())
+    except LookupError:
+        return jsonify({"code": 404, "msg": "File not found", "data": None}), 404
+    except AssetInUse as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).exception("delete_file failed")
+        return jsonify({"code": 500, "msg": f"delete failed: {exc}", "data": None}), 500
+    message = "File deleted successfully"
+    if result["cleanupPending"]:
+        message = "File record deleted; local bytes could not be removed"
+    return jsonify({"code": 200, "msg": message, "data": result}), 200
+
 
 @app.route('/deleteFiles', methods=['POST'])
 def delete_files_batch():
-    data = _read_json_body()
-    ids = data.get('ids', [])
-    if not ids:
+    """Delete several media records; each id is reported individually."""
+    try:
+        data = _read_json_body()
+    except Exception:  # noqa: BLE001 - a malformed body is a 400, not a 500
+        data = {}
+    ids = data.get('ids') if isinstance(data, dict) else None
+    if not isinstance(ids, list) or not ids:
         return jsonify({'code': 400, 'msg': 'No IDs provided', 'data': None}), 400
 
-    succeeded = []
-    failed = []
-    try:
-        with _db_connection(_current_db_path()) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            for file_id in ids:
-                try:
-                    cursor.execute("SELECT * FROM file_records WHERE id = ?", (int(file_id),))
-                    record = cursor.fetchone()
-                    if not record:
-                        failed.append({'id': file_id, 'error': 'Not found'})
-                        continue
-                    record = dict(record)
-                    file_path = _resolve_video_file_path_safely(record['file_path'])
-                    if file_path and file_path.exists():
-                        try:
-                            file_path.unlink()
-                        except Exception:
-                            pass
-                    if record.get('storage_key') and record.get('storage_backend_id'):
-                        _delete_file_from_storage(record['storage_key'], record['storage_backend_id'], db_path=_current_db_path())
-                    cursor.execute("DELETE FROM file_records WHERE id = ?", (record['id'],))
-                    succeeded.append(record['id'])
-                except Exception as e:
-                    failed.append({'id': file_id, 'error': str(e)})
-            conn.commit()
-    except Exception as e:
-        return jsonify({'code': 500, 'msg': f'Batch delete failed: {e}', 'data': None}), 500
+    db_path = _current_db_path()
+    succeeded: list[dict] = []
+    failed: list[dict] = []
+    for file_id in ids:
+        if not str(file_id).isdigit():
+            failed.append({'id': file_id, 'error': 'Invalid id'})
+            continue
+        try:
+            succeeded.append(_delete_file_record(int(file_id), db_path=db_path))
+        except LookupError:
+            failed.append({'id': file_id, 'error': 'Not found'})
+        except AssetInUse as exc:
+            failed.append({'id': file_id, 'error': str(exc), 'reason': 'in_use'})
+        except Exception as exc:  # noqa: BLE001
+            failed.append({'id': file_id, 'error': str(exc)})
 
     return jsonify({
         'code': 200,
@@ -1392,87 +1473,93 @@ def delete_files_batch():
         'data': {
             'succeeded': len(succeeded),
             'failed': len(failed),
-            'details': {'succeeded': succeeded, 'failed': failed}
-        }
+            'details': {
+                'succeeded': [row['id'] for row in succeeded],
+                'failed': failed,
+            },
+        },
     }), 200
 
-@app.route('/deleteAccount', methods=['GET'])
-def delete_account():
-    account_id = request.args.get('id')
 
-    if not account_id or not account_id.isdigit():
+@app.route('/deleteAccount', methods=['DELETE'])
+def delete_account():
+    """Delete one account in exactly ONE namespace.
+
+    ``type`` names the namespace explicitly — ``structured`` (the ``accounts``
+    table the UI manages, the default) or ``legacy`` (``user_info``). The two
+    tables number independently, so the previous "check legacy, else
+    structured" probe could delete the wrong account when ids overlapped.
+
+    The row is removed before the cookie file, so a cookie-removal failure
+    leaves a harmless orphan rather than an account whose credentials are gone.
+    """
+    raw_id = request.args.get('id')
+    if not raw_id or not str(raw_id).isdigit():
+        return jsonify({"code": 400, "msg": "Invalid or missing account ID", "data": None}), 400
+    namespace = str(
+        request.args.get('type') or asset_lifecycle.NAMESPACE_STRUCTURED
+    ).strip().lower()
+    if namespace not in asset_lifecycle.NAMESPACES:
         return jsonify({
             "code": 400,
-            "msg": "Invalid or missing account ID",
-            "data": None
+            "msg": "type must be 'legacy' or 'structured'",
+            "data": None,
         }), 400
-
-    account_id = int(account_id)
+    account_id = int(raw_id)
+    db_path = _current_db_path()
 
     try:
-        db_path = _current_db_path()
+        # 1. Resolve in exactly one namespace and run the guards.
         with _db_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            legacy = cursor.execute(
-                "SELECT * FROM user_info WHERE id = ?",
-                (account_id,),
-            ).fetchone()
-            if legacy is not None:
-                record = dict(legacy)
-                if record.get('filePath'):
-                    cookie_file_path = _resolve_cookie_path(record['filePath'])
-                    if cookie_file_path.exists():
-                        try:
-                            cookie_file_path.unlink()
-                            print(f"✅ Cookie文件已删除: {cookie_file_path}")
-                        except Exception as e:
-                            print(f"⚠️ 删除Cookie文件失败: {e}")
-                cursor.execute("DELETE FROM user_info WHERE id = ?", (account_id,))
+            row = asset_lifecycle.resolve_account_namespace(conn, account_id, kind=namespace)
+            if row is None:
+                return jsonify({"code": 404, "msg": "account not found", "data": None}), 404
+            if namespace == asset_lifecycle.NAMESPACE_STRUCTURED:
+                asset_lifecycle.assert_account_deletable(conn, account_id)
+        # 2. Delete the row. The structured service re-checks active deliveries
+        #    inside its own transaction, so the guard above cannot be raced.
+        if namespace == asset_lifecycle.NAMESPACE_STRUCTURED:
+            cookie_path = row.get('cookie_path')
+            profile_registry.delete_account(
+                account_id, workspace_id=_workspace_scope(), db_path=db_path
+            )
+        else:
+            cookie_path = row.get('filePath')
+            with _db_connection(db_path) as conn:
+                conn.execute("DELETE FROM user_info WHERE id = ?", (account_id,))
                 conn.commit()
-                return jsonify({
-                    "code": 200,
-                    "msg": "account deleted successfully",
-                    "data": None
-                }), 200
+    except LookupError:
+        return jsonify({"code": 404, "msg": "account not found", "data": None}), 404
+    except AssetInUse as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    except ValueError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).exception("delete_account failed")
+        return jsonify({"code": 500, "msg": f"delete failed: {exc}", "data": None}), 500
 
-            structured = cursor.execute(
-                "SELECT cookie_path FROM accounts WHERE id = ?",
-                (account_id,),
-            ).fetchone()
-            if structured is None:
-                return jsonify({
-                    "code": 404,
-                    "msg": "account not found",
-                    "data": None
-                }), 404
-
-            cookie_path = structured['cookie_path']
-            if cookie_path:
-                resolved_cookie_path = _resolve_cookie_path(cookie_path)
-                if _cookie_path_is_allowed(resolved_cookie_path) and resolved_cookie_path.exists():
-                    try:
-                        resolved_cookie_path.unlink()
-                        print(f"✅ Cookie文件已删除: {resolved_cookie_path}")
-                    except Exception as e:
-                        print(f"⚠️ 删除Cookie文件失败: {e}")
-
-            cursor.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
-            conn.commit()
-
-        return jsonify({
-            "code": 200,
-            "msg": "account deleted successfully",
-            "data": None
-        }), 200
-
-    except Exception as e:
-        return jsonify({
-            "code": 500,
-            "msg": f"delete failed: {str(e)}",
-            "data": None
-        }), 500
+    # 3. Only now remove the cookie file, and only inside an allowed root.
+    cookie_removed = False
+    cookie_pending = False
+    if cookie_path:
+        resolved = _resolve_cookie_path(cookie_path)
+        if _cookie_path_is_allowed(resolved) and resolved.exists():
+            try:
+                resolved.unlink()
+                cookie_removed = True
+            except OSError as exc:
+                cookie_pending = True
+                logging.getLogger(__name__).warning("could not remove cookie file: %s", exc)
+    return jsonify({
+        "code": 200,
+        "msg": "account deleted successfully",
+        "data": {
+            "namespace": namespace,
+            "cookieRemoved": cookie_removed,
+            "cleanupPending": cookie_pending,
+        },
+    }), 200
 
 
 # SSE 登录接口
@@ -2096,7 +2183,7 @@ def _workspace_scope() -> str | None:
     resources resolve as 404. Wired route-by-route (Phase 6); unscoped by default
     so existing behavior is unchanged.
     """
-    config = app.config.get("SAU_APP_CONFIG")
+    config = current_app.config.get("SAU_APP_CONFIG")
     if config is None or getattr(config, "tenancy_mode", "single") != "enforced":
         return None
     ctx = getattr(g, "auth_ctx", None)

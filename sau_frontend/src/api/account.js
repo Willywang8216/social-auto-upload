@@ -22,9 +22,11 @@ export const accountApi = {
     return http.post('/updateUserinfo', data)
   },
 
-  // 删除账号
-  deleteAccount(id) {
-    return http.get(`/deleteAccount?id=${id}`)
+  // Delete an account. DELETE (not GET): a read must never mutate, and the
+  // server rejects the old GET form with 405. ``type`` names the namespace
+  // explicitly so an id present in both tables cannot delete the wrong row.
+  deleteAccount(id, type = 'structured') {
+    return http.delete('/deleteAccount', { id, type })
   },
 
   getHealthSummary() {
