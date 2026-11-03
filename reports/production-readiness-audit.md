@@ -41,28 +41,45 @@ bypasses rather than rewriting anything.
   results, all environmental (missing `fcntl`, Windows file locks, absent
   `rclone`/`crontab`/`ffmpeg`).
 
-## Deliberately NOT done in this pass
+## Deployment (2026-11-03)
 
-1. **Python 3.12 runtime.** The Dockerfile and `Dockerfile.base` still pin
-   3.10.19. The suite already runs on 3.12 in CI, but the production image and
-   its base have not been rebuilt/moved, so the runtime change is unverified.
-2. **`create_app()` independence.** It still returns the legacy global app.
-   De-globalising ~158 route decorators and the handlers that read
-   `app.config` directly is a real refactor, not a rename; it was not started
-   rather than half-done.
-3. **Full Linux release matrix + image smoke** for these commits. Not run.
-4. **Deployment.** Production is untouched and still on `7d4ef0d…`.
-5. **Frontend advisory graph** (9 high, transitive) — recorded, not upgraded.
-6. **Container image scanning** — no scanner configured on this host; a gap,
+**Deployed and verified.** Both roles run
+`5feba347d1ca060fbd5ff3b648851e645e34c4a4`, image
+`sha256:c85ca0f101293e057978eed018cca91c705f70f560714cd9d3d865502f649242`,
+gate binding `26a6136f1948cd3456058e2883a2855e74807eb1b2aa801c52a0f7fd6d869506`.
+
+| Gate | Result |
+|---|---|
+| Linux Python 3.10.19 | 2,859 passed, 2 skipped, 170 subtests |
+| Linux Python 3.12.14 | 2,859 passed, 2 skipped, 170 subtests |
+| Pinned Node 22.21.1 frontend | 130 tests, production build |
+| Maintained Python static checks | 458 files, 0 errors |
+| Offline browser smoke | passed on both interpreters |
+| Exact-image non-root web/worker smoke | passed, network disabled |
+
+**The Linux gate earned its keep.** It caught a defect the Windows suite
+missed: the outbound-fetch rewrite had dropped the original's Content-Length
+comparison, so a truncated download would have been accepted and written out as
+a complete object. Fixed, with two new regression tests
+(`test_fetch_rejects_a_truncated_body`, `test_fetch_accepts_an_exact_length_match`).
+
+Live checks after activation: both roles healthy on the matched image/revision;
+anonymous access rejected; bearer accepted; Google login disabled; watcher
+revision matches; claims unpaused. `/getFiles` returns `total` with a bounded
+page (`total: 3681`, page of 5, `hasMore: true`), confirming the pagination is
+live. Against the pre-release backup: **0 missing targets, 0 changed schedules,
+0 changed successful/cancelled history, 0 changed target destinations or media
+references, 0 changed account identity/routing bindings.**
+
+## Still open
+
+1. **Python 3.12 as the production runtime.** The suite passes on 3.12, but the
+   production image and its base still build on 3.10.19. Moving the runtime
+   needs a base-image rebuild and its own verification.
+2. **`pillow` 11→12 and `fastmcp` 3→4** — major bumps, explicitly accepted with
+   rationale in `reports/security-advisories-2026-11-03.md`.
+3. **Frontend advisory graph** (9 high, transitive) — recorded, not upgraded.
+4. **Container image CVE scanning** — no scanner configured on this host; a gap,
    not a clean result.
-
-## Open follow-ups (ordered)
-
-1. Run the Linux 3.10/3.12 matrix, frontend build and exact-image smoke on
-   these commits.
-2. Move the production runtime to Python 3.12 and re-verify.
-3. Refactor `create_app()` for real instance independence with an
-   import-direction test.
-4. Upgrade `pillow` and `fastmcp` major versions with their suites.
-5. Add an image CVE scan to the release gate.
-6. Deploy through the existing locked, drained, backed-up promotion path.
+5. **Broader query-plan audit** — only the two paths named in the plan were
+   measured; see `reports/performance-read-paths.md`.

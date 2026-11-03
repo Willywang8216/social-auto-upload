@@ -13,7 +13,7 @@ while (( $# )); do
   case "$1" in
     --python) VERSION="$2"; shift 2 ;;
     --receipts) RECEIPTS="$2"; shift 2 ;;
-    *) echo "usage: release-gates.sh [all|backend|frontend|verify] [--python 3.10|3.12] --receipts DIR" >&2; exit 2 ;;
+    *) echo "usage: release-gates.sh [all|backend|frontend|verify] [--python 3.12|3.13] --receipts DIR" >&2; exit 2 ;;
   esac
 done
 [[ "$MODE" =~ ^(all|backend|frontend|verify)$ ]] || exit 2
@@ -24,7 +24,7 @@ RECEIPTS="$(cd "$RECEIPTS" && pwd)"
 if [[ "$MODE" == verify ]]; then
   exec "$PYTHON" "$ROOT/scripts/release_checks.py" --root "$ROOT" verify --revision "$REVISION" --receipts "$RECEIPTS"
 fi
-[[ "$(uname -s)" == Linux ]] || { echo 'Release gates require Linux (Python 3.10 and 3.12).' >&2; exit 1; }
+[[ "$(uname -s)" == Linux ]] || { echo 'Release gates require Linux (Python 3.12 and 3.13).' >&2; exit 1; }
 command -v uv >/dev/null
 [[ "$(uv --version)" == 'uv 0.12.7'* ]] || { echo 'Use the pinned release uv 0.12.7.' >&2; exit 1; }
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/sau-release-gates.XXXXXX")"
@@ -67,8 +67,8 @@ frontend() {
   run_clean "$PYTHON" scripts/release_checks.py record --revision "$REVISION" --receipts "$RECEIPTS" --component frontend
 }
 case "$MODE" in
-  all) backend 3.10; backend 3.12; frontend ;;
-  backend) [[ "$VERSION" == 3.10 || "$VERSION" == 3.12 ]] || exit 2; backend "$VERSION" ;;
+  all) backend 3.12; backend 3.13; frontend ;;
+  backend) [[ "$VERSION" == 3.12 || "$VERSION" == 3.13 ]] || exit 2; backend "$VERSION" ;;
   frontend) frontend ;;
 esac
 "$PYTHON" "$ROOT/scripts/release_checks.py" --root "$ROOT" clean --revision "$REVISION" >/dev/null

@@ -16,7 +16,9 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 MAINTAINED_DIRS = ("myUtils", "utils", "uploader", "mcp_server", "sau_app", "sau_inbox",
                    "scripts", "db", "migrations", "docker", "tests", "examples", "skills", "tools")
-COMPONENTS = ("backend-3.10", "backend-3.12", "frontend")
+# Python 3.10 is end-of-life and is no longer tested or shipped; the matrix
+# covers the supported production runtime and the next version.
+COMPONENTS = ("backend-3.12", "backend-3.13", "frontend")
 LOCKS = ("uv.lock", "pyproject.toml", "sau_frontend/package-lock.json")
 FORMAT = "sau-release-gates-v1"
 

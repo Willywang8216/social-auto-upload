@@ -1,4 +1,6 @@
-FROM python:3.10.19-slim
+# Python 3.12: 3.10 reached end-of-life in October 2026 and is receiving no
+# further patches. 3.12 is also the floor for the fixed Pillow (13.x).
+FROM python:3.12.14-slim
 
 WORKDIR /app
 

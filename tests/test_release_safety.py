@@ -357,7 +357,8 @@ def test_release_static_invariants():
     restore = (ROOT / "scripts/restore.sh").read_text()
     assert "uv export --frozen" in dockerfile and "--require-hashes" in dockerfile
     assert "pip install" not in dockerfile and "requirements.txt" not in dockerfile
-    assert "sys.version_info[:3] == (3, 10, 19)" in dockerfile
+    # Python 3.10 is end-of-life; the shipped runtime is asserted explicitly.
+    assert "sys.version_info[:3] == (3, 12, 14)" in dockerfile
     assert re.search(r"^FROM ghcr\.io/willywang8216/sau-base:slim@sha256:[a-f0-9]{64}$", dockerfile, re.M)
     assert "COPY db/createTable.py ./myUtils/db_bootstrap.py" in dockerfile
     assert dockerfile.index("chmod -R u=rwX,go=rX /app") > dockerfile.index("COPY --from=builder /app/dist/vite.svg")
@@ -369,7 +370,7 @@ def test_release_static_invariants():
     assert "sau_frontend/package-lock.json" not in (ROOT / "Dockerfile.dockerignore").read_text().splitlines()
     assert "uv sync --frozen" in gates and "-m pytest tests/ -q" in gates and "--ignore" not in gates
     assert "run_clean npm ci" in gates and "run_clean npm test" in gates and "run_clean npm run build" in gates
-    assert "env -i" in gates and "backend 3.10; backend 3.12" in gates
+    assert "env -i" in gates and "backend 3.12; backend 3.13" in gates
     assert {"uploader", "mcp_server", "sau_app"}.issubset(release_checks.MAINTAINED_DIRS)
     assert "ci-watch.lock" in watcher and "ci-watch.lock" in deploy and "ci-watch.lock" in restore
     assert "SAU_CI_WATCH_FORCE_DEPLOY" not in watcher and "MAX_DEFER" not in watcher
@@ -383,7 +384,8 @@ def test_release_static_invariants():
     assert deploy.index('wait_ready active "$ACTIVE_SINCE"') < deploy.index('mv "$LOG_DIR/.ci-watch.state.$$"')
     assert "assert_offline" in restore and "--offline" in restore and "fuser" in restore
     ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
-    assert ci["jobs"]["backend-tests"]["strategy"]["matrix"]["python"] == ["3.10", "3.12"]
+    # CI must exercise the same two versions the release gates do.
+    assert ci["jobs"]["backend-tests"]["strategy"]["matrix"]["python"] == ["3.12", "3.13"]
     image = yaml.safe_load((ROOT / ".github/workflows/image.yml").read_text())
     assert image["jobs"]["gates"]["uses"] == "./.github/workflows/ci.yml"
     assert image["jobs"]["build-and-push"]["needs"] == "gates"

@@ -8,8 +8,10 @@ ENV NODE_ENV=production
 ENV PATH=/app/node_modules/.bin:$PATH
 RUN npm run build
 
-# Keep the existing production Python 3.10 base (not the developer's interpreter).
-FROM ghcr.io/willywang8216/sau-base:slim@sha256:f5f852b8212854b8bc09dfef9496d08a4d3894d950c141986cf380d7f778e494
+# Production runtime is the base image's Python (3.12.14), asserted below.
+# Base rebuilt on Python 3.12.14. The digest is pinned deliberately: rebuilding
+# Dockerfile.base changes it, and this line must be updated in the same change.
+FROM ghcr.io/willywang8216/sau-base:slim@sha256:56377973c90f44fafdd0a99b022f0e1b51c5de1e92cb3cdfbf8ed738769b618e
 ARG GIT_SHA=""
 ARG SAU_BUILD_REVISION=${GIT_SHA}
 ARG BUILD_DATE=""
@@ -24,7 +26,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends fonts-noto-cjk rclone libcups2t64 \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
-RUN python3 -c "import sys; assert sys.version_info[:3] == (3, 10, 19), 'production requires Python 3.10.19'"
+RUN python3 -c "import sys; assert sys.version_info[:3] == (3, 12, 14), 'production requires Python 3.12.14'"
 COPY pyproject.toml uv.lock ./
 # Export only the locked runtime graph, with hashes. A separate venv prevents
 # old/unpinned dependencies in sau-base from leaking into the application.

@@ -7,7 +7,7 @@ name = "social-auto-upload"
 version = "0.1.0"
 description = "Social media auto uploader"
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.12,<3.14"
 dependencies = [
   # `cryptography` powers at-rest encryption for cookie files
   # (myUtils/cookie_storage.py). Encryption is opt-in via the
@@ -26,7 +26,9 @@ dependencies = [
   # async API. Every uploader and the Flask login/auth helpers go through
   # it; we no longer ship the upstream `playwright` package alongside.
   "patchright==1.58.2",
-  "pillow==11.2.1",
+  # 13.0.0 clears the PYSEC-2026-* / CVE-2026-* advisories that affect 11.x and
+  # 12.x. It requires Python >=3.11, which is why the project now targets 3.12+.
+  "pillow==13.0.0",
   "qrcode==8.2",
   # 2.33.0 carries the fixes for PYSEC-2026-1872 / PYSEC-2026-2275.
   "requests==2.33.0",
@@ -38,7 +40,8 @@ dependencies = [
   # (`sau-mcp` console script). The dependency is unconditional so the
   # MCP entry point is importable on every install, matching the cookie /
   # config encryption pattern above.
-  "fastmcp==3.4.7",
+  # 4.1.2 clears GHSA-7xgj-8392-5q4r (3.4.x).
+  "fastmcp==4.1.2",
   # `telethon` powers publishing to Telegram as the user's own account
   # (MTProto / api_id+api_hash) rather than via a bot token. Imported
   # lazily so non-Telegram installs stay light.
