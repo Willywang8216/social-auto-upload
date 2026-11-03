@@ -39,11 +39,11 @@ RUN uv export --frozen --no-dev --extra web --no-emit-project --format requireme
 ENV PATH=/opt/venv/bin:$PATH
 ENV PYTHONPATH=/app
 
-# sau-base pip-installs requirements.txt into the system interpreter. The app
-# venv cannot import that environment (include-system-site-packages is false),
-# but it still carried 1,295 stale distributions - old Pillow, Authlib, aiohttp,
-# cryptography among them - that image scanners reported as if they were live.
-# It is deleted above; this asserts the application really cannot see it.
+# sau-base installs its own pinned dependency list into the system interpreter.
+# The app venv cannot import that environment (include-system-site-packages is
+# false), but it still carried 1,295 stale distributions - old Pillow, Authlib,
+# aiohttp, cryptography among them - that image scanners reported as if they
+# were live. It is deleted above; this asserts the app really cannot see it.
 RUN test ! -e /usr/local/lib/python3.12/site-packages \
     && python -c "import sys; assert not [p for p in sys.path if p.endswith('local/lib/python3.12/site-packages')], sys.path"
 COPY . .

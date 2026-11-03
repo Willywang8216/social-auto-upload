@@ -41,7 +41,7 @@ def test_image_bootstrap_ignores_shadowing_data_directory(tmp_path):
     assert result.returncode == 0, result.stderr
     conn = sqlite3.connect(database)
     try:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0024_publish_submissions"
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0025_file_record_path_indexes"
         assert "lease_token" in {row[1] for row in conn.execute("PRAGMA table_info(publish_job_targets)")}
     finally:
         conn.close()
