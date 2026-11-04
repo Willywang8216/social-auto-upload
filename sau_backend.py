@@ -374,9 +374,21 @@ def _resolve_video_file_path_safely(file_path: str) -> Path | None:
 def _oauth_post_message_origin() -> str:
     """Return the safe target origin for OAuth postMessage callbacks.
 
-    Reads SAU_APP_ORIGIN from env. Falls back to the production frontend origin.
+    SAU_APP_ORIGIN wins, then the configured public base URL, so the target
+    always matches the page the popup was opened from. The old hardcoded
+    fallback posted to a different origin, and a browser silently drops a
+    postMessage whose targetOrigin does not match the opener - which made every
+    OAuth result, success and failure alike, invisible to the UI even though the
+    credential had already been saved.
     """
-    return str(os.environ.get("SAU_APP_ORIGIN") or "https://up.iamwillywang.com").strip()
+    for key in ("SAU_APP_ORIGIN", "SAU_PUBLIC_BASE_URL", "SAU_PUBLIC_APP_URL"):
+        value = str(os.environ.get(key) or "").strip()
+        if not value:
+            continue
+        parsed = urlparse(value if "//" in value else f"//{value}")
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+    return "https://up.iamwillywang.com"
 
 
 def _html_safe_json(value) -> str:

@@ -1135,13 +1135,21 @@ const doOAuthConnect = async () => {
     const api = { tiktok: tiktokApi, facebook: metaApi, instagram: metaApi, threads: threadsApi,
       youtube: youtubeApi, twitter: twitterApi, reddit: redditApi }[platform]
     if (!api) throw new Error('OAuth is not supported for this platform')
-    const oauthRes = await api.startOAuth(payload)
+    // Open the popup BEFORE any await. window.open outside the click's
+    // user-activation window is blocked by the browser, which turned every
+    // reconnect into a silent no-op: the start request succeeded server-side and
+    // the user saw nothing at all.
+    const popup = window.open('about:blank', 'oauth-popup', 'width=600,height=700,scrollbars=yes')
+    if (!popup) throw new Error('Popup blocked - please allow popups for this site')
+    let oauthRes
+    try {
+      oauthRes = await api.startOAuth(payload)
+    } catch (e) { popup.close(); throw e }
     const authorizeUrl = oauthRes?.data?.authorizeUrl
     const state = oauthRes?.data?.state
-    if (!authorizeUrl || !state) throw new Error('No authorization URL/state returned')
+    if (!authorizeUrl || !state) { popup.close(); throw new Error('No authorization URL/state returned') }
     const callbackOrigin = new URL(oauthRes?.data?.callbackOrigin || getApiBaseUrl() || window.location.origin, window.location.origin).origin
-    const popup = window.open(authorizeUrl, 'oauth-popup', 'width=600,height=700,scrollbars=yes')
-    if (!popup) throw new Error('Popup blocked — please allow popups for this site')
+    popup.location.replace(authorizeUrl)
     const isMeta = platform === 'facebook' || platform === 'instagram'
     const expectedType = `sau:${isMeta ? 'meta' : platform}-oauth`
     let selecting = false

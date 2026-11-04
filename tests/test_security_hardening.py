@@ -23,6 +23,7 @@ from sau_backend import (
     _safe_upload_filename,
     _is_valid_upload_key,
     _resolve_video_file_path_safely,
+    _oauth_post_message_origin,
 )
 
 
@@ -356,6 +357,43 @@ class UploadRegisterKeyValidationTests(unittest.TestCase):
             "filename": "file.mp4", "key": key, "public_url": "", "size": 0,
         })
         self.assertEqual(resp.status_code, 400)
+
+class OAuthPostMessageOriginTests(unittest.TestCase):
+    """The popup's postMessage target must be the origin the opener is on.
+
+    A browser silently drops a postMessage whose targetOrigin does not match the
+    opener. The shipped fallback posted to a different host, so every OAuth
+    result - success and failure alike - was invisible to the UI even though the
+    credential had already been saved.
+    """
+
+    def origin(self, **env):
+        base = {"SAU_APP_ORIGIN": "", "SAU_PUBLIC_BASE_URL": "", "SAU_PUBLIC_APP_URL": ""}
+        base.update(env)
+        with patch.dict("os.environ", base, clear=False):
+            return _oauth_post_message_origin()
+
+    def test_the_public_base_url_is_used_and_reduced_to_an_origin(self):
+        for value in ("https://socialupload.iamwillywang.com",
+                      "https://socialupload.iamwillywang.com/",
+                      "https://socialupload.iamwillywang.com/oauth/meta/callback"):
+            with self.subTest(value=value):
+                self.assertEqual(self.origin(SAU_PUBLIC_BASE_URL=value),
+                                 "https://socialupload.iamwillywang.com")
+
+    def test_an_explicit_app_origin_wins(self):
+        self.assertEqual(
+            self.origin(SAU_APP_ORIGIN="https://app.example.com",
+                        SAU_PUBLIC_BASE_URL="https://socialupload.iamwillywang.com"),
+            "https://app.example.com")
+
+    def test_a_schemeless_value_still_yields_an_origin(self):
+        self.assertEqual(self.origin(SAU_PUBLIC_BASE_URL="socialupload.iamwillywang.com"),
+                         "https://socialupload.iamwillywang.com")
+
+    def test_the_shipped_default_is_only_a_last_resort(self):
+        self.assertEqual(self.origin(), "https://up.iamwillywang.com")
+
 
 
 if __name__ == "__main__":
