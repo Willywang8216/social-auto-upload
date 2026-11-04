@@ -6,8 +6,10 @@ two audiences: a global English audience (US ET the anchor) and a Traditional
 Chinese audience in Taiwan. The current calendar pins almost everything to
 13:00 UTC; this spreads each platform's posts across the windows that actually
 match its peak engagement, while keeping the anti-spam rules (>= 30 min between
-posts to one account, <= 3 posts/account/day) and never moving a post earlier
-than its existing date.
+posts to one provider identity, <= 3 posts/identity/day) and never moving a post
+earlier than its existing date. "Identity" is the provider-side page / IG / Threads
+user id, so the two account rows the operator deliberately points at one Facebook
+page share a single timeline instead of stacking posts on the same feed.
 
 Dry-run is the default. ``--apply`` writes the new ``schedule_at`` values.
 
@@ -98,6 +100,56 @@ def _candidate_times(platform: str, day, account_id: int) -> list[datetime]:
     return sorted(candidates)
 
 
+# Provider-side identity behind an account row. The operator deliberately points
+# two rows (one per profile) at the same Facebook page / Instagram user / Threads
+# user, so "one account" for spacing means the provider identity, not the row:
+# keying on the row let both rows book the same feed minutes apart.
+_META_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
+    "facebook": ("pageId",),
+    "instagram": ("igUserId",),
+    "threads": ("threadUserId", "userId"),
+}
+
+
+def _identity_groups(conn) -> dict[str, str]:
+    """Map ``account_ref`` to a provider-identity group key.
+
+    Meta rows sharing a page/IG/Threads id collapse into one group; every other
+    account keeps its own row as its group. A missing or unreadable config falls
+    back to the row, so an unknown account is never merged by accident.
+    """
+    import json
+
+    groups: dict[str, str] = {}
+    try:
+        rows = conn.execute("SELECT id, platform, config_json FROM accounts").fetchall()
+    except Exception:  # noqa: BLE001 - identity is an optimization, never a gate
+        return groups
+    for row in rows:  # positional: works for tuple and sqlite3.Row cursors alike
+        account_id, platform, config_json = row[0], row[1], row[2]
+        platform = str(platform or "").strip().lower()
+        fields = _META_IDENTITY_FIELDS.get(platform)
+        if not fields:
+            continue
+        try:
+            config = json.loads(config_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(config, dict):
+            continue
+        for field in fields:
+            value = str(config.get(field) or "").strip()
+            if value:
+                groups["account:%s" % account_id] = "meta:%s:%s" % (platform, value)
+                break
+    return groups
+
+
+def _identity_group(account_ref: str, groups: dict[str, str]) -> str:
+    """Group key for one account row: its provider identity, else the row."""
+    return groups.get(str(account_ref)) or str(account_ref)
+
+
 def plan_optimize(
     *,
     db_path: Path = DB_PATH,
@@ -114,23 +166,27 @@ def plan_optimize(
             ORDER BY t.schedule_at, t.id
             """
         ).fetchall()
+        identities = _identity_groups(conn)
     finally:
         conn.close()
 
-    by_account: dict[str, list] = defaultdict(list)
+    by_identity: dict[str, list] = defaultdict(list)
     for row in rows:
-        by_account[row["account_ref"]].append(row)
+        by_identity[_identity_group(row["account_ref"], identities)].append(row)
 
     gap = timedelta(minutes=max(1, MIN_GAP_MINUTES))
     cap = max(0, MAX_PER_DAY)
     changes: list[dict] = []
-    for account_ref, members in by_account.items():
-        try:
-            account_id = int(str(account_ref).split(":", 1)[1])
-        except (IndexError, ValueError):
-            continue
+    # One timeline per provider identity. The two rows that point at the same
+    # Facebook page / Instagram user / Threads user share `assigned`, so the
+    # gap and the daily cap are enforced on the feed rather than on the row.
+    for members in by_identity.values():
         assigned: list[datetime] = []
         for row in members:
+            try:
+                account_id = int(str(row["account_ref"]).split(":", 1)[1])
+            except (IndexError, ValueError):
+                account_id = 0
             original = _parse(row["schedule_at"])
             if original is None:
                 continue
@@ -165,7 +221,7 @@ def plan_optimize(
                 changes.append(
                     {
                         "target_id": int(row["id"]),
-                        "account_ref": account_ref,
+                        "account_ref": row["account_ref"],
                         "platform": row["platform"],
                         "old": original.isoformat(timespec="seconds"),
                         "new": candidate.isoformat(timespec="seconds"),
