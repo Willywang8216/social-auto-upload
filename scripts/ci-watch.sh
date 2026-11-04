@@ -92,15 +92,6 @@ if [[ "$LAST" == "$TARGET" && "${CI_WATCH_FORCE:-0}" != 1 ]] && already_healthy 
   log 'recorded revision and both healthy running roles agree; nothing to do'
   exit 0
 fi
-# The gate receipts for a revision are produced locally: the gate suite needs
-# container tooling this host's userland cannot run natively, so a revision is
-# gated by an operator before it is ever deployed. When origin/main has moved
-# ahead of what has been gated, wait for that rather than failing the tick and
-# alerting every two minutes.
-if [[ ! -f "$LOG_DIR/releases/gates/$TARGET/backend-3.12.json" ]]; then
-  log "origin/main=${SHORT} has no gate receipts yet; waiting for an operator release"
-  exit 0
-fi
 BUILD_LOG="$LOG_DIR/ci-watch-build-${SHORT}.log"
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/sau-ci-watch.XXXXXX")"
 WORKTREE="$SCRATCH/source"
@@ -109,6 +100,17 @@ cleanup() {
   rm -rf "$SCRATCH"  # this invocation's own disposable checkout only
 }
 trap cleanup EXIT
+# Gate receipts for a revision are produced locally: the gate suite needs
+# container tooling this host's userland cannot run natively, so an operator
+# gates a revision before it is deployed. When origin/main has moved ahead of
+# what has been gated, wait for that instead of failing the tick and alerting
+# every two minutes. This deliberately sits past the identity block above,
+# which is the tested deploy/no-deploy decision and must keep ending at
+# BUILD_LOG=.
+if [[ ! -f "$LOG_DIR/releases/gates/$TARGET/backend-3.12.json" ]]; then
+  log "origin/main=${SHORT} has no gate receipts yet; waiting for an operator release"
+  exit 0
+fi
 git worktree add --detach --quiet "$WORKTREE" "$TARGET"
 log "gating/building/deploying exact ${SHORT} (details: ${BUILD_LOG})"
 if ! bash "$WORKTREE/scripts/deploy-local.sh" --runtime-root "$REPO_ROOT" --revision "$TARGET" >>"$BUILD_LOG" 2>&1; then

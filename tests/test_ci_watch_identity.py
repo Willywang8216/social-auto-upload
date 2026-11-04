@@ -180,5 +180,51 @@ class CiWatchDeferralTests(unittest.TestCase):
         self.assertIn('com.centurylinklabs.watchtower.enable: "false"', source)
 
 
+@unittest.skipUnless(_bash(), "Bash is required to exercise the deployment shell")
+class CiWatchGateReceiptTests(unittest.TestCase):
+    """An ungated revision must wait, not fail and alert every two minutes.
+
+    Gate receipts are produced locally, because the gate suite needs container
+    tooling this host's userland cannot run natively. Without this guard the
+    watcher failed and alerted for as long as origin/main ran ahead of the last
+    revision an operator had gated.
+    """
+
+    def _run_guard(self, *, receipts_present: bool) -> str:
+        source = SCRIPT.read_text(encoding="utf-8")
+        start = source.index('if [[ ! -f "$LOG_DIR/releases/gates/$TARGET/backend-3.12.json" ]]')
+        block = source[start:source.index("git worktree add", start)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = root / "watch.log"
+            if receipts_present:
+                receipts = root / "releases" / "gates" / TARGET
+                receipts.mkdir(parents=True)
+                (receipts / "backend-3.12.json").write_text("{}", encoding="utf-8")
+            harness = f"""
+set -euo pipefail
+LOG={shlex.quote(log.as_posix())}
+LOG_DIR={shlex.quote(root.as_posix())}
+TARGET={TARGET}
+SHORT={TARGET[:12]}
+log() {{ printf '%s\\n' "$*" >> "$LOG"; }}
+{block}
+printf 'PROCEEDED\\n' >> "$LOG"
+"""
+            result = subprocess.run([_bash(), "-c", harness], capture_output=True,
+                                    text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return log.read_text(encoding="utf-8")
+
+    def test_an_ungated_revision_waits_without_failing(self):
+        output = self._run_guard(receipts_present=False)
+        self.assertIn("no gate receipts yet", output)
+        self.assertNotIn("PROCEEDED", output)
+
+    def test_a_gated_revision_proceeds_to_the_build(self):
+        output = self._run_guard(receipts_present=True)
+        self.assertNotIn("no gate receipts yet", output)
+        self.assertIn("PROCEEDED", output)
+
 if __name__ == "__main__":
     unittest.main()
