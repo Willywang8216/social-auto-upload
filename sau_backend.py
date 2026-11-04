@@ -386,8 +386,8 @@ def _oauth_post_message_origin() -> str:
         if not value:
             continue
         parsed = urlparse(value if "//" in value else f"//{value}")
-        if parsed.scheme and parsed.netloc:
-            return f"{parsed.scheme}://{parsed.netloc}"
+        if parsed.netloc:
+            return f"{parsed.scheme or 'https'}://{parsed.netloc}"
     return "https://up.iamwillywang.com"
 
 
