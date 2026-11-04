@@ -27,7 +27,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   vi.resetAllMocks()
   rows = [account(11, 1), account(22, 2)]
-  popup = { closed: false, close: vi.fn(() => { popup.closed = true }) }
+  popup = { closed: false, close: vi.fn(() => { popup.closed = true }), location: { replace: vi.fn() } }
   listeners = new Map()
   vi.stubGlobal('window', { location: { origin: 'https://ui.example.invalid' }, open: vi.fn(() => popup),
     addEventListener: (type, fn) => listeners.set(type, fn),
@@ -64,6 +64,9 @@ describe('AccountManagement bounded OAuth', () => {
     await state.doOAuthConnect()
     expect(api.threads).toHaveBeenCalledWith({ accountId: 22, profileId: 2, accountName: 'same-name' })
     expect(api.create).not.toHaveBeenCalled()
+    // The popup is opened synchronously and then navigated; a real popup always
+    // has a location, and this pins that the authorize URL actually gets there.
+    expect(popup.location.replace).toHaveBeenCalledWith('https://provider.example.invalid/authorize')
     expect(state.oauthBusy).toBe(true)
   })
 
