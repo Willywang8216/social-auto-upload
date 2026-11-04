@@ -234,8 +234,11 @@ PY
   OLD_WORKER="$(cat "$RELEASE_DIR/baseline/worker-image")"
   for previous in "$OLD_WEB" "$OLD_WORKER"; do
     [[ -n "$previous" ]] || continue  # legacy release had no separate worker
-    [[ "$(docker image inspect -f '{{.Id}}' "$previous" 2>>"$DETAIL_LOG")" == "$previous" ]] \
-      || fail 'Previous release image is unavailable; staged candidate remains paused.'
+    [[ "$(docker image inspect -f '{{.Id}}' "$previous" 2>>"$DETAIL_LOG")" == "$previous" ]] && continue
+    # Do NOT rewrite the sealed bundle to point at a rebuilt image: its manifest
+    # hashes those files, and a silent substitution is worse than a clear stop.
+    # A pruned rollback image is recoverable, so name the recovery instead.
+    fail "Previous release image $previous is unavailable - something on this host pruned it. Rebuild that revision with 'docker build' from a worktree of $(cat "$RELEASE_DIR/baseline/git-revision" 2>/dev/null || echo '<recorded revision>') and re-seal the bundle before --resume. The staged candidate stays paused."
   done
   PAUSE_OWNED=1 TOUCHED=1
   wait_ready paused || fail 'Staged candidate is no longer safe to activate.'

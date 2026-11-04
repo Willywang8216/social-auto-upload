@@ -92,6 +92,15 @@ if [[ "$LAST" == "$TARGET" && "${CI_WATCH_FORCE:-0}" != 1 ]] && already_healthy 
   log 'recorded revision and both healthy running roles agree; nothing to do'
   exit 0
 fi
+# The gate receipts for a revision are produced locally: the gate suite needs
+# container tooling this host's userland cannot run natively, so a revision is
+# gated by an operator before it is ever deployed. When origin/main has moved
+# ahead of what has been gated, wait for that rather than failing the tick and
+# alerting every two minutes.
+if [[ ! -f "$LOG_DIR/releases/gates/$TARGET/backend-3.12.json" ]]; then
+  log "origin/main=${SHORT} has no gate receipts yet; waiting for an operator release"
+  exit 0
+fi
 BUILD_LOG="$LOG_DIR/ci-watch-build-${SHORT}.log"
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/sau-ci-watch.XXXXXX")"
 WORKTREE="$SCRATCH/source"
