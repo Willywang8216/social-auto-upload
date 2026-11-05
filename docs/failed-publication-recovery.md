@@ -100,6 +100,11 @@ variant, framing, alt text and covers. A checksum-verified older prepared part
 may create a new generation while retaining its original source interval. It
 cannot overwrite scheduled/published artifacts, drop tails, or become text-only.
 
+When an artifact supplies top-level `checksum` or `sha256`, preprocessing binds
+those fields to the final output bytes too. Original source/input hashes remain
+in provenance metadata; retaining them as output checksums would incorrectly
+reject a valid derivative or identify different ordered parts as the same media.
+
 Only after **all** preparation completes are future slots allocated. Production's
 default is **three posts per canonical destination per day with a 30-minute
 minimum gap**. A requested cap may tighten, never raise or disable the configured

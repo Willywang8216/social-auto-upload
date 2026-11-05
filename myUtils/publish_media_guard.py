@@ -198,6 +198,11 @@ def _replacement(original: dict, part, source: Path, *, image: bool, platform: s
     from myUtils.video_artifacts import served_url
     replacement = {**original, "artifact_kind": "prepared_image" if image else "prepared_video",
                    "local_path": str(part.path), "metadata": {**(original.get("metadata") or {}), **part.metadata}}
+    # Publishers and duplicate guards must see FINAL bytes, not a retained
+    # raw checksum. Source/input hashes remain in immutable provenance.
+    for field in ("checksum", "sha256"):
+        if field in replacement:
+            replacement[field] = part.metadata["sha256"]
     if platform == "tiktok":
         replacement["metadata"]["unwatermarked"] = True
     if part.path != source:

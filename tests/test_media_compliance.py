@@ -324,3 +324,45 @@ def test_display_sar_is_preserved_before_square_pixel_normalization():
     filters = prep.build_filters({"width": 320, "height": 240, "sample_aspect_ratio": "2:1", "field_order": "progressive"}, prep.effective_limits("threads"), 4_000_000)
     assert "scale=640:240" in filters and "pad=640:240" in filters and "setsar=1" in filters
     assert "crop=" not in filters
+
+
+@pytest.mark.parametrize("image", [True, False], ids=["image", "video"])
+@pytest.mark.parametrize("fields", [("checksum",), ("sha256",), ("checksum", "sha256")])
+def test_final_artifact_checksums_refer_to_outputs_not_raw_inputs(source, tmp_path, image, fields):
+    from types import SimpleNamespace
+    from PIL import Image
+    from myUtils import publish_media_guard as guard, worker
+
+    if image:
+        original_path = tmp_path / "source.jpg"
+        final_path = tmp_path / "normalized.jpg"
+        pixels = Image.new("RGB", (128, 128), (160, 80, 40))
+        pixels.save(original_path, quality=100)
+        pixels.save(final_path, quality=65)
+        raw_sha = prep.sha256_file(original_path)
+        part = SimpleNamespace(path=final_path, metadata={
+            "sha256": prep.sha256_file(final_path), "size_bytes": final_path.stat().st_size,
+            "source_sha256": raw_sha, "input_sha256": raw_sha})
+        platform = "bluesky"
+    else:
+        original_path = source
+        raw_sha = prep.sha256_file(source)
+        part = prep.prepare_video(source, tmp_path / "normalized", platform="threads")[0]
+        platform = "threads"
+    assert part.metadata["sha256"] != raw_sha
+    original = {"artifact_kind": "local", "local_path": str(original_path),
+        "metadata": {"content_variant": "approved-existing-variant"},
+        **{field: raw_sha for field in fields}}
+    before = copy.deepcopy(original)
+    working = guard._working_payload({"message": "  Unchanged approved copy.  ",
+        "artifacts": [original]}, platform)
+    result = guard._replacement(working["artifacts"][0], part, original_path, image=image, platform=platform)
+    assert original == before and prep.sha256_file(original_path) == raw_sha
+    assert all(result[field] == part.metadata["sha256"] for field in fields)
+    assert result["metadata"]["source_sha256"] == raw_sha
+    assert result["metadata"]["input_sha256"] == raw_sha
+    assert result["metadata"]["content_variant"] == "approved-existing-variant"
+    worker._verify_artifact(part.path, result)
+    final_payload = {"message": working["message"], "_preserveApprovedText": True, "artifacts": [result]}
+    guard.validate_payload(final_payload, platform=platform)
+    assert final_payload["message"] == "  Unchanged approved copy.  "
