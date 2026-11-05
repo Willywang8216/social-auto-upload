@@ -852,7 +852,7 @@ def _running_target(conn, target_id, lease_token, *, missing_error=False):
 
 def _write_target_state(
     conn, row, status, *, error=None, error_category=None, next_attempt_at=None,
-    checkpoint_json=None, delivery_state=None,
+    checkpoint_json=None, delivery_state=None, alert_max_attempts=None,
 ) -> bool:
     """Caller holds BEGIN IMMEDIATE; still fence by the selected generation."""
     cursor = conn.execute(
@@ -869,12 +869,17 @@ def _write_target_state(
          checkpoint_json if checkpoint_json is not None else row["checkpoint_json"],
          delivery_state, row["id"], TARGET_RUNNING, row["lease_token"]),
     )
-    return cursor.rowcount == 1
+    changed = cursor.rowcount == 1
+    if changed and status in {TARGET_FAILED, TARGET_BLOCKED, TARGET_NEEDS_REVIEW}:
+        from myUtils.publish_alert_outbox import enqueue_publish_stop
+        enqueue_publish_stop(conn, row["id"], max_attempts=alert_max_attempts)
+    return changed
 
 
 def _transition_target(
     target_id, status, *, error=None, error_category=None, delay_seconds=None,
     checkpoint=None, delivery_state=None, lease_token=None, db_path=None, missing_error=False,
+    alert_max_attempts=None,
 ) -> bool:
     if delay_seconds is not None:
         delay_seconds = _seconds(delay_seconds)
@@ -889,6 +894,7 @@ def _transition_target(
             conn, row, status, error=error, error_category=error_category,
             next_attempt_at=_after_seconds(delay_seconds) if delay_seconds is not None else None,
             checkpoint_json=checkpoint_json, delivery_state=delivery_state,
+            alert_max_attempts=alert_max_attempts,
         )
         if changed:
             _recount_job(conn, row["job_id"])
@@ -916,30 +922,33 @@ def mark_target_retry(
 def mark_target_failed(
     target_id: int, error: str, *, db_path: Path | None = None,
     lease_token: str | None = None, error_category: str | None = None,
+    alert_max_attempts: int | None = None,
 ) -> bool:
     """CAS running -> failed. Late cancellation/stale-token completions are no-ops."""
     return _transition_target(target_id, TARGET_FAILED, error=error, delivery_state="failed",
                               error_category=error_category, lease_token=lease_token,
-                              db_path=db_path, missing_error=True)
+                              db_path=db_path, missing_error=True, alert_max_attempts=alert_max_attempts)
 
 
 def mark_target_blocked(
     target_id: int, error: str, *, lease_token: str | None = None,
     error_category: str = "blocked", db_path: Path | None = None,
+    alert_max_attempts: int | None = None,
 ) -> bool:
     """Release a claim into a non-claimable prerequisite/account-blocked state."""
     return _transition_target(target_id, TARGET_BLOCKED, error=error, error_category=error_category,
-                              lease_token=lease_token, db_path=db_path)
+                              lease_token=lease_token, db_path=db_path, alert_max_attempts=alert_max_attempts)
 
 
 def mark_target_needs_review(
     target_id: int, error: str, *, lease_token: str | None = None,
     error_category: str = "needs_review", db_path: Path | None = None,
+    alert_max_attempts: int | None = None,
 ) -> bool:
     """Release an ambiguous delivery for manual review, never automatic resubmit."""
     return _transition_target(target_id, TARGET_NEEDS_REVIEW, error=error,
                               error_category=error_category, delivery_state="unknown",
-                              lease_token=lease_token, db_path=db_path)
+                              lease_token=lease_token, db_path=db_path, alert_max_attempts=alert_max_attempts)
 
 
 def mark_target_awaiting_delivery(
@@ -1030,23 +1039,38 @@ def requeue_stale_running(
         moved = 0
         for row in rows:
             checkpoint = _decode_checkpoint(row["checkpoint_json"])
+            from myUtils import delivery as delivery_checkpoint
+            route_attempts, route_budget, invalid_route = row["attempts"], budget, False
+            try:
+                route = delivery_checkpoint.active_route({"_delivery": checkpoint})
+                detail = delivery_checkpoint.publish_routes({"_delivery": checkpoint}).get(route) or {}
+                route_attempts = detail.get("attempts", route_attempts)
+                stored_budget = detail.get("max_attempts", budget)
+                if type(route_attempts) is not int or route_attempts < 0 or type(stored_budget) is not int or stored_budget < 1:
+                    raise delivery_checkpoint.DeliveryUnknown("Invalid persisted provider budget")
+                route_budget = min(budget, stored_budget)
+            except delivery_checkpoint.DeliveryUnknown:
+                invalid_route = True
             due = None
             delivery = None
             category = "stale_execution"
-            if checkpoint.get("provider_receipt"):
+            if invalid_route:
+                state, delivery, category = TARGET_NEEDS_REVIEW, "unknown", "checkpoint_invalid"
+                error = "stale execution: invalid persisted delivery/provider state; review required"
+            elif checkpoint.get("provider_receipt"):
                 state, due, delivery = TARGET_AWAITING_DELIVERY, now, "awaiting_delivery"
                 error = "stale execution: resume reconciliation of the recorded provider receipt"
-            elif checkpoint.get("submission_started") is True or checkpoint.get("checkpoint_invalid"):
+            elif delivery_checkpoint.has_unresolved_submission({"_delivery": checkpoint}):
                 state, delivery, category = TARGET_NEEDS_REVIEW, "unknown", "submission_unknown"
                 error = "stale execution: submission may have started; manual delivery review required"
-            elif row["attempts"] >= budget:
+            elif route_attempts >= route_budget:
                 state, delivery = TARGET_FAILED, "failed"
                 error = "requeued as stale: worker died mid-run and retry budget exhausted"
             else:
                 state, due = TARGET_RETRYING, now
                 error = "requeued as stale: worker died before submission; will retry"
             if _write_target_state(conn, row, state, error=error, error_category=category,
-                                   next_attempt_at=due, delivery_state=delivery):
+                                   next_attempt_at=due, delivery_state=delivery, alert_max_attempts=budget):
                 moved += 1
                 affected_jobs.add(row["job_id"])
         for job_id in affected_jobs:
@@ -1358,6 +1382,7 @@ def reschedule_failed_target(
     target_id: int, schedule_at: str, *, expected_fingerprint: str,
     revalidate: Callable[[sqlite3.Connection], str],
     workspace_id: str | None = None, db_path: Path | None = None,
+    prepared_payloads: list[dict] | None = None, part_schedule_ats: list[str] | None = None,
 ) -> Target:
     """Guarded recovery, not an explicit resubmit or delivery-reconciliation API.
 
@@ -1396,11 +1421,24 @@ def reschedule_failed_target(
             raise ValueError("Recovery validator must be read-only")
         if not isinstance(observed, str) or not secrets.compare_digest(observed, expected_fingerprint):
             raise ValueError("Stale recovery plan; regenerate it")
+        if prepared_payloads is not None:
+            from myUtils.prepared_recovery import validate_parts
+            validate_parts(conn, row, prepared_payloads, part_schedule_ats)
+            if _utc_datetime(part_schedule_ats[0]) != candidate:
+                raise ValueError("First prepared slot does not match the guarded recovery slot")
+            if any(_utc_datetime(slot) <= _utc_datetime(_now_iso()) for slot in part_schedule_ats):
+                raise ValueError("Every prepared part must be scheduled in the future")
+        elif part_schedule_ats is not None:
+            raise ValueError("Part schedules require prepared payloads")
         _reset_target(conn, row, candidate.isoformat())
         # A deliberate, validated recovery is a new provider submission intent.
         # Automatic retries retain this value, so their idempotency key is stable.
-        conn.execute("UPDATE publish_job_targets SET checkpoint_json=? WHERE id=?",
-                     (json.dumps({"recovery_generation": expected_fingerprint}), target_id))
+        if prepared_payloads is None:
+            conn.execute("UPDATE publish_job_targets SET checkpoint_json=? WHERE id=?",
+                         (json.dumps({"recovery_generation": expected_fingerprint}), target_id))
+        else:
+            from myUtils.prepared_recovery import install_parts
+            install_parts(conn, row, prepared_payloads, part_schedule_ats, expected_fingerprint)
         return _row_to_target(conn.execute(
             "SELECT * FROM publish_job_targets WHERE id=?", (target_id,),
         ).fetchone())

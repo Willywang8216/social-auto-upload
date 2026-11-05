@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -242,7 +243,12 @@ class CampaignPrepSttWiringTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.video = Path(self.tmp.name) / "clip.mp4"
-        self.video.write_bytes(b"not really an mp4")
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-f", "lavfi", "-i", "color=c=blue:s=64x64:r=25", "-t", "1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            str(self.video),
+        ], check=True, capture_output=True, timeout=30)
         self.db_path = Path(self.tmp.name) / "db.db"
         self.monkey = mock.patch.object(
             campaign_media_prep.campaign_store,
@@ -252,7 +258,7 @@ class CampaignPrepSttWiringTests(unittest.TestCase):
         self.add_artifact = self.monkey.start()
         self.addCleanup(self.monkey.stop)
 
-    def _artifact_path(self, campaign_id, source_path, *, artifact_kind, suffix=None, base_dir=None):
+    def _artifact_path(self, campaign_id, source_path, *, artifact_kind, suffix=None, base_dir=None, generation=None):
         return Path(self.tmp.name) / f"{artifact_kind}{suffix or ''}"
 
     def _run(self, request_data: dict, settings: dict | None = None) -> dict:
@@ -265,6 +271,9 @@ class CampaignPrepSttWiringTests(unittest.TestCase):
         ), mock.patch.object(
             campaign_media_prep.media_pipeline, "prepare_campaign_artifact_path",
             side_effect=self._artifact_path,
+        ), mock.patch.object(
+            campaign_media_prep.campaign_store, "add_campaign_artifact_set",
+            return_value=[],
         ), mock.patch.object(
             campaign_media_prep, "_shrink_for_publish",
             side_effect=lambda p, *a, **k: Path(p),
@@ -282,7 +291,7 @@ class CampaignPrepSttWiringTests(unittest.TestCase):
                 _profile(settings),
                 media_files,
                 request_data,
-                selected_platforms=set(),
+                selected_platforms={"youtube"},
                 db_path=self.db_path,
             )
 

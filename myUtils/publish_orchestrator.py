@@ -38,6 +38,7 @@ from myUtils import content_rules
 from myUtils import jobs as job_runtime
 from myUtils import media_groups as media_group_store
 from myUtils import platform_capabilities
+from myUtils import media_compliance, image_compliance, platform_limits, publish_media_guard
 
 _logger = logging.getLogger(__name__)
 from myUtils import profiles as profile_registry
@@ -473,6 +474,145 @@ def _files_with_roles(media_files: list[dict]) -> list[dict]:
     ]
 
 
+def _preparation_limits_for_accounts(accounts, selected_platforms, requested=None,
+                                     *, backup_compatible_platforms=None) -> dict:
+    """Tighten each selected account FIRST, then merge; requests cannot grant caps."""
+    if requested is not None and not isinstance(requested, dict):
+        raise media_compliance.MediaPreparationError("Invalid selected-account preparation plan")
+    backup = set(backup_compatible_platforms or [])
+    result = {}
+    for platform in selected_platforms:
+        configs = [account.config or {} for account in accounts if account.platform == platform] or [{}]
+        plans = [media_compliance.effective_limits(platform, account_config=config,
+                 limits=(requested or {}).get(platform), backup_compatible=platform in backup) for config in configs]
+        result[platform] = media_compliance.merge_limits(plans)
+    return result
+
+
+def _image_preparation_limits_for_accounts(accounts, selected_platforms, requested=None,
+                                           *, backup_compatible_platforms=None) -> dict:
+    if requested is not None and not isinstance(requested, dict):
+        raise media_compliance.MediaPreparationError("Invalid selected-account image preparation plan")
+    backup = set(backup_compatible_platforms or [])
+    return {platform: image_compliance.effective_limits(platform,
+            limits=(requested or {}).get(platform), backup_compatible=(platform in backup and
+                not platform_limits.IMAGE_PREPARATION_POLICIES[platform].get("cover_only")))
+            for platform in selected_platforms if platform in platform_limits.IMAGE_PREPARATION_POLICIES}
+
+
+def _preparation_account_configs_for_accounts(accounts, selected_platforms) -> dict:
+    return {platform: platform_limits.preparation_account_config(platform,
+            [account.config or {} for account in accounts if account.platform == platform])
+            for platform in selected_platforms}
+
+
+def _video_artifact(artifact: dict) -> bool:
+    if publish_media_guard.is_context_artifact(artifact) or publish_media_guard.is_support_artifact(artifact):
+        return False
+    return (artifact.get("artifact_kind") in {"prepared_video", "watermarked_video"}
+            or (artifact.get("metadata") or {}).get("role") == "video"
+            or Path(artifact.get("local_path") or "").suffix.lower() in media_compliance.VIDEO_SUFFIXES)
+
+
+def _validate_prepared_part(artifact, platform, account_config=None, *, backup_compatible=False,
+                            limits=None):
+    metadata = artifact.get("metadata") or {}
+    if not metadata.get("preparation_policy_version"):
+        raise media_compliance.MediaPreparationRequired("Reprepare video before scheduling")
+    checksum = metadata.get("sha256")
+    if not isinstance(checksum, str) or len(checksum) != 64:
+        raise media_compliance.MediaPreparationError("Prepared video has no checksum")
+    current = media_compliance.effective_limits(platform, account_config=account_config,
+                                               backup_compatible=backup_compatible)
+    planned = media_compliance.tighten_limits(current, metadata.get("preparation_limits"))
+    planned = media_compliance.tighten_limits(planned, limits)
+    media_compliance.validate_video(artifact.get("local_path") or "", platform=platform,
+        account_config=account_config, limits=planned, expected_sha256=checksum, backup_compatible=backup_compatible)
+
+
+def _prepared_post_groups(artifacts, platform, media_files, *, supports_multi_media,
+                          artifact_payloads_for_platform, artifact_part_groups_for_platform=None,
+                          account_config=None, backup_compatible=False, image_limits=None, video_limits=None):
+    """Read-only whole-generation gate; every ordered image/video becomes a post."""
+    cleaned = [a for a in artifacts if not publish_media_guard.is_context_artifact(a)]
+    files = _files_with_roles(media_files)
+    videos = {item["file_record_id"] for item in files if item.get("role") == "video"}
+    videos.update(a.get("source_file_record_id") for a in cleaned if _video_artifact(a))
+    prepared = {}
+    for source_id in videos:
+        parts = media_compliance.select_prepared_parts(
+            [a for a in cleaned if _video_artifact(a) and a.get("source_file_record_id") == source_id], platform)
+        for part in parts:
+            _validate_prepared_part(part, platform, account_config, backup_compatible=backup_compatible, limits=video_limits)
+        prepared[source_id] = parts
+    nonvideos = [a for a in cleaned if not _video_artifact(a)]
+    selected = artifact_payloads_for_platform(nonvideos, platform)
+    selected = [a for a in selected if not publish_media_guard.is_context_artifact(a)]
+    support = [a for a in selected if publish_media_guard.is_support_artifact(a)]
+    images = [a for a in selected if publish_media_guard.media_kind(a) == "image"]
+    if platform == "youtube" and videos:
+        # The existing publisher uses these as a thumbnail, never as a post.
+        support += [{**a, "metadata": {**(a.get("metadata") or {}), "role": "cover"}} for a in images]
+        images = []
+    if images:
+        if any(not (a.get("metadata") or {}).get("preparation_policy_version") for a in images):
+            raise media_compliance.MediaPreparationRequired("Reprepare the complete image set before scheduling")
+        # A callback cannot return only the first image or select from an older
+        # group. Select the complete generation from the actual campaign rows.
+        images = image_compliance.select_prepared_images(
+            [a for a in nonvideos if publish_media_guard.media_kind(a) == "image"], platform)
+        for image in images:
+            metadata = image.get("metadata") or {}
+            limits = image_compliance.effective_limits(platform, account_config=account_config,
+                        limits=image_limits, backup_compatible=backup_compatible)
+            limits = media_compliance.tighten_limits(limits, metadata.get("preparation_limits"))
+            image_compliance.validate_image(image.get("local_path") or "", platform=platform,
+                account_config=account_config, limits=limits, expected_sha256=metadata.get("sha256"),
+                backup_compatible=backup_compatible)
+    ordered_ids = [item["file_record_id"] for item in files]
+    if set(prepared) - set(ordered_ids):
+        raise media_compliance.MediaPreparationError("Prepared video has no selected source file")
+    if not files and not (images or prepared):
+        return [(selected, None)]  # a genuine text-only intent
+    images_by_source = {}
+    for image in images:
+        images_by_source.setdefault(image.get("source_file_record_id"), []).append(image)
+    if set(images_by_source) - set(ordered_ids):
+        raise media_compliance.MediaPreparationError("Prepared image has no selected source file")
+    groups, run = [], []
+    def flush_images():
+        if not run:
+            return
+        planned = image_compliance.effective_limits(platform, account_config=account_config,
+                    limits=image_limits, backup_compatible=backup_compatible)
+        # ordered_batches tightens counts from every immutable member's policy;
+        # heterogeneous JPEG/PNG geometry need not share an encoder recipe.
+        for batch in image_compliance.ordered_batches(run, platform, account_config=account_config,
+                                                      limits=planned, backup_compatible=backup_compatible):
+            groups.append((support + batch, list(dict.fromkeys(a.get("source_file_record_id") for a in batch))))
+        run.clear()
+    for item in files:
+        source_id = item["file_record_id"]
+        if source_id in prepared:
+            flush_images()
+            covers = [a for a in support if a.get("source_file_record_id") in {None, source_id} or platform == "youtube"]
+            groups.extend((covers + [part], [source_id]) for part in prepared[source_id])
+        elif source_id in images_by_source:
+            if not images_by_source[source_id]:
+                raise media_compliance.MediaPreparationError("Prepared image source count does not match the selected media")
+            run.append(images_by_source[source_id].pop(0))
+        elif not any(a.get("source_file_record_id") == source_id for a in support):
+            raise media_compliance.MediaPreparationRequired("No prepared media for a selected source file")
+    flush_images()
+    if any(values for values in images_by_source.values()):
+        raise media_compliance.MediaPreparationError("Complete prepared image set does not match the selected source order")
+    if not groups:
+        raise media_compliance.MediaPreparationRequired("No complete publishable prepared media set")
+    if len(groups) == 1:
+        groups[0] = (groups[0][0], None)
+    return groups
+
+
 def submit_publish(
     *,
     profile_ids: list[int],
@@ -599,6 +739,13 @@ def submit_publish(
         request_data = _request_data_for_options(
             brief=brief, options=options, profile=profile
         )
+        platforms = {account.platform for account in accounts}
+        if (options or {}).get("_backupCompatiblePlatforms") is not None:
+            request_data["_backupCompatiblePlatforms"] = options["_backupCompatiblePlatforms"]
+        from myUtils.preparation_context import configure_request
+        request_data, _backup_contexts = configure_request(accounts, platforms, request_data,
+                                                         settings=profile.settings, has_video=has_video)
+        backup_platforms = platform_limits.backup_compatible_platforms(request_data) & platforms
         campaign = campaign_store.create_campaign(
             profile.id,
             media_group.id,
@@ -672,6 +819,20 @@ def submit_publish(
             supports_first_comment = platform_capabilities.platform_supports_first_comment(platform)
             supports_multi_media = platform_capabilities.platform_supports_multi_media(platform)
 
+            try:
+                post_groups = _prepared_post_groups(
+                    artifacts, platform, publishable_files, supports_multi_media=supports_multi_media,
+                    artifact_payloads_for_platform=artifact_payloads_for_platform,
+                    artifact_part_groups_for_platform=artifact_part_groups_for_platform,
+                    account_config=request_data["_preparationAccountConfigs"].get(platform),
+                    backup_compatible=platform in backup_platforms,
+                    image_limits=(request_data.get("_imagePreparationLimits") or {}).get(platform),
+                    video_limits=(request_data.get("_preparationLimits") or {}).get(platform),
+                )
+            except (ValueError, OSError) as exc:
+                skipped.append({"profileId": profile_id, "platform": platform,
+                                "reason": f"prepared media validation failed: {exc}"})
+                continue
             for account in platform_accounts:
                 # Cross-job duplicate guard. The target table is unique on
                 # (job_id, account_ref, file_ref), so the same media re-submitted
@@ -779,79 +940,35 @@ def submit_publish(
                     elif not link_in_first_comment:
                         draft["firstComment"] = ""
 
-                if supports_multi_media or len(publishable_files) <= 1:
-                    # One source video longer than a platform cap becomes
-                    # several part-posts; anything within the cap is a single
-                    # group, identical to before.
-                    if artifact_part_groups_for_platform is not None:
-                        part_groups = artifact_part_groups_for_platform(artifacts, platform)
-                    else:
-                        part_groups = [artifact_payloads_for_platform(artifacts, platform)]
-                    for part_index, part_artifacts in enumerate(part_groups, start=1):
-                        post = campaign_store.add_campaign_post(
-                            campaign.id,
-                            platform,
-                            account_ids=[account.id],
-                            draft=draft,
-                            status=campaign_store.CAMPAIGN_POST_READY,
-                            db_path=db_path,
-                        )
-                        account_tt_settings = tiktok_post_settings.get(str(account.id)) or tiktok_post_settings.get(account.id)
-                        payload = _build_payload(
-                            campaign, post, draft, part_artifacts, platform,
-                            tiktok_direct_post=tiktok_direct_post,
-                            tiktok_post_settings=account_tt_settings if isinstance(account_tt_settings, dict) else None,
-                        )
-                        if len(part_groups) > 1:
-                            payload["partIndex"] = part_index
-                            payload["partCount"] = len(part_groups)
-                        targets = [
-                            (
-                                f"account:{account.id}",
-                                f"campaign_post:{post.id}",
-                                _next_free_slot(account.id, base_time, stagger_offset, booked_slots),
-                            )
-                        ]
-                        stagger_offset += 1
-                        queued_jobs.append(
-                            _enqueue_post(
-                                platform, payload, targets, campaign, post, job_to_payload, db_path
-                            )
-                        )
-                else:
-                    for media_file in publishable_files:
-                        single_id = int(media_file["file_record_id"])
-                        post = campaign_store.add_campaign_post(
-                            campaign.id,
-                            platform,
-                            account_ids=[account.id],
-                            draft=draft,
-                            file_record_ids=[single_id],
-                            status=campaign_store.CAMPAIGN_POST_READY,
-                            db_path=db_path,
-                        )
-                        account_tt_settings = tiktok_post_settings.get(str(account.id)) or tiktok_post_settings.get(account.id)
-                        payload = _build_payload(
-                            campaign, post, draft,
-                            artifact_payloads_for_platform(artifacts, platform),
-                            platform,
-                            tiktok_direct_post=tiktok_direct_post,
-                            tiktok_post_settings=account_tt_settings if isinstance(account_tt_settings, dict) else None,
-                        )
-                        payload["fileRecordIds"] = [single_id]
-                        targets = [
-                            (
-                                f"account:{account.id}",
-                                f"campaign_post:{post.id}",
-                                _next_free_slot(account.id, base_time, stagger_offset, booked_slots),
-                            )
-                        ]
-                        stagger_offset += 1
-                        queued_jobs.append(
-                            _enqueue_post(
-                                platform, payload, targets, campaign, post, job_to_payload, db_path
-                            )
-                        )
+                # The complete generation was checked before any post is added.
+                # Every video part uses the same draft/options and the existing
+                # queue, with source order followed by part order.
+                part_base = base_time
+                if len(post_groups) > 1:
+                    # Publish-now split posts still need the allocator's gap and
+                    # daily-cap guard (its legacy None path only adds 5 minutes).
+                    part_base = base_time or now_fn().astimezone(timezone.utc).replace(tzinfo=None)
+                for part_index, (part_artifacts, file_ids) in enumerate(post_groups, start=1):
+                    post = campaign_store.add_campaign_post(
+                        campaign.id, platform, account_ids=[account.id], draft=draft,
+                        file_record_ids=file_ids, status=campaign_store.CAMPAIGN_POST_READY, db_path=db_path,
+                    )
+                    account_tt_settings = tiktok_post_settings.get(str(account.id)) or tiktok_post_settings.get(account.id)
+                    payload = _build_payload(
+                        campaign, post, draft, part_artifacts, platform,
+                        tiktok_direct_post=tiktok_direct_post,
+                        tiktok_post_settings=account_tt_settings if isinstance(account_tt_settings, dict) else None,
+                    )
+                    if file_ids is not None:
+                        payload["fileRecordIds"] = file_ids
+                    if len(post_groups) > 1:
+                        payload["partIndex"] = part_index
+                        payload["partCount"] = len(post_groups)
+                    targets = [(f"account:{account.id}", f"campaign_post:{post.id}",
+                                _next_free_slot(account.id, part_base, stagger_offset, booked_slots))]
+                    stagger_offset += 1
+                    queued_jobs.append(_enqueue_post(
+                        platform, payload, targets, campaign, post, job_to_payload, db_path))
 
         # A prep that queued nothing must not regress a campaign that already has
         # queued posts (see campaigns.campaign_has_queued_posts).

@@ -27,15 +27,15 @@ STT, development PostgreSQL, the proxy override, external network and existing
 mounts are preserved; release commands name only the web/worker pair and use
 `--pull never --no-deps`.
 
-Production remains the existing **Python 3.10** `sau-base:slim` image. The app
+Production uses the pinned **Python 3.12.14** `sau-base:slim` image. The app
 build asserts that version and stamps the full SHA in `SAU_BUILD_REVISION` and
 `org.opencontainers.image.revision`. `GIT_SHA` remains a compatible build arg.
 
 ## Shared gates and receipts
 
-Linux prerequisites: Git, Bash, Python 3.10+, **uv 0.12.7**, **Node 22.21.1**,
+Linux prerequisites: Git, Bash, Python 3.12+, **uv 0.12.7**, **Node 22.21.1**,
 Docker with Compose v2, `flock`, and the existing ffmpeg/browser system libraries.
-uv can provision the 3.10/3.12 test interpreters. Restore also needs `fuser`,
+uv can provision the 3.12/3.13 test interpreters. Restore also needs `fuser`,
 `tar`, `sha256sum` and the existing rclone installation.
 
 ```bash
@@ -45,7 +45,7 @@ bash scripts/release-gates.sh verify --receipts /tmp/sau-gate-receipts
 
 The shared recipe runs:
 
-- Linux **3.10 and 3.12**: `uv sync --frozen --extra web --group dev
+- Linux **3.12 and 3.13**: `uv sync --frozen --extra web --group dev
   --no-install-project`, compile/undefined-name checks across maintained Python
   (including `uploader`, `mcp_server`, `sau_app`, scripts and tests), and **all**
   `tests/`, including `test_security_http.py`.

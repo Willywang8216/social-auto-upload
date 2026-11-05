@@ -205,7 +205,8 @@ def test_all_worker_writes_are_fenced_after_recovery_and_reclaim(db_path):
     ({}, 1, "retrying"), ({}, 3, "failed"),
     ({"submission_started": True}, 1, "needs_review"),
     ({"submission_started": True}, 99, "needs_review"),
-    ({"provider_receipt": {"publish_id": "p1"}}, 99, "awaiting_delivery"),
+    ({"provider_receipt": {"publish_id": "p1"}}, 99, "needs_review"),
+    ({"provider_receipt": {"provider": "tiktok", "id": "p1"}}, 99, "awaiting_delivery"),
 ])
 def test_stale_recovery_uses_submission_evidence_before_retry_budget(db_path, checkpoint, attempts, expected):
     job = _enqueue(db_path)

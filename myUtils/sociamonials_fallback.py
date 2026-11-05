@@ -1,63 +1,51 @@
-"""Sociamonials fallback publisher (Phase 4).
+"""Bounded, fail-closed HTTP backup to an explicitly mapped Sociamonials profile.
 
-When a publish target has exhausted its retry budget, the worker can hand the
-post to Sociamonials instead of marking it failed outright.  Sociamonials
-already holds OAuth connections for most of the same brand accounts, so this
-turns a dead X/Facebook/Bluesky target into a delivered one.
+No import-time I/O, automatic retries, caption rewriting, account substitution,
+media re-preparation, or library deletion. The parent worker owns route budgets,
+recovery generations and durable checkpoint persistence. A receipt is acceptance,
+NOT delivery; only the exact destination's confirmed network post is success.
 
-This module speaks the same REST surface the Sociamonials MCP wraps, because
-the worker runs headless in a container where an MCP HTTP handshake would be
-strictly worse.  Mapping to the MCP tool names:
-
-========================================  ==================================
-REST here                                 MCP tool
-========================================  ==================================
-``POST /api/v1/posts``                    ``create_social_post``
-``POST /api/v1/media/uploads`` + PUT +    (no direct equivalent; the agent
-``POST /api/v1/media/uploads/{id}/complete``  upload path)
-``POST /api/v1/media/imports``            ``import_media_from_url``
-profile map below                         ``list_social_profiles``
-========================================  ==================================
-
-The fallback is opt-in: it only fires when ``SAU_SOCIAMONIALS_FALLBACK`` is
-truthy *and* ``SOCIAMONIALS_API_KEY`` is present.  It must never fire for a
-target that is already classified non-retryable for a permanent reason (banned
-subreddit, missing media, ...); use :func:`should_attempt_fallback` for that
-guard.
-
-Nothing here is imported at module import time that performs network I/O, and
-every entry point accepts an injected ``session`` so tests never make a live
-call.
+Public reference/OpenAPI verified read-only on 2026-11-05: validation is
+POST /api/v1/posts with validate_only=true and strict=true, NOT an undocumented
+/posts/validate endpoint. Validation does not fetch media, so local and external
+byte verification below remains mandatory. No draft is created for preflight.
 """
-
 from __future__ import annotations
 
+import copy
 import hashlib
+import ipaddress
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
+import socket
+import sys
+import threading
+import time
+from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
-from myUtils import media_pipeline, media_prep, platform_limits
+from myUtils import delivery as delivery_state
+from myUtils import media_pipeline, platform_limits
+from myUtils import sociamonials_policy as policy
 
 logger = logging.getLogger(__name__)
-
 BASE_URL = "https://www.sociamonials.com"
 POSTS_URL = f"{BASE_URL}/api/v1/posts"
+# This is deliberately the documented dry-run surface, not a guessed endpoint.
+POST_VALIDATE_URL = POSTS_URL
 MEDIA_UPLOADS_URL = f"{BASE_URL}/api/v1/media/uploads"
 MEDIA_ASSETS_URL = f"{BASE_URL}/api/v1/media/assets"
 DEFAULT_WORKSPACE_ID = "26985"
-
 ENABLED_ENV = "SAU_SOCIAMONIALS_FALLBACK"
 API_KEY_ENV = "SOCIAMONIALS_API_KEY"
 WORKSPACE_ENV = "SOCIAMONIALS_WORKSPACE_ID"
-# The teaching brand lives in a SEPARATE Sociamonials workspace (34293) reached
-# with its own agent key. It is isolated from the adult brands by policy, so it
-# is never merged into the default workspace.
 TEACHING_API_KEY_ENV = "SOCIAMONIALS_TEACHING_API_KEY"
 TEACHING_WORKSPACE_ENV = "SOCIAMONIALS_TEACHING_WORKSPACE_ID"
 DEFAULT_TEACHING_WORKSPACE_ID = "34293"
@@ -65,104 +53,62 @@ SECRETS_FILE_ENV = "SOCIAMONIALS_SECRETS_FILE"
 TIMEOUT_ENV = "SAU_SOCIAMONIALS_TIMEOUT"
 ASSET_READY_TIMEOUT_ENV = "SAU_SOCIAMONIALS_ASSET_READY_TIMEOUT"
 DELIVERY_TIMEOUT_ENV = "SAU_SOCIAMONIALS_DELIVERY_TIMEOUT"
-# Reuse an identical file already in the workspace library instead of
-# re-uploading it. This is the fix for the storage_quota_exceeded wall: a
-# retried target used to upload the same video again for every attempt (the
-# post idempotency key is per target, not per file), and the duplicates filled
-# the quota. Default on; set to 0 to force the old upload-every-time path.
 REUSE_ASSETS_ENV = "SAU_SOCIAMONIALS_REUSE_ASSETS"
-
-# How long to wait for the platform to actually accept a post before calling
-# the fallback done. A video hand-off can take a little while; a failed URL
-# usually reports back quickly. 0 disables the check (accept-only semantics).
-DEFAULT_DELIVERY_TIMEOUT = 60.0
-
 DEFAULT_TIMEOUT = 60.0
-# Hosted video is transcoded after the upload completes; attaching it before
-# ``processing_status == "ready"`` is rejected with 422 validation_failed
-# (asset_not_ready). Poll the asset for this long before giving up.
-DEFAULT_ASSET_READY_TIMEOUT = 300.0
-
-# Networks that only publish with media attached (Sociamonials validation).
+DEFAULT_DELIVERY_TIMEOUT = 30.0
+DEFAULT_ASSET_READY_TIMEOUT = 60.0
+MAX_HTTP_REQUESTS = 96
+MAX_HTTP_SECONDS = 300.0
+MAX_POLL_REQUESTS = 12
+MAX_UPLOAD_GRANTS = 20
+MAX_UPLOAD_PARTS = 128
+PART_URL_BATCH = 32
+MAX_REUSE_DETAILS = 8
 _MEDIA_REQUIRED_NETWORKS = {"in", "tiktok", "yt", "pi"}
-
-# Per-network caps, sourced from the single platform-limits table so the
-# fallback cannot drift from the direct publishers. Sociamonials only surfaces
-# an over-limit post as an opaque 422 at create time, so validate first.
-NETWORK_MAX_VIDEO_SECONDS: dict[str, float] = {
-    code: seconds
-    for code, platform in platform_limits.NETWORK_TO_PLATFORM.items()
+NETWORK_MAX_MESSAGE_CHARS = dict(policy.NETWORK_MAX_MESSAGE_CHARS)
+NETWORK_MAX_IMAGES = dict(policy.NETWORK_MAX_IMAGES)
+NETWORK_MAX_VIDEO_SECONDS = {
+    code: seconds for code, platform in policy.NETWORK_TO_PLATFORM.items()
     if (seconds := platform_limits.video_max_seconds(platform))
 }
-NETWORK_MAX_MESSAGE_CHARS: dict[str, int] = {
-    code: chars
-    for code, platform in platform_limits.NETWORK_TO_PLATFORM.items()
-    if (chars := platform_limits.message_max_chars(platform))
-}
-NETWORK_MAX_IMAGES: dict[str, int] = {
-    code: count
-    for code, platform in platform_limits.NETWORK_TO_PLATFORM.items()
-    if (count := platform_limits.max_images(platform))
-}
-
+LINK_IN_MAIN_POST_FORBIDDEN_NETWORKS = frozenset({"tw"})
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v"}
-
-# Hosts that serve an HTML viewer rather than the raw bytes.  The Graph API and
-# Sociamonials' fetch guard both reject these, so never hand one over.
+_CONTEXT_SUFFIXES = {".txt", ".wav", ".mp3", ".flac", ".srt", ".vtt", ".json", ".md"}
+_CONTEXT_ROLES = {"audio", "transcript", "metadata", "support", "subtitle", "manifest", "prompt"}
 _NON_DIRECT_HOSTS = {
-    "drive.google.com",
-    "docs.google.com",
-    "photos.google.com",
-    "www.google.com",
-    "localhost",
-    "127.0.0.1",
-    "0.0.0.0",
+    "drive.google.com", "docs.google.com", "photos.google.com", "drive.usercontent.google.com",
+    "dropbox.com", "www.dropbox.com", "localhost", "127.0.0.1", "0.0.0.0",
 }
+_SHA_RE = re.compile(r"[0-9a-f]{64}")
+_SAFE_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,79}")
+_PLACEHOLDER_IDS = {"", "0", "null", "none", "false", "true", "unknown", "undefined", "pending", "n/a",
+                    "delivered", "published", "failed", "processing", "draft", "scheduled", "queued", "accepted", "error", "success", "ok"}
 
-# SAU account id -> Sociamonials destination.  Mirrors the plan map, corrected
-# with the full ``socialupload-groups.json`` profile refs so the EN and ZH
-# Bluesky accounts do not collapse onto one profile.  ``workspace_id`` /
-# ``api_key_env`` override the global workspace/key for the teaching brand.
+# Existing operational mappings are preserved, not repaired by similar names.
+# Live grants are checked on EVERY new publication. Per-account config wins.
 _TEACHING = {"workspace_id": DEFAULT_TEACHING_WORKSPACE_ID, "api_key_env": TEACHING_API_KEY_ENV}
 SAU_ACCOUNT_TO_SOCIAMONIALS: dict[int, dict[str, Any]] = {
-    # Facebook
     11: {"network": "fb", "profile_refs": ["19784|175913"], "name": "Nakedwill2"},
     64: {"network": "fb", "profile_refs": ["30186|255814"], "name": "Sexualwill"},
-    # Instagram
     72: {"network": "in", "profile_refs": ["52817"], "name": "nakedwill8"},
     75: {"network": "in", "profile_refs": ["82894"], "name": "sexualwill8"},
-    # X / Twitter
     123: {"network": "tw", "profile_refs": ["13425"], "name": "model_will"},
     124: {"network": "tw", "profile_refs": ["13426"], "name": "nudeweiwei"},
     77: {"network": "tw", "profile_refs": ["14100"], "name": "will_sexual"},
-    # Account 103 (光光) publishes as nakedhappylife on X. Without this entry the
-    # fallback raised "no Sociamonials profile is mapped", so every 103 target
-    # failed outright once the X API credits ran out - even though Sociamonials
-    # already holds a connected, publishable profile for the same handle.
     103: {"network": "tw", "profile_refs": ["14099"], "name": "nakedhappylife"},
-    # Bluesky (EN + ZH are distinct profiles)
     118: {"network": "blsk", "profile_refs": ["1280"], "name": "nakedwill.bsky.social"},
     119: {"network": "blsk", "profile_refs": ["1279"], "name": "nudeweiwei.bsky.social"},
     120: {"network": "blsk", "profile_refs": ["1281"], "name": "sexualwill.bsky.social"},
     121: {"network": "blsk", "profile_refs": ["1282"], "name": "nakedhappylife.bsky.social"},
-    # Threads
     62: {"network": "thrd", "profile_refs": ["361"], "name": "nakedwill8"},
     42: {"network": "thrd", "profile_refs": ["1939"], "name": "sexualwill8"},
-    # TikTok
     109: {"network": "tiktok", "profile_refs": ["3917"], "name": "Nakedwill"},
-    # YouTube
     110: {"network": "yt", "profile_refs": ["13223"], "name": "itsnakedwill"},
-    # --- Teaching connector (workspace 34293, its own key).  Isolated from the
-    # adult brands: never mix a teaching profile with nakedwill/sexualwill. ---
     43: {"network": "in", "profile_refs": ["70076"], "name": "supercool_bd", **_TEACHING},
     58: {"network": "fb", "profile_refs": ["26317|220114"], "name": "威威教學", **_TEACHING},
     61: {"network": "thrd", "profile_refs": ["1102"], "name": "supercool_bd", **_TEACHING},
     100: {"network": "tiktok", "profile_refs": ["5800"], "name": "weiwei_wang0", **_TEACHING},
-    # 107 is @willytutordev. The teaching workspace holds TWO X profiles and this
-    # used to point at 16087 (@weiwei_wang0), so every 107 post went to the wrong
-    # X handle. Verified 2026-10-14 via the Sociamonials list_social_profiles MCP
-    # tool: the connected profile for @willytutordev is 17650.
     107: {"network": "tw", "profile_refs": ["17650"], "name": "willytutordev", **_TEACHING},
     108: {"network": "yt", "profile_refs": ["11020"], "name": "威威🌞", **_TEACHING},
     125: {"network": "blsk", "profile_refs": ["1278"], "name": "iamwillywang.bsky.social", **_TEACHING},
@@ -170,229 +116,177 @@ SAU_ACCOUNT_TO_SOCIAMONIALS: dict[int, dict[str, Any]] = {
 
 
 class SociamonialsFallbackError(RuntimeError):
-    """A fallback attempt failed; the caller should record the target failed."""
+    """Safe-to-report error, with explicit retryability and submission safety."""
+
+    def __init__(self, message: str, *, retryable: bool = False, details: Mapping[str, Any] | None = None):
+        super().__init__(message)
+        self.retryable = bool(retryable)
+        self.details = {"provider": "sociamonials", "retrySafe": True, **dict(details or {})}
 
 
 class SociamonialsNotConfigured(SociamonialsFallbackError):
-    """The fallback is switched off or has no API key."""
+    """No authorized/configured route; never guess a different credential."""
 
 
-# --------------------------------------------------------------------------- #
-# Configuration
-# --------------------------------------------------------------------------- #
-
-def _truthy(value: str | None) -> bool:
+def _truthy(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def get_api_key(env: Mapping[str, str] | None = None) -> str:
-    """Return the API key from the environment, or the secrets file.
+def _testing() -> bool:
+    return _truthy(os.environ.get("SAU_TESTING")) or "pytest" in sys.modules or bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
-    The secrets-file fallback exists for local CLI use; the container is
-    expected to receive ``SOCIAMONIALS_API_KEY`` through its environment.
-    """
-    environ = env if env is not None else os.environ
-    key = str(environ.get(API_KEY_ENV) or "").strip()
+
+def _key_for_env(env_name: str, env: Mapping[str, str] | None = None) -> str:
+    environ = os.environ if env is None else env
+    key = str(environ.get(env_name) or "").strip()
     if key:
         return key
     secrets_path = str(environ.get(SECRETS_FILE_ENV) or "").strip()
-    if not secrets_path and env is None:
+    # Explicit files are supported in tests; implicit HOME secret reads are not.
+    if not secrets_path and env is None and not _testing():
         default_path = Path.home() / ".claude" / "secrets.json"
-        secrets_path = str(default_path) if default_path.exists() else ""
+        if default_path.is_file():
+            secrets_path = str(default_path)
     if secrets_path:
         try:
-            payload = json.loads(Path(secrets_path).read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                return str(payload.get(API_KEY_ENV) or "").strip()
+            data = json.loads(Path(secrets_path).read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return str(data.get(env_name) or "").strip()
         except (OSError, ValueError):
-            logger.debug("could not read Sociamonials secrets file %s", secrets_path)
+            logger.debug("Could not read the explicitly selected Sociamonials credential file")
     return ""
 
 
-def get_workspace_id(env: Mapping[str, str] | None = None) -> str:
-    environ = env if env is not None else os.environ
-    return str(environ.get(WORKSPACE_ENV) or DEFAULT_WORKSPACE_ID).strip()
+def get_api_key(env: Mapping[str, str] | None = None) -> str:
+    return _key_for_env(API_KEY_ENV, env)
 
 
 def get_teaching_api_key(env: Mapping[str, str] | None = None) -> str:
-    """The teaching workspace's agent key (separate Sociamonials workspace)."""
-    environ = env if env is not None else os.environ
-    return str(environ.get(TEACHING_API_KEY_ENV) or "").strip()
+    return _key_for_env(TEACHING_API_KEY_ENV, env)
+
+
+def get_workspace_id(env: Mapping[str, str] | None = None) -> str:
+    return str((os.environ if env is None else env).get(WORKSPACE_ENV) or DEFAULT_WORKSPACE_ID).strip()
 
 
 def get_teaching_workspace_id(env: Mapping[str, str] | None = None) -> str:
-    environ = env if env is not None else os.environ
-    return str(environ.get(TEACHING_WORKSPACE_ENV) or DEFAULT_TEACHING_WORKSPACE_ID).strip()
+    return str((os.environ if env is None else env).get(TEACHING_WORKSPACE_ENV) or DEFAULT_TEACHING_WORKSPACE_ID).strip()
 
 
-def resolve_credentials(
-    mapping: Mapping[str, Any] | None,
-    *,
-    api_key: str | None = None,
-    workspace_id: str | None = None,
-) -> tuple[str, str]:
-    """Resolve the ``(api_key, workspace_id)`` for one mapping.
+def resolve_credentials(mapping: Mapping[str, Any] | None, *, api_key: str | None = None,
+                        workspace_id: str | None = None) -> tuple[str, str]:
+    """Explicit key argument, otherwise ONLY the selected env/file key.
 
-    Precedence for the key: explicit argument, the mapping's ``api_key_env``
-    (eg. the teaching key), then the global key.  The workspace follows the
-    same order, and a mapping that names the teaching key defaults to the
-    teaching workspace even when the env var is unset.
+    A named api_key_env never falls through to the global key. Teaching's
+    workspace cannot use the adult/default credential, even if it is present.
     """
-    key = str(api_key or "").strip()
-    env_name = ""
-    if mapping:
-        env_name = str(mapping.get("api_key_env") or "").strip()
-    if not key and env_name:
-        key = str(os.environ.get(env_name) or "").strip()
-    if not key:
-        key = get_api_key()
-
-    ws = str(workspace_id or "").strip()
-    if not ws and mapping:
-        ws = str(mapping.get("workspace_id") or "").strip()
-    if not ws and env_name == TEACHING_API_KEY_ENV:
-        ws = get_teaching_workspace_id()
+    entry = mapping or {}
+    env_name = str(entry.get("api_key_env") or "").strip()
+    ws = str(workspace_id or entry.get("workspace_id") or "").strip()
     if not ws:
-        ws = get_workspace_id()
+        ws = get_teaching_workspace_id() if env_name == TEACHING_API_KEY_ENV else get_workspace_id()
+    if ws == DEFAULT_TEACHING_WORKSPACE_ID:
+        if env_name and env_name != TEACHING_API_KEY_ENV:
+            raise SociamonialsNotConfigured("Teaching workspace requires its isolated credential selector")
+        env_name = TEACHING_API_KEY_ENV
+    if env_name == TEACHING_API_KEY_ENV and ws != get_teaching_workspace_id():
+        raise SociamonialsNotConfigured("Teaching credential cannot be routed to another workspace")
+    key = str(api_key or "").strip() or _key_for_env(env_name or API_KEY_ENV)
     return key, ws
 
 
 def is_configured(env: Mapping[str, str] | None = None) -> bool:
-    """True when any usable agent key is available."""
-    environ = env if env is not None else os.environ
-    return bool(get_api_key(env) or get_teaching_api_key(environ))
+    return bool(get_api_key(env) or get_teaching_api_key(env))
 
 
 def is_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """True only when the opt-in flag is set *and* the API key is present."""
-    environ = env if env is not None else os.environ
-    return _truthy(environ.get(ENABLED_ENV)) and is_configured(environ)
+    return _truthy((os.environ if env is None else env).get(ENABLED_ENV)) and is_configured(env)
 
 
-def should_attempt_fallback(
-    *,
-    retryable: bool | None,
-    attempts: int,
-    max_attempts: int,
-    enabled: bool | None = None,
-) -> bool:
-    """Guard for the worker: only after a genuine retry-budget exhaustion.
-
-    ``retryable is False`` means the failure was classified permanent (banned
-    subreddit, missing media, dead credential, ...).  Those must never be
-    silently re-routed to a different account, so the fallback is skipped.
-    """
-    if retryable is False:
-        return False
-    if attempts < max_attempts:
+def should_attempt_fallback(*, retryable: bool | None, attempts: int, max_attempts: int,
+                            enabled: bool | None = None) -> bool:
+    """Legacy budget guard. The worker separately proves backup eligibility."""
+    if retryable is False or attempts < max_attempts:
         return False
     return is_enabled() if enabled is None else bool(enabled)
 
 
-# --------------------------------------------------------------------------- #
-# Mapping
-# --------------------------------------------------------------------------- #
-
 def _account_value(account: Any, key: str, default: Any = None) -> Any:
-    if isinstance(account, Mapping):
-        return account.get(key, default)
-    return getattr(account, key, default)
+    return account.get(key, default) if isinstance(account, Mapping) else getattr(account, key, default)
+
+
+def _platform_network(platform: str | None) -> str | None:
+    text = str(platform or "").strip().lower()
+    if text == "google_business_profile":
+        return "gmb"
+    return next((network for network, name in policy.NETWORK_TO_PLATFORM.items() if name == text), None)
 
 
 def _normalise_entry(entry: Any) -> dict[str, Any] | None:
-    """Accept a few operator-friendly config shapes and return one mapping."""
     if not isinstance(entry, Mapping):
         return None
-    network = str(entry.get("network") or "").strip().lower()
-    refs = entry.get("profile_refs")
-    if refs is None and entry.get("profile_ref") is not None:
-        refs = [entry.get("profile_ref")]
-    if isinstance(refs, str):
+    refs = entry.get("profile_refs", entry.get("profile_ref"))
+    if isinstance(refs, (str, int)) and not isinstance(refs, bool):
         refs = [refs]
-    refs = [str(ref).strip() for ref in (refs or []) if str(ref).strip()]
-    if not refs:
+    if not isinstance(refs, (list, tuple)) or any(isinstance(ref, bool) or not isinstance(ref, (str, int)) for ref in refs):
         return None
-    workspace_id = str(entry.get("workspace_id") or "").strip()
-    api_key_env = str(entry.get("api_key_env") or "").strip()
-    result = {
-        "network": network,
-        "profile_refs": refs,
-        "name": str(entry.get("name") or "").strip() or None,
-    }
-    if workspace_id:
-        result["workspace_id"] = workspace_id
-    if api_key_env:
-        result["api_key_env"] = api_key_env
+    refs = [str(ref).strip() for ref in refs]
+    if not refs or any(not ref or len(ref) > 128 or not re.fullmatch(r"[A-Za-z0-9_.:|@-]+", ref) for ref in refs):
+        return None
+    result = {"network": str(entry.get("network") or "").strip().lower(), "profile_refs": refs,
+              "name": str(entry.get("name") or "").strip() or None}
+    for key in ("workspace_id", "api_key_env"):
+        if entry.get(key) is not None:
+            text = str(entry[key]).strip()
+            if not text:
+                return None
+            result[key] = text
     return result
 
 
 def _from_settings(settings: Any, account_id: int | None) -> dict[str, Any] | None:
-    if not isinstance(settings, Mapping):
+    if not isinstance(settings, Mapping) or not isinstance(settings.get("sociamonials"), Mapping):
         return None
-    raw = settings.get("sociamonials")
-    if not isinstance(raw, Mapping):
-        return None
-    # shapes: {accountId: {...}} or {"accounts": {accountId: {...}}} or a single entry
-    if "network" in raw:
+    raw = settings["sociamonials"]
+    if "network" in raw or "profile_refs" in raw or "profile_ref" in raw:
         return _normalise_entry(raw)
     accounts = raw.get("accounts") if isinstance(raw.get("accounts"), Mapping) else raw
-    if account_id is not None:
-        found = accounts.get(account_id)
-        if found is None:
-            found = accounts.get(str(account_id))
-        if isinstance(found, Mapping):
-            merged = dict(found)
-            merged.setdefault("network", raw.get("network"))
-            return _normalise_entry(merged)
-    return None
+    found = accounts.get(account_id, accounts.get(str(account_id))) if account_id is not None else None
+    if not isinstance(found, Mapping):
+        return None
+    merged = dict(found)
+    for key in ("network", "workspace_id", "api_key_env"):
+        if key in raw:
+            merged.setdefault(key, raw[key])
+    return _normalise_entry(merged)
 
 
-def resolve_mapping(
-    account_id: int | None,
-    *,
-    platform: str | None = None,
-    account: Any = None,
-    settings: Any = None,
-) -> dict[str, Any] | None:
-    """Resolve an SAU account to ``{network, profile_refs, name}``.
+def resolve_mapping(account_id: int | None, *, platform: str | None = None, account: Any = None,
+                    settings: Any = None) -> dict[str, Any] | None:
+    """Account override, profile override, then unchanged historical mapping.
 
-    Precedence: per-account config, then profile settings, then the built-in
-    map.  An explicit mapping must agree with the platform when both are known.
+    A malformed EXPLICIT mapping is a denial, not permission to use a built-in.
+    Live verification below prevents stale/banned/disconnected destinations.
     """
-    if account is None and account_id is not None:
-        account = {"id": account_id}
-
-    config = _account_value(account, "config", None) if account is not None else None
-    if isinstance(config, Mapping):
-        configured = _normalise_entry(config.get("sociamonials"))
-        if configured:
-            if not configured.get("network"):
-                configured["network"] = _platform_network(platform) or configured["network"]
-            return configured
-
-    resolved = _from_settings(settings, account_id)
-    if resolved:
-        if not resolved.get("network"):
-            resolved["network"] = _platform_network(platform) or resolved["network"]
-        return resolved
-
-    if account_id is not None:
-        builtin = SAU_ACCOUNT_TO_SOCIAMONIALS.get(int(account_id))
-        if builtin:
-            entry = _normalise_entry(builtin)
-            if entry and not entry.get("network"):
-                entry["network"] = _platform_network(platform) or entry["network"]
-            return entry
-    return None
+    config = _account_value(account, "config", {}) or {}
+    if isinstance(config, Mapping) and "sociamonials" in config:
+        entry = _normalise_entry(config["sociamonials"])
+    else:
+        entry = _from_settings(settings, account_id)
+        if entry is None:
+            raw = (settings or {}).get("sociamonials") if isinstance(settings, Mapping) else None
+            accounts = raw.get("accounts", raw) if isinstance(raw, Mapping) else {}
+            if isinstance(raw, Mapping) and ("network" in raw or str(account_id) in accounts or account_id in accounts):
+                return None
+            entry = _normalise_entry(SAU_ACCOUNT_TO_SOCIAMONIALS.get(account_id))
+    if entry and not entry["network"]:
+        entry["network"] = _platform_network(platform) or ""
+    return entry
 
 
 def prefers_sociamonials(account: Any, *, platform: str) -> bool:
-    """Explicit per-account routing; never infer it from a revoked direct token.
-
-    A primary managed route requires one operator-verified destination in the
-    account config. Receipt resumption is handled separately by the worker.
-    """
-    config = _account_value(account, "config", None) or {}
+    """Preserve explicit primary routing; never infer it from failed native auth."""
+    config = _account_value(account, "config", {}) or {}
     if not isinstance(config, Mapping):
         raise SociamonialsNotConfigured("Invalid publishing route configuration")
     provider = str(config.get("publishingProvider") or "direct").strip().lower()
@@ -400,1266 +294,1491 @@ def prefers_sociamonials(account: Any, *, platform: str) -> bool:
         return False
     if provider != "sociamonials":
         raise SociamonialsNotConfigured("Unsupported configured publishing provider")
-    mapping = _normalise_entry(config.get("sociamonials"))
-    network = _platform_network(platform)
-    if (not network or not mapping or mapping.get("network") != network
-            or len(mapping["profile_refs"]) != 1):
-        raise SociamonialsNotConfigured(
-            "Primary Sociamonials route requires one explicit matching-platform destination"
-        )
+    entry = _normalise_entry(config.get("sociamonials"))
+    if not entry or entry["network"] != _platform_network(platform) or len(entry["profile_refs"]) != 1:
+        raise SociamonialsNotConfigured("Primary Sociamonials route requires one explicit matching-platform destination")
     return True
 
 
-def _platform_network(platform: str | None) -> str | None:
-    mapping = {
-        "facebook": "fb",
-        "twitter": "tw",
-        "bluesky": "blsk",
-        "threads": "thrd",
-        "tiktok": "tiktok",
-        "youtube": "yt",
-        "instagram": "in",
-        "linkedin": "ln",
-        "pinterest": "pi",
-    }
-    return mapping.get(str(platform or "").strip().lower())
-
-
-# --------------------------------------------------------------------------- #
-# Media helpers
-# --------------------------------------------------------------------------- #
-
-def _has_media_suffix(url: str) -> bool:
-    path = urlparse(url).path.lower()
-    return path.endswith(tuple(_IMAGE_SUFFIXES | _VIDEO_SUFFIXES))
-
-
-def is_direct_media_url(url: str | None) -> bool:
-    """Best-effort check that ``url`` is a raw file URL, not a viewer page.
-
-    The Graph API error this fallback exists to work around is exactly a
-    non-direct URL, so a share/page link must never be treated as usable media.
-    """
-    raw = str(url or "").strip()
-    if not raw.lower().startswith("https://"):
-        return False
-    parsed = urlparse(raw)
-    host = (parsed.hostname or "").lower()
-    if not host or host in _NON_DIRECT_HOSTS:
-        return False
-    if host.endswith(".google.com") or host.endswith(".googleusercontent.com"):
-        # Drive viewer links; the raw download host (drive.usercontent.google.com)
-        # is allowed through the suffix check below.
-        if "usercontent" not in host:
-            return False
-    if "/file/d/" in parsed.path:
-        return False
-    return _has_media_suffix(raw)
-
-
-def _normalize_public_url(url: str) -> str:
-    """Percent-encode characters a platform's media fetcher rejects.
-
-    Stored artifacts with a literal space (e.g. ``SFW clip.mp4``) otherwise
-    reach Sociamonials' fetch guard as an invalid URL and fail with
-    'Video URL not accessible after retries'. Only the unsafe characters are
-    encoded, so an already-encoded URL is unchanged.
-    """
-    text = str(url or "").strip()
-    if not text:
-        return text
-    parts = urlparse(text)
-    if not parts.scheme or not parts.netloc:
-        return text
-    return urlunparse(
-        (
-            parts.scheme,
-            parts.netloc,
-            quote(parts.path, safe="/%:@!$&'()*+,;="),
-            parts.params,
-            quote(parts.query, safe="=&%?+:;,/"),
-            quote(parts.fragment, safe=""),
-        )
-    )
-
-
-def _verify_remote_media(url: str, session: Any, *, timeout: float) -> bool:
-    """HEAD ``url`` and reject only a clear HTML/error response.
-
-    A server that refuses HEAD (405/501) or cannot be reached is not proof the
-    URL is bad, so it is allowed through; an explicit HTML content type or an
-    outright error status is the only thing treated as a failure.
-    """
+def _bounded_timeout(value: Any, default: float, maximum: float = 60.0, *, zero: bool = False) -> float:
     try:
-        response = session.head(url, timeout=timeout, allow_redirects=True)
-    except Exception:  # noqa: BLE001 - an unverifiable URL is not proof of anything
-        logger.warning("could not HEAD media url %s for the fallback", url)
-        return True
-    status = int(getattr(response, "status_code", 0) or 0)
-    if status in {405, 501}:
-        return True
-    if status >= 400 or status == 0:
-        return False
-    content_type = str(
-        (getattr(response, "headers", {}) or {}).get("Content-Type") or ""
-    ).lower()
-    if content_type.startswith(("image/", "video/", "application/octet-stream")):
-        return True
-    return not content_type.startswith("text/html")
-
-
-def _media_kind(path: str) -> str:
-    suffix = Path(path).suffix.lower()
-    if suffix in _IMAGE_SUFFIXES:
-        return "image"
-    if suffix in _VIDEO_SUFFIXES:
-        return "video"
-    guessed = (mimetypes.guess_type(path)[0] or "").lower()
-    return "video" if guessed.startswith("video/") else "image"
-
-
-def _assert_media_size(network: str, size_bytes: int) -> None:
-    """Refuse media larger than the target network's file cap."""
-    platform = platform_limits.NETWORK_TO_PLATFORM.get(network)
-    max_mb = platform_limits.media_max_mb(platform) if platform else None
-    if max_mb and size_bytes and size_bytes > max_mb * 1_000_000:
-        raise SociamonialsFallbackError(
-            f"{network} media {size_bytes / 1_000_000:.0f} MB exceeds the "
-            f"{max_mb} MB limit"
-        )
-
-
-def _assert_video_duration(network: str, local_path: str | None) -> None:
-    """Refuse a video longer than the target network allows.
-
-    Only the local file can be probed, so a public-URL-only video is passed
-    through and the network's own rejection (if any) still applies. A probe
-    failure is not treated as a rejection.
-    """
-    max_seconds = NETWORK_MAX_VIDEO_SECONDS.get(network)
-    if not max_seconds or not local_path:
-        return
-    path = Path(str(local_path))
-    if not path.is_file():
-        return
-    try:
-        from myUtils import media_pipeline
-
-        duration = media_pipeline.probe_video_duration(str(path))
-    except Exception as exc:  # noqa: BLE001 - a probe failure is not a rejection
-        logger.warning("could not probe video duration for the fallback: %s", exc)
-        return
-    if duration and duration > max_seconds:
-        raise SociamonialsFallbackError(
-            f"{network} video duration {duration:.0f}s exceeds the "
-            f"{int(max_seconds)}s limit"
-        )
-
-
-def _split_for_network(
-    network: str, local_path: str | None, *, target_id: int | None = None
-) -> str | None:
-    """Split an over-long video into parts the target network accepts.
-
-    The fallback used to refuse a video longer than the target network's cap, so
-    a 222s clip against X's 140s limit failed permanently even though the direct
-    path has always split such a video into per-part posts. Splitting here keeps
-    the fallback's promise - deliver when the direct path cannot - instead of
-    turning a solvable length problem into a lost publish.
-
-    Returns the path of the FIRST part to publish now; the caller records the
-    remaining parts as warnings. Returns ``None`` when the video already fits,
-    when it cannot be probed, or when a split is not possible, in which case the
-    original refusal stands.
-    """
-    max_seconds = NETWORK_MAX_VIDEO_SECONDS.get(network)
-    if not max_seconds or not local_path:
-        return None
-    path = Path(str(local_path))
-    if not path.is_file():
-        return None
-    try:
-        duration = media_pipeline.probe_video_duration(str(path))
-    except Exception as exc:  # noqa: BLE001 - a probe failure is not a rejection
-        logger.warning("could not probe video duration for the fallback: %s", exc)
-        return None
-    if not duration or duration <= max_seconds:
-        return None
-    parts = media_prep.split_to_seconds(
-        str(path),
-        path.parent,
-        max_seconds,
-    )
-    if len(parts) <= 1:
-        return None
-    logger.info(
-        "sociamonials fallback split a %.0fs video into %d part(s) for %s (cap %.0fs)",
-        duration,
-        len(parts),
-        network,
-        max_seconds,
-    )
-    return str(parts[0])
-
-
-def collect_media(
-    payload: Mapping[str, Any] | None, media_paths: Sequence[str] | None = None
-) -> list[dict[str, Any]]:
-    """Normalise artifacts + explicit paths into ``{local_path, public_url, kind}``."""
-    items: list[dict[str, Any]] = []
-    artifacts = (payload or {}).get("artifacts") or []
-    for artifact in artifacts:
-        if not isinstance(artifact, Mapping):
-            continue
-        local_path = str(artifact.get("local_path") or "").strip()
-        public_url = str(artifact.get("public_url") or "").strip()
-        role = ""
-        meta = artifact.get("metadata")
-        if isinstance(meta, Mapping):
-            role = str(meta.get("role") or "").strip().lower()
-        kind = "video" if role == "video" else ("image" if role == "image" else "")
-        if not kind:
-            kind = _media_kind(local_path or public_url)
-        items.append(
-            {"local_path": local_path or None, "public_url": public_url or None, "kind": kind}
-        )
-    if not items:
-        for path in media_paths or []:
-            text = str(path or "").strip()
-            if text:
-                items.append(
-                    {"local_path": text, "public_url": None, "kind": _media_kind(text)}
-                )
-    return items
-
-
-def _sha256(local_path: Path) -> str:
-    digest = hashlib.sha256()
-    with local_path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _guess_mime(local_path: Path, kind: str) -> str:
-    guessed = mimetypes.guess_type(local_path.name)[0]
-    if guessed:
-        return guessed
-    return "video/mp4" if kind == "video" else "image/jpeg"
-
-
-def _asset_id(asset: Mapping[str, Any] | None) -> int | None:
-    if not isinstance(asset, Mapping):
-        return None
-    try:
-        return int(asset.get("asset_id"))
+        number = float(value)
     except (TypeError, ValueError):
-        return None
+        number = default
+    if not math.isfinite(number):
+        number = default
+    return max(0.0 if zero else 0.1, min(number, maximum))
 
-
-def _reuse_assets_enabled() -> bool:
-    """Whether to look for an existing library asset before uploading.
-
-    Defaults **off**. Reuse matches a library asset by filename/size, and an
-    asset that was created from a URL import is delivered by Sociamonials from
-    that URL; when the object later moved, delivery failed forever with "Video
-    URL not accessible" (observed on X targets 3391/3399). Uploading the local
-    bytes instead guarantees byte-backed delivery. Set
-    ``SAU_SOCIAMONIALS_REUSE_ASSETS=1`` to re-enable reuse.
-    """
-    raw = os.environ.get(REUSE_ASSETS_ENV)
-    return False if raw is None else _truthy(raw)
-
-
-def _asset_preference(asset: Mapping[str, Any]) -> tuple[int, str, int]:
-    """Sort key picking the copy of a file to reuse: starred, then oldest."""
-    return (
-        0 if asset.get("starred") else 1,
-        str(asset.get("created_at") or asset.get("created") or ""),
-        _asset_id(asset) or 0,
-    )
-
-
-def select_reusable_asset(
-    assets: Sequence[Mapping[str, Any]] | None,
-    *,
-    filename: str,
-    size_bytes: int,
-    kind: str,
-    exclude_ids: set[int] | None = None,
-) -> Mapping[str, Any] | None:
-    """Pick an existing identical library asset to reuse, or ``None``.
-
-    An asset is reusable only when the filename matches exactly, the byte size
-    matches exactly, the media kind agrees and the asset is ready. That is the
-    same ``(filename, size_bytes)`` identity the de-duplication utility uses, so
-    a genuine different file that merely shares a name is never collapsed onto
-    another. Preference is starred first, then the oldest upload, then the
-    lowest asset id, so repeated retries converge on one stable asset.
-    """
-    target = str(filename or "").strip()
-    try:
-        target_size = int(size_bytes)
-    except (TypeError, ValueError):
-        return None
-    if not target or target_size <= 0:
-        return None
-    best: Mapping[str, Any] | None = None
-    for asset in assets or []:
-        if not isinstance(asset, Mapping):
-            continue
-        if str(asset.get("filename") or "").strip() != target:
-            continue
-        try:
-            asset_size = int(asset.get("size_bytes"))
-        except (TypeError, ValueError):
-            continue
-        if asset_size != target_size:
-            continue
-        media_type = str(asset.get("media_type") or "").strip().lower()
-        if kind and media_type and media_type != kind:
-            continue
-        status = str(asset.get("processing_status") or "ready").strip().lower()
-        if status not in {"", "ready"}:
-            continue
-        asset_id = _asset_id(asset)
-        if asset_id is None or (exclude_ids and asset_id in exclude_ids):
-            continue
-        if best is None or _asset_preference(asset) < _asset_preference(best):
-            best = asset
-    return best
-
-
-def _lookup_reusable_asset(
-    session: Any,
-    headers: Mapping[str, str],
-    workspace_id: str,
-    *,
-    filename: str,
-    size_bytes: int,
-    kind: str,
-    timeout: float,
-) -> Mapping[str, Any] | None:
-    """Ask the workspace library for a file matching ``filename``/size.
-
-    Never raises: a plan without library browsing answers
-    ``asset_access_not_enabled`` and a lookup is only an optimisation, so any
-    failure falls through to the ordinary upload instead of failing a publish.
-    """
-    if not _reuse_assets_enabled():
-        return None
-    workspace = _workspace_int(workspace_id)
-
-    # Page through the library rather than reading one page of 200. The whole
-    # point of this lookup is to avoid re-uploading media that already exists,
-    # and the incident it was written for was duplicate uploads filling a 4 GB
-    # quota. With a single page, once the library grew past 200 assets the match
-    # would be missed and the file re-uploaded - re-inflating the quota it exists
-    # to protect. ``_REUSE_LOOKUP_MAX_PAGES`` bounds the work; a search filter is
-    # still sent so the common case returns on page one.
-    max_pages = _reuse_lookup_max_pages()
-    page_size = 200
-    for page in range(max_pages):
-        params: dict[str, Any] = {
-            "search": filename,
-            "limit": page_size,
-            "offset": page * page_size,
-        }
-        if workspace is not None:
-            params["workspace_registration_id"] = workspace
-        try:
-            response = session.get(
-                MEDIA_ASSETS_URL, headers=dict(headers), params=params, timeout=timeout
-            )
-        except Exception as exc:  # noqa: BLE001 - lookup is an optimisation
-            logger.warning("sociamonials media reuse lookup failed: %s", exc)
-            return None
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400 or status == 0:
-            logger.info(
-                "sociamonials media reuse lookup HTTP %s; uploading instead", status
-            )
-            return None
-        body = _json_body(response)
-        rows = body.get("assets")
-        if not isinstance(rows, list):
-            rows = []
-        match = select_reusable_asset(
-            rows, filename=filename, size_bytes=size_bytes, kind=kind
-        )
-        if match is not None:
-            return match
-        # A short page is the last page: stop rather than issue a request that
-        # can only return nothing.
-        if len(rows) < page_size:
-            return None
-    logger.info(
-        "sociamonials media reuse lookup exhausted %s page(s) without a match "
-        "for %s; uploading",
-        max_pages,
-        filename,
-    )
-    return None
-
-
-def _reuse_lookup_max_pages() -> int:
-    """How many library pages the reuse lookup may read (default 5 = 1000 assets)."""
-    raw = os.environ.get("SAU_SOCIAMONIALS_REUSE_MAX_PAGES")
-    try:
-        value = int(str(raw).strip()) if raw not in (None, "") else 5
-    except (TypeError, ValueError):
-        value = 5
-    return max(1, min(value, 50))
-
-
-def _resolve_local_media(
-    session: Any,
-    headers: Mapping[str, str],
-    workspace_id: str,
-    local_path: Path,
-    *,
-    timeout: float,
-    db_path: Any = None,
-    used_assets: list[dict[str, Any]] | None = None,
-) -> str:
-    """Return an ``asset://<id>`` for ``local_path``, reusing when possible.
-
-    This is the single place the reuse-vs-upload decision is made, so the
-    upload path cannot silently regress into re-uploading a file already in
-    the library. Both branches log which one happened.
-
-    Before a *new* upload the quota guard reads the workspace storage block and,
-    when the file will not fit, reclaims already-delivered assets first. That is
-    the policy the operator asked for: add an asset, publish it, then add the
-    next one - a full library never becomes a wall that stops publishing. When
-    it still will not fit, the guard raises a clear error naming the numbers
-    instead of leaving the caller with an opaque ``storage_quota_exceeded``.
-    A reuse makes no new bytes, so it does not need the guard.
-    """
-    kind = _media_kind(str(local_path))
-    size_bytes = local_path.stat().st_size
-    reusable = _lookup_reusable_asset(
-        session,
-        headers,
-        workspace_id,
-        filename=local_path.name,
-        size_bytes=size_bytes,
-        kind=kind,
-        timeout=timeout,
-    )
-    reused_id = _asset_id(reusable)
-    if reused_id is not None:
-        reference = f"asset://{reused_id}"
-        logger.info(
-            "sociamonials media reused asset://%s for %s (%.1f MB)",
-            reused_id,
-            local_path.name,
-            size_bytes / 1_000_000,
-        )
-    else:
-        _guard_storage_for_upload(
-            session,
-            headers,
-            workspace_id,
-            local_path=local_path,
-            size_bytes=size_bytes,
-            db_path=db_path,
-            timeout=timeout,
-        )
-        reference = _upload_local_media(
-            session, headers, workspace_id, local_path, timeout=timeout
-        )
-        logger.info(
-            "sociamonials media uploaded %s as %s (%.1f MB)",
-            local_path.name,
-            reference,
-            size_bytes / 1_000_000,
-        )
-    if used_assets is not None:
-        from myUtils import sociamonials_reclaim as reclaim
-
-        entry = reclaim.collect_used_assets(
-            reference, local_path=local_path, kind=kind
-        )
-        if entry is not None and entry.get("asset_id") not in {
-            item.get("asset_id") for item in used_assets
-        }:
-            used_assets.append(entry)
-    return reference
-
-
-def _guard_storage_for_upload(
-    session: Any,
-    headers: Mapping[str, str],
-    workspace_id: str,
-    *,
-    local_path: Path,
-    size_bytes: int,
-    db_path: Any,
-    timeout: float,
-) -> None:
-    """Reclaim delivered assets when needed to fit ``local_path``.
-
-    Best-effort by design: a storage read that fails (unavailable accounting)
-    must not stop the upload, because the platform itself does not refuse for
-    storage in that state. A genuine "still will not fit" raises, which is the
-    one case the caller must see rather than an opaque 422 later.
-    """
-    if db_path is None:
-        return
-    try:
-        from myUtils import sociamonials_reclaim as reclaim
-
-        reclaim.ensure_headroom(
-            session=session,
-            headers=headers,
-            workspace_id=workspace_id,
-            db_path=db_path,
-            size_bytes=size_bytes,
-            timeout=timeout,
-        )
-    except SociamonialsFallbackError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - the guard is an optimisation
-        logger.warning(
-            "sociamonials quota guard skipped for %s: %s", local_path.name, exc
-        )
-
-
-def _upload_local_media(
-    session: Any,
-    headers: Mapping[str, str],
-    workspace_id: str,
-    local_path: Path,
-    *,
-    timeout: float,
-) -> str:
-    """Three-step upload; returns an ``asset://<id>`` reference.
-
-    No ``idempotency_key`` is sent: a repeated key with a *completed* multipart
-    upload makes Sociamonials hand back the same closed session, whose part
-    URLs then fail with ``NoSuchUpload``. Duplicate posts are already prevented
-    by the post-level key. Callers should reach this through
-    :func:`_resolve_local_media`, which reuses an identical library asset first;
-    that reuse, not a per-file upload key, is what stops the library refilling
-    with the same file. The docs list ``idempotency_key`` only on the create and
-    import calls, not on the upload-grant call, so there is nothing to replay
-    against here.
-    """
-    kind = _media_kind(str(local_path))
-    size_bytes = local_path.stat().st_size
-    body: dict[str, Any] = {
-        "filename": local_path.name,
-        "mime_type": _guess_mime(local_path, kind),
-        "size_bytes": size_bytes,
-        "sha256": _sha256(local_path),
-        "workspace_registration_id": _workspace_int(workspace_id),
-    }
-
-    response = session.post(MEDIA_UPLOADS_URL, json=body, headers=dict(headers), timeout=timeout)
-    _raise_for_status(response, context="media upload grant")
-    grant = _json_body(response)
-    upload_id = grant.get("upload_id")
-    if upload_id is None:
-        raise SociamonialsFallbackError("media upload grant had no upload_id")
-
-    if str(grant.get("mode") or "single").lower() == "multipart":
-        _put_multipart(session, grant, local_path, timeout=timeout)
-    else:
-        upload_url = str(grant.get("upload_url") or "").strip()
-        if not upload_url:
-            raise SociamonialsFallbackError("media upload grant had no upload_url")
-        # The pre-signed URL is its own bearer grant: no Authorization header.
-        put = session.put(upload_url, data=local_path.read_bytes(), timeout=timeout)
-        _raise_for_status(put, context="media upload PUT")
-
-    complete_body: dict[str, Any] = {}
-    if isinstance(grant.get("_parts"), list) and grant["_parts"]:
-        complete_body["parts"] = grant["_parts"]
-    complete = session.post(
-        f"{MEDIA_UPLOADS_URL}/{upload_id}/complete",
-        json=complete_body,
-        headers=dict(headers),
-        timeout=timeout,
-    )
-    _raise_for_status(complete, context="media upload complete")
-    asset = _json_body(complete)
-    asset_id = asset.get("asset_id")
-    if asset_id is None:
-        asset = asset.get("asset") if isinstance(asset.get("asset"), Mapping) else asset
-        asset_id = asset.get("asset_id")
-    if asset_id is None:
-        raise SociamonialsFallbackError("media upload complete returned no asset_id")
-    # A hosted video is transcoded asynchronously; it cannot be attached until
-    # the asset reports ``processing_status == "ready"``. Images are ready at
-    # once, so this is a single cheap GET for them.
-    ready_timeout = _asset_ready_timeout()
-    if ready_timeout > 0:
-        _wait_for_asset_ready(session, headers, asset_id, timeout=ready_timeout)
-    return f"asset://{asset_id}"
-
-
-def _wait_for_asset_ready(
-    session: Any,
-    headers: Mapping[str, str],
-    asset_id: Any,
-    *,
-    timeout: float,
-    interval: float = 5.0,
-) -> None:
-    """Poll ``GET /api/v1/media/assets/{id}`` until the asset is attachable.
-
-    Raises :class:`SociamonialsFallbackError` on a failed asset or when the
-    readiness budget runs out, so the caller records a real failure instead of
-    attaching a not-ready asset and getting an opaque 422.
-    """
-    import time as _time
-
-    deadline = _time.monotonic() + max(0.0, float(timeout))
-    last_status = "unknown"
-    while True:
-        try:
-            response = session.get(
-                f"{MEDIA_ASSETS_URL}/{asset_id}", headers=dict(headers), timeout=30
-            )
-            if int(getattr(response, "status_code", 0) or 0) == 200:
-                body = _json_body(response)
-                asset = body.get("asset") if isinstance(body.get("asset"), Mapping) else body
-                last_status = str((asset or {}).get("processing_status") or "").strip().lower()
-                if last_status == "ready":
-                    return
-                if last_status in {"failed", "error"}:
-                    raise SociamonialsFallbackError(
-                        f"media asset {asset_id} failed processing (status={last_status})"
-                    )
-            else:
-                # A freshly-completed upload is briefly absent from the asset
-                # index; keep polling rather than handing a not-ready asset to
-                # the post call (which returns an opaque 422 asset_not_ready).
-                logger.warning(
-                    "sociamonials asset readiness poll HTTP %s for asset %s",
-                    getattr(response, "status_code", "?"),
-                    asset_id,
-                )
-        except SociamonialsFallbackError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - a poll failure is not proof of anything
-            logger.warning("sociamonials asset readiness poll failed: %s", exc)
-        if _time.monotonic() >= deadline:
-            raise SociamonialsFallbackError(
-                f"media asset {asset_id} was not ready within {timeout:.0f}s "
-                f"(status={last_status or 'unknown'})"
-            )
-        _time.sleep(interval)
-
-
-def _put_multipart(session: Any, grant: Mapping[str, Any], local_path: Path, *, timeout: float) -> None:
-    """Split ``local_path`` into the grant's parts and PUT each one.
-
-    The grant may carry the first batch of parts; the rest are fetched from the
-    upload's parts endpoint.  Every PUT's ETag is kept for the complete call.
-    """
-    upload_id = grant.get("upload_id")
-    part_size = int(grant.get("part_size_bytes") or 0)
-    if not part_size:
-        raise SociamonialsFallbackError("multipart upload grant had no part_size_bytes")
-    data = local_path.read_bytes()
-    total_parts = max(1, (len(data) + part_size - 1) // part_size)
-
-    parts: dict[int, str] = {}
-
-    def _put(part_number: int, url: str) -> None:
-        start = (part_number - 1) * part_size
-        response = session.put(url, data=data[start : start + part_size], timeout=timeout)
-        _raise_for_status(response, context=f"media upload part {part_number}")
-        etag = str((getattr(response, "headers", {}) or {}).get("ETag") or "").strip()
-        if etag:
-            parts[part_number] = etag
-
-    for part in grant.get("parts") or []:
-        if not isinstance(part, Mapping):
-            continue
-        number = int(part.get("part_number") or 0)
-        url = str(part.get("url") or part.get("upload_url") or "").strip()
-        if number and url:
-            _put(number, url)
-
-    for number in range(1, total_parts + 1):
-        if number in parts:
-            continue
-        response = session.post(
-            f"{MEDIA_UPLOADS_URL}/{upload_id}/parts",
-            json={"part_number": number},
-            timeout=timeout,
-        )
-        _raise_for_status(response, context=f"media upload parts {number}")
-        payload = _json_body(response)
-        candidates = payload.get("parts") if isinstance(payload.get("parts"), list) else [payload]
-        for part in candidates:
-            if not isinstance(part, Mapping):
-                continue
-            if int(part.get("part_number") or 0) == number:
-                url = str(part.get("url") or part.get("upload_url") or "").strip()
-                if url:
-                    _put(number, url)
-    if len(parts) < total_parts:
-        raise SociamonialsFallbackError(
-            f"multipart upload incomplete: {len(parts)}/{total_parts} parts"
-        )
-    # The complete call needs the ETags; keep them on the grant for the caller.
-    grant["_parts"] = [{"part_number": n, "etag": parts[n]} for n in sorted(parts)]
-
-
-# --------------------------------------------------------------------------- #
-# Message composition
-# --------------------------------------------------------------------------- #
-
-def _stringify(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, (int, float, bool)):
-        return str(value)
-    if isinstance(value, Mapping):
-        pieces: list[str] = []
-        for key in ("title", "summary", "description", "message", "body"):
-            piece = _stringify(value.get(key))
-            if piece:
-                pieces.append(piece)
-        for key, nested in value.items():
-            if key in {"title", "summary", "description", "message", "body"}:
-                continue
-            if isinstance(nested, Mapping):
-                for sub in nested.values():
-                    piece = _stringify(sub)
-                    if piece:
-                        pieces.append(piece)
-            elif isinstance(nested, list):
-                for sub in nested:
-                    piece = _stringify(sub)
-                    if piece:
-                        pieces.append(piece)
-        hashtags = value.get("hashtags")
-        if isinstance(hashtags, list):
-            tags = " ".join(
-                str(tag) if str(tag).startswith("#") else f"#{tag}" for tag in hashtags if str(tag).strip()
-            )
-            if tags:
-                pieces.append(tags)
-        return "\n\n".join(piece for piece in pieces if piece)
-    if isinstance(value, (list, tuple)):
-        return "\n\n".join(piece for piece in (_stringify(item) for item in value) if piece)
-    return str(value).strip()
-
-
-def _draft_from_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    draft = payload.get("draft") if isinstance(payload, Mapping) else None
-    return draft if isinstance(draft, Mapping) else {}
-
-
-_URL_RE = re.compile(r"https?://[^\s<>\"')]+", re.IGNORECASE)
-
-# Networks whose main post must not contain a URL. Sociamonials' X/Twitter
-# hand-off rejects a tweet body that carries a link, so any URL found in the
-# composed X message is stripped out and carried in the follow-up reply
-# (``first_comment``) instead. This is the single place that remembers the
-# restriction; if Sociamonials ever lifts it, drop ``tw`` from this set and
-# update the module docstring.
-LINK_IN_MAIN_POST_FORBIDDEN_NETWORKS: frozenset[str] = frozenset({"tw"})
-
-
-def _extract_urls(text: str) -> tuple[str, list[str]]:
-    """Return ``(text_without_urls, urls)``, preserving the surrounding copy."""
-    raw = text or ""
-    urls = _URL_RE.findall(raw)
-    if not urls:
-        return raw.strip(), []
-    cleaned = _URL_RE.sub("", raw)
-    # Collapse the whitespace/blank lines the removal leaves behind.
-    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
-    # De-duplicate while keeping the original order.
-    return cleaned, list(dict.fromkeys(urls))
-
-
-def compose_message_with_links(
-    payload: Mapping[str, Any], *, network: str
-) -> tuple[str, list[str]]:
-    """Compose the caption, returning ``(message, moved_links)``.
-
-    For a network in :data:`LINK_IN_MAIN_POST_FORBIDDEN_NETWORKS` (X/Twitter)
-    every URL is removed from the body and returned so the caller can carry it
-    in the follow-up reply. The body is truncated to the platform limit *after*
-    the links are removed, so a long URL cannot consume the whole post.
-    """
-    payload = payload or {}
-    draft = _draft_from_payload(payload)
-    message = _stringify(draft.get("message") or payload.get("message"))
-    if not message:
-        message = _stringify(payload.get("brief") or payload.get("notes"))
-    hashtags = draft.get("hashtags")
-    if isinstance(hashtags, list) and hashtags:
-        joined = " ".join(
-            str(tag) if str(tag).startswith("#") else f"#{tag}"
-            for tag in hashtags
-            if str(tag).strip()
-        )
-        low = message.lower()
-        missing = [tag for tag in joined.split() if tag.lower() not in low]
-        if missing:
-            message = f"{message}\n\n{' '.join(missing)}".strip()
-    links: list[str] = []
-    if network in LINK_IN_MAIN_POST_FORBIDDEN_NETWORKS:
-        message, links = _extract_urls(message)
-    limit = NETWORK_MAX_MESSAGE_CHARS.get(network)
-    if limit and len(message) > limit:
-        message = message[: limit - 1].rstrip() + "…"
-    return message, links
-
-
-def compose_message(payload: Mapping[str, Any], *, network: str) -> str:
-    """Extract the publishable caption from the job payload."""
-    message, _ = compose_message_with_links(payload, network=network)
-    return message
-
-
-def _network_options(payload: Mapping[str, Any], network: str) -> dict[str, Any]:
-    draft = _draft_from_payload(payload)
-    options: dict[str, Any] = {}
-    title = _stringify(draft.get("title"))
-    if network == "yt" and title:
-        options["title"] = title
-    if network == "reddit":
-        options["title"] = title or None
-    first_comment = _stringify(draft.get("firstComment"))
-    return options
-
-
-def _first_comment(payload: Mapping[str, Any]) -> str:
-    draft = _draft_from_payload(payload)
-    return _stringify(draft.get("firstComment"))
-
-
-# --------------------------------------------------------------------------- #
-# HTTP plumbing
-# --------------------------------------------------------------------------- #
 
 def _timeout() -> float:
-    try:
-        return float(os.environ.get(TIMEOUT_ENV) or DEFAULT_TIMEOUT)
-    except (TypeError, ValueError):
-        return DEFAULT_TIMEOUT
+    return _bounded_timeout(os.environ.get(TIMEOUT_ENV), DEFAULT_TIMEOUT)
 
 
 def _delivery_timeout() -> float:
-    try:
-        return float(
-            os.environ.get(DELIVERY_TIMEOUT_ENV) or DEFAULT_DELIVERY_TIMEOUT
-        )
-    except (TypeError, ValueError):
-        return DEFAULT_DELIVERY_TIMEOUT
+    return _bounded_timeout(os.environ.get(DELIVERY_TIMEOUT_ENV), DEFAULT_DELIVERY_TIMEOUT, zero=True)
 
 
 def _asset_ready_timeout() -> float:
-    try:
-        return float(
-            os.environ.get(ASSET_READY_TIMEOUT_ENV) or DEFAULT_ASSET_READY_TIMEOUT
-        )
-    except (TypeError, ValueError):
-        return DEFAULT_ASSET_READY_TIMEOUT
+    return _bounded_timeout(os.environ.get(ASSET_READY_TIMEOUT_ENV), DEFAULT_ASSET_READY_TIMEOUT, zero=True)
 
 
 def _workspace_int(workspace_id: Any) -> int | None:
+    if isinstance(workspace_id, bool):
+        return None
     try:
-        return int(str(workspace_id).strip())
+        value = int(str(workspace_id).strip())
+        return value if 0 < value < 2**63 else None
     except (TypeError, ValueError):
         return None
 
 
 def _headers(api_key: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json",
-    }
+    return {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
 
 
 def _json_body(response: Any) -> dict[str, Any]:
     try:
         body = response.json()
-    except Exception:  # noqa: BLE001
-        body = None
+    except (ValueError, TypeError):
+        return {}
     return body if isinstance(body, dict) else {}
 
 
-def _raise_for_status(response: Any, *, context: str) -> None:
+def _data(body: Mapping[str, Any]) -> dict[str, Any]:
+    return dict(body["data"]) if isinstance(body.get("data"), Mapping) else dict(body)
+
+
+def _safe_code(value: Any, default: str = "provider_error") -> str:
+    if not isinstance(value, str) or not _SAFE_CODE.fullmatch(value) or value.lower().startswith(("sm_agent_", "sma_", "sk-", "ghp_")):
+        return default
+    return value
+
+
+def _rate_details(response: Any) -> dict[str, Any]:
+    headers = {str(k).lower(): v for k, v in (getattr(response, "headers", {}) or {}).items()}
+    result = {}
+    for header, key in (("retry-after", "retryAfter"), ("x-ratelimit-reset", "rateLimitReset"),
+                        ("ratelimit-reset", "rateLimitReset")):
+        raw = str(headers.get(header) or "")
+        if re.fullmatch(r"[0-9A-Za-z,: +./-]{1,128}", raw):
+            result[key] = raw
+    return result
+
+
+def _raise_for_status(response: Any, *, context: str, side_effects: bool = True) -> None:
     status = int(getattr(response, "status_code", 0) or 0)
-    if status and status < 400:
+    if 200 <= status < 300:
         return
-    body = _json_body(response)
-    error = body.get("error")
-    if isinstance(error, Mapping):
-        pieces = [str(error.get("code") or error.get("message") or "")]
-        nested = error.get("errors")
-        if isinstance(nested, Mapping):
-            # Validation errors are keyed by the body field that failed
-            # (image_urls, video_url, ...); keep them so a 422 is diagnosable.
-            for field, messages in nested.items():
-                pieces.append(f"{field}={messages}")
-        elif isinstance(nested, list):
-            pieces.extend(str(item) for item in nested[:4])
-        detail = "; ".join(piece for piece in pieces if piece)
-    else:
-        detail = error or getattr(response, "text", "")
-    raise SociamonialsFallbackError(f"{context} failed (HTTP {status}): {detail}")
+    error = _data(_json_body(response)).get("error")
+    code = _safe_code(error.get("code") if isinstance(error, Mapping) else error)
+    details = {"httpStatus": status, "providerCode": code, "stage": context,
+               "retrySafe": not side_effects or (400 <= status < 500 and status not in {408, 409}),
+               **_rate_details(response)}
+    if isinstance(error, Mapping) and isinstance(error.get("errors"), Mapping):
+        details["fields"] = [key for key in error["errors"] if isinstance(key, str) and _SAFE_CODE.fullmatch(key)][:8]
+    # Never attach the raw response, error message, request, credential or URL.
+    raise SociamonialsFallbackError(f"Sociamonials {context} rejected (HTTP {status}, code={code})",
+                                   retryable=status == 429 or status >= 500 or status == 0, details=details)
+
+
+_RATE_LOCK = threading.Lock()
+_RATE_WINDOWS: dict[tuple[str, str], deque] = {}
+_STORAGE_LOCK = threading.Lock()  # All pooled workspaces in this process, not one lock per workspace.
+
+
+def _take_rate(key_digest: str, bucket: str, limit: int) -> None:
+    now = time.monotonic()
+    with _RATE_LOCK:
+        if len(_RATE_WINDOWS) > 256:
+            for key in list(_RATE_WINDOWS):
+                if not _RATE_WINDOWS[key] or now - _RATE_WINDOWS[key][-1] >= 60:
+                    del _RATE_WINDOWS[key]
+        window = _RATE_WINDOWS.setdefault((key_digest, bucket), deque())
+        while window and now - window[0] >= 60:
+            window.popleft()
+        if len(window) >= limit:
+            raise SociamonialsFallbackError("Sociamonials credential rate budget reached; release worker concurrency",
+                                           retryable=True, details={"httpStatus": 429, "retryAfter": max(1, math.ceil(60 - (now - window[0]))),
+                                                                    "rateBucket": bucket, "retrySafe": True})
+        window.append(now)
+
+
+class _HTTP:
+    """No automatic HTTP retry; finite calls and shared per-credential pacing."""
+
+    def __init__(self, session: Any, key: str):
+        self.session = session
+        self.key_digest = hashlib.sha256(key.encode()).hexdigest()
+        self.calls = 0
+        self.agency = False
+        self.grants = 0
+        self.deadline = time.monotonic() + MAX_HTTP_SECONDS
+
+    def _request(self, method: str, url: str, *, context: str = "request", side_effects: bool = False, **kwargs):
+        remaining = self.deadline - time.monotonic()
+        if self.calls >= MAX_HTTP_REQUESTS or remaining <= 0:
+            raise SociamonialsFallbackError("Bounded backup HTTP/time budget reached; resume from its checkpoint",
+                                           retryable=True, details={"retryAfter": 5, "stage": context, "retrySafe": True})
+        provider = url.startswith(BASE_URL + "/api/v1/")
+        bucket = "read" if provider and method == "get" else "write" if provider else "transfer"
+        limit = {"read": 120, "write": 30, "transfer": 300}[bucket]
+        if self.agency and bucket != "transfer":
+            limit *= 2
+        _take_rate(self.key_digest, bucket, limit)
+        self.calls += 1
+        kwargs.setdefault("allow_redirects", False)
+        kwargs["timeout"] = min(_bounded_timeout(kwargs.get("timeout"), DEFAULT_TIMEOUT), remaining)
+        try:
+            return getattr(self.session, method)(url, **kwargs)
+        except AssertionError:
+            raise  # Missing contract mocks should fail loudly, not become retries.
+        except Exception:
+            raise SociamonialsFallbackError("Sociamonials transport response is unavailable; reconcile any started write",
+                                           retryable=True, details={"stage": context, "retrySafe": not side_effects,
+                                                                    "transportUnknown": True}) from None
+
+    def get(self, url: str, **kwargs):
+        return self._request("get", url, **kwargs)
+
+    def post(self, url: str, **kwargs):
+        kwargs.setdefault("side_effects", True)
+        return self._request("post", url, **kwargs)
+
+    def put(self, url: str, **kwargs):
+        kwargs.setdefault("side_effects", True)
+        return self._request("put", url, **kwargs)
 
 
 def _get_session(session: Any = None):
     if session is not None:
         return session
+    if _testing():
+        raise SociamonialsNotConfigured("Tests must inject a verified mock HTTP session; external publishing is disabled")
     import requests
+    result = requests.Session()
+    result.trust_env = False
+    return result
 
-    return requests.Session()
+
+def _http(session: Any, key: str) -> _HTTP:
+    return session if isinstance(session, _HTTP) else _HTTP(_get_session(session), key)
 
 
-# --------------------------------------------------------------------------- #
-# Publish
-# --------------------------------------------------------------------------- #
+def _identity(http: _HTTP, headers: Mapping[str, str], ws: str, *, timeout: float,
+              permissions: Sequence[str]) -> dict[str, Any]:
+    response = http.get(f"{BASE_URL}/api/v1/me", headers=dict(headers), timeout=timeout, context="identity")
+    _raise_for_status(response, context="identity", side_effects=False)
+    body = _data(_json_body(response))
+    agent, entitlement, workspaces = body.get("agent"), body.get("entitlement"), body.get("workspaces")
+    if (not isinstance(agent, Mapping) or agent.get("status") != "active"
+            or not isinstance(entitlement, Mapping) or entitlement.get("state") != "active"
+            or not isinstance(workspaces, Mapping) or not isinstance(workspaces.get(ws), Mapping)):
+        raise SociamonialsNotConfigured("Credential identity/entitlement does not prove access to the exact workspace")
+    entry = dict(workspaces[ws])
+    grants = entry.get("permissions")
+    if not isinstance(grants, Mapping) or any(grants.get(name) is not True for name in permissions):
+        raise SociamonialsNotConfigured("Credential lacks a required exact-workspace permission",
+                                       details={"requiredPermissions": list(permissions)})
+    http.agency = agent.get("type") == "agency"
+    return entry
 
-def publish_via_sociamonials(
-    *,
-    platform: str,
-    account: Any,
-    payload: Mapping[str, Any],
-    media_paths: Sequence[str] | None = None,
-    target_id: int | None = None,
-    settings: Any = None,
-    session: Any = None,
-    db_path: Any = None,
-    api_key: str | None = None,
-    workspace_id: str | None = None,
-    timeout: float | None = None,
-    verify_media: bool = True,
-    delivery_timeout: float | None = None,
-    idempotency_suffix: str | None = None,
-) -> dict[str, Any]:
-    """Publish one exhausted target through Sociamonials.
 
-    Raises :class:`SociamonialsNotConfigured` when the fallback is off or has no
-    key, and :class:`SociamonialsFallbackError` for any API/media failure.  The
-    caller marks the target succeeded only when this returns.
+def _required_capabilities(payload: Mapping[str, Any] | None = None, *, intent: Mapping[str, Any] | None = None) -> set[str]:
+    source = payload or {}
+    required = set()
+    if (intent or {}).get("message") or compose_message(source, network="fb"):
+        required.add("text")
+    media = collect_media(source)
+    for item in media:
+        if item["kind"] != "thumbnail":
+            required.add(item["kind"])
+    if len([item for item in media if item["kind"] == "image"]) > 1:
+        required.add("carousel")
+    if ((intent or {}).get("top_fields") or {}).get("first_comment") or _first_comment(source):
+        required.add("first_comment")
+    if ((intent or {}).get("top_fields") or {}).get("story"):
+        required.add("story")
+    return required
+
+
+def _verify_route(http: _HTTP, headers: Mapping[str, str], mapping: Mapping[str, Any], ws: str,
+                  *, platform: str, timeout: float, required: set[str]) -> dict[str, Any]:
+    network = mapping.get("network")
+    refs = mapping.get("profile_refs")
+    if network != _platform_network(platform) or network not in policy.NETWORK_TO_PLATFORM or not isinstance(refs, list) or len(refs) != 1:
+        raise SociamonialsNotConfigured("Backup requires one exact matching-platform profile, not guessed substitutions")
+    if _workspace_int(ws) is None:
+        raise SociamonialsNotConfigured("Backup requires an explicit usable workspace id")
+    identity = _identity(http, headers, ws, timeout=timeout, permissions=("posts.read", "posts.create", "profiles.read"))
+    assigned = identity.get("social_profiles")
+    if (not isinstance(assigned, list) or len([row for row in assigned if isinstance(row, Mapping)
+                                              and row.get("network") == network and row.get("profile_ref") == refs[0]]) != 1):
+        raise SociamonialsNotConfigured("Credential has no exact network/profile-ref grant in this workspace")
+    response = http.get(f"{BASE_URL}/api/v1/workspaces/{ws}/social-profiles", headers=dict(headers),
+                        timeout=timeout, context="profile grants")
+    _raise_for_status(response, context="profile grants", side_effects=False)
+    body = _data(_json_body(response))
+    if _workspace_int(body.get("workspace_registration_id")) != _workspace_int(ws):
+        raise SociamonialsNotConfigured("Profile response belongs to another or unknown workspace")
+    profiles = body.get("profiles")
+    matches = [row for row in profiles or [] if isinstance(row, Mapping) and row.get("network") == network and row.get("profile_ref") == refs[0]]
+    if len(matches) != 1:
+        raise SociamonialsNotConfigured("Exact mapped profile is absent or ambiguous; do not replace it by name")
+    profile = matches[0]
+    capabilities = profile.get("capabilities")
+    if (profile.get("connected") is not True or profile.get("agent_can_publish_to") is not True
+            or "unavailable_reason" not in profile or profile["unavailable_reason"] is not None
+            or not isinstance(capabilities, list) or any(not isinstance(cap, str) for cap in capabilities)
+            or "mobile_app_handoff" in capabilities or profile.get("mobile_app_handoff") not in (None, False)):
+        raise SociamonialsNotConfigured("Mapped profile is disconnected, unavailable, unauthorized or requires a mobile handoff")
+    missing = required - set(capabilities)
+    if missing:
+        raise SociamonialsNotConfigured("Exact destination lacks required original-content capabilities",
+                                       details={"missingCapabilities": sorted(missing)})
+    grants = identity["permissions"]
+    return {"verified": True,
+            "mapping": {"network": network, "profile_refs": list(refs), "workspace_id": ws,
+                        "api_key_env": mapping.get("api_key_env") or (TEACHING_API_KEY_ENV if ws == DEFAULT_TEACHING_WORKSPACE_ID else API_KEY_ENV)},
+            "capabilities": sorted(set(capabilities)),
+            "permissions": {name: grants.get(name) is True for name in ("assets.read", "assets.write", "posts.publish_direct")},
+            "requires_approval": identity.get("requires_approval_for_posting") is True or grants.get("posts.publish_direct") is not True,
+            "rate_limits": {"reads_per_minute": 240 if http.agency else 120, "writes_per_minute": 60 if http.agency else 30,
+                            "media_transfers_per_minute": 300},
+            "verified_at": delivery_state.utc_now()}
+
+
+def _read_storage(http: Any, headers: Mapping[str, str], ws: str, *, timeout: float) -> dict[str, Any]:
+    response = http.get(f"{BASE_URL}/api/v1/workspaces/{ws}/context", headers=dict(headers), timeout=timeout)
+    _raise_for_status(response, context="storage context", side_effects=False)
+    body = _data(_json_body(response))
+    declared_ws = body.get("workspace_registration_id")
+    if declared_ws is None and isinstance(body.get("workspace"), Mapping):
+        declared_ws = body["workspace"].get("workspace_registration_id", body["workspace"].get("id"))
+    if declared_ws is not None and _workspace_int(declared_ws) != _workspace_int(ws):
+        raise SociamonialsFallbackError("Storage context is for another workspace", details={"storageUnknown": True})
+    storage = body.get("storage")
+    if not isinstance(storage, Mapping) or storage.get("status") != "ok":
+        raise SociamonialsFallbackError("Workspace storage accounting is unavailable; verify quota/entitlement or reuse an exact ready asset",
+                                       details={"storageUnknown": True})
+    maximum = storage.get("max_upload_bytes")
+    available = storage.get("available_bytes")
+    if (not isinstance(maximum, Mapping) or not {"image", "video"} <= set(maximum)
+            or any(value is not None and (type(value) is not int or value <= 0) for value in (maximum["image"], maximum["video"]))
+            or type(storage.get("enforcement")) is not bool or type(storage.get("pooled")) is not bool
+            or (not (type(available) is int and available >= 0) and not (available is None and storage.get("unmetered") is True))
+            or storage.get("unconfigured") is True):
+        raise SociamonialsFallbackError("Storage response is incomplete; confirm effective hosted limits and pooled quota before uploading",
+                                       details={"storageUnknown": True})
+    return {"status": "ok", "max_upload_bytes": dict(maximum), "available_bytes": available,
+            "enforcement": storage["enforcement"], "pooled": storage["pooled"],
+            "unmetered": storage.get("unmetered") is True,
+            "ratchet_active": isinstance(storage.get("ratchet"), Mapping) and storage["ratchet"].get("active") is True,
+            "requires_approval": isinstance(body.get("approval"), Mapping) and (
+                body["approval"].get("credential_routes_through_approval") is True or body["approval"].get("client_requested_hold") is True)}
+
+
+def verify_destination(*, platform: str, account: Any = None, account_id: int | None = None,
+                       mapping: Mapping[str, Any] | None = None, settings: Any = None,
+                       payload: Mapping[str, Any] | None = None, required_capabilities: Sequence[str] | None = None,
+                       session: Any = None, api_key: str | None = None, workspace_id: str | None = None,
+                       timeout: float | None = None, require_storage: bool = True) -> dict[str, Any]:
+    """Read-only preparation gate returning verified mapping + conservative caps.
+
+    No secrets/customer content are returned. Default require_storage=True fails
+    closed on unknown accounting. False is ONLY useful to discover grants before
+    proving an already-ready asset; it returns no hosted-video entitlement.
+    This result is not a cached authorization token: publish always re-verifies.
     """
-    from myUtils import delivery as delivery_state
-    account_id = _account_value(account, "id", None)
-    mapping = resolve_mapping(
-        int(account_id) if account_id is not None else None,
-        platform=platform,
-        account=account,
-        settings=settings,
-    )
-    if not mapping:
-        raise SociamonialsFallbackError(
-            f"no Sociamonials profile is mapped for account {account_id!r} ({platform})"
-        )
-    # Resolve the workspace + key AFTER the mapping: the teaching accounts
-    # carry their own workspace_id/api_key_env, so this is where the separate
-    # connector is honoured instead of always using the global workspace.
-    key, ws = resolve_credentials(
-        mapping, api_key=api_key, workspace_id=workspace_id
-    )
+    account_id = _account_value(account, "id", account_id)
+    entry = _normalise_entry(mapping) if mapping is not None else resolve_mapping(account_id, platform=platform, account=account, settings=settings)
+    if not entry:
+        raise SociamonialsNotConfigured("No explicit usable Sociamonials destination is mapped for this account")
+    key, ws = resolve_credentials(entry, api_key=api_key, workspace_id=workspace_id)
     if not key:
-        raise SociamonialsNotConfigured(
-            "no Sociamonials API key is set (SOCIAMONIALS_API_KEY / "
-            "SOCIAMONIALS_TEACHING_API_KEY)"
-        )
-    network = mapping["network"]
-    platform_network = _platform_network(platform)
-    if platform_network and network != platform_network:
-        raise SociamonialsFallbackError(
-            f"mapped network {network!r} does not match platform {platform!r}"
-        )
+        raise SociamonialsNotConfigured("The exact destination's selected Sociamonials credential is missing")
+    http, headers = _http(session, key), _headers(key)
+    budget = _bounded_timeout(timeout, _timeout())
+    required = set(required_capabilities or ()) | _required_capabilities(payload)
+    result = _verify_route(http, headers, entry, ws, platform=platform, timeout=budget, required=required)
+    storage = _read_storage(http, headers, ws, timeout=budget) if require_storage else None
+    result["storage"] = storage
+    result["limits"] = policy.limits_for(entry["network"], storage)
+    if storage:
+        result["requires_approval"] = result["requires_approval"] or storage["requires_approval"]
+    return result
 
-    request_timeout = float(timeout if timeout is not None else _timeout())
-    http = _get_session(session)
-    headers = _headers(key)
-    resolved_db_path = db_path if db_path is not None else payload.get("_db_path")
-    used_assets: list[dict[str, Any]] = []
+
+def _media_kind(path: str) -> str:
+    suffix = Path(urlparse(path).path).suffix.lower()
+    return "image" if suffix in _IMAGE_SUFFIXES else "video" if suffix in _VIDEO_SUFFIXES else ""
+
+
+def collect_media(payload: Mapping[str, Any] | None, media_paths: Sequence[str] | None = None) -> list[dict[str, Any]]:
+    """Preserve all declared media in order; exclude only explicit context files."""
+    items = []
+    artifacts = (payload or {}).get("artifacts") or []
+    if not isinstance(artifacts, (list, tuple)):
+        raise SociamonialsFallbackError("Artifacts must be an ordered list")
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            raise SociamonialsFallbackError("Declared media is invalid; refusing a text-only replacement")
+        metadata = artifact.get("metadata") or {}
+        if not isinstance(metadata, Mapping):
+            raise SociamonialsFallbackError("Declared media metadata is invalid")
+        local = str(artifact.get("local_path") or "").strip()
+        public = str(artifact.get("public_url") or "").strip()
+        role = str(metadata.get("role") or "").lower()
+        artifact_kind = str(artifact.get("artifact_kind") or "").lower()
+        suffix = Path(urlparse(local or public).path).suffix.lower()
+        if (role in _CONTEXT_ROLES or suffix in _CONTEXT_SUFFIXES or "transcript" in artifact_kind or "audio" in artifact_kind
+                or artifact_kind in {"support", "metadata", "context"} or artifact_kind.startswith(("support_", "metadata_"))):
+            continue
+        kind = _media_kind(local or public)
+        if not kind or (role in {"video", "image"} and role != kind):
+            raise SociamonialsFallbackError("Declared media is unsupported or mismatched; refusing a text-only replacement")
+        if role in {"thumbnail", "cover"}:
+            if kind != "image":
+                raise SociamonialsFallbackError("A declared video thumbnail must be an image")
+            kind = "thumbnail"
+        items.append({"local_path": local or None, "public_url": public or None, "kind": kind,
+                      "metadata": dict(metadata), "artifact": dict(artifact)})
+    if not artifacts:
+        for path in media_paths or []:
+            value = str(path or "").strip()
+            if Path(value).suffix.lower() in _CONTEXT_SUFFIXES:
+                continue
+            kind = _media_kind(value)
+            if not kind:
+                raise SociamonialsFallbackError("An explicit media path is unsupported")
+            items.append({"local_path": value, "public_url": None, "kind": kind, "metadata": {}, "artifact": {}})
+    return items
+
+
+def _sha256(local_path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        expected_size = local_path.stat().st_size
+        with local_path.open("rb") as handle:
+            remaining = expected_size
+            while remaining:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise SociamonialsFallbackError("Exact media was truncated during hashing")
+                digest.update(chunk)
+                remaining -= len(chunk)
+            if handle.read(1) or local_path.stat().st_size != expected_size:
+                raise SociamonialsFallbackError("Exact media grew or changed size during hashing")
+    except OSError:
+        raise SociamonialsFallbackError("Exact local media became unreadable; restore it before backup") from None
+    return digest.hexdigest()
+
+
+def _assert_media_size(network: str, size_bytes: int, *, kind: str = "video") -> None:
+    cap = policy.IMAGE_MAX_BYTES if kind in {"image", "thumbnail"} else policy.HOSTED_VIDEO_MAX_BYTES
+    if kind == "video":
+        native = platform_limits.media_max_mb(policy.NETWORK_TO_PLATFORM.get(network))
+        if native:
+            cap = min(cap, int(native * 1_000_000))
+    if type(size_bytes) is not int or not 0 < size_bytes <= cap:
+        raise SociamonialsFallbackError("Exact local media exceeds the backup/native byte budget; prepare and schedule every compliant part",
+                                       details={"mediaReviewRequired": True, "size_bytes": size_bytes, "max_bytes": cap})
+
+
+def _assert_video_duration(network: str, local_path: str | None) -> None:
+    if not local_path or not Path(local_path).is_file():
+        raise SociamonialsFallbackError("Materialise the exact local video before backup validation")
+    try:
+        duration = media_pipeline.probe_video_duration(local_path)
+    except Exception:
+        raise SociamonialsFallbackError("Could not verify the local video's duration; preprocess it before backup") from None
+    limit = NETWORK_MAX_VIDEO_SECONDS.get(network)
+    if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
+        raise SociamonialsFallbackError("Local video duration could not be proven")
+    if limit and duration > limit:
+        raise SociamonialsFallbackError("Video duration exceeds the backup/native limit; schedule all prepared parts",
+                                       details={"duration_seconds": duration, "max_seconds": limit})
+
+
+def _checked_media(items: list[dict[str, Any]], network: str) -> list[dict[str, Any]]:
+    for item in items:
+        local = item.get("local_path")
+        if not local or not Path(local).is_file():
+            from myUtils.media_compliance import MediaPreparationRequired
+            raise MediaPreparationRequired("Materialise the exact local media before backup; never use an unverified/oversized original URL")
+        path = Path(local)
+        size = path.stat().st_size
+        _assert_media_size(network, size, kind=item["kind"])
+        digest = _sha256(path)
+        metadata, artifact = item["metadata"], item["artifact"]
+        expected = metadata.get("sha256", artifact.get("sha256"))
+        if expected is not None and expected != digest:
+            raise SociamonialsFallbackError("Prepared media checksum changed; do not publish tampered bytes", details={"mediaReviewRequired": True})
+        expected_size = metadata.get("size_bytes", artifact.get("size_bytes"))
+        if expected_size is not None and expected_size != size:
+            raise SociamonialsFallbackError("Prepared media byte count changed; do not publish tampered bytes")
+        if item["kind"] == "video":
+            _assert_video_duration(network, local)
+        else:
+            try:
+                from PIL import Image
+                with Image.open(path) as image:
+                    width, height = image.size
+                    if image.format not in {"JPEG", "PNG", "GIF", "WEBP"} or (item["kind"] == "thumbnail" and image.format not in {"JPEG", "PNG"}):
+                        raise ValueError("Unsupported image encoding")
+                    if width <= 0 or height <= 0 or width * height > policy.IMAGE_MAX_PIXELS or max(width, height) > policy.IMAGE_MAX_LONG_SIDE:
+                        raise ValueError("Image geometry exceeds policy")
+                    image.verify()
+            except Exception:
+                raise SociamonialsFallbackError("Image encoding/dimensions cannot be verified against the backup policy") from None
+        item.update({"sha256": digest, "size_bytes": size})
+    return items
+
+
+def _normalize_public_url(url: str) -> str:
+    parts = urlparse(str(url or "").strip())
+    return urlunparse((parts.scheme, parts.netloc, quote(parts.path, safe="/%:@!$&'()*+;="), parts.params, parts.query, parts.fragment))
+
+
+def is_direct_media_url(url: str | None) -> bool:
+    try:
+        parsed = urlparse(str(url or "").strip())
+        host = (parsed.hostname or "").lower()
+        if (parsed.scheme != "https" or not host or parsed.username is not None or parsed.password is not None
+                or parsed.port not in (None, 443) or parsed.query or parsed.fragment or parsed.params
+                or host in _NON_DIRECT_HOSTS or host.endswith((".localhost", ".local", ".internal"))
+                or "/file/d/" in parsed.path or any(char in unquote(parsed.path) for char in ("\r", "\n", "\x00"))):
+            return False
+        try:
+            if not ipaddress.ip_address(host).is_global:
+                return False
+        except ValueError:
+            pass
+        return _media_kind(parsed.path) != ""
+    except ValueError:
+        return False
+
+
+def _resolve_public_host(host: str) -> None:
+    """DNS guard; tests inject it. Reject any non-public address, not just localhost."""
+    try:
+        addresses = {row[4][0] for row in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
+        if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+            raise ValueError("Not public")
+    except Exception:
+        raise SociamonialsFallbackError("Media host cannot be verified as public HTTPS; use an immutable public CDN object") from None
+
+
+def _verify_remote_media(url: str, session: Any, *, timeout: float, local_path: Path | None = None,
+                         sha256: str | None = None, size_bytes: int | None = None, max_bytes: int | None = None,
+                         immutable: bool = False) -> bool:
+    """Stream a bounded HTTPS GET and prove equality to the exact LOCAL bytes.
+
+    HEAD failures, redirects, credential/expiring URLs, mutable paths, unknown
+    checksums and HTML responses are NEVER permission to publish. No credentials
+    are sent to a public media host. This cannot be disabled by verify_media=False.
+    """
+    if not is_direct_media_url(url) or not immutable or not local_path or not local_path.is_file():
+        return False
+    if not isinstance(sha256, str) or not _SHA_RE.fullmatch(sha256) or type(size_bytes) is not int or type(max_bytes) is not int:
+        return False
+    if not 0 < size_bytes <= max_bytes or local_path.stat().st_size != size_bytes or _sha256(local_path) != sha256:
+        return False
+    _resolve_public_host(urlparse(url).hostname or "")
+    response = None
+    deadline = time.monotonic() + _bounded_timeout(timeout, DEFAULT_TIMEOUT)
+    try:
+        response = session.get(url, headers={"Accept-Encoding": "identity", "Authorization": None, "Cookie": None},
+                               auth=(), cookies={}, timeout=timeout, stream=True, allow_redirects=False)
+        if int(getattr(response, "status_code", 0) or 0) != 200:
+            return False
+        headers = {str(k).lower(): str(v) for k, v in (getattr(response, "headers", {}) or {}).items()}
+        if headers.get("content-encoding", "identity").lower() not in {"", "identity"}:
+            return False
+        kind = _media_kind(str(local_path))
+        if not headers.get("content-type", "").lower().startswith(kind + "/"):
+            return False
+        if headers.get("content-length") and (not headers["content-length"].isdigit() or int(headers["content-length"]) != size_bytes):
+            return False
+        digest, received = hashlib.sha256(), 0
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            received += len(chunk)
+            if received > size_bytes or received > max_bytes or time.monotonic() > deadline:
+                return False
+            digest.update(chunk)
+        return received == size_bytes and digest.hexdigest() == sha256
+    except SociamonialsFallbackError:
+        raise
+    except Exception:
+        return False
+    finally:
+        if response is not None and callable(getattr(response, "close", None)):
+            response.close()
+
+
+def _external_reference(item: Mapping[str, Any], http: Any, *, timeout: float) -> str:
+    url = _normalize_public_url(str(item.get("public_url") or ""))
+    metadata = item.get("metadata") or {}
+    digest = item["sha256"]
+    immutable = (digest in unquote(urlparse(url).path).lower() or metadata.get("public_url_immutable") is True)
+    # An explicit URL-specific checksum can tighten provenance, never replace
+    # the computed local checksum with the raw original's checksum.
+    if metadata.get("public_url_sha256", digest) != digest:
+        immutable = False
+    maximum = policy.EXTERNAL_VIDEO_MAX_BYTES if item["kind"] == "video" else policy.IMAGE_MAX_BYTES
+    if not _verify_remote_media(url, http, timeout=timeout, local_path=Path(item["local_path"]),
+                                sha256=digest, size_bytes=item["size_bytes"], max_bytes=maximum, immutable=immutable):
+        raise SociamonialsFallbackError("Hosted media is unavailable and no stable public HTTPS URL proves the exact prepared bytes within its external limit",
+                                       details={"mediaReviewRequired": True, "external_max_bytes": maximum})
+    return url
+
+
+def _asset_id(asset: Mapping[str, Any] | None) -> int | None:
+    return _workspace_int(asset.get("asset_id")) if isinstance(asset, Mapping) else None
+
+
+def _asset_preference(asset: Mapping[str, Any]) -> tuple[int, str, int]:
+    return (0 if asset.get("starred") else 1, str(asset.get("created_at") or ""), _asset_id(asset) or 0)
+
+
+def select_reusable_asset(assets: Sequence[Mapping[str, Any]] | None, *, filename: str = "", size_bytes: int,
+                          kind: str, sha256: str | None = None, workspace_id: str | None = None,
+                          exclude_ids: set[int] | None = None) -> Mapping[str, Any] | None:
+    """Ready SHA-256 + exact size/kind/workspace identity; filename is NOT proof."""
+    if not isinstance(sha256, str) or not _SHA_RE.fullmatch(sha256) or type(size_bytes) is not int or size_bytes <= 0:
+        return None
+    matches = []
+    for asset in assets or []:
+        if (not isinstance(asset, Mapping) or not _asset_id(asset) or asset.get("sha256") != sha256
+                or type(asset.get("size_bytes")) is not int or asset["size_bytes"] != size_bytes
+                or asset.get("media_type") != kind or asset.get("processing_status", asset.get("status")) != "ready"
+                or asset.get("parent_asset_id") is not None or asset.get("deleted") is True
+                or (exclude_ids and _asset_id(asset) in exclude_ids)
+                or (workspace_id is not None and _workspace_int(asset.get("workspace_registration_id")) != _workspace_int(workspace_id))):
+            continue
+        matches.append(asset)
+    return min(matches, key=_asset_preference) if matches else None
+
+
+def _reuse_assets_enabled() -> bool:
+    # Exact byte identity is safe and avoids filling pooled quota on retries.
+    raw = os.environ.get(REUSE_ASSETS_ENV)
+    return True if raw is None else _truthy(raw)
+
+
+def _reuse_lookup_max_pages() -> int:
+    try:
+        return max(1, min(5, int(os.environ.get("SAU_SOCIAMONIALS_REUSE_MAX_PAGES") or 5)))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _asset_body(response: Any) -> dict[str, Any]:
+    body = _data(_json_body(response))
+    return dict(body["asset"]) if isinstance(body.get("asset"), Mapping) else body
+
+
+def _lookup_reusable_asset(session: Any, headers: Mapping[str, str], workspace_id: str, *, filename: str,
+                           size_bytes: int, kind: str, timeout: float, sha256: str | None = None) -> Mapping[str, Any] | None:
+    if not _reuse_assets_enabled() or not sha256:
+        return None
+    details_read = 0
+    for page in range(_reuse_lookup_max_pages()):
+        response = session.get(MEDIA_ASSETS_URL, headers=dict(headers),
+                               params={"workspace_registration_id": _workspace_int(workspace_id),
+                                       "limit": 200, "offset": page * 200}, timeout=timeout)
+        if int(getattr(response, "status_code", 0) or 0) == 403:
+            return None  # Explicit lack of library browsing, not permission to skip quota.
+        _raise_for_status(response, context="media reuse lookup", side_effects=False)
+        rows = _data(_json_body(response)).get("assets")
+        if not isinstance(rows, list):
+            raise SociamonialsFallbackError("Library lookup returned an unrecognizable response; verify media identity before allocating more storage")
+        for row in rows:
+            if not isinstance(row, Mapping) or row.get("size_bytes") != size_bytes or row.get("media_type") != kind:
+                continue
+            if row.get("sha256") not in (None, sha256):
+                continue
+            asset_id = _asset_id(row)
+            if not asset_id or details_read >= MAX_REUSE_DETAILS:
+                continue
+            # Full read proves workspace/provenance/hash; a list's name/size
+            # alone never does, even if it is the oldest/starred candidate.
+            full = session.get(f"{MEDIA_ASSETS_URL}/{asset_id}", headers=dict(headers), timeout=timeout)
+            details_read += 1
+            if int(getattr(full, "status_code", 0) or 0) == 404:
+                continue
+            _raise_for_status(full, context="media identity read", side_effects=False)
+            match = select_reusable_asset([_asset_body(full)], filename=filename, size_bytes=size_bytes,
+                                           kind=kind, sha256=sha256, workspace_id=workspace_id)
+            if match:
+                return match
+        if len(rows) < 200:
+            break
+    return None
+
+
+def _upload_checkpoint(payload: dict, digest: str, **changes: Any) -> dict[str, Any]:
+    uploads = copy.deepcopy(delivery_state.state(payload).get("sociamonials_uploads") or {})
+    current = {**uploads.get(digest, {}), **changes}
+    uploads[digest] = current
+    delivery_state.checkpoint(payload, sociamonials_uploads=uploads)
+    return current
+
+
+def _asset_receipt(asset: Mapping[str, Any], item: Mapping[str, Any], ws: str) -> dict[str, Any]:
+    match = select_reusable_asset([asset], size_bytes=item["size_bytes"], kind=item["kind"], sha256=item["sha256"], workspace_id=ws)
+    if not match:
+        raise SociamonialsFallbackError("Provider media receipt does not prove exact ready bytes in this workspace",
+                                       details={"mediaReviewRequired": True, "retrySafe": False})
+    return {"asset_id": _asset_id(match), "workspace_id": _workspace_int(ws), "sha256": item["sha256"],
+            "size_bytes": item["size_bytes"], "kind": item["kind"], "processing_status": "ready"}
+
+
+def _saved_asset(http: Any, headers: Mapping[str, str], ws: str, item: Mapping[str, Any], payload: dict,
+                 *, timeout: float) -> Mapping[str, Any] | None:
+    saved = (delivery_state.state(payload).get("sociamonials_uploads") or {}).get(item["sha256"])
+    if not isinstance(saved, Mapping):
+        return None
+    if (saved.get("workspace_id") != _workspace_int(ws) or saved.get("sha256") != item["sha256"]
+            or saved.get("size_bytes") != item["size_bytes"] or saved.get("kind") != item["kind"]):
+        raise SociamonialsFallbackError("Saved upload belongs to different bytes/workspace; reconcile it without a new upload", details={"retrySafe": False})
+    asset_id = saved.get("asset_id") or saved.get("upload_id")
+    if not _workspace_int(asset_id):
+        return None
+    response = http.get(f"{MEDIA_ASSETS_URL}/{asset_id}", headers=dict(headers), timeout=timeout)
+    if int(getattr(response, "status_code", 0) or 0) == 404 and not saved.get("asset_id"):
+        return None  # Reserved upload: replay the SAME grant or complete it, not allocate another.
+    _raise_for_status(response, context="saved media receipt", side_effects=False)
+    asset = _asset_body(response)
+    state = asset.get("processing_status", asset.get("status"))
+    if state in {"pending_upload", "completing"} and not saved.get("asset_id"):
+        return None
+    if state == "processing":
+        asset = _wait_for_asset_ready(http, headers, asset_id, timeout=_asset_ready_timeout(), workspace_id=ws)
+    receipt = _asset_receipt(asset, item, ws)
+    _upload_checkpoint(payload, item["sha256"], **receipt, status="ready")
+    return asset
+
+
+def _guard_storage_for_upload(session: Any, headers: Mapping[str, str], workspace_id: str, *, local_path: Path,
+                              size_bytes: int, db_path: Any = None, timeout: float) -> dict[str, Any]:
+    """Read-only headroom gate. Never imports/calls sociamonials_reclaim."""
+    storage = _read_storage(session, headers, workspace_id, timeout=timeout)
+    cap = policy.limits_for("fb", storage)["hosted_video_max_bytes"] if _media_kind(str(local_path)) == "video" else policy.limits_for("fb", storage)["hosted_image_max_bytes"]
+    if cap is None or size_bytes > cap:
+        raise SociamonialsFallbackError("Effective hosted-media entitlement/byte ceiling refuses this upload",
+                                       details={"providerCode": "hosted_media_limit", "max_bytes": cap})
+    if storage["ratchet_active"] or (storage["available_bytes"] is not None and size_bytes > storage["available_bytes"]):
+        raise SociamonialsFallbackError("Pooled storage has insufficient headroom; reuse exact media or a verified stable public URL (no automatic deletion)",
+                                       details={"providerCode": "storage_quota_exceeded", "available_bytes": storage["available_bytes"], "size_bytes": size_bytes})
+    return storage
+
+
+def _transfer_url(url: Any) -> str:
+    if not isinstance(url, str):
+        raise SociamonialsFallbackError("Upload grant has no usable HTTPS transfer URL", details={"retrySafe": False})
+    try:
+        parsed = urlparse(url)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None
+                or parsed.port not in (None, 443) or parsed.fragment or parsed.hostname.lower() in _NON_DIRECT_HOSTS):
+            raise ValueError("Unsafe transfer URL")
+        _resolve_public_host(parsed.hostname)
+    except ValueError:
+        raise SociamonialsFallbackError("Upload grant has an unsafe transfer URL; reconcile without exposing its signature", details={"retrySafe": False}) from None
+    return url
+
+
+def _guess_mime(local_path: Path, kind: str) -> str:
+    if kind == "video" and local_path.suffix.lower() == ".m4v":
+        return "video/mp4"
+    guessed = mimetypes.guess_type(local_path.name)[0]
+    allowed = {"image/jpeg", "image/png", "image/gif", "image/webp", "video/mp4", "video/quicktime", "video/webm"}
+    if guessed not in allowed:
+        raise SociamonialsFallbackError("Prepared media encoding is unsupported by the hosted upload transport")
+    return guessed
+
+
+class _FileSlice:
+    """File-backed bounded request body; no read_bytes(), whole video, or giant part in RAM."""
+
+    def __init__(self, handle: Any, size: int, *, deadline: float | None = None):
+        self.handle, self.size, self.sent = handle, size, 0
+        self.digest = hashlib.sha256()
+        self.deadline = deadline
+
+    def __len__(self):
+        return self.size
+
+    def tell(self):
+        return self.sent
+
+    def read(self, size: int = -1):
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise SociamonialsFallbackError("Bounded media transfer time expired; reconcile the saved upload", details={"retrySafe": False})
+        remaining = self.size - self.sent
+        requested = min(remaining, 1024 * 1024, 1024 * 1024 if size is None or size < 0 else size)
+        chunk = self.handle.read(requested)
+        self.sent += len(chunk)
+        self.digest.update(chunk)
+        return chunk
+
+
+def _put_bytes(session: Any, url: str, local_path: Path, *, start: int, size: int,
+               timeout: float, mime_type: str) -> tuple[str, str]:
+    url = _transfer_url(url)
+    with local_path.open("rb") as handle:
+        handle.seek(start)
+        stream = _FileSlice(handle, size, deadline=getattr(session, "deadline", None))
+        response = session.put(url, data=stream, headers={"Content-Type": mime_type, "Content-Length": str(size),
+                                                        "Authorization": None, "Cookie": None},
+                               auth=(), cookies={}, timeout=timeout, allow_redirects=False)
+        _raise_for_status(response, context="media transfer", side_effects=True)
+        if stream.sent != size:
+            raise SociamonialsFallbackError("Media transfer did not consume the exact file slice", details={"retrySafe": False})
+        etag = str((getattr(response, "headers", {}) or {}).get("ETag") or "").strip().strip('"')
+        if not re.fullmatch(r"[A-Za-z0-9_./+=:-]{1,256}", etag):
+            raise SociamonialsFallbackError("Media transfer returned no usable ETag; reconcile the saved upload", details={"retrySafe": False})
+        return etag, stream.digest.hexdigest()
+
+
+def _validate_grant(grant: Mapping[str, Any], *, ws: str, kind: str, size: int) -> None:
+    if (not _workspace_int(grant.get("upload_id")) or _workspace_int(grant.get("workspace_registration_id")) != _workspace_int(ws)
+            or grant.get("method") != "PUT" or grant.get("media_type") != kind or grant.get("mode") not in {"single", "multipart"}
+            or type(grant.get("max_bytes")) is not int or size > grant["max_bytes"]):
+        raise SociamonialsFallbackError("Upload grant does not authorize the exact workspace, kind and bytes", details={"retrySafe": False})
+    try:
+        expiry = datetime.fromisoformat(str(grant.get("expires_at") or "").replace("Z", "+00:00"))
+        if expiry.tzinfo is None or expiry <= datetime.now(timezone.utc):
+            raise ValueError("Expired")
+    except (ValueError, TypeError):
+        raise SociamonialsFallbackError("Saved upload grant expired or has no verified expiry; reconcile without allocating a new upload", details={"retrySafe": False}) from None
+    required = grant.get("required_headers")
+    if not isinstance(required, Mapping) or any(str(key).lower() != "content-type" for key in required):
+        raise SociamonialsFallbackError("Upload grant requests unsupported headers; no credentials will be forwarded", details={"retrySafe": False})
+    if grant["mode"] == "multipart":
+        part_size, count = grant.get("part_size_bytes"), grant.get("part_count")
+        if type(part_size) is not int or part_size <= 0 or type(count) is not int or not 1 <= count <= MAX_UPLOAD_PARTS or count != math.ceil(size / part_size):
+            raise SociamonialsFallbackError("Multipart grant count/size exceeds the finite upload contract", details={"retrySafe": False})
+
+
+def _put_multipart(session: Any, grant: dict[str, Any], local_path: Path, *, timeout: float,
+                   headers: Mapping[str, str] | None = None, payload: dict | None = None,
+                   digest: str | None = None) -> None:
+    """Authenticated batched part grants; storage-confirmed resume; bounded streams."""
+    size, part_size, count = local_path.stat().st_size, grant["part_size_bytes"], grant["part_count"]
+    if not 1 <= count <= MAX_UPLOAD_PARTS or count != math.ceil(size / part_size):
+        raise SociamonialsFallbackError("Multipart part count is invalid", details={"retrySafe": False})
+    uploaded: dict[int, dict[str, Any]] = {}
+    for first in range(1, count + 1, PART_URL_BATCH):
+        response = session.post(f"{MEDIA_UPLOADS_URL}/{grant['upload_id']}/parts",
+                                json={"from": first, "count": min(PART_URL_BATCH, count - first + 1)},
+                                headers=dict(headers or {}), timeout=timeout)
+        _raise_for_status(response, context="multipart grants", side_effects=False)
+        body = _data(_json_body(response))
+        parts, existing = body.get("parts"), body.get("uploaded", [])
+        if not isinstance(parts, list) or not isinstance(existing, list) or len(parts) > PART_URL_BATCH or len(existing) > count:
+            raise SociamonialsFallbackError("Multipart grant response is malformed or unbounded", details={"retrySafe": False})
+        for part in existing:
+            if not isinstance(part, Mapping):
+                raise SociamonialsFallbackError("Stored multipart receipt is malformed", details={"retrySafe": False})
+            number = part.get("part_number")
+            expected = min(part_size, size - (number - 1) * part_size) if type(number) is int and 1 <= number <= count else None
+            etag = str(part.get("etag") or "").strip().strip('"')
+            if expected is None or part.get("size_bytes") != expected or not re.fullmatch(r"[A-Za-z0-9_./+=:-]{1,256}", etag):
+                raise SociamonialsFallbackError("Stored part size/ETag cannot be verified", details={"retrySafe": False})
+            saved_parts = ((delivery_state.state(payload or {}).get("sociamonials_uploads") or {}).get(digest, {}) or {}).get("parts", [])
+            saved = next((p for p in saved_parts if p.get("part_number") == number), None)
+            if saved and (saved.get("etag") != etag or saved.get("size_bytes") != expected):
+                raise SociamonialsFallbackError("Storage part differs from its persisted exact-byte receipt", details={"retrySafe": False})
+            uploaded[number] = {"part_number": number, "etag": etag, "size_bytes": expected}
+        urls = {}
+        for part in parts:
+            if not isinstance(part, Mapping) or type(part.get("part_number")) is not int:
+                raise SociamonialsFallbackError("Part grant is malformed", details={"retrySafe": False})
+            number = part["part_number"]
+            if not first <= number < min(first + PART_URL_BATCH, count + 1) or number in urls:
+                raise SociamonialsFallbackError("Part grant numbering is duplicate/out of range", details={"retrySafe": False})
+            urls[number] = _transfer_url(part.get("url", part.get("upload_url")))
+        for number in range(first, min(first + PART_URL_BATCH, count + 1)):
+            if number in uploaded:
+                continue
+            if number not in urls:
+                raise SociamonialsFallbackError("Multipart grant omitted a required part", details={"retrySafe": False})
+            length = min(part_size, size - (number - 1) * part_size)
+            etag, part_hash = _put_bytes(session, urls[number], local_path, start=(number - 1) * part_size,
+                                         size=length, timeout=timeout, mime_type=_guess_mime(local_path, _media_kind(str(local_path))))
+            uploaded[number] = {"part_number": number, "etag": etag, "size_bytes": length, "sha256": part_hash}
+            if payload is not None and digest:
+                _upload_checkpoint(payload, digest, parts=[uploaded[n] for n in sorted(uploaded)], status="uploading")
+    if set(uploaded) != set(range(1, count + 1)):
+        raise SociamonialsFallbackError("Not every exact multipart piece was confirmed", details={"retrySafe": False})
+    grant["_parts"] = [{"part_number": n, "etag": uploaded[n]["etag"]} for n in range(1, count + 1)]
+
+
+def _wait_for_asset_ready(session: Any, headers: Mapping[str, str], asset_id: Any, *, timeout: float,
+                          interval: float = 5.0, workspace_id: str | None = None) -> dict[str, Any]:
+    deadline = time.monotonic() + _bounded_timeout(timeout, DEFAULT_ASSET_READY_TIMEOUT, zero=True)
+    last_status = "unknown"
+    for attempt in range(MAX_POLL_REQUESTS):
+        response = session.get(f"{MEDIA_ASSETS_URL}/{asset_id}", headers=dict(headers), timeout=min(30.0, max(0.1, deadline - time.monotonic())))
+        if int(getattr(response, "status_code", 0) or 0) != 404:
+            try:
+                _raise_for_status(response, context="asset readiness", side_effects=False)
+            except SociamonialsFallbackError as exc:
+                if exc.retryable:
+                    _pending("Asset processing/read is pending; resume the saved upload", **exc.details)
+                raise
+            asset = _asset_body(response)
+            if _asset_id(asset) != _workspace_int(asset_id) or (workspace_id is not None and _workspace_int(asset.get("workspace_registration_id")) != _workspace_int(workspace_id)):
+                raise SociamonialsFallbackError("Asset poll returned a different identity/workspace", details={"retrySafe": False})
+            last_status = str(asset.get("processing_status", asset.get("status")) or "unknown")
+            if last_status == "ready":
+                return asset
+            if last_status in {"failed", "error", "expired"}:
+                raise SociamonialsFallbackError("Saved asset failed processing; retain its receipt for review", details={"asset_id": _workspace_int(asset_id), "retrySafe": False})
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or attempt + 1 == MAX_POLL_REQUESTS:
+            break
+        time.sleep(min(max(0.001, interval), remaining))
+    _pending("Hosted asset is not ready; resume this receipt without reuploading", asset_id=_workspace_int(asset_id),
+             asset_status=last_status, retryAfter=5, stage="asset_processing")
+
+
+def _upload_local_media(session: Any, headers: Mapping[str, str], workspace_id: str, local_path: Path, *, timeout: float,
+                         payload: dict | None = None, item: Mapping[str, Any] | None = None) -> str:
+    payload = payload if payload is not None else {}
+    item = item or {"sha256": _sha256(local_path), "size_bytes": local_path.stat().st_size, "kind": _media_kind(str(local_path))}
+    digest, size, kind = item["sha256"], item["size_bytes"], item["kind"]
+    if _sha256(local_path) != digest or local_path.stat().st_size != size:
+        raise SociamonialsFallbackError("Local media changed after preflight; no upload will be started")
+    saved = (delivery_state.state(payload).get("sociamonials_uploads") or {}).get(digest, {})
+    if saved and (saved.get("workspace_id") != _workspace_int(workspace_id) or saved.get("sha256") != digest):
+        raise SociamonialsFallbackError("Upload receipt workspace/bytes changed", details={"retrySafe": False})
+    upload_key = f"sau-media-{workspace_id}-{digest}"
+    mime_type = _guess_mime(local_path, kind)
+    if isinstance(session, _HTTP):
+        if session.grants >= MAX_UPLOAD_GRANTS:
+            raise SociamonialsFallbackError("Bounded media-grant count reached; resume existing receipts", details={"retrySafe": False})
+        session.grants += 1
+    # Save BEFORE grant creation; a lost grant response replays the SAME key.
+    _upload_checkpoint(payload, digest, workspace_id=_workspace_int(workspace_id), sha256=digest, size_bytes=size,
+                       kind=kind, grant_key=upload_key, status=saved.get("status", "grant_started"))
+    response = session.post(MEDIA_UPLOADS_URL,
+                            json={"filename": local_path.name, "mime_type": mime_type, "size_bytes": size, "sha256": digest,
+                                  "workspace_registration_id": _workspace_int(workspace_id), "idempotency_key": upload_key,
+                                  "client_reference": upload_key}, headers=dict(headers), timeout=timeout)
+    _raise_for_status(response, context="media upload grant")
+    grant = _data(_json_body(response))
+    # Persist the identity before validating advisory metadata/URLs. No bearer
+    # grants or signatures are put into checkpoints, logs, or error details.
+    if _workspace_int(grant.get("upload_id")):
+        _upload_checkpoint(payload, digest, upload_id=_workspace_int(grant["upload_id"]))
+    _validate_grant(grant, ws=workspace_id, kind=kind, size=size)
+    if saved.get("upload_id") and saved["upload_id"] != _workspace_int(grant["upload_id"]):
+        raise SociamonialsFallbackError("Idempotent upload replay returned a different reservation", details={"retrySafe": False})
+    _upload_checkpoint(payload, digest, mode=grant["mode"], part_count=grant.get("part_count"),
+                       part_size_bytes=grant.get("part_size_bytes"))
+    # A completed transfer's checkpoint goes directly to complete. Crash before
+    # checkpoint is safe: same single object is overwritten with identical bytes;
+    # multipart uses storage's uploaded listing instead of sending parts twice.
+    if saved.get("status") not in {"uploaded", "completing", "processing", "ready"}:
+        if grant["mode"] == "multipart":
+            _put_multipart(session, grant, local_path, timeout=timeout, headers=headers, payload=payload, digest=digest)
+        else:
+            etag, sent_hash = _put_bytes(session, grant.get("upload_url"), local_path, start=0, size=size,
+                                          timeout=timeout, mime_type=mime_type)
+            if sent_hash != digest:
+                raise SociamonialsFallbackError("Transferred bytes differ from the preflight checksum", details={"retrySafe": False})
+            _upload_checkpoint(payload, digest, etag=etag)
+        if _sha256(local_path) != digest or local_path.stat().st_size != size:
+            raise SociamonialsFallbackError("Local media changed during transfer; never create a replacement post", details={"retrySafe": False})
+        _upload_checkpoint(payload, digest, status="uploaded")
+    complete_parts = grant.get("_parts")
+    if grant["mode"] == "multipart" and not complete_parts:
+        previous = (delivery_state.state(payload).get("sociamonials_uploads") or {}).get(digest, {}).get("parts", [])
+        complete_parts = [{"part_number": p["part_number"], "etag": p["etag"]} for p in previous]
+        if len(complete_parts) != grant["part_count"]:
+            raise SociamonialsFallbackError("Saved multipart completion is incomplete; reconcile its parts", details={"retrySafe": False})
+    _upload_checkpoint(payload, digest, status="completing")
+    complete = session.post(f"{MEDIA_UPLOADS_URL}/{grant['upload_id']}/complete",
+                            json={"parts": complete_parts} if complete_parts else {}, headers=dict(headers), timeout=timeout)
+    _raise_for_status(complete, context="media upload complete")
+    asset = _asset_body(complete)
+    asset_id = _asset_id(asset)
+    if not asset_id or asset_id != _workspace_int(grant["upload_id"]):
+        raise SociamonialsFallbackError("Upload completion has no matching asset receipt; reconcile the saved upload", details={"retrySafe": False})
+    _upload_checkpoint(payload, digest, asset_id=asset_id, status="processing")
+    if (asset.get("sha256") != digest or asset.get("size_bytes") != size or asset.get("media_type") != kind
+            or _workspace_int(asset.get("workspace_registration_id")) != _workspace_int(workspace_id)):
+        raise SociamonialsFallbackError("Server-computed upload checksum/bytes/type/workspace differ from the exact local media", details={"retrySafe": False})
+    if asset.get("processing_status", asset.get("status")) != "ready":
+        asset = _wait_for_asset_ready(session, headers, asset_id, timeout=_asset_ready_timeout(), workspace_id=workspace_id)
+    receipt = _asset_receipt(asset, item, workspace_id)
+    _upload_checkpoint(payload, digest, **receipt, status="ready")
+    return f"asset://{asset_id}"
+
+
+def _resolve_local_media(session: Any, headers: Mapping[str, str], workspace_id: str, local_path: Path, *, timeout: float,
+                         db_path: Any = None, used_assets: list[dict[str, Any]] | None = None,
+                         payload: dict | None = None, item: Mapping[str, Any] | None = None) -> str:
+    payload = payload if payload is not None else {}
+    item = item or {"sha256": _sha256(local_path), "size_bytes": local_path.stat().st_size,
+                    "kind": _media_kind(str(local_path)), "local_path": str(local_path), "metadata": {}}
+    if not _STORAGE_LOCK.acquire(timeout=0.1):
+        _pending("Another pooled-quota upload is active; release worker concurrency", retryAfter=5, stage="storage_pool")
+    try:
+        _guard_storage_for_upload(session, headers, workspace_id, local_path=local_path, size_bytes=item["size_bytes"], timeout=timeout)
+        reference = _upload_local_media(session, headers, workspace_id, local_path, timeout=timeout, payload=payload, item=item)
+    finally:
+        _STORAGE_LOCK.release()
+    if used_assets is not None:
+        saved = (delivery_state.state(payload).get("sociamonials_uploads") or {})[item["sha256"]]
+        used_assets.append({key: saved[key] for key in ("asset_id", "workspace_id", "sha256", "size_bytes", "kind", "processing_status")})
+    return reference
+
+
+def _stringify(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value  # Exact whitespace, Unicode and links are approved copy too.
+    if isinstance(value, Mapping):
+        allowed = {"title", "summary", "description", "message", "body", "hashtags"}
+        if set(value) - allowed:
+            raise SociamonialsFallbackError("Structured draft contains unsupported copy fields; review instead of flattening settings into text")
+        pieces = [_stringify(value.get(key)) for key in ("title", "summary", "description", "message", "body") if value.get(key) is not None]
+        tags = value.get("hashtags")
+        if tags is not None:
+            if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+                raise SociamonialsFallbackError("Draft hashtags must be strings")
+            pieces.append(" ".join(tag if tag.startswith("#") else "#" + tag for tag in tags if tag))
+        return "\n\n".join(piece for piece in pieces if piece)
+    raise SociamonialsFallbackError("Approved message must be text or an explicit structured draft")
+
+
+def _draft_from_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    return payload["draft"] if isinstance(payload.get("draft"), Mapping) else {}
+
+
+def compose_message_with_links(payload: Mapping[str, Any], *, network: str) -> tuple[str, list[str]]:
+    """Compatibility API: exact message, NO moved links and NO truncation.
+
+    X restrictions are decided by strict provider validation against the ORIGINAL
+    main post (Enterprise link allowance differs). No invented X first comment.
+    """
+    payload = payload or {}
+    draft = _draft_from_payload(payload)
+    raw = payload.get("message") if payload.get("message") is not None else draft.get("message")
+    message = _stringify(raw)
+    if not message:
+        message = _stringify(payload.get("brief") if payload.get("brief") is not None else payload.get("notes"))
+    tags = draft.get("hashtags")
+    if isinstance(tags, list) and network != "yt":
+        if any(not isinstance(tag, str) for tag in tags):
+            raise SociamonialsFallbackError("Draft hashtags must be strings")
+        missing = [tag if tag.startswith("#") else "#" + tag for tag in tags if tag and (tag if tag.startswith("#") else "#" + tag).lower() not in message.lower()]
+        if missing:
+            message += ("\n\n" if message else "") + " ".join(missing)
+    return message, []
+
+
+def compose_message(payload: Mapping[str, Any], *, network: str) -> str:
+    return compose_message_with_links(payload, network=network)[0]
+
+
+def _first_comment(payload: Mapping[str, Any]) -> str:
+    draft = _draft_from_payload(payload)
+    return _stringify(draft.get("firstComment", draft.get("first_comment", payload.get("first_comment", payload.get("firstComment")))))
+
+
+def _network_options(payload: Mapping[str, Any], network: str, account_config: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        media = collect_media(payload)
+        main = [item for item in media if item["kind"] != "thumbnail"]
+        return policy.map_intent(payload, network=network, message=compose_message(payload, network=network),
+                                 account_config=account_config, media_kind=main[0]["kind"] if main else None,
+                                 media_count=len(main))["network_options"]
+    except policy.SociamonialsPolicyError as exc:
+        raise SociamonialsFallbackError(str(exc), details=exc.details) from None
+
+
+def _idempotency_key(target_id: Any, payload: dict, suffix: str | None) -> str:
+    if type(target_id) is not int or not 0 < target_id < 2**63:
+        raise SociamonialsFallbackError("A stable positive SAU target_id is required for backup idempotency")
+    generation = delivery_state.state(payload).get("recovery_generation")
+    if generation is not None and (not isinstance(generation, str) or not _SHA_RE.fullmatch(generation)):
+        raise SociamonialsFallbackError("Invalid recovery generation; refusing an unstable post key")
+    stable_suffix = "recovery-" + generation if generation is not None else ""
+    if suffix and suffix != stable_suffix:
+        raise SociamonialsFallbackError("Attempt-specific idempotency suffix is unsafe; use only the persisted recovery generation")
+    key = f"sau-target-{target_id}" + (f"-{stable_suffix}" if stable_suffix else "")
+    if len(key) > 120:
+        raise SociamonialsFallbackError("Stable idempotency key exceeds the provider limit")
+    return key
+
+
+def _pending(message: str, **details: Any) -> None:
+    error = delivery_state.DeliveryPending(message)
+    error.retryable = True
+    error.details = {"provider": "sociamonials", **details, "retrySafe": False}
+    raise error
+
+
+def _unknown(message: str, **details: Any) -> None:
+    error = delivery_state.DeliveryUnknown(message)
+    error.retryable = False
+    error.details = {"provider": "sociamonials", **details, "retrySafe": False}
+    raise error
+
+
+def _usable_post_id(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return False
+    text = str(value)
+    if any(char in text for char in ("?", "#", "@")) or text.lower().startswith(("sm_agent_", "sma_", "bearer", "token=")):
+        return False
+    if re.fullmatch(r"-?\d+", text) and int(text) <= 0:
+        return False
+    return text.lower() not in _PLACEHOLDER_IDS and bool(re.fullmatch(r"[A-Za-z0-9_:/?.#%+=@|~-]{1,512}", text))
+
+
+def _check_native_receipt(payload: dict, proof: Mapping[str, Any] | None, target_id: int | None) -> None:
+    state = delivery_state.state(payload)
+    receipt = state.get("provider_receipt")
+    unrelated = isinstance(receipt, Mapping) and receipt.get("provider") != "sociamonials"
+    started = delivery_state.has_unresolved_submission(payload)
+    journals = {}
+    raw = state.get("provider_operations") or {}
+    if not isinstance(raw, Mapping):
+        _unknown("Native operation journal is invalid; reconcile before backup")
+    for provider, journal in raw.items():
+        if provider == "sociamonials":
+            continue
+        if not isinstance(journal, Mapping) or not isinstance(journal.get("items", {}), Mapping):
+            _unknown("Native operation receipts are invalid; reconcile before backup")
+        if journal.get("items"):
+            journals[provider] = journal["items"]
+    if not unrelated and not started and not journals:
+        return
+    authorization = proof or state.get("backup_authorization")
+    valid = (isinstance(authorization, Mapping) and authorization.get("definitive_rejection") is True
+             and authorization.get("no_publication") is True and authorization.get("target_id") == target_id)
+    if unrelated:
+        valid = valid and authorization.get("provider") == receipt.get("provider") and authorization.get("receipt_id") == receipt.get("id")
+    elif started and (not journals or state.get("operation")):
+        valid = valid and isinstance(state.get("operation"), str) and bool(state["operation"]) and authorization.get("operation") == state["operation"]
+    if not valid:
+        _unknown("An existing native receipt or ambiguous submission owns this intent; reconcile it before authorizing backup")
+    if journals:
+        proofs = authorization.get("operation_receipts")
+        if not isinstance(proofs, Mapping) or set(proofs) != set(journals):
+            _unknown("Every native operation receipt needs explicit scoped proof of non-publication before backup")
+        for provider, items in journals.items():
+            verified_items = proofs[provider]
+            if not isinstance(verified_items, Mapping) or set(verified_items) != set(items):
+                _unknown("Native operation proof is incomplete; do not discard earlier side effects")
+            for name, item in items.items():
+                proof_item = verified_items[name]
+                if (not isinstance(item, Mapping) or not isinstance(proof_item, Mapping)
+                        or proof_item.get("id") != item.get("id") or proof_item.get("no_publication") is not True
+                        or proof_item.get("definitive_rejection") is not True):
+                    _unknown("Native operation non-publication proof does not match its original receipt")
+    # Persist only the proof's scoped machine fields; never provider error text,
+    # signatures or caller-supplied extra fields. Subsequent safe retries reuse it.
+    saved_proof = {key: authorization[key] for key in ("target_id", "provider", "receipt_id", "operation", "definitive_rejection", "no_publication") if key in authorization}
+    if journals:
+        saved_proof["operation_receipts"] = {provider: {name: {key: authorization["operation_receipts"][provider][name].get(key)
+            for key in ("id", "definitive_rejection", "no_publication")} for name in items} for provider, items in journals.items()}
+    changes = {"backup_authorization": saved_proof}
+    if unrelated:
+        changes["native_provider_receipt"] = dict(receipt)
+    delivery_state.checkpoint(payload, **changes)
+
+
+def _strict_validate(http: Any, headers: Mapping[str, str], body: Mapping[str, Any], *, timeout: float,
+                     payload: dict | None = None, route: Mapping[str, Any] | None = None) -> None:
+    request = {**copy.deepcopy(body), "validate_only": True, "strict": True}
+    response = http.post(POST_VALIDATE_URL, json=request, headers=dict(headers), timeout=timeout, side_effects=False)
+    _raise_for_status(response, context="strict validation", side_effects=False)
+    result = _data(_json_body(response))
+    resolution = result.get("profile_resolution")
+    network = next(iter(body["networks"]))
+    refs = body["networks"][network]["profile_refs"]
+    if _workspace_int(result.get("post_id")):
+        if payload is not None and route is not None:
+            delivery_state.accepted(payload, provider="sociamonials", receipt_id=str(result["post_id"]),
+                network=network, profile_refs=list(refs), workspace_id=body["workspace_registration_id"],
+                api_key_env=route["api_key_env"], idempotency_key=body["idempotency_key"], intent_mismatch=True)
+        _unknown("Validation unexpectedly returned a post receipt; reconcile it without any further write")
+    rows = resolution.get("resolved_profiles") if isinstance(resolution, Mapping) else None
+    if (result.get("valid") is not True or result.get("validate_only") is not True or result.get("post_id") is not None
+            or result.get("mode") != body["mode"] or not isinstance(resolution, Mapping) or resolution.get("mode") != "explicit"
+            or resolution.get("preset") is not None or not isinstance(rows, list) or len(rows) != 1
+            or not isinstance(rows[0], Mapping) or rows[0].get("network") != network or rows[0].get("profile_ref") != refs[0]
+            or type(result.get("requires_approval")) is not bool
+            or result.get("warnings") != [] or resolution.get("warnings") != []):
+        raise SociamonialsFallbackError("Strict no-create validation did not confirm the original settings and exact destination; no media/post will be created",
+                                       details={"intentReviewRequired": True, "validationUnknown": True})
+    if result.get("requires_approval") is True:
+        raise SociamonialsNotConfigured("Original destination requires provider approval; arrange approval instead of automatic backup writes",
+                                       details={"requiresApproval": True, "intentReviewRequired": True})
+
+
+def _delivery_view(body: Mapping[str, Any], *, post_id: Any, network: str, profile_refs: Sequence[str], workspace_id: Any) -> dict[str, Any]:
+    unknown = {"state": "unknown", "delivered": None, "error": "Exact-destination delivery could not be proven", "platform_post_id": None}
+    if (_workspace_int(body.get("post_id")) != _workspace_int(post_id)
+            or _workspace_int(body.get("workspace_registration_id")) != _workspace_int(workspace_id)):
+        return {**unknown, "details": {"receiptScopeMismatch": True}}
+    networks = body.get("networks")
+    if not isinstance(networks, Mapping) or not isinstance(networks.get(network), Mapping):
+        return unknown
+    detail = networks[network]
+    profiles = detail.get("profiles")
+    if not isinstance(profiles, list) or len(profile_refs) != 1:
+        return unknown
+    selected = [row for row in profiles if isinstance(row, Mapping) and row.get("profile_ref") == profile_refs[0]
+                and row.get("network", network) == network]
+    if len(selected) != 1:
+        return unknown
+    if set(networks) != {network} or len(profiles) != 1:
+        return {**unknown, "state": "partial", "error": "Provider receipt includes unexpected destinations; reconcile partial publication"}
+    profile = selected[0]
+    state = str(profile.get("delivery_state") or "").lower()
+    status = str(detail.get("delivery_status") or "").lower()
+    native_id = profile.get("platform_post_id")
+    if body.get("requires_approval") is True or (body.get("approved") is False and body.get("draft") is not True):
+        return {**unknown, "state": "requires_approval", "error": "Provider holds this receipt for approval"}
+    if profile.get("reason") in {"MOBILE_APP_SHARE", "APPROVAL_REQUIRED", "APPROVAL_HOLD"}:
+        return {**unknown, "state": "requires_approval", "error": "Receipt requires a person/approval; never report automatic delivery"}
+    if (detail.get("delivered") is True and status == "delivered" and state == "published"
+            and ("delivered" not in profile or profile["delivered"] is True) and _usable_post_id(native_id)):
+        return {"state": "delivered", "delivered": True, "error": "", "platform_post_id": str(native_id)}
+    if _usable_post_id(native_id) or detail.get("delivered") is True or state == "published" or status == "delivered":
+        return unknown  # Contradictory flags or an id without literal confirmation.
+    if body.get("canceled") is True or state == "canceled":
+        return {**unknown, "state": "failed", "delivered": False, "error": "Exact provider destination is canceled; retain its receipt"}
+    if profile.get("reason") in {"MEDIA_DISPATCH_INTERRUPTED", "DELIVERY_UNKNOWN", "PUBLISHING_TIMEOUT"}:
+        return {**unknown, "details": {"reason": profile["reason"]}}
+    if status == "failed" and state == "needs_attention":
+        return {**unknown, "state": "failed", "delivered": False,
+                "error": "Provider reports final failure for the exact destination; inspect the retained receipt",
+                "details": {"reason": _safe_code(profile.get("reason"), "delivery_failed")}}
+    if status in {"pending", "processing"} and state in {"accepted", "preparing_media", "publishing"}:
+        result = {**unknown, "state": "processing" if status == "processing" or state != "accepted" else "pending", "error": ""}
+        next_check = profile.get("next_check_at_utc")
+        if isinstance(next_check, str):
+            try:
+                datetime.fromisoformat(next_check.replace("Z", "+00:00"))
+                result["details"] = {"next_check_at_utc": next_check}
+            except ValueError:
+                pass
+        return result
+    return unknown
+
+
+def _wait_for_delivery(http: Any, headers: Mapping[str, str], post_id: Any, *, timeout: float, interval: float = 5.0,
+                       network: str | None = None, profile_refs: Sequence[str] | None = None,
+                       workspace_id: Any = None) -> dict[str, Any]:
+    """Bounded receipt-only polling. A 429/5xx retains deadlines and releases concurrency."""
+    last = {"state": "unknown", "delivered": None, "error": "Exact receipt destination is missing", "platform_post_id": None}
+    if not _workspace_int(post_id) or network not in policy.NETWORK_TO_PLATFORM or not profile_refs or len(profile_refs) != 1 or not _workspace_int(workspace_id):
+        return last
+    deadline = time.monotonic() + _bounded_timeout(timeout, DEFAULT_DELIVERY_TIMEOUT, zero=True)
+    for attempt in range(MAX_POLL_REQUESTS):
+        try:
+            response = http.get(f"{POSTS_URL}/{post_id}", headers=dict(headers), timeout=min(30.0, max(0.1, deadline - time.monotonic())))
+            if int(getattr(response, "status_code", 0) or 0) == 404:
+                return {**last, "details": {"httpStatus": 404}}
+            _raise_for_status(response, context="delivery poll", side_effects=False)
+            body = _data(_json_body(response))
+            if isinstance(body.get("post"), Mapping):
+                body = dict(body["post"])
+            last = _delivery_view(body, post_id=post_id, network=network, profile_refs=profile_refs, workspace_id=workspace_id)
+            last["details"] = {**dict(last.get("details") or {}), **_rate_details(response)}
+        except SociamonialsFallbackError as exc:
+            if exc.retryable:
+                _pending("Provider delivery poll is deferred; keep the original receipt and release concurrency", **exc.details)
+            raise
+        except AssertionError:
+            raise
+        except Exception:
+            return {"state": "unknown", "delivered": None, "error": "Provider receipt read was unavailable; do not recreate", "platform_post_id": None}
+        if last["state"] in {"delivered", "failed", "partial", "requires_approval", "unknown"}:
+            return last
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or attempt + 1 == MAX_POLL_REQUESTS:
+            return last
+        time.sleep(min(max(0.001, interval), remaining))
+    return last
+
+
+def _result(receipt: Mapping[str, Any], view: Mapping[str, Any]) -> dict[str, Any]:
+    return {"ok": view.get("delivered") is True and _usable_post_id(view.get("platform_post_id")),
+            "accepted": True, "provider": "sociamonials", "post_id": _workspace_int(receipt.get("id")),
+            "platform_post_id": view.get("platform_post_id"), "status": view.get("state"),
+            "network": receipt["network"], "profile_refs": list(receipt["profile_refs"]),
+            "workspace_id": receipt["workspace_id"], "used_assets": receipt.get("used_assets") or [],
+            "delivery_state": view.get("state"), "delivered": view.get("delivered"),
+            "requires_approval": view.get("state") == "requires_approval", "delivery_error": view.get("error", ""),
+            "details": dict(view.get("details") or {})}
+
+
+def _resume_receipt(payload: dict, receipt: Mapping[str, Any], *, platform: str, session: Any,
+                    api_key: str | None, timeout: float, delivery_timeout: float) -> dict[str, Any]:
+    # The receipt, not current config or today's mapping, owns workspace/ref/key.
+    ws = str(receipt.get("workspace_id") or "")
+    network, refs, selector = receipt.get("network"), receipt.get("profile_refs"), receipt.get("api_key_env")
+    if (not _workspace_int(receipt.get("id")) or not _workspace_int(ws) or network != _platform_network(platform)
+            or not isinstance(refs, list) or len(refs) != 1 or not isinstance(refs[0], str) or not refs[0]
+            or not isinstance(selector, str) or not selector):
+        _unknown("Saved Sociamonials receipt lacks its original workspace/profile/credential scope; reconcile rather than guess a mapping")
+    key, resolved_ws = resolve_credentials({"workspace_id": ws, "api_key_env": selector}, api_key=api_key)
+    if not key or resolved_ws != ws:
+        raise SociamonialsNotConfigured("Original receipt's isolated credential is unavailable; do not switch keys/workspaces")
+    http, headers = _http(session, key), _headers(key)
+    _identity(http, headers, ws, timeout=timeout, permissions=("posts.read",))
+    view = _wait_for_delivery(http, headers, receipt["id"], timeout=delivery_timeout, network=network, profile_refs=refs, workspace_id=ws)
+    if receipt.get("intent_mismatch") is True:
+        view = {"state": "partial", "delivered": None, "error": "Stored provider receipt changed original intent; reconcile it", "platform_post_id": None}
+    updated = {**receipt, "status": view["state"]}
+    if view.get("platform_post_id"):
+        updated["platform_post_id"] = view["platform_post_id"]
+    delivery_state.checkpoint(payload, provider_receipt=updated)
+    return _result(updated, view)
+
+
+def publish_via_sociamonials(*, platform: str, account: Any, payload: Mapping[str, Any],
+                             media_paths: Sequence[str] | None = None, target_id: int | None = None,
+                             settings: Any = None, session: Any = None, db_path: Any = None,
+                             api_key: str | None = None, workspace_id: str | None = None,
+                             timeout: float | None = None, verify_media: bool = True,
+                             delivery_timeout: float | None = None, idempotency_suffix: str | None = None,
+                             native_failure_proof: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Publish exactly one prepared target, or resume its original scoped receipt.
+
+    Stable API; verify_media is compatibility-only and bypasses NO safety check.
+    New writes require target_id and a persisted recovery_generation (when used).
+    Checkpoints store scoped receipts/hash identities, never secrets/signed URLs.
+    Optional native_failure_proof (or _delivery.backup_authorization) must name
+    target_id, provider, receipt_id, definitive_rejection=True, no_publication=True
+    before an unrelated native receipt can be superseded; its evidence is kept.
+    Any provider_operations journal also requires operation_receipts proofs for
+    EVERY recorded item: {provider: {operation: {id, no_publication: True,
+    definitive_rejection: True}}}. A missing/changed receipt always blocks.
+    The parent must persist _save_checkpoint under its lease before side effects.
+    """
+    payload = payload if isinstance(payload, dict) else dict(payload)
+    request_timeout = _bounded_timeout(timeout, _timeout())
+    poll_timeout = _bounded_timeout(delivery_timeout, _delivery_timeout(), zero=True)
     receipt = delivery_state.receipt_for(payload, "sociamonials")
     if receipt is not None:
-        delivery = _wait_for_delivery(http, headers, receipt["id"], timeout=0)
-        return {"ok": True, "post_id": receipt["id"], "network": receipt.get("network", network),
-                "workspace_id": receipt.get("workspace_id", _workspace_int(ws)),
-                "used_assets": receipt.get("used_assets") or [],
-                "delivery_state": delivery.get("state"), "delivered": delivery.get("delivered"),
-                "delivery_error": delivery.get("error"), "status": delivery.get("state")}
-
-    warnings: list[str] = []
-    message, moved_links = compose_message_with_links(payload, network=network)
-    if not message:
-        raise SociamonialsFallbackError("payload contained no publishable message")
-
-    body: dict[str, Any] = {
-        "mode": "publish_now",
-        "message": message,
-        "networks": {network: {"profile_refs": list(mapping["profile_refs"])}},
-    }
-    if _workspace_int(ws) is not None:
-        body["workspace_registration_id"] = _workspace_int(ws)
-    first_comment = _first_comment(payload)
-    if moved_links:
-        # X/Twitter cannot carry a link in the main post; put it in the
-        # follow-up reply. Whether Sociamonials honours ``first_comment`` for
-        # ``tw`` is not yet proven - the warning makes that visible if it is
-        # ever rejected so the operator can fall back to link-free posts.
-        moved = "\n".join(moved_links)
-        first_comment = f"{first_comment}\n{moved}".strip() if first_comment else moved
-        warnings.append(
-            f"{network} forbids links in the main post; moved "
-            f"{len(moved_links)} link(s) to the first comment/reply"
-        )
-    if first_comment:
-        body["first_comment"] = first_comment
-    options = _network_options(payload, network)
-    if options.get("title") and network == "yt":
-        body["networks"][network]["title"] = options["title"]
-    if target_id is not None:
-        # The key must be stable WITHIN one attempt (a retried HTTP call must
-        # not create a second post) but change ACROSS attempts. A fixed
-        # ``sau-target-<id>`` made every retry return the original post, so a
-        # post that Sociamonials had permanently failed to deliver was returned
-        # forever and the target could never recover (observed: post_id
-        # 10689041 on every retry of X target 3391).
-        suffix = str(idempotency_suffix or "").strip()
-        if not suffix:
-            generation = delivery_state.state(payload).get("recovery_generation")
-            if generation is not None:
-                if not isinstance(generation, str) or not re.fullmatch(r"[0-9a-f]{64}", generation):
-                    raise SociamonialsFallbackError("Invalid recovery generation; refusing an unstable post key")
-                suffix = "recovery-" + generation
-        body["idempotency_key"] = (
-            f"sau-target-{target_id}" + (f"-{suffix}" if suffix else "")
-        )
-
-    media = collect_media(payload, media_paths)
-    if media:
-        image_refs: list[str] = []
-        video_ref: str | None = None
-        video_local_path: str | None = None
-        for item in media:
-            kind = item["kind"]
-            reference: str | None = None
-            local_path = item.get("local_path")
-            public_url = item.get("public_url")
-            # Prefer the prepared LOCAL file. The payload's public_url is often
-            # the raw oversized original that just failed the direct publish;
-            # re-attaching it is exactly how the Stonewall IG post got stuck.
-            if local_path:
-                local = Path(str(local_path))
-                if local.exists():
-                    _assert_media_size(network, local.stat().st_size)
-                    reference = _resolve_local_media(
-                        http,
-                        headers,
-                        ws,
-                        local,
-                        timeout=request_timeout,
-                        db_path=resolved_db_path,
-                        used_assets=used_assets,
-                    )
-                elif not (public_url and is_direct_media_url(public_url)):
-                    # A declared local artifact that is gone and no usable URL:
-                    # nothing to attach.
-                    raise SociamonialsFallbackError(f"local media missing: {local}")
-            if reference is None and public_url and is_direct_media_url(public_url):
-                # Normalize the URL (percent-encode spaces etc.) so Sociamonials'
-                # fetch guard can reach it. Without this, a URL with a literal space
-                # fails with 'Video URL not accessible after retries'.
-                normalized_url = _normalize_public_url(public_url)
-                if verify_media and not _verify_remote_media(normalized_url, http, timeout=request_timeout):
-                    warnings.append(f"media url could not be verified: {normalized_url}")
-                else:
-                    reference = normalized_url
-            if reference is None:
-                continue
-            if kind == "video":
-                video_ref = reference
-                video_local_path = str(item.get("local_path") or "") or None
+        return _resume_receipt(payload, receipt, platform=platform, session=session, api_key=api_key,
+                               timeout=request_timeout, delivery_timeout=poll_timeout)
+    current = delivery_state.state(payload)
+    if delivery_state.has_unresolved_submission(payload) and current.get("operation") == "sociamonials-create-post":
+        _unknown("An earlier backup create is ambiguous; retain its stable key and reconcile before any new write")
+    key_id = _idempotency_key(target_id, payload, idempotency_suffix)
+    _check_native_receipt(payload, native_failure_proof, target_id)
+    if _account_value(account, "enabled", True) in (False, 0):
+        raise SociamonialsNotConfigured("Disabled/deleted account cannot use a new backup publication")
+    account_id = _account_value(account, "id")
+    if type(account_id) is not int or account_id <= 0:
+        raise SociamonialsNotConfigured("The original SAU account is missing/deleted; do not invent an account substitution")
+    mapping = resolve_mapping(account_id, platform=platform, account=account, settings=settings)
+    if not mapping:
+        raise SociamonialsNotConfigured("No exact Sociamonials destination is mapped for this account; operational mappings need verification")
+    key, ws = resolve_credentials(mapping, api_key=api_key, workspace_id=workspace_id)
+    if not key:
+        raise SociamonialsNotConfigured("The selected exact destination's Sociamonials credential is missing")
+    network = mapping["network"]
+    if network != _platform_network(platform) or len(mapping["profile_refs"]) != 1:
+        raise SociamonialsNotConfigured("Backup needs one exact matching-platform destination")
+    if not payload.get("artifacts") and media_paths:
+        payload["artifacts"] = [{"local_path": path} for path in media_paths]
+    media = collect_media(payload)
+    for item in media:
+        locator = urlparse(str(item.get("public_url") or ""))
+        if locator.username is not None or locator.password is not None or locator.query or locator.fragment:
+            raise SociamonialsFallbackError("Declared media has a credential/expiring locator; supply a credential-free stable URL before checkpointing")
+    main, thumbnails = [item for item in media if item["kind"] != "thumbnail"], [item for item in media if item["kind"] == "thumbnail"]
+    kinds = {item["kind"] for item in main}
+    if len(kinds) > 1 or len([item for item in main if item["kind"] == "video"]) > 1:
+        raise SociamonialsFallbackError("Mixed image/video or multiple videos require separately scheduled intents; nothing may be dropped")
+    if thumbnails and (len(thumbnails) != 1 or kinds != {"video"}):
+        raise SociamonialsFallbackError("A video cover needs exactly one video and one explicit thumbnail")
+    if (payload.get("artifacts") or media_paths) and not main:
+        raise SociamonialsFallbackError("Only unsupported/context media was supplied; refusing a text-only replacement")
+    media_kind = next(iter(kinds), None)
+    if network in _MEDIA_REQUIRED_NETWORKS and (not main or network == "yt" and media_kind != "video"):
+        raise SociamonialsFallbackError("This destination requires original publishable media")
+    if media_kind == "image" and len(main) > policy.limits_for(network)["max_images"]:
+        raise SociamonialsFallbackError("Image count exceeds the backup limit; schedule ALL images without dropping extras")
+    config = _account_value(account, "config", {}) or {}
+    try:
+        intent = policy.map_intent(payload, network=network, message=compose_message(payload, network=network),
+                                   account_config=config, media_kind=media_kind, media_count=len(main))
+    except policy.SociamonialsPolicyError as exc:
+        raise SociamonialsFallbackError(str(exc), details=exc.details) from None
+    if not intent["message"] and not main:
+        raise SociamonialsFallbackError("Original intent contains no publishable text/media")
+    http, headers = _http(session, key), _headers(key)
+    verified = _verify_route(http, headers, mapping, ws, platform=platform, timeout=request_timeout,
+                             required=_required_capabilities(payload, intent=intent))
+    if verified["requires_approval"]:
+        raise SociamonialsNotConfigured("Verified destination requires approval; no automatic backup media/post writes",
+                                       details={"requiresApproval": True})
+    route = verified["mapping"]
+    prior_route = delivery_state.state(payload).get("sociamonials_route")
+    if prior_route and any(prior_route.get(k) != route.get(k) for k in ("network", "profile_refs", "workspace_id", "api_key_env")):
+        _unknown("Backup checkpoint owns a different original route; do not move its media/submission to a changed mapping")
+    media = _checked_media(media, network)
+    declared_identity = [(item["kind"], item["local_path"], item["sha256"], item["size_bytes"]) for item in media]
+    from myUtils.publish_media_guard import ensure_single_payload
+    # Final scheduled bytes must remain immutable. Neither this call nor a mock
+    # verify_media flag permits skipping live profile grants/strict validation.
+    ensure_single_payload(payload, platform=platform, account_config=config, backup_compatible=True)
+    media = _checked_media(collect_media(payload), network)
+    main, thumbnails = [item for item in media if item["kind"] != "thumbnail"], [item for item in media if item["kind"] == "thumbnail"]
+    if [(item["kind"], item["local_path"], item["sha256"], item["size_bytes"]) for item in media] != declared_identity:
+        raise SociamonialsFallbackError("The preparation guard changed scheduled byte/part identity; prepare and schedule all parts first")
+    if intent["network_options"].get("shorts"):
+        if media_kind != "video" or media_pipeline.probe_video_duration(main[0]["local_path"]) > 180:
+            raise SociamonialsFallbackError("Original YouTube Shorts intent exceeds 180 seconds; do not silently publish a regular video")
+    body = {"mode": "publish_now", "strict": True, "message": intent["message"],
+            "workspace_registration_id": _workspace_int(ws),
+            "networks": {network: {"profile_refs": list(mapping["profile_refs"]), **intent["network_options"]}},
+            "idempotency_key": key_id, **intent["top_fields"]}
+    # Per-image alt text cannot be collapsed to a single global alt_text unless
+    # every original value is identical. A missing/different value is not dropped.
+    alt_values = [item["metadata"].get("alt_text", item["artifact"].get("alt_text")) for item in main]
+    if any(value is not None for value in alt_values):
+        if media_kind != "image" or not all(isinstance(value, str) for value in alt_values) or any(value != alt_values[0] for value in alt_values) or network in {"in", "gmb", "yt", "tiktok"}:
+            raise SociamonialsFallbackError("Original per-image accessibility text cannot be represented faithfully by this backup")
+        if body.get("alt_text") is not None and body["alt_text"] != alt_values[0]:
+            raise SociamonialsFallbackError("Global and per-image alt text conflict")
+        body["alt_text"] = alt_values[0]
+    if body.get("video_thumbnail_url") and not thumbnails:
+        raise SociamonialsFallbackError("Original thumbnail URL has no exact local checksum-backed cover artifact")
+    if thumbnails:
+        if network not in policy.THUMBNAIL_NETWORKS:
+            raise SociamonialsFallbackError("Original cover is unsupported on this backup network")
+        reference = _external_reference(thumbnails[0], http, timeout=request_timeout)
+        if body.get("video_thumbnail_url") and _normalize_public_url(body["video_thumbnail_url"]) != reference:
+            raise SociamonialsFallbackError("Original cover URL differs from the exact thumbnail artifact")
+        body["video_thumbnail_url"] = reference
+    fingerprint = hashlib.sha256(json.dumps({"intent": body, "media": [{"sha256": item["sha256"], "size_bytes": item["size_bytes"], "kind": item["kind"]} for item in media]},
+                                              sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    previous = delivery_state.state(payload).get("sociamonials_intent_sha256")
+    if previous is not None and previous != fingerprint:
+        _unknown("Original backup copy/options/media changed under a stable target key; reconcile before new writes")
+    delivery_state.checkpoint(payload, sociamonials_route=route, sociamonials_idempotency_key=key_id,
+                               sociamonials_intent_sha256=fingerprint)
+    used_assets: list[dict[str, Any]] = []
+    refs: list[str | None] = []
+    for item in main:
+        asset = _saved_asset(http, headers, ws, item, payload, timeout=request_timeout)
+        if asset is None and verified["permissions"]["assets.read"]:
+            asset = _lookup_reusable_asset(http, headers, ws, filename=Path(item["local_path"]).name,
+                                           size_bytes=item["size_bytes"], kind=item["kind"], sha256=item["sha256"], timeout=request_timeout)
+        if asset is not None:
+            asset_receipt = _asset_receipt(asset, item, ws)
+            _upload_checkpoint(payload, item["sha256"], **asset_receipt, status="ready")
+            used_assets.append(asset_receipt)
+            refs.append(f"asset://{asset_receipt['asset_id']}")
+        else:
+            refs.append(None)
+    new_indices = [index for index, reference in enumerate(refs) if reference is None]
+    storage = _read_storage(http, headers, ws, timeout=request_timeout) if new_indices else None
+    if storage and storage["requires_approval"]:
+        raise SociamonialsNotConfigured("Client/workspace holds this intent for approval; no automatic backup uploads", details={"requiresApproval": True})
+    caps = policy.limits_for(network, storage)
+    available = storage["available_bytes"] if storage else 0
+    for index in new_indices:
+        item = main[index]
+        cap = caps["hosted_video_max_bytes"] if item["kind"] == "video" else caps["hosted_image_max_bytes"]
+        fits = (verified["permissions"]["assets.write"] and cap is not None and item["size_bytes"] <= cap
+                and not storage["ratchet_active"] and (available is None or item["size_bytes"] <= available))
+        if not fits:
+            # Separate external budget + exact stable URL. Never fall back to a
+            # larger raw original, an unverified URL or a different destination.
+            refs[index] = _external_reference(item, http, timeout=request_timeout)
+        elif available is not None:
+            available -= item["size_bytes"]  # Aggregate pooled cost before ANY grant.
+    preview = copy.deepcopy(body)
+    preview_refs = [ref or f"{BASE_URL}/sau-preflight/{item['sha256']}{'.mp4' if item['kind'] == 'video' else '.jpg'}" for ref, item in zip(refs, main)]
+    if media_kind == "video":
+        preview["video_url"] = preview_refs[0]
+    elif media_kind == "image":
+        preview["image_urls"] = preview_refs
+    # Validation-only does not fetch placeholders and never creates them. The
+    # final strict validation below uses real, server-verified ready references.
+    _strict_validate(http, headers, preview, timeout=request_timeout, payload=payload, route=route)
+    for index, item in enumerate(main):
+        if refs[index] is not None:
+            continue
+        if item["kind"] == "video" and not verified["permissions"]["assets.read"]:
+            raise SociamonialsNotConfigured("Hosted video readiness requires an asset-read grant before upload")
+        try:
+            refs[index] = _resolve_local_media(http, headers, ws, Path(item["local_path"]), timeout=request_timeout,
+                                                payload=payload, item=item, used_assets=used_assets)
+        except SociamonialsFallbackError as exc:
+            # Only a definitive quota/entitlement rejection may select the
+            # previously declared exact URL. Ambiguous writes NEVER change route.
+            if exc.details.get("retrySafe") is True and exc.details.get("providerCode") in {"storage_quota_exceeded", "video_upload_not_enabled", "hosted_media_limit"}:
+                refs[index] = _external_reference(item, http, timeout=request_timeout)
             else:
-                image_refs.append(reference)
-        if video_ref:
-            # An over-long video is split rather than refused: the direct path
-            # splits, so refusing here would lose a publish that is solvable.
-            try:
-                _assert_video_duration(network, video_local_path)
-            except SociamonialsFallbackError:
-                split_first = _split_for_network(network, video_local_path)
-                if split_first is None:
-                    raise
-                # Upload the first part and note the rest, rather than dropping
-                # the video entirely or sending one the network will reject.
-                reference = _resolve_local_media(
-                    http,
-                    headers,
-                    ws,
-                    Path(split_first),
-                    timeout=request_timeout,
-                    db_path=resolved_db_path,
-                    used_assets=used_assets,
-                )
-                video_ref = reference
-                warnings.append(
-                    f"{network} duration limit: published the first split part; "
-                    "remaining parts were not sent by the fallback"
-                )
-            body["video_url"] = video_ref
-            if image_refs:
-                warnings.append("both video and image media were present; images were dropped")
-        elif image_refs:
-            max_images = NETWORK_MAX_IMAGES.get(network)
-            if max_images and len(image_refs) > max_images:
-                warnings.append(
-                    f"{network} accepts at most {max_images} images; "
-                    f"dropped {len(image_refs) - max_images}"
-                )
-                image_refs = image_refs[:max_images]
-            body["image_urls"] = image_refs
-
-    if (payload.get("artifacts") or media_paths) and not (body.get("video_url") or body.get("image_urls")):
-        raise SociamonialsFallbackError(
-            "Declared media could not be attached; refusing a text-only replacement"
-        )
-
-    if network in _MEDIA_REQUIRED_NETWORKS and not (body.get("video_url") or body.get("image_urls")):
-        raise SociamonialsFallbackError(
-            f"{network} requires an image or video and no usable media was found"
-        )
-
+                raise
+    if media_kind == "video":
+        body["video_url"] = refs[0]
+    elif media_kind == "image":
+        body["image_urls"] = refs
+    if main:
+        _strict_validate(http, headers, body, timeout=request_timeout, payload=payload, route=route)
+    # Last in-memory/local identity gate immediately before the only post write.
+    for item in media:
+        if Path(item["local_path"]).stat().st_size != item["size_bytes"] or _sha256(Path(item["local_path"])) != item["sha256"]:
+            raise SociamonialsFallbackError("Scheduled media changed after upload; do not create a mismatched post")
     delivery_state.starting(payload, operation="sociamonials-create-post")
-    response = http.post(POSTS_URL, json=body, headers=headers, timeout=request_timeout)
-    if 400 <= response.status_code < 500:
+    try:
+        response = http.post(POSTS_URL, json=body, headers=headers, timeout=request_timeout, context="create post")
+    except SociamonialsFallbackError as exc:
+        if exc.details.get("retrySafe") is True:
+            # Local rate/budget rejection happens before HTTP; it must not leave
+            # a false ambiguous-submission flag that prevents safe resumption.
+            delivery_state.checkpoint(payload, submission_started=False)
+        raise
+    status = int(getattr(response, "status_code", 0) or 0)
+    if 400 <= status < 500 and status not in {408, 409}:
         delivery_state.checkpoint(payload, submission_started=False)
     _raise_for_status(response, context="create post")
-    result = _json_body(response)
-    if result.get("post_id"):
-        delivery_state.accepted(payload, provider="sociamonials", receipt_id=str(result["post_id"]),
-                                network=network, workspace_id=_workspace_int(ws), used_assets=used_assets)
+    result = _data(_json_body(response))
+    post_id = _workspace_int(result.get("post_id"))
+    if not post_id:
+        _unknown("Provider create response has no usable post receipt; reconcile its stable idempotency key")
+    delivery_state.accepted(payload, provider="sociamonials", receipt_id=str(post_id), network=network,
+                            workspace_id=_workspace_int(ws), profile_refs=list(mapping["profile_refs"]), api_key_env=route["api_key_env"],
+                            idempotency_key=key_id, used_assets=used_assets, intent_sha256=fingerprint)
+    receipt = delivery_state.receipt_for(payload, "sociamonials")
+    resolution = result.get("profile_resolution")
+    wrong_resolution = False
+    if resolution is not None:
+        rows = resolution.get("resolved_profiles") if isinstance(resolution, Mapping) else None
+        wrong_resolution = (not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], Mapping)
+                            or rows[0].get("network") != network or rows[0].get("profile_ref") != mapping["profile_refs"][0]
+                            or resolution.get("mode") != "explicit" or resolution.get("preset") is not None or resolution.get("warnings") not in (None, []))
+    if result.get("warnings") not in (None, []) or wrong_resolution or ("message" in result and result["message"] != body["message"]):
+        receipt = {**receipt, "intent_mismatch": True, "status": "partial"}
+        delivery_state.checkpoint(payload, provider_receipt=receipt)
+        return _result(receipt, {"state": "partial", "delivered": None, "platform_post_id": None,
+                                 "error": "Provider accepted with changed targeting/settings/copy; reconcile the original receipt"})
+    if result.get("requires_approval") is True or result.get("status") == "pending_approval":
+        view = {"state": "requires_approval", "delivered": None, "platform_post_id": None, "error": "Provider holds the accepted receipt for approval"}
     else:
-        raise delivery_state.DeliveryUnknown("Sociamonials returned no post receipt")
-    result_warnings = result.get("warnings")
-    if isinstance(result_warnings, list):
-        warnings.extend(str(item) for item in result_warnings if str(item).strip())
-    for warning in warnings:
-        logger.warning("sociamonials fallback warning: %s", warning)
-    requires_approval = bool(result.get("requires_approval"))
-    if requires_approval:
-        logger.warning(
-            "sociamonials accepted the post but holds it for approval (post_id=%s)",
-            result.get("post_id"),
-        )
-
-    # Acceptance is not delivery. Sociamonials returns 200 as soon as the post
-    # is queued and only discovers later that it cannot fetch the media (a
-    # video URL it is refused, an R2 object not yet visible to it) - that has
-    # already marked targets succeeded while nothing reached the platform. When
-    # a post id comes back, poll it briefly and report the real delivery state.
-    post_id = result.get("post_id")
-    effective_delivery_timeout = (
-        float(delivery_timeout)
-        if delivery_timeout is not None
-        else _delivery_timeout()
-    )
-    delivery = (
-        _wait_for_delivery(
-            http, headers, post_id, timeout=effective_delivery_timeout
-        )
-        if post_id and effective_delivery_timeout > 0
-        else {"state": "unknown", "delivered": None, "error": ""}
-    )
-
-    # Check if delivery failed due to URL accessibility issues.
-    # When Sociamonials cannot fetch the video URL, it reports a delivery failure.
-    # Raise a clear error so the caller knows the post was accepted but not delivered.
-    delivery_error = str(delivery.get("error") or "").strip()
-    if delivery.get("delivered") is False and delivery_error:
-        error_lower = delivery_error.lower()
-        if "url" in error_lower and ("not accessible" in error_lower or "not reachable" in error_lower or "cannot fetch" in error_lower):
-            raise SociamonialsFallbackError(
-                f"Sociamonials accepted the post but delivery failed: {delivery_error}. "
-                f"The video URL may be unreachable or require authentication."
-            )
-
-    return {
-        "ok": True,
-        "post_id": post_id,
-        "status": result.get("status"),
-        "requires_approval": requires_approval,
-        "warnings": warnings,
-        "network": network,
-        "profile_refs": list(mapping["profile_refs"]),
-        "workspace_id": _workspace_int(ws),
-        "used_assets": used_assets,
-        "delivery_state": delivery.get("state"),
-        "delivered": delivery.get("delivered"),
-        "delivery_error": delivery.get("error"),
-        "raw": result,
-    }
-
-
-def _wait_for_delivery(
-    http: Any,
-    headers: dict[str, str],
-    post_id: Any,
-    *,
-    timeout: float,
-    interval: float = 5.0,
-) -> dict[str, Any]:
-    """Poll a created post until it is delivered, failed or ``timeout`` elapses.
-
-    Returns ``{"state", "delivered", "error"}``. ``state`` is one of
-    ``delivered``, ``failed``, ``pending`` (still queued when the budget ran
-    out) or ``unknown`` (the status could not be read). Never raises: an
-    unreadable status must not turn a successful submit into a fallback error.
-    """
-    import time as _time
-
-    deadline = _time.monotonic() + max(0.0, float(timeout))
-    last: dict[str, Any] = {"state": "unknown", "delivered": None, "error": ""}
-    while True:
-        try:
-            response = http.get(
-                f"{BASE_URL}/api/v1/posts/{post_id}", headers=headers, timeout=30
-            )
-            if response.status_code != 200:
-                return last
-            body = _json_body(response)
-        except Exception as exc:  # noqa: BLE001 - status is advisory only
-            logger.warning("sociamonials delivery poll failed: %s", exc)
-            return last
-
-        networks = body.get("networks")
-        if isinstance(networks, dict) and networks:
-            for network, detail in networks.items():
-                if not isinstance(detail, dict):
-                    continue
-                status = str(detail.get("delivery_status") or "").strip().lower()
-                delivered = bool(detail.get("delivered"))
-                error = str(detail.get("error") or "").strip()
-                if delivered or status == "delivered":
-                    return {"state": "delivered", "delivered": True, "error": ""}
-                if status in {"failed", "error"} or str(
-                    detail.get("delivery_state") or ""
-                ).strip().lower() == "needs_attention":
-                    return {
-                        "state": "failed",
-                        "delivered": False,
-                        "error": error[:400],
-                    }
-                last = {
-                    "state": "pending",
-                    "delivered": False,
-                    "error": error[:400],
-                }
-        if _time.monotonic() >= deadline:
-            return last
-        _time.sleep(interval)
+        view = _wait_for_delivery(http, headers, post_id, timeout=poll_timeout, network=network,
+                                  profile_refs=mapping["profile_refs"], workspace_id=ws)
+    receipt = {**receipt, "status": view["state"]}
+    if view.get("platform_post_id"):
+        receipt["platform_post_id"] = view["platform_post_id"]
+    delivery_state.checkpoint(payload, provider_receipt=receipt)
+    return _result(receipt, view)

@@ -10,10 +10,9 @@ TRANSIENT   — The failure is expected to resolve on its own. Retry with
               backoff. Examples: network timeout, HTTP 5xx, rate limit (429),
               platform temporarily unavailable.
 
-PERMANENT   — The failure will not resolve by retrying. Fail immediately,
-              skip fallback, alert the operator. Examples: deleted account,
-              invalid media format, content policy violation, platform
-              disabled by operator.
+PERMANENT   — The native failure will not resolve by retrying. Stop native
+              retries; a separately verified backup is governed by
+              backup_eligible, not this category alone.
 
 RECOVERABLE — The failure can be fixed by an automated action (token refresh,
               media restore, re-host). Attempt recovery once, then retry the
@@ -105,6 +104,11 @@ _ACCOUNT_GONE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"account (?:does not exist|deleted|disabled)", re.IGNORECASE),
 )
 
+_ACCOUNT_BANNED_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:user|account)[_ -](?:is |has been )?(?:banned|suspended)\b", re.IGNORECASE),
+    re.compile(r"\bbanned[_ -](?:user|account)\b", re.IGNORECASE),
+)
+
 # Patterns that indicate missing or invalid media.
 _MEDIA_INVALID_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"artifacts? were supplied but none is", re.IGNORECASE),
@@ -188,6 +192,9 @@ def classify_failure(
     if _matches_any(text, _ACCOUNT_GONE_PATTERNS):
         return ClassifiedFailure(text, PERMANENT, platform=platform, cause=exc)
 
+    if _matches_any(text, _ACCOUNT_BANNED_PATTERNS):
+        return ClassifiedFailure(text, PERMANENT, platform=platform, cause=exc)
+
     if _matches_any(text, _DISABLED_PATTERNS):
         return ClassifiedFailure(text, PERMANENT, platform=platform, cause=exc)
 
@@ -246,3 +253,70 @@ def failure_summary(exc: BaseException, message: str | None = None) -> dict:
         "recoverable": classified.is_recoverable,
         "platform": classified.platform,
     }
+
+
+def proven_non_delivery(exc: BaseException) -> bool:
+    """A response rejection is evidence; arbitrary error text is not."""
+    details = getattr(exc, "details", None) or {}
+    if isinstance(details, dict) and details.get("definitiveNonDelivery") is True:
+        return True
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if type(status) is not int:
+        return False
+    if status in {401, 402, 429}:
+        return True
+    return status == 403 and _matches_any(str(exc), _CREDENTIAL_DEAD_PATTERNS)
+
+
+def backup_eligible(exc: BaseException, *, checkpoint: dict | None = None) -> bool:
+    """Native retryability is NOT backup eligibility.
+
+    Only a separate verified connection to the same destination may repair a
+    native credential/provider failure. This predicate grants no account access;
+    the adapter must still verify grants, media and every intent setting.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    state = {} if checkpoint is None else checkpoint
+    details = getattr(exc, "details", None) or {}
+    if not isinstance(state, dict) or state.get("checkpoint_invalid"):
+        return False
+    if (state.get("provider_receipt") or state.get("telegramCompletedByDelivery")
+            or state.get("completed_operations") or state.get("provider_operations")):
+        return False
+    from myUtils import delivery
+    if isinstance(exc, delivery.RouteExhausted) and isinstance(details, dict) and details.get("provider") == "native":
+        routes = state.get("publish_routes") or {}
+        if not isinstance(routes, dict) or not isinstance(routes.get("native", {}), dict):
+            return False
+        prior_error = routes.get("native", {}).get("error", "")
+        if not isinstance(prior_error, str):
+            return False
+        text += " " + prior_error
+    if any(_matches_any(text, patterns) for patterns in (
+            _ACCOUNT_GONE_PATTERNS, _ACCOUNT_BANNED_PATTERNS, _DISABLED_PATTERNS, _CONTENT_POLICY_PATTERNS,
+            _MEDIA_INVALID_PATTERNS)):
+        return False
+    if re.search(r"banned|user_banned|restricted by|community violation|deleted account|"
+                 r"content policy|does not match|missing (?:media|file)|requires human approval", text, re.I):
+        return False
+    if isinstance(details, dict) and details.get("retrySafe") is False:
+        return False
+    credential_failure = (_matches_any(text, _CREDENTIAL_DEAD_PATTERNS)
+                          or bool(re.search(r"token.{0,100}expired|reconnect (?:required|the account)|"
+                                            r"requires? reconnection|media\.write|scope.not.authorized", text, re.I)))
+    definite = proven_non_delivery(exc)
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    provider_budget_failure = (status_code == 402 or bool(re.search(
+        r"HTTP 402|CreditsDepleted|insufficient (?:provider )?credits|credit balance exhausted", text, re.I)))
+    rejected_auth = credential_failure and status_code in {401, 403}
+    rejected_budget = provider_budget_failure and status_code == 402
+    persisted_rejection = not delivery.has_unresolved_submission({"_delivery": state})
+    exhausted_native = (isinstance(exc, delivery.RouteExhausted)
+                        and isinstance(details, dict) and details.get("provider") == "native")
+    if state.get("submission_started") and not (definite or rejected_auth or rejected_budget or persisted_rejection):
+        return False
+    if credential_failure or provider_budget_failure or definite or exhausted_native:
+        return True
+    return classify_failure(exc).category in {TRANSIENT, RECOVERABLE}

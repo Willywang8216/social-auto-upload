@@ -78,53 +78,53 @@ _TELEGRAM_TEXT_LIMIT = 3900
 
 
 def _split_message(text: str, limit: int = _TELEGRAM_TEXT_LIMIT) -> list[str]:
-    """Split text into chunks of at most ``limit`` characters, on line breaks.
+    """UTF-16-bounded chunks; keep complete Unicode graphemes where possible."""
+    import regex
+    from myUtils.text_limits import utf16_length
 
-    Without this a long alert is rejected wholesale by Telegram (400, "message
-    is too long") and — because every send is deliberately best-effort — it
-    disappears silently: the sender returns False and only a log line records
-    it. The daily publish digest is the usual offender, one line per scheduled
-    target, 5-6k characters on an ordinary day, so the operator would simply
-    never receive it. Splitting happens before escaping, so an HTML entity can
-    never be cut in half.
-    """
-    if len(text) <= limit:
+    if limit < 2:
+        raise ValueError("Notification text budget must be at least two units")
+    if utf16_length(text) <= limit:
         return [text]
-    parts: list[str] = []
-    current: list[str] = []
-    size = 0
-    for line in text.split("\n"):
-        if len(line) > limit:
-            # No boundary to split on; hard-slice the over-long line.
-            if current:
-                parts.append("\n".join(current))
-                current, size = [], 0
-            parts.extend(line[i:i + limit] for i in range(0, len(line), limit))
-            continue
-        if current and size + len(line) + 1 > limit:
-            parts.append("\n".join(current))
-            current, size = [], 0
-        current.append(line)
-        size += len(line) + 1
+    parts, current, size = [], [], 0
+    for match in regex.finditer(r"\X", text):
+        cluster = match.group()
+        units = utf16_length(cluster)
+        if units > limit:
+            # An enormous combining sequence is still valid text. Hard-split
+            # it at code-point boundaries rather than lose the entire notice.
+            chunks, chunk, used = [], [], 0
+            for char in cluster:
+                width = utf16_length(char)
+                if used + width > limit:
+                    chunks.append("".join(chunk)); chunk, used = [], 0
+                chunk.append(char); used += width
+            chunks.append("".join(chunk))
+        else:
+            chunks = [cluster]
+        for chunk in chunks:
+            width = utf16_length(chunk)
+            if current and size + width > limit:
+                parts.append("".join(current)); current, size = [], 0
+            current.append(chunk); size += width
     if current:
-        parts.append("\n".join(current))
+        parts.append("".join(current))
     return parts
 
 
 def _telegram_payloads(subject: str, body: str) -> list[tuple[str, str]]:
-    """(html, plain) message bodies — one pair per chunk Telegram will accept."""
-    chunks = _split_message(body)
+    """(escaped HTML, plain) chunks that fit after Telegram entity parsing."""
+    from myUtils.text_limits import utf16_length
+
+    budget = min(_TELEGRAM_TEXT_LIMIT, 4096 - utf16_length(subject) - 40)
+    chunks = _split_message(body, limit=budget)
     total = len(chunks)
     payloads: list[tuple[str, str]] = []
     for index, chunk in enumerate(chunks, start=1):
         header = subject if index == 1 else f"{subject} (cont.)"
         counter = f"\n\n[{index}/{total}]" if total > 1 else ""
-        payloads.append(
-            (
-                f"<b>{html.escape(header)}</b>\n{html.escape(chunk)}{counter}",
-                f"{header}\n{chunk}{counter}",
-            )
-        )
+        payloads.append((f"<b>{html.escape(header)}</b>\n{html.escape(chunk)}{counter}",
+                         f"{header}\n{chunk}{counter}"))
     return payloads
 
 
@@ -251,12 +251,15 @@ def _send_smtp(subject: str, body: str) -> bool:
 def send_ops_alert(*, subject: str, body: str) -> bool:
     """Fire the alert on every configured channel. Returns True if at least one
     channel accepted it. Never raises."""
+    if _is_under_test():
+        return False  # Applies to Telegram, webhook and SMTP alike.
     sent = False
     for channel in (_send_telegram, _send_webhook, _send_smtp):
         try:
             sent = channel(subject, body) or sent
         except Exception as exc:  # noqa: BLE001 — best-effort by design
-            _logger.warning(f"ops_alerts: {channel.__name__} failed: {exc!r}")
+            from myUtils.secret_redaction import redact_text
+            _logger.warning(f"ops_alerts: {channel.__name__} failed: {redact_text(repr(exc))}")
     if not sent:
         _logger.info(f"ops_alerts: no channel configured; alert not delivered: {subject}")
     return sent

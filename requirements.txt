@@ -65,6 +65,7 @@ pyee==13.0.1
 PySocks==1.7.1
 PyYAML==6.0.3
 qrcode==8.2
+regex>=2024.11.6,<2027
 requests==2.33.0
 rsa==4.9.1
 schedule==1.2.2

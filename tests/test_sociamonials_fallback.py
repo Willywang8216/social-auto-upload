@@ -1,1050 +1,425 @@
-"""Tests for the Sociamonials fallback (Phase 4).
+"""Sociamonials HTTP contracts. Every GET/validate/transfer/create is mocked.
 
-Every test injects a fake HTTP session; nothing here makes a live call.  The
-suite covers the config guards, the account->profile mapping, media handling
-(direct URL passthrough, three-step upload, multipart), payload composition and
-the post request itself.
+The preparation guard is injected for transport unit tests; that never bypasses
+live-grant or strict-provider-validation mocks. Safety tests cover refusal paths.
 """
-
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
-from unittest.mock import patch
+from PIL import Image
 
+from myUtils import delivery
 from myUtils import sociamonials_fallback as sm
+from myUtils import sociamonials_policy as policy
 
 
-# --------------------------------------------------------------------------- #
-# Fakes
-# --------------------------------------------------------------------------- #
-
-class FakeResponse:
-    def __init__(self, status_code=200, payload=None, text="", headers=None):
-        self.status_code = status_code
-        self._payload = payload
-        self.text = text
-        self.headers = headers or {}
+class Response:
+    def __init__(self, payload=None, status=200, headers=None, content=b""):
+        self.status_code, self.payload = status, payload
+        self.headers, self.content = headers or {}, content
+        self.text = "never log a provider body"
+        self.closed = False
 
     def json(self):
-        if self._payload is None:
-            raise ValueError("no json")
-        return self._payload
+        if self.payload is None:
+            raise ValueError("not JSON")
+        return copy.deepcopy(self.payload)
+
+    def iter_content(self, chunk_size):
+        for start in range(0, len(self.content), chunk_size):
+            yield self.content[start:start + chunk_size]
+
+    def close(self):
+        self.closed = True
 
 
-class FakeSession:
-    """Records every call and dispatches to a handler."""
+class Account:
+    def __init__(self, account_id=77, platform="twitter", config=None, enabled=True):
+        self.id, self.platform, self.config, self.enabled = account_id, platform, config or {}, enabled
 
-    def __init__(self, handler):
-        self.handler = handler
+
+def profile(network="tw", ref="14100", **changes):
+    return {"network": network, "profile_ref": ref, "connected": True, "agent_can_publish_to": True,
+            "unavailable_reason": None,
+            "capabilities": ["text", "image", "video", "carousel", "first_comment", "story", "title", "description"],
+            **changes}
+
+
+def storage(**changes):
+    return {"status": "ok", "max_upload_bytes": {"image": policy.IMAGE_MAX_BYTES, "video": policy.HOSTED_VIDEO_MAX_BYTES},
+            "available_bytes": 4_000_000_000, "enforcement": True, "pooled": True,
+            "unmetered": False, "unconfigured": False, "ratchet": {"active": False}, **changes}
+
+
+def asset_for(path, asset_id=77, ws=26985, kind=None, **changes):
+    return {"asset_id": asset_id, "workspace_registration_id": ws, "filename": Path(path).name,
+            "size_bytes": Path(path).stat().st_size, "sha256": sm._sha256(Path(path)),
+            "media_type": kind or sm._media_kind(str(path)), "processing_status": "ready",
+            "parent_asset_id": None, "source": "upload", "url": f"https://cdn.example/assets/{asset_id}.mp4", **changes}
+
+
+class ContractSession:
+    """Explicit schema-shaped fake; unexpected endpoints/assertions fail loudly."""
+    def __init__(self, *, profiles=None, assets=None, storage_block=None, override=None, part_size=None,
+                 delivery_state="delivered", envelope=False):
         self.calls = []
+        self.profiles = profiles if profiles is not None else [profile(entry["network"], ref)
+            for entry in sm.SAU_ACCOUNT_TO_SOCIAMONIALS.values() for ref in entry["profile_refs"]]
+        self.assets = {row["asset_id"]: copy.deepcopy(row) for row in assets or []}
+        self.storage = storage_block if storage_block is not None else storage()
+        self.override, self.part_size, self.delivery_state, self.envelope = override, part_size, delivery_state, envelope
+        self.grants, self.grant_keys, self.parts, self.created = {}, {}, {}, {}
+        self.last_body = None
+        self.public = {}
+        self.published = {}
+        self.permissions = {name: True for name in ["posts.read", "posts.create", "profiles.read", "posts.publish_direct", "assets.read", "assets.write"]}
+        self.approval = False
+        self.agent_type = "workspace"
+        self.ready_after = 0
+        self.asset_polls = {}
+
+    def _wrap(self, body):
+        return {"data": body} if self.envelope else body
+
+    def _resolution(self, body):
+        return {"mode": "explicit", "preset": None, "warnings": [], "resolved_profiles": [
+            {"network": network, "profile_ref": ref} for network, detail in body["networks"].items() for ref in detail["profile_refs"]]}
 
     def _call(self, method, url, **kwargs):
-        self.calls.append((method, url, kwargs))
-        return self.handler(method, url, kwargs)
+        recorded = dict(kwargs)
+        if "json" in recorded:
+            recorded["json"] = copy.deepcopy(recorded["json"])
+        self.calls.append((method, url, recorded))
+        if self.override:
+            response = self.override(method, url, kwargs)
+            if response is not None:
+                return response
+        path = urlparse(url).path
+        if method == "GET" and path == "/api/v1/me":
+            assigned = [{"network": row["network"], "profile_ref": row["profile_ref"]} for row in self.profiles]
+            return Response(self._wrap({"agent": {"id": 1, "status": "active", "type": self.agent_type}, "credential": {"name": "fixture"},
+                "entitlement": {"state": "active"}, "workspaces": {ws: {"permissions": self.permissions,
+                    "social_profiles": assigned, "requires_approval_for_posting": self.approval} for ws in ("26985", "34293", "123")}}))
+        if method == "GET" and path.endswith("/social-profiles"):
+            ws = int(path.split("/")[-2])
+            return Response(self._wrap({"workspace_registration_id": ws, "profiles": self.profiles}))
+        if method == "GET" and path.endswith("/context"):
+            ws = int(path.split("/")[-2])
+            return Response(self._wrap({"workspace_registration_id": ws, "storage": self.storage,
+                                       "approval": {"credential_routes_through_approval": False, "client_requested_hold": False}}))
+        if method == "GET" and path == "/api/v1/media/assets":
+            rows = list(self.assets.values())
+            params = kwargs.get("params", {})
+            start, limit = params.get("offset", 0), params.get("limit", 200)
+            return Response(self._wrap({"assets": rows[start:start + limit]}))
+        if method == "GET" and path.startswith("/api/v1/media/assets/"):
+            asset_id = int(path.rsplit("/", 1)[1])
+            if asset_id not in self.assets:
+                return Response({}, 404)
+            row = copy.deepcopy(self.assets[asset_id])
+            count = self.asset_polls.get(asset_id, 0)
+            self.asset_polls[asset_id] = count + 1
+            if count < self.ready_after:
+                row["processing_status"] = "processing"
+            return Response(self._wrap(row))
+        if method == "POST" and path == "/api/v1/media/uploads":
+            body = kwargs["json"]
+            key = body["idempotency_key"]
+            upload_id = self.grant_keys.setdefault(key, 77 + len(self.grant_keys))
+            self.grants[upload_id] = copy.deepcopy(body)
+            return Response(self._wrap({"upload_id": upload_id, "workspace_registration_id": body["workspace_registration_id"],
+                "mode": "multipart" if self.part_size else "single", "method": "PUT", "media_type": sm._media_kind(body["filename"]),
+                "max_bytes": policy.HOSTED_VIDEO_MAX_BYTES, "required_headers": {"Content-Type": body["mime_type"]},
+                "expires_at": "2099-01-01T00:00:00Z", "upload_url": f"https://upload.example/upload/{upload_id}/single?signature=fixture",
+                "part_size_bytes": self.part_size, "part_count": (body["size_bytes"] + self.part_size - 1) // self.part_size if self.part_size else None,
+                "parts": []}))
+        if method == "POST" and path.endswith("/parts"):
+            upload_id = int(path.split("/")[-2])
+            first, count = kwargs["json"]["from"], kwargs["json"]["count"]
+            parts = [{"part_number": n, "url": f"https://upload.example/upload/{upload_id}/part/{n}?signature=fixture"}
+                     for n in range(first, first + count)]
+            uploaded = [{"part_number": n, "etag": hashlib.md5(data).hexdigest(), "size_bytes": len(data)}
+                        for n, data in self.parts.get(upload_id, {}).items()]
+            return Response(self._wrap({"parts": parts, "uploaded": uploaded}))
+        if method == "PUT":
+            assert not kwargs["headers"].get("Authorization") and not kwargs["headers"].get("Cookie")
+            assert kwargs["allow_redirects"] is False
+            stream = kwargs["data"]
+            assert not isinstance(stream, bytes)
+            data = b"".join(iter(lambda: stream.read(8192), b""))
+            assert len(data) == int(kwargs["headers"]["Content-Length"])
+            split = path.split("/")
+            upload_id = int(split[2])
+            number = int(split[-1]) if "part" in split else 1
+            self.parts.setdefault(upload_id, {})[number] = data
+            return Response({}, headers={"ETag": '"' + hashlib.md5(data).hexdigest() + '"'})
+        if method == "POST" and path.endswith("/complete"):
+            upload_id = int(path.split("/")[-2])
+            original = self.grants[upload_id]
+            parts = self.parts[upload_id]
+            data = b"".join(parts[n] for n in sorted(parts))
+            assert len(data) == original["size_bytes"] and hashlib.sha256(data).hexdigest() == original["sha256"]
+            row = {"asset_id": upload_id, "workspace_registration_id": original["workspace_registration_id"],
+                   "media_type": sm._media_kind(original["filename"]), "filename": original["filename"], "size_bytes": len(data),
+                   "sha256": original["sha256"], "processing_status": "ready", "parent_asset_id": None,
+                   "url": f"https://cdn.example/assets/{upload_id}.mp4"}
+            self.assets[upload_id] = row
+            result = copy.deepcopy(row)
+            if self.ready_after:
+                result["processing_status"] = "processing"
+            return Response(self._wrap(result))
+        if method == "POST" and path == "/api/v1/posts":
+            body = kwargs["json"]
+            assert body["strict"] is True and body["mode"] == "publish_now"
+            if body.get("validate_only") is True:
+                return Response(self._wrap({"valid": True, "validate_only": True, "mode": body["mode"], "requires_approval": False,
+                    "profile_resolution": self._resolution(body), "warnings": []}))
+            self.last_body = copy.deepcopy(body)
+            self.created.setdefault(body["idempotency_key"], 999)
+            self.published[999] = self.last_body
+            return Response(self._wrap({"post_id": 999, "status": "scheduled", "requires_approval": False,
+                                        "message": body["message"], "profile_resolution": self._resolution(body), "warnings": []}))
+        if method == "GET" and path.startswith("/api/v1/posts/"):
+            body = self.published[int(path.rsplit("/", 1)[1])]
+            state = self.delivery_state
+            return Response(self._wrap({"post_id": 999, "workspace_registration_id": body["workspace_registration_id"], "approved": True,
+                "networks": {network: {"delivered": state == "delivered", "delivery_status": state,
+                    "profiles": [{"profile_ref": ref, "delivery_state": {"delivered": "published", "failed": "needs_attention", "pending": "accepted",
+                                "processing": "publishing"}[state], "platform_post_id": "native-post-999" if state == "delivered" else None} for ref in detail["profile_refs"]]}
+                             for network, detail in body["networks"].items()}}))
+        if method == "GET" and url in self.public:
+            return self.public[url]
+        raise AssertionError(f"Unexpected mocked {method} {path}")
 
-    def post(self, url, **kwargs):
-        return self._call("POST", url, **kwargs)
+    def get(self, url, **kwargs): return self._call("GET", url, **kwargs)
+    def post(self, url, **kwargs): return self._call("POST", url, **kwargs)
+    def put(self, url, **kwargs): return self._call("PUT", url, **kwargs)
 
-    def put(self, url, **kwargs):
-        return self._call("PUT", url, **kwargs)
-
-    def head(self, url, **kwargs):
-        return self._call("HEAD", url, **kwargs)
-
-    def get(self, url, **kwargs):
-        return self._call("GET", url, **kwargs)
-
-    def calls_for(self, method, contains=""):
-        return [c for c in self.calls if c[0] == method and contains in c[1]]
+    def calls_for(self, method, contains="", *, create=False):
+        return [call for call in self.calls if call[0] == method and contains in call[1]
+                and (not create or not call[2].get("json", {}).get("validate_only"))]
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
-    for key in (
-        sm.ENABLED_ENV,
-        sm.API_KEY_ENV,
-        sm.WORKSPACE_ENV,
-        sm.TEACHING_API_KEY_ENV,
-        sm.TEACHING_WORKSPACE_ENV,
-        sm.SECRETS_FILE_ENV,
-        sm.TIMEOUT_ENV,
-        sm.REUSE_ASSETS_ENV,
-    ):
-        monkeypatch.delenv(key, raising=False)
-    # Never let a test read the developer's real ~/.claude/secrets.json.
-    monkeypatch.setenv(sm.SECRETS_FILE_ENV, "/nonexistent/sau-test-secrets.json")
-    yield
+def isolate(monkeypatch):
+    for name in (sm.API_KEY_ENV, sm.TEACHING_API_KEY_ENV, sm.WORKSPACE_ENV, sm.TEACHING_WORKSPACE_ENV,
+                 sm.SECRETS_FILE_ENV, sm.ENABLED_ENV, sm.REUSE_ASSETS_ENV, sm.TIMEOUT_ENV, sm.ASSET_READY_TIMEOUT_ENV,
+                 sm.DELIVERY_TIMEOUT_ENV, "SAU_SOCIAMONIALS_REUSE_MAX_PAGES"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SAU_TESTING", "1")
+    monkeypatch.setenv("SAU_ALERTS_DISABLED", "1")
+    monkeypatch.setattr(sm, "_resolve_public_host", lambda host: None)
+    monkeypatch.setattr(sm.time, "sleep", lambda value: None)
+    sm._RATE_WINDOWS.clear()
+    from myUtils import publish_media_guard
+    monkeypatch.setattr(publish_media_guard, "ensure_single_payload", lambda payload, **kw: None)
 
 
-class _Account:
-    def __init__(self, account_id, platform="twitter", config=None):
-        self.id = account_id
-        self.platform = platform
-        self.config = config or {}
-        self.account_name = f"acct-{account_id}"
+@pytest.fixture
+def image(tmp_path):
+    path = tmp_path / "pic.png"
+    Image.new("RGB", (16, 16), "red").save(path)
+    return path
 
 
-def _posts_handler(*, post_result=None, grants=None, upload_etag="etag-1", assets=None):
-    """Handler serving the media upload flow and the post create."""
-    grants = grants or {
-        "default": {
-            "upload_id": 5,
-            "mode": "single",
-            "upload_url": "https://upload.example/put/5",
-        }
-    }
-    post_result = post_result if post_result is not None else {
-        "post_id": 999,
-        "status": "published",
-        "requires_approval": False,
-    }
-    assets = list(assets or [])
-
-    def handler(method, url, kwargs):
-        if method == "HEAD":
-            return FakeResponse(200, headers={"Content-Type": "video/mp4"})
-        if method == "GET" and url.rstrip("/").endswith("/media/assets"):
-            return FakeResponse(200, {"assets": assets, "total": len(assets)})
-        if method == "GET" and "/media/assets/" in url:
-            return FakeResponse(200, {"asset_id": 77, "processing_status": "ready"})
-        if method == "POST" and url.endswith("/media/uploads"):
-            name = kwargs["json"].get("filename", "default")
-            grant = grants.get(name, grants.get("default"))
-            return FakeResponse(200, grant)
-        if method == "PUT" and url.startswith("https://upload.example"):
-            return FakeResponse(200, headers={"ETag": upload_etag})
-        if method == "POST" and url.endswith("/complete"):
-            return FakeResponse(200, {"asset_id": 77, "url": "https://cdn.example/a/77.mp4"})
-        if method == "POST" and url.endswith("/parts"):
-            number = kwargs["json"]["part_number"]
-            return FakeResponse(
-                200, {"parts": [{"part_number": number, "url": f"https://upload.example/part/{number}"}]}
-            )
-        if method == "POST" and url.endswith("/api/v1/posts"):
-            return FakeResponse(200, post_result)
-        raise AssertionError(f"unexpected {method} {url}")
-
-    return handler
+@pytest.fixture
+def video(tmp_path, monkeypatch):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"exact-video-fixture" * 100)
+    monkeypatch.setattr(sm.media_pipeline, "probe_video_duration", lambda path: 30.0)
+    return path
 
 
-# --------------------------------------------------------------------------- #
-# Configuration guards
-# --------------------------------------------------------------------------- #
-
-def test_is_configured_requires_a_key():
-    assert sm.is_configured({}) is False
-    assert sm.is_configured({sm.API_KEY_ENV: "sm_agent_x"}) is True
+def media_payload(path, *, message="Approved original", public_url=None, **metadata):
+    return {"draft": {"message": message}, "artifacts": [{"local_path": str(path), "public_url": public_url,
+        "metadata": {"role": sm._media_kind(str(path)), "sha256": sm._sha256(Path(path)), "size_bytes": Path(path).stat().st_size, **metadata}}]}
 
 
-def test_get_api_key_reads_secrets_file(tmp_path, monkeypatch):
-    secrets = tmp_path / "secrets.json"
-    secrets.write_text(json.dumps({sm.API_KEY_ENV: "sm_agent_file"}), encoding="utf-8")
-    monkeypatch.setenv(sm.SECRETS_FILE_ENV, str(secrets))
-    assert sm.get_api_key() == "sm_agent_file"
+def publish(session, *, payload=None, account=None, platform="twitter", **kwargs):
+    options = {"platform": platform, "account": account or Account(), "payload": payload if payload is not None else {"message": "Approved original"},
+               "target_id": 4321, "api_key": "fixture-only", "session": session, "delivery_timeout": 0}
+    options.update(kwargs)
+    return sm.publish_via_sociamonials(**options)
 
 
-def test_is_enabled_default_off(monkeypatch):
-    monkeypatch.setenv(sm.API_KEY_ENV, "sm_agent_x")
-    assert sm.is_enabled() is False  # flag not set -> default off
+def test_configuration_and_budget_guards(monkeypatch):
+    assert not sm.is_configured({}) and not sm.is_enabled({})
+    assert sm.is_configured({sm.API_KEY_ENV: "fixture"})
+    monkeypatch.setenv(sm.API_KEY_ENV, "fixture")
     monkeypatch.setenv(sm.ENABLED_ENV, "1")
-    assert sm.is_enabled() is True
+    assert sm.is_enabled()
+    assert not sm.should_attempt_fallback(retryable=False, attempts=3, max_attempts=3, enabled=True)
+    assert not sm.should_attempt_fallback(retryable=True, attempts=2, max_attempts=3, enabled=True)
+    assert sm.should_attempt_fallback(retryable=True, attempts=3, max_attempts=3, enabled=True)
 
 
-def test_is_enabled_requires_a_key(monkeypatch):
-    monkeypatch.setenv(sm.ENABLED_ENV, "1")
-    assert sm.is_enabled() is False
+def test_explicit_credential_file_and_teaching_isolation(tmp_path, monkeypatch):
+    file = tmp_path / "test-secrets.json"
+    file.write_text(json.dumps({sm.API_KEY_ENV: "adult-fixture", sm.TEACHING_API_KEY_ENV: "teaching-fixture"}), encoding="utf-8")
+    monkeypatch.setenv(sm.SECRETS_FILE_ENV, str(file))
+    assert sm.get_api_key() == "adult-fixture"
+    assert sm.resolve_credentials(sm.resolve_mapping(107)) == ("teaching-fixture", "34293")
+    assert sm.resolve_credentials(sm.resolve_mapping(77)) == ("adult-fixture", "26985")
 
 
-def test_should_attempt_fallback_never_for_non_retryable():
-    assert sm.should_attempt_fallback(
-        retryable=False, attempts=3, max_attempts=3, enabled=True
-    ) is False
+def test_config_mapping_precedence_and_no_guessed_new_maps():
+    config = {"sociamonials": {"network": "tw", "profile_refs": ["custom"]}}
+    assert sm.resolve_mapping(77, account=Account(config=config))["profile_refs"] == ["custom"]
+    assert sm.resolve_mapping(77, platform="twitter", settings={"sociamonials": {"77": {"profile_ref": "settings"}}})["profile_refs"] == ["settings"]
+    assert sm.resolve_mapping(107)["profile_refs"] == ["17650"]
+    for account_id in (133, 134, 135, 136, 424242):
+        assert sm.resolve_mapping(account_id) is None
+    assert sm.resolve_mapping(77, account=Account(config={"sociamonials": {"network": "tw"}})) is None
 
 
-def test_should_attempt_fallback_only_after_budget_exhausted():
-    assert sm.should_attempt_fallback(
-        retryable=True, attempts=2, max_attempts=3, enabled=True
-    ) is False
-    assert sm.should_attempt_fallback(
-        retryable=True, attempts=3, max_attempts=3, enabled=True
-    ) is True
-    # disabled master switch short-circuits even at the limit
-    assert sm.should_attempt_fallback(
-        retryable=True, attempts=3, max_attempts=3, enabled=False
-    ) is False
+@pytest.mark.parametrize("network", ["tw", "blsk", "fb", "tiktok"])
+def test_compose_never_truncates_or_moves_original_urls(network):
+    original = "  Long " + "x" * 400 + " https://a.example/original\n "
+    assert sm.compose_message_with_links({"message": original}, network=network) == (original, [])
 
 
-# --------------------------------------------------------------------------- #
-# Mapping
-# --------------------------------------------------------------------------- #
-
-def test_resolve_mapping_builtin():
-    mapping = sm.resolve_mapping(77, platform="twitter")
-    assert mapping == {"network": "tw", "profile_refs": ["14100"], "name": "will_sexual"}
+def test_structured_copy_preserves_title_body_and_tags_once():
+    payload = {"draft": {"message": {"title": "Title", "description": "Body", "hashtags": ["#one", "two"]}}}
+    assert sm.compose_message(payload, network="fb") == "Title\n\nBody\n\n#one #two"
 
 
-def test_resolve_mapping_account_config_wins():
-    account = _Account(77, config={"sociamonials": {"network": "tw", "profile_refs": ["9999"]}})
-    mapping = sm.resolve_mapping(77, account=account)
-    assert mapping["profile_refs"] == ["9999"]
-
-
-def test_resolve_mapping_settings_override():
-    settings = {"sociamonials": {"accounts": {"77": {"network": "tw", "profile_refs": ["1234"]}}}}
-    mapping = sm.resolve_mapping(77, settings=settings)
-    assert mapping["profile_refs"] == ["1234"]
-
-
-def test_resolve_mapping_settings_single_shape():
-    settings = {"sociamonials": {"77": {"profile_refs": ["4321"]}}}
-    mapping = sm.resolve_mapping(77, platform="twitter", settings=settings)
-    assert mapping["profile_refs"] == ["4321"]
-    assert mapping["network"] == "tw"
-
-
-def test_resolve_mapping_unmapped_account_returns_none():
-    assert sm.resolve_mapping(424242) is None
-
-
-# --------------------------------------------------------------------------- #
-# Direct-URL detection
-# --------------------------------------------------------------------------- #
-
-def test_is_direct_media_url_accepts_cdn_file():
-    assert sm.is_direct_media_url("https://cdn.example/campaigns/1/videos/clip.mp4") is True
-
-
-def test_is_direct_media_url_rejects_page_and_local():
-    assert sm.is_direct_media_url("http://127.0.0.1:5409/getFile?filename=x.mp4") is False
-    assert sm.is_direct_media_url("https://drive.google.com/file/d/abc/view") is False
-    assert sm.is_direct_media_url("https://share.example.com/d/abc") is False
-    assert sm.is_direct_media_url("not-a-url") is False
-
-
-# --------------------------------------------------------------------------- #
-# Message composition
-# --------------------------------------------------------------------------- #
-
-def test_compose_message_flattens_dict_draft_and_hashtags():
-    payload = {
-        "draft": {
-            "message": {"title": "A title", "description": "Body copy", "hashtags": ["#one", "two"]},
-        }
-    }
-    message = sm.compose_message(payload, network="facebook")
-    assert "A title" in message
-    assert "Body copy" in message
-    assert "#one" in message and "#two" in message
-
-
-def test_compose_message_truncates_twitter():
-    payload = {"draft": {"message": "x" * 400}}
-    message = sm.compose_message(payload, network="tw")
-    assert len(message) <= 280
-
-
-def test_compose_message_with_links_strips_x_links_and_returns_them():
-    payload = {"draft": {"message": "Read more at https://nakedwill.com/post today"}}
-    message, links = sm.compose_message_with_links(payload, network="tw")
-    assert "http" not in message.lower()
-    assert "Read more at" in message and "today" in message
-    assert links == ["https://nakedwill.com/post"]
-
-
-def test_compose_message_keeps_links_for_non_x_networks():
-    payload = {"draft": {"message": "Read more at https://nakedwill.com/post today"}}
-    message, links = sm.compose_message_with_links(payload, network="facebook")
-    assert "https://nakedwill.com/post" in message
-    assert links == []
-
-
-def test_compose_message_truncates_bluesky_to_300():
-    payload = {"draft": {"message": "x" * 400}}
-    message, _ = sm.compose_message_with_links(payload, network="blsk")
-    assert len(message) <= 300
-
-
-def test_assert_video_duration_rejects_over_limit(tmp_path, monkeypatch):
-    import myUtils.media_pipeline as media_pipeline
-
-    video = tmp_path / "clip.mp4"
-    video.write_bytes(b"v" * 32)
-    monkeypatch.setattr(media_pipeline, "probe_video_duration", lambda path: 500.0)
-    with pytest.raises(sm.SociamonialsFallbackError):
-        sm._assert_video_duration("tw", str(video))
-
-
-def test_assert_video_duration_allows_within_limit(tmp_path, monkeypatch):
-    import myUtils.media_pipeline as media_pipeline
-
-    video = tmp_path / "clip.mp4"
-    video.write_bytes(b"v" * 32)
-    monkeypatch.setattr(media_pipeline, "probe_video_duration", lambda path: 120.0)
-    sm._assert_video_duration("tw", str(video))
-
-
-# --------------------------------------------------------------------------- #
-# Publishing
-# --------------------------------------------------------------------------- #
-
-def test_publish_requires_a_key():
-    with pytest.raises(sm.SociamonialsNotConfigured):
-        sm.publish_via_sociamonials(
-            platform="twitter",
-            account=_Account(77),
-            payload={"draft": {"message": "hello"}},
-            api_key="",
-        )
-
-
-def test_publish_unmapped_account_raises():
-    with pytest.raises(sm.SociamonialsFallbackError):
-        sm.publish_via_sociamonials(
-            platform="twitter",
-            account=_Account(424242, platform="twitter"),
-            payload={"draft": {"message": "hello"}},
-            api_key="sm_agent_x",
-        )
-
-
-def test_publish_maps_network_and_idempotency_key():
-    session = FakeSession(_posts_handler())
-    account = _Account(77, platform="twitter")
-    result = sm.publish_via_sociamonials(
-        platform="twitter",
-        account=account,
-        payload={"draft": {"message": "Hello there", "hashtags": ["#naturism"]}},
-        target_id=4321,
-        api_key="sm_agent_x",
-        session=session,
-    )
-    assert result["ok"] is True
-    assert result["post_id"] == 999
-    posts = session.calls_for("POST", "/api/v1/posts")
-    body = posts[0][2]["json"]
-    assert body["mode"] == "publish_now"
-    assert body["networks"] == {"tw": {"profile_refs": ["14100"]}}
+def test_text_publish_has_verified_get_and_no_create_strict_gate():
+    session = ContractSession()
+    result = publish(session, payload={"draft": {"message": "Hello", "hashtags": ["one"]}})
+    assert result["ok"] is True and result["delivered"] is True
+    assert result["post_id"] == 999 and result["platform_post_id"] == "native-post-999"
+    body = session.last_body
+    assert body["message"] == "Hello\n\n#one" and body["networks"] == {"tw": {"profile_refs": ["14100"]}}
     assert body["idempotency_key"] == "sau-target-4321"
-    assert "Hello there" in body["message"]
-    assert "#naturism" in body["message"]
+    assert [urlparse(c[1]).path for c in session.calls[:3]] == ["/api/v1/me", "/api/v1/workspaces/26985/social-profiles", "/api/v1/posts"]
+    preview = session.calls_for("POST", "/posts")[0][2]["json"]
+    assert preview["validate_only"] is True and preview["strict"] is True and preview["mode"] == "publish_now"
+    assert not any("/posts/validate" in call[1] for call in session.calls)
 
 
-def test_retry_uses_a_new_idempotency_key():
-    """A retry must not return the previously-failed post.
-
-    A fixed key made Sociamonials return the original post on every retry, so a
-    post it had permanently failed to deliver (post_id 10689041) came back
-    forever and X target 3391 could never recover.
-    """
-    session = FakeSession(_posts_handler())
-    account = _Account(77, platform="twitter")
-    for suffix in ("a1-20261013T080000", "a2-20261013T081000"):
-        sm.publish_via_sociamonials(
-            platform="twitter",
-            account=account,
-            payload={"draft": {"message": "Hello"}},
-            target_id=4321,
-            api_key="sm_agent_x",
-            session=session,
-            idempotency_suffix=suffix,
-        )
-    posts = session.calls_for("POST", "/api/v1/posts")
-    keys = [call[2]["json"]["idempotency_key"] for call in posts]
-    assert keys == [
-        "sau-target-4321-a1-20261013T080000",
-        "sau-target-4321-a2-20261013T081000",
-    ]
+@pytest.mark.parametrize("envelope", [False, True])
+def test_verified_preparation_caps_are_secret_free(envelope):
+    session = ContractSession(envelope=envelope)
+    result = sm.verify_destination(platform="twitter", account=Account(), payload={"message": "Original"}, session=session, api_key="secret-fixture")
+    assert result["verified"] is True and result["mapping"]["profile_refs"] == ["14100"]
+    assert result["limits"]["hosted_video_max_bytes"] == 1_073_741_824
+    assert result["limits"]["external_video_max_bytes"] == 1_024_000_000
+    assert result["storage"]["pooled"] is True
+    assert "secret-fixture" not in json.dumps(result)
+    assert not session.calls_for("POST")
 
 
-def test_publish_x_moves_links_from_body_to_first_comment():
-    session = FakeSession(_posts_handler())
-    sm.publish_via_sociamonials(
-        platform="twitter",
-        account=_Account(124),
-        payload={"draft": {"message": "New post: https://nakedwill.com/x"}},
-        target_id=321,
-        api_key="sm_agent_x",
-        session=session,
-        delivery_timeout=0,
-    )
-    body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
-    assert "http" not in body["message"].lower()
-    assert body["first_comment"] == "https://nakedwill.com/x"
+def test_upload_streams_exact_image_and_checkpoints_ready_receipt(image):
+    session = ContractSession()
+    payload = media_payload(image)
+    snapshots = []
+    payload["_save_checkpoint"] = lambda state: snapshots.append(copy.deepcopy(state))
+    result = publish(session, platform="instagram", account=Account(72, "instagram"), payload=payload)
+    assert result["ok"] is True and session.last_body["image_urls"] == ["asset://77"]
+    grant = session.calls_for("POST", "/media/uploads")[0][2]["json"]
+    assert grant["sha256"] == sm._sha256(image) and grant["idempotency_key"] == f"sau-media-26985-{grant['sha256']}"
+    assert session.calls_for("PUT") and len(session.calls_for("POST", "/posts", create=True)) == 1
+    saved = delivery.state(payload)["sociamonials_uploads"][grant["sha256"]]
+    assert saved["asset_id"] == 77 and saved["processing_status"] == "ready"
+    assert "signature" not in json.dumps(snapshots) and "fixture-only" not in json.dumps(snapshots)
+    validations = [call for call in session.calls_for("POST", "/posts") if call[2]["json"].get("validate_only")]
+    assert len(validations) == 2 and validations[-1][2]["json"]["image_urls"] == ["asset://77"]
 
 
-def test_publish_x_appends_links_to_existing_first_comment():
-    session = FakeSession(_posts_handler())
-    sm.publish_via_sociamonials(
-        platform="twitter",
-        account=_Account(124),
-        payload={
-            "draft": {
-                "message": "Body https://a.example/1",
-                "firstComment": "Reply text",
-            }
-        },
-        api_key="sm_agent_x",
-        session=session,
-        delivery_timeout=0,
-    )
-    body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
-    assert "http" not in body["message"].lower()
-    assert "Reply text" in body["first_comment"]
-    assert "https://a.example/1" in body["first_comment"]
+def test_exact_ready_sha_asset_is_reused_even_with_renamed_file(image):
+    existing = asset_for(image, asset_id=555, filename="a-different-name.png")
+    session = ContractSession(assets=[existing])
+    result = publish(session, platform="instagram", account=Account(72, "instagram"), payload=media_payload(image))
+    assert result["ok"] and session.last_body["image_urls"] == ["asset://555"]
+    assert not session.calls_for("PUT") and not session.calls_for("POST", "/media/uploads")
 
 
-def test_publish_non_x_keeps_link_in_body():
-    session = FakeSession(_posts_handler())
-    sm.publish_via_sociamonials(
-        platform="facebook",
-        account=_Account(11, platform="facebook"),
-        payload={"draft": {"message": "Body https://a.example/1"}},
-        api_key="sm_agent_x",
-        session=session,
-        delivery_timeout=0,
-    )
-    body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
-    assert "https://a.example/1" in body["message"]
-
-
-def test_local_media_upload_sends_no_idempotency_key(tmp_path):
-    """A media-level key makes a completed multipart grant un-reusable."""
-    image = tmp_path / "pic.jpg"
-    image.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
-    session = FakeSession(_posts_handler())
-    sm.publish_via_sociamonials(
-        platform="instagram",
-        account=_Account(72, platform="instagram"),
-        payload={"draft": {"message": "A photo"}, "artifacts": [
-            {"local_path": str(image), "public_url": "", "metadata": {"role": "image"}}
-        ]},
-        target_id=55,
-        api_key="sm_agent_x",
-        session=session,
-        delivery_timeout=0,
-    )
-    grant_body = session.calls_for("POST", "/media/uploads")[0][2]["json"]
-    assert "idempotency_key" not in grant_body
-
-
-def test_publish_waits_for_a_video_asset_to_become_ready(tmp_path):
-    video = tmp_path / "clip.mp4"
-    video.write_bytes(b"v" * 64)
-    polls = {"n": 0}
-
-    def handler(method, url, kwargs):
-        if method == "GET" and "/media/assets/" in url:
-            polls["n"] += 1
-            status = "processing" if polls["n"] < 2 else "ready"
-            return FakeResponse(200, {"asset_id": 77, "processing_status": status})
-        if method == "POST" and url.endswith("/media/uploads"):
-            return FakeResponse(200, {"upload_id": 5, "mode": "single", "upload_url": "https://upload.example/put/5"})
-        if method == "PUT":
-            return FakeResponse(200, headers={"ETag": "e"})
-        if method == "POST" and url.endswith("/complete"):
-            return FakeResponse(200, {"asset_id": 77})
-        if method == "POST" and url.endswith("/api/v1/posts"):
-            return FakeResponse(200, {"post_id": 1, "status": "scheduled"})
-        raise AssertionError(f"unexpected {method} {url}")
-
-    session = FakeSession(handler)
-    sm.publish_via_sociamonials(
-        platform="twitter",
-        account=_Account(77),
-        payload={"draft": {"message": "video post"}, "artifacts": [
-            {"local_path": str(video), "metadata": {"role": "video"}}
-        ]},
-        api_key="sm_agent_x",
-        session=session,
-        delivery_timeout=0,
-    )
-    assert polls["n"] >= 2
-    assert session.calls_for("POST", "/api/v1/posts")
-
-
-def test_wait_for_asset_ready_retries_a_transient_404():
-    polls = {"n": 0}
-
-    class Sess:
-        def get(self, url, **kw):
-            polls["n"] += 1
-            if polls["n"] == 1:
-                return FakeResponse(404, {})
-            return FakeResponse(200, {"asset_id": 7, "processing_status": "ready"})
-
-    sm._wait_for_asset_ready(Sess(), {}, 7, timeout=5, interval=0.001)
-    assert polls["n"] == 2
-
-
-def test_publish_raises_when_a_video_asset_never_becomes_ready(tmp_path):
-    video = tmp_path / "clip.mp4"
-    video.write_bytes(b"v" * 64)
-
-    def handler(method, url, kwargs):
-        if method == "GET" and "/media/assets/" in url:
-            return FakeResponse(200, {"asset_id": 77, "processing_status": "processing"})
-        if method == "POST" and url.endswith("/media/uploads"):
-            return FakeResponse(200, {"upload_id": 5, "mode": "single", "upload_url": "https://upload.example/put/5"})
-        if method == "PUT":
-            return FakeResponse(200, headers={"ETag": "e"})
-        if method == "POST" and url.endswith("/complete"):
-            return FakeResponse(200, {"asset_id": 77})
-        raise AssertionError(f"unexpected {method} {url}")
-
-    session = FakeSession(handler)
-    with pytest.raises(sm.SociamonialsFallbackError):
-        sm._wait_for_asset_ready(session, {}, 77, timeout=0.01, interval=0.001)
-
-
-def test_publish_uses_direct_video_url_without_uploading():
-    session = FakeSession(_posts_handler())
-    payload = {
-        "draft": {"message": "Watch this"},
-        "artifacts": [
-            {
-                "local_path": "/tmp/clip.mp4",
-                "public_url": "https://cdn.example/campaigns/1/videos/clip.mp4",
-                "metadata": {"role": "video"},
-            }
-        ],
-    }
-    sm.publish_via_sociamonials(
-        platform="twitter",
-        account=_Account(77),
-        payload=payload,
-        api_key="sm_agent_x",
-        session=session,
-    )
-    assert not session.calls_for("POST", "/media/uploads")
-    body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
-    assert body["video_url"] == "https://cdn.example/campaigns/1/videos/clip.mp4"
-
-
-def test_publish_uploads_local_image(tmp_path):
-    image = tmp_path / "pic.jpg"
-    image.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
-    session = FakeSession(_posts_handler())
-    payload = {
-        "draft": {"message": "A photo"},
-        "artifacts": [
-            {"local_path": str(image), "public_url": "", "metadata": {"role": "image"}}
-        ],
-    }
-    result = sm.publish_via_sociamonials(
-        platform="instagram",
-        account=_Account(72, platform="instagram"),
-        payload=payload,
-        target_id=55,
-        api_key="sm_agent_x",
-        session=session,
-    )
-    assert result["ok"] is True
+def test_filename_size_without_hash_is_not_byte_equality(image):
+    existing = asset_for(image, asset_id=555, sha256=None)
+    session = ContractSession(assets=[existing])
+    publish(session, platform="instagram", account=Account(72, "instagram"), payload=media_payload(image))
     assert session.calls_for("POST", "/media/uploads")
-    assert session.calls_for("PUT", "https://upload.example")
-    complete = session.calls_for("POST", "/complete")
-    assert complete, "the upload must be completed"
-    body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
-    assert body["image_urls"] == ["asset://77"]
-
-
-def test_publish_reuses_an_identical_library_asset(tmp_path, monkeypatch):
-    """A file already in the library must not be uploaded a second time."""
-    monkeypatch.setenv(sm.REUSE_ASSETS_ENV, "1")
-    image = tmp_path / "pic.jpg"
-    image.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
-    existing = {
-        "asset_id": 555,
-        "filename": "pic.jpg",
-        "size_bytes": image.stat().st_size,
-        "media_type": "image",
-        "processing_status": "ready",
-        "created_at": "2026-10-05 12:00:00",
-    }
-    session = FakeSession(_posts_handler(assets=[existing]))
-    result = sm.publish_via_sociamonials(
-        platform="instagram",
-        account=_Account(72, platform="instagram"),
-        payload={
-            "draft": {"message": "A photo"},
-            "artifacts": [
-                {"local_path": str(image), "public_url": "", "metadata": {"role": "image"}}
-            ],
-        },
-        target_id=55,
-        api_key="sm_agent_x",
-        session=session,
-        delivery_timeout=0,
-    )
-    assert result["ok"] is True
-    assert not session.calls_for("POST", "/media/uploads"), "must not re-upload"
-    body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
-    assert body["image_urls"] == ["asset://555"]
-
-
-def test_publish_reuses_an_identical_video_asset(tmp_path, monkeypatch):
-    monkeypatch.setenv(sm.REUSE_ASSETS_ENV, "1")
-    video = tmp_path / "clip.mp4"
-    video.write_bytes(b"v" * 64)
-    existing = {
-        "asset_id": 556,
-        "filename": "clip.mp4",
-        "size_bytes": video.stat().st_size,
-        "media_type": "video",
-        "processing_status": "ready",
-        "created_at": "2026-10-05 12:00:00",
-    }
-    session = FakeSession(_posts_handler(assets=[existing]))
-    sm.publish_via_sociamonials(
-        platform="twitter",
-        account=_Account(77),
-        payload={
-            "draft": {"message": "video post"},
-            "artifacts": [
-                {"local_path": str(video), "public_url": "", "metadata": {"role": "video"}}
-            ],
-        },
-        api_key="sm_agent_x",
-        session=session,
-        delivery_timeout=0,
-    )
-    assert not session.calls_for("POST", "/media/uploads")
-    body = session.calls_for("POST", "/api/v1/posts")[0][2]["json"]
-    assert body["video_url"] == "asset://556"
-
-
-def test_publish_uploads_when_the_match_size_differs(tmp_path):
-    """Same filename but a different size is a different file: upload it."""
-    image = tmp_path / "pic.jpg"
-    image.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
-    existing = {
-        "asset_id": 555,
-        "filename": "pic.jpg",
-        "size_bytes": image.stat().st_size + 1,
-        "media_type": "image",
-        "processing_status": "ready",
-    }
-    session = FakeSession(_posts_handler(assets=[existing]))
-    sm.publish_via_sociamonials(
-        platform="instagram",
-        account=_Account(72, platform="instagram"),
-        payload={
-            "draft": {"message": "A photo"},
-            "artifacts": [
-                {"local_path": str(image), "public_url": "", "metadata": {"role": "image"}}
-            ],
-        },
-        target_id=55,
-        api_key="sm_agent_x",
-        session=session,
-        delivery_timeout=0,
-    )
-    assert session.calls_for("POST", "/media/uploads")
-
-
-def test_publish_uploads_when_library_listing_is_not_entitled(tmp_path, monkeypatch):
-    """A plan without library browsing must still be able to publish."""
-    monkeypatch.setenv(sm.REUSE_ASSETS_ENV, "1")
-    image = tmp_path / "pic.jpg"
-    image.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
-
-    def handler(method, url, kwargs):
-        if method == "GET" and url.rstrip("/").endswith("/media/assets"):
-            return FakeResponse(403, {"error": {"code": "asset_access_not_enabled"}})
-        if method == "GET" and "/media/assets/" in url:
-            return FakeResponse(200, {"asset_id": 77, "processing_status": "ready"})
-        if method == "POST" and url.endswith("/media/uploads"):
-            return FakeResponse(
-                200,
-                {"upload_id": 5, "mode": "single", "upload_url": "https://upload.example/put/5"},
-            )
-        if method == "PUT":
-            return FakeResponse(200, headers={"ETag": "e"})
-        if method == "POST" and url.endswith("/complete"):
-            return FakeResponse(200, {"asset_id": 77})
-        if method == "POST" and url.endswith("/api/v1/posts"):
-            return FakeResponse(200, {"post_id": 1, "status": "published"})
-        raise AssertionError(f"unexpected {method} {url}")
-
-    session = FakeSession(handler)
-    sm.publish_via_sociamonials(
-        platform="instagram",
-        account=_Account(72, platform="instagram"),
-        payload={
-            "draft": {"message": "A photo"},
-            "artifacts": [
-                {"local_path": str(image), "public_url": "", "metadata": {"role": "image"}}
-            ],
-        },
-        target_id=55,
-        api_key="sm_agent_x",
-        session=session,
-        delivery_timeout=0,
-    )
-    assert session.calls_for("POST", "/media/uploads")
-
-
-def test_publish_can_disable_reuse(tmp_path, monkeypatch):
-    monkeypatch.setenv(sm.REUSE_ASSETS_ENV, "0")
-    image = tmp_path / "pic.jpg"
-    image.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
-    existing = {
-        "asset_id": 555,
-        "filename": "pic.jpg",
-        "size_bytes": image.stat().st_size,
-        "media_type": "image",
-        "processing_status": "ready",
-    }
-    session = FakeSession(_posts_handler(assets=[existing]))
-    sm.publish_via_sociamonials(
-        platform="instagram",
-        account=_Account(72, platform="instagram"),
-        payload={
-            "draft": {"message": "A photo"},
-            "artifacts": [
-                {"local_path": str(image), "public_url": "", "metadata": {"role": "image"}}
-            ],
-        },
-        target_id=55,
-        api_key="sm_agent_x",
-        session=session,
-        delivery_timeout=0,
-    )
-    assert session.calls_for("POST", "/media/uploads")
-
-
-def test_select_reusable_asset_requires_exact_name_size_and_kind():
-    assets = [
-        {"asset_id": 1, "filename": "a.mp4", "size_bytes": 10, "media_type": "video"},
-        {"asset_id": 2, "filename": "a.mp4", "size_bytes": 11, "media_type": "video"},
-        {"asset_id": 3, "filename": "a.mp4", "size_bytes": 10, "media_type": "image"},
-        {"asset_id": 4, "filename": "b.mp4", "size_bytes": 10, "media_type": "video"},
-    ]
-    # asset 1 is the only exact name/size/kind match.
-    assert sm.select_reusable_asset(
-        assets, filename="a.mp4", size_bytes=10, kind="video"
-    )["asset_id"] == 1
-    # asset 3 is the wrong kind, 2 the wrong size, 4 the wrong name: nothing.
-    assert sm.select_reusable_asset(
-        [assets[1], assets[2], assets[3]], filename="a.mp4", size_bytes=10, kind="video"
-    ) is None
-
-
-def test_select_reusable_asset_prefers_starred_then_oldest_and_skips_unready():
-    assets = [
-        {"asset_id": 10, "filename": "a.mp4", "size_bytes": 10, "media_type": "video",
-         "processing_status": "ready", "created_at": "2026-10-05 01:00:00"},
-        {"asset_id": 11, "filename": "a.mp4", "size_bytes": 10, "media_type": "video",
-         "processing_status": "ready", "created_at": "2026-10-04 01:00:00"},
-        {"asset_id": 12, "filename": "a.mp4", "size_bytes": 10, "media_type": "video",
-         "processing_status": "ready", "created_at": "2026-10-06 01:00:00", "starred": True},
-        {"asset_id": 13, "filename": "a.mp4", "size_bytes": 10, "media_type": "video",
-         "processing_status": "processing", "created_at": "2026-10-01 01:00:00"},
-    ]
-    chosen = sm.select_reusable_asset(
-        assets, filename="a.mp4", size_bytes=10, kind="video"
-    )
-    assert chosen["asset_id"] == 12  # starred wins
-    # With no starred copy, the oldest ready upload is chosen.
-    chosen = sm.select_reusable_asset(
-        assets[:2], filename="a.mp4", size_bytes=10, kind="video"
-    )
-    assert chosen["asset_id"] == 11
-
-
-def test_select_reusable_asset_respects_exclude_ids():
-    assets = [
-        {"asset_id": 1, "filename": "a.mp4", "size_bytes": 10, "media_type": "video"},
-        {"asset_id": 2, "filename": "a.mp4", "size_bytes": 10, "media_type": "video"},
-    ]
-    chosen = sm.select_reusable_asset(
-        assets, filename="a.mp4", size_bytes=10, kind="video", exclude_ids={1}
-    )
-    assert chosen["asset_id"] == 2
-
-
-def test_publish_multipart_upload_keeps_etags(tmp_path):
-    video = tmp_path / "big.mp4"
-    video.write_bytes(b"v" * (100 + 16))
-    grant = {
-        "upload_id": 9,
-        "mode": "multipart",
-        "part_size_bytes": 64,
-        "parts": [{"part_number": 1, "url": "https://upload.example/part/1"}],
-    }
-    handler = _posts_handler(grants={"big.mp4": grant}, upload_etag="etag-part")
-    session = FakeSession(handler)
-    payload = {
-        "draft": {"message": "big video"},
-        "artifacts": [{"local_path": str(video), "public_url": "", "metadata": {"role": "video"}}],
-    }
-    sm.publish_via_sociamonials(
-        platform="twitter",
-        account=_Account(77),
-        payload=payload,
-        api_key="sm_agent_x",
-        session=session,
-    )
-    puts = session.calls_for("PUT")
-    assert len(puts) == 2  # part 1 from grant, part 2 fetched
-    complete = session.calls_for("POST", "/complete")[0][2]["json"]
-    assert sorted(part["part_number"] for part in complete["parts"]) == [1, 2]
-
-
-def test_publish_raises_on_http_error():
-    def handler(method, url, kwargs):
-        if method == "POST" and url.endswith("/api/v1/posts"):
-            return FakeResponse(422, {"error": {"code": "validation_failed"}})
-        return FakeResponse(200, {})
-
-    session = FakeSession(handler)
-    with pytest.raises(sm.SociamonialsFallbackError):
-        sm.publish_via_sociamonials(
-            platform="twitter",
-            account=_Account(77),
-            payload={"draft": {"message": "hello"}},
-            api_key="sm_agent_x",
-            session=session,
-        )
-
-
-def test_media_required_network_without_media_raises():
-    session = FakeSession(_posts_handler())
-    with pytest.raises(sm.SociamonialsFallbackError):
-        sm.publish_via_sociamonials(
-            platform="youtube",
-            account=_Account(110, platform="youtube"),
-            payload={"draft": {"message": "no media"}},
-            api_key="sm_agent_x",
-            session=session,
-        )
-
-
-def test_publish_propagates_warnings_and_approval_hold():
-    session = FakeSession(
-        _posts_handler(
-            post_result={
-                "post_id": 1,
-                "status": "pending_approval",
-                "requires_approval": True,
-                "warnings": ["cta_group not found"],
-            }
-        )
-    )
-    result = sm.publish_via_sociamonials(
-        platform="twitter",
-        account=_Account(77),
-        payload={"draft": {"message": "held"}},
-        api_key="sm_agent_x",
-        session=session,
-    )
-    assert result["requires_approval"] is True
-    assert "cta_group not found" in result["warnings"]
-
-
-# --- Teaching connector (separate workspace / key) ----------------------- #
-
-
-def test_teaching_accounts_use_the_teaching_workspace():
-    for account_id in (43, 58, 61, 100, 107, 108, 125):
-        mapping = sm.resolve_mapping(account_id)
-        assert mapping is not None, account_id
-        assert mapping["workspace_id"] == sm.DEFAULT_TEACHING_WORKSPACE_ID, account_id
-        assert mapping["api_key_env"] == sm.TEACHING_API_KEY_ENV, account_id
-
-
-def test_adult_accounts_do_not_carry_a_workspace_override():
-    mapping = sm.resolve_mapping(103)
-    assert mapping == {"network": "tw", "profile_refs": ["14099"], "name": "nakedhappylife"}
-    assert "workspace_id" not in mapping
-    assert "api_key_env" not in mapping
-
-
-def test_resolve_credentials_prefers_the_mapping_key_and_workspace(monkeypatch):
-    monkeypatch.setenv(sm.API_KEY_ENV, "main_key")
-    monkeypatch.setenv(sm.TEACHING_API_KEY_ENV, "teach_key")
-    monkeypatch.setenv(sm.TEACHING_WORKSPACE_ENV, "34293")
-    monkeypatch.setenv(sm.WORKSPACE_ENV, "26985")
-    mapping = sm.resolve_mapping(100)
-    key, ws = sm.resolve_credentials(mapping)
-    assert key == "teach_key"
-    assert ws == "34293"
-    # An adult mapping still uses the global key/workspace.
-    key2, ws2 = sm.resolve_credentials(sm.resolve_mapping(103))
-    assert key2 == "main_key"
-    assert ws2 == "26985"
-
-
-def test_publish_uses_the_teaching_workspace(monkeypatch):
-    monkeypatch.setenv(sm.TEACHING_API_KEY_ENV, "teach_key")
-    monkeypatch.setenv(sm.TEACHING_WORKSPACE_ENV, "34293")
-    seen = {}
-
-    def handler(method, url, kwargs):
-        if method == "POST" and url == sm.POSTS_URL:
-            seen["auth"] = (kwargs.get("headers") or {}).get("Authorization")
-            seen["body"] = kwargs.get("json") or {}
-            return FakeResponse(200, {"post_id": 9, "status": "published"})
-        return FakeResponse(200, {"results": [{"status": "published"}]})
-
-    # The media upload must not fire for a text-only teaching post.
-    session = FakeSession(handler)
-    result = sm.publish_via_sociamonials(
-        platform="twitter",
-        account=_Account(107),
-        payload={"draft": {"message": "teaching copy"}},
-        session=session,
-        delivery_timeout=0,
-    )
-    assert result["post_id"] == 9
-    assert seen["auth"] == "Bearer teach_key"
-    assert seen["body"]["workspace_registration_id"] == 34293
-    assert seen["body"]["networks"] == {"tw": {"profile_refs": ["17650"]}}
-
-
-class _FakeLibraryResponse:
-    def __init__(self, assets):
-        self.status_code = 200
-        self._assets = assets
-
-    def json(self):
-        return {"assets": self._assets}
-
-
-class _FakeLibrarySession:
-    """Records every page request so pagination is observable."""
-
-    def __init__(self, pages):
-        self._pages = list(pages)
-        self.requests: list[dict] = []
-
-    def get(self, url, headers=None, params=None, timeout=None):
-        self.requests.append(dict(params or {}))
-        index = int((params or {}).get("offset", 0)) // int((params or {}).get("limit", 200))
-        if index < len(self._pages):
-            return _FakeLibraryResponse(self._pages[index])
-        return _FakeLibraryResponse([])
-
-
-def test_reuse_lookup_paginates_past_the_first_page(monkeypatch):
-    """A match on page 2 must be found, not re-uploaded.
-
-    The lookup is a single page of 200 by original design. Once the library grew
-    past one page the match was missed and the file re-uploaded, re-inflating the
-    quota this lookup exists to protect.
-    """
-    monkeypatch.setenv("SAU_SOCIAMONIALS_REUSE_ASSETS", "1")
-    page_one = [
-        {"asset_id": i, "filename": f"other{i}.mp4", "size_bytes": 1, "media_type": "video"}
-        for i in range(200)
-    ]
-    page_two = [
-        {"asset_id": 999, "filename": "wanted.mp4", "size_bytes": 10, "media_type": "video"}
-    ]
-    session = _FakeLibrarySession([page_one, page_two])
-    found = sm._lookup_reusable_asset(
-        session, {}, "26985", filename="wanted.mp4", size_bytes=10,
-        kind="video", timeout=5,
-    )
-    assert found is not None and found["asset_id"] == 999
-    assert len(session.requests) == 2, "must have walked to the second page"
-    assert session.requests[1]["offset"] == 200
-
-
-def test_reuse_lookup_stops_on_a_short_page(monkeypatch):
-    monkeypatch.setenv("SAU_SOCIAMONIALS_REUSE_ASSETS", "1")
-    session = _FakeLibrarySession([[
-        {"asset_id": 1, "filename": "other.mp4", "size_bytes": 1, "media_type": "video"}
-    ]])
-    assert sm._lookup_reusable_asset(
-        session, {}, "26985", filename="missing.mp4", size_bytes=9,
-        kind="video", timeout=5,
-    ) is None
-    # A page shorter than the page size is the last page: do not keep asking.
-    assert len(session.requests) == 1
-
-
-def test_reuse_lookup_is_bounded(monkeypatch):
-    monkeypatch.setenv("SAU_SOCIAMONIALS_REUSE_ASSETS", "1")
-    monkeypatch.setenv("SAU_SOCIAMONIALS_REUSE_MAX_PAGES", "3")
-    full_page = [
-        {"asset_id": i, "filename": f"o{i}.mp4", "size_bytes": 1, "media_type": "video"}
-        for i in range(200)
-    ]
-    session = _FakeLibrarySession([full_page, full_page, full_page, full_page])
-    assert sm._lookup_reusable_asset(
-        session, {}, "26985", filename="missing.mp4", size_bytes=9,
-        kind="video", timeout=5,
-    ) is None
-    assert len(session.requests) == 3, "must respect the page bound"
-
-
-def test_split_returns_none_when_the_video_fits(tmp_path):
-    clip = tmp_path / "ok.mp4"
-    clip.write_bytes(b"x")
-    with patch.object(sm.media_pipeline, "probe_video_duration", return_value=100.0):
-        assert sm._split_for_network("tw", str(clip)) is None
-
-
-def test_split_returns_none_without_a_local_file():
-    # A remote-only video cannot be probed or split here.
-    assert sm._split_for_network("tw", None) is None
-    assert sm._split_for_network("tw", "/nonexistent/x.mp4") is None
-
-
-def test_split_returns_none_for_a_network_with_no_duration_cap(tmp_path):
-    clip = tmp_path / "x.mp4"
-    clip.write_bytes(b"x")
-    assert sm._split_for_network("fb", str(clip)) is None
-
-
-def test_split_probe_failure_is_not_a_rejection(tmp_path):
-    clip = tmp_path / "x.mp4"
-    clip.write_bytes(b"x")
-    with patch.object(
-        sm.media_pipeline, "probe_video_duration", side_effect=RuntimeError("no ffprobe")
-    ):
-        assert sm._split_for_network("tw", str(clip)) is None
-
-
-def test_split_returns_the_first_part(tmp_path):
-    clip = tmp_path / "long.mp4"
-    clip.write_bytes(b"x")
-    parts = [tmp_path / "long_part1of2_pub.mp4", tmp_path / "long_part2of2_pub.mp4"]
-    for part in parts:
-        part.write_bytes(b"x")
-    with patch.object(
-        sm.media_pipeline, "probe_video_duration", return_value=222.0
-    ), patch.object(sm.media_prep, "split_to_seconds", return_value=parts):
-        assert sm._split_for_network("tw", str(clip)) == str(parts[0])
-
-
-def test_split_yielding_one_part_falls_back_to_refusal(tmp_path):
-    clip = tmp_path / "long.mp4"
-    clip.write_bytes(b"x")
-    with patch.object(
-        sm.media_pipeline, "probe_video_duration", return_value=222.0
-    ), patch.object(sm.media_prep, "split_to_seconds", return_value=[clip]):
-        assert sm._split_for_network("tw", str(clip)) is None
-
-
-def test_asset_reuse_is_off_by_default(monkeypatch):
-    """Reuse must be opt-in: a URL-backed reused asset broke delivery."""
-    monkeypatch.delenv(sm.REUSE_ASSETS_ENV, raising=False)
-    assert sm._reuse_assets_enabled() is False
-    monkeypatch.setenv(sm.REUSE_ASSETS_ENV, "1")
-    assert sm._reuse_assets_enabled() is True
-
-
-def test_account_107_maps_to_the_willytutordev_x_profile():
-    """Regression: the teaching workspace has two X profiles.
-
-    Account 107 was mapped to 16087 (@weiwei_wang0), so its posts would have
-    landed on the wrong X handle. @willytutordev is 17650.
-    """
-    entry = sm.SAU_ACCOUNT_TO_SOCIAMONIALS[107]
-    assert entry["network"] == "tw"
-    assert entry["profile_refs"] == ["17650"]
-    assert entry["name"] == "willytutordev"
+    assert sm.select_reusable_asset([existing], filename=image.name, size_bytes=image.stat().st_size, kind="image") is None
+
+
+def test_multipart_uses_documented_batched_authenticated_parts_and_etags(video):
+    session = ContractSession(part_size=64)
+    result = publish(session, payload=media_payload(video))
+    assert result["ok"]
+    parts = session.calls_for("POST", "/parts")
+    assert all(set(call[2]["json"]) == {"from", "count"} for call in parts)
+    assert all(call[2]["headers"]["Authorization"] == "Bearer fixture-only" for call in parts)
+    complete = session.calls_for("POST", "/complete")[0][2]["json"]["parts"]
+    assert len(complete) == (video.stat().st_size + 63) // 64
+    assert all(part["etag"] for part in complete)
+
+
+def test_hosted_video_processing_is_bounded_and_resume_does_not_reupload(video):
+    session = ContractSession()
+    session.ready_after = 99
+    payload = media_payload(video)
+    with pytest.raises(delivery.DeliveryPending):
+        publish(session, payload=payload)
+    assert len(session.calls_for("GET", "/media/assets/")) == sm.MAX_POLL_REQUESTS
+    assert not session.calls_for("POST", "/posts", create=True)
+    session.ready_after = 0
+    result = publish(session, payload=payload)
+    assert result["ok"] and len(session.calls_for("POST", "/media/uploads")) == 2  # grant + complete, not another grant
+    assert len(session.calls_for("PUT")) == 1
+
+
+@pytest.mark.parametrize("state", ["pending", "processing", "failed"])
+def test_acceptance_is_not_delivery_and_receipt_is_retained(state):
+    session = ContractSession(delivery_state=state)
+    payload = {"message": "Approved"}
+    result = publish(session, payload=payload)
+    assert not result["ok"] and result["delivery_state"] == state
+    assert delivery.receipt_for(payload, "sociamonials")["id"] == "999"
+    publish(session, payload=payload)
+    assert len(session.calls_for("POST", "/posts", create=True)) == 1
+
+
+def test_transient_create_retry_reuses_key_and_previously_uploaded_asset(image):
+    counts = {"create": 0}
+    def override(method, url, kwargs):
+        if method == "POST" and url == sm.POSTS_URL and not kwargs["json"].get("validate_only"):
+            counts["create"] += 1
+            if counts["create"] == 1:
+                return Response({"error": {"code": "rate_limited"}}, 429, {"Retry-After": "120"})
+    session = ContractSession(override=override)
+    payload = media_payload(image)
+    with pytest.raises(sm.SociamonialsFallbackError) as caught:
+        publish(session, platform="instagram", account=Account(72, "instagram"), payload=payload)
+    assert caught.value.retryable and caught.value.details["retryAfter"] == "120"
+    assert caught.value.details["retrySafe"] is True
+    assert delivery.state(payload)["submission_started"] is False
+    publish(session, platform="instagram", account=Account(72, "instagram"), payload=payload)
+    keys = [call[2]["json"]["idempotency_key"] for call in session.calls_for("POST", "/posts", create=True)]
+    assert keys == ["sau-target-4321", "sau-target-4321"] and len(session.calls_for("PUT")) == 1
+
+
+def test_recovery_generation_only_changes_deliberate_recovery_key():
+    session = ContractSession()
+    for generation in (None, "a" * 64, "a" * 64, "b" * 64):
+        payload = {"message": "Original"}
+        if generation:
+            payload["_delivery"] = {"recovery_generation": generation}
+        publish(session, payload=payload)
+    keys = [call[2]["json"]["idempotency_key"] for call in session.calls_for("POST", "/posts", create=True)]
+    assert keys == ["sau-target-4321", "sau-target-4321-recovery-" + "a" * 64,
+                    "sau-target-4321-recovery-" + "a" * 64, "sau-target-4321-recovery-" + "b" * 64]
+
+
+def test_teaching_primary_uses_only_teaching_key_and_workspace(monkeypatch):
+    monkeypatch.setenv(sm.TEACHING_API_KEY_ENV, "teach-fixture")
+    monkeypatch.setenv(sm.API_KEY_ENV, "adult-fixture")
+    session = ContractSession()
+    result = publish(session, account=Account(107), api_key=None)
+    assert result["workspace_id"] == 34293 and session.last_body["networks"] == {"tw": {"profile_refs": ["17650"]}}
+    assert all(call[2].get("headers", {}).get("Authorization") == "Bearer teach-fixture" for call in session.calls)

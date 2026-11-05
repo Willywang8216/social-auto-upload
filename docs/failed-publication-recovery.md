@@ -50,6 +50,65 @@ Threads/Meta token to be polled. A direct Meta receipt is not permission to crea
 a second post through Sociamonials. Account enablement, ownership, media, language
 and content-policy checks still apply.
 
+## Preprocess before scheduling
+
+Use `scripts/preprocess_failed_targets.py` for repaired media and complete ordered
+parts. With neither `--prepare` nor `--apply`, it is an offline, read-only queue
+dry-run. An explicit frozen selection avoids silently expanding the batch to
+new failures that appeared during implementation.
+
+```bash
+# A server-side, private inventory supplies {"target_ids": [123, 456]}.
+python scripts/preprocess_failed_targets.py --selection-file /private/frozen.json
+
+# Restore/encode/validate all selected eligible targets; no queue writes.
+python scripts/preprocess_failed_targets.py --selection-file /private/frozen.json \
+  --prepare --out-dir /private/prepared --plan-file /private/prepared-plan.json
+
+# Consume the exact saved plan; revalidate and atomically queue every part.
+python scripts/preprocess_failed_targets.py --apply \
+  --plan-file /private/prepared-plan.json
+```
+
+Paths and IDs above are placeholders. Plans/reports stay on the server, use
+exclusive 0600 file creation, contain fingerprints rather than account secrets,
+and are not committed or copied into test fixtures. `--prepare` isolates each
+target's failure so a bad file cannot suppress unrelated safe targets. Neither
+phase publishes. Encoding/probing/final decode validation occur outside queue
+write transactions; application performs only guarded SQL, policy and hash checks.
+
+Use `--backup-account-id ID` only for a currently verified effective destination;
+fresh grants/storage constraints tighten the common preparation profile. An
+explicit managed primary also requires that verification. This does not authorize
+a new account, a guessed mapping, or a different workspace's credential. Lower
+current entitlements and unsupported original options must stop before queueing.
+
+All final video/image outputs carry immutable checksums and complete ordered
+part/group metadata. Recovery preserves approved text, links, privacy/options,
+variant, framing, alt text and covers. A checksum-verified older prepared part
+may create a new generation while retaining its original source interval. It
+cannot overwrite scheduled/published artifacts, drop tails, or become text-only.
+
+Only after **all** preparation completes are future slots allocated. Production's
+default is **three posts per canonical destination per day with a 30-minute
+minimum gap**. A requested cap may tighten, never raise or disable the configured
+cap. Shared native/managed aliases, confirmed delivery history, existing bookings,
+and unresolved/in-flight work consume capacity. Do not force an early canary past
+pacing merely to claim a delivered result.
+
+Application revalidates target/intent/account fingerprints, current route/policy,
+all final hashes, receipt/duplicate state and every reserved slot under the guarded
+write transaction. Every part for one original target is installed **atomically**.
+The original job intent and previous failure/checkpoint evidence remain recorded;
+tail parts have unique identities and the recovery generation is durable. A stale
+plan or second application cannot reset/duplicate it. Failed campaigns resume only
+after their exact recovery validates; cancelled/superseded campaigns do not.
+
+Successful, cancelled, duplicate, deleted-account, disabled, retired, uncertain,
+receipt-bearing and irreparable targets remain unchanged. `--resolved-target-id`
+requires evidence of an actual repair, not an assumption that a fresh web login
+fixed an API credential. Unsupported backup copy/settings stay exceptions.
+
 ## Dry-run and guarded application
 
 The recovery utility defaults to a dry run. Explicit IDs cover the selected
@@ -98,3 +157,31 @@ provider delivery, delivered and failed results. Do not report an accepted or
 scheduled post as delivered. Record unavailable accounts, policy/content problems,
 ambiguous history and irreparable media as explicit exceptions rather than
 repeating them indefinitely.
+
+## Durable operator notification
+
+Terminal failed, blocked and needs-review transitions enqueue their stop event in
+the **same database transaction**. A failed enqueue rolls back the transition.
+Delivery occurs outside that transaction through the configured operator channel,
+Telegram by default when configured. Events are deduplicated by target/recovery
+generation, retain sent receipts, and independently retry unsent notifications
+after restart. At-least-once delivery can resend after a lost acknowledgement but
+can never resubmit the publication. No blanket historical alert backfill runs.
+
+The notice includes occurrence time, account/platform, target/job/part, separate
+native and backup outcomes, redacted reasons, a UI link and the safe next action.
+Confirmed failure, unavailable backup, partial delivery and approval/manual review
+are labelled separately. Notification transport failures do not disable unrelated
+worker maintenance. After a gated deployment, send a clearly labelled real channel
+test and verify its provider acknowledgement, not a fixture alert.
+
+## Release prerequisites
+
+Use the existing clean-commit release helper and matching gate receipts: Linux
+Python **3.12 and 3.13**, pinned uv/Node, all backend tests, frontend tests/build,
+and the exact image/runtime checks. Tests use isolated databases/media and mocked
+external services without production credentials. Drain via the release-owned
+pause and SIGTERM; never escalate over active work. Verify an online SQLite backup
+and isolated restore, apply additive Alembic migrations with writers stopped, then
+verify matched web/worker images, schema and held readiness. Database rollback over
+newer delivery receipts is not allowed. See [release gates](ci-watch.md).

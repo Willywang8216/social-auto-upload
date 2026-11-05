@@ -153,7 +153,7 @@ trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Every service-changing path requires passing Linux 3.10/3.12 + frontend
+# Every service-changing path requires passing Linux 3.12/3.13 + frontend
 # receipts and an image-ID receipt for the same clean commit and lockfiles.
 if ! bash "$SOURCE/scripts/release-gates.sh" verify --receipts "$RECEIPTS" >>"$DETAIL_LOG" 2>&1; then
   (( NO_BUILD == 0 )) || fail 'No matching passing gate receipts; --no-build cannot bypass tests.'

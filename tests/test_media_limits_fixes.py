@@ -189,8 +189,8 @@ class FacebookSizeCapTests(unittest.TestCase):
             self.assertEqual(len(cmds), 2)
 
     def test_platform_limits_facebook_size_cap(self) -> None:
-        """Facebook's media_max_mb should be 4096."""
-        self.assertEqual(platform_limits.media_max_mb("facebook"), 4096)
+        """The conservative Page /videos profile uses 4,000 decimal MB."""
+        self.assertEqual(platform_limits.media_max_mb("facebook"), 4000)
 
     def test_platform_limits_threads_duration_cap(self) -> None:
         """Threads' video_max_seconds should be 300."""
@@ -222,9 +222,9 @@ class PlatformCapsIntegrationTests(unittest.TestCase):
         self.assertLessEqual(part_duration, threads_cap)
 
     def test_facebook_5gb_video_is_split(self) -> None:
-        """A 5 GB video targeting Facebook must be split to ≤4096 MB parts."""
+        """A 5 GB video targeting Facebook must fit the 4,000 MB policy."""
         facebook_size_cap = platform_limits.media_max_mb("facebook")
-        self.assertEqual(facebook_size_cap, 4096)
+        self.assertEqual(facebook_size_cap, 4000)
         
         # Simulate the split logic
         size_bytes = 5000 * 1024 * 1024  # 5000 MB

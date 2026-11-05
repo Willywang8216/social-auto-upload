@@ -157,7 +157,7 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
             ),
             db_path=self.db_path,
         )
-        target = jobs.list_targets(job.id, db_path=self.db_path)[0]
+        target = jobs.claim_next_targets(db_path=self.db_path)[0]
         instance = PublishWorker(lambda *a, **k: None, db_path=self.db_path)
         with patch.object(
             worker,
@@ -252,7 +252,7 @@ class SociamonialsFallbackHookTests(unittest.TestCase):
 
     def test_x_target_goes_straight_to_the_fallback_when_direct_is_disabled(self) -> None:
         self._enable_fallback()
-        os.environ.pop("SAU_X_DIRECT_PUBLISH", None)
+        os.environ["SAU_X_DIRECT_PUBLISH"] = "0"  # explicit provider selection, never inferred from fallback availability
         twitter_account_id = profile_registry.add_account(
             self.profile_id,
             platform="twitter",

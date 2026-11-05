@@ -17,6 +17,7 @@ import os
 import sqlite3
 import subprocess
 import urllib.parse as _urlparse
+import uuid
 from pathlib import Path
 
 from utils.conf_defaults import BASE_DIR
@@ -28,8 +29,15 @@ from myUtils import media_prep
 from myUtils import media_remote_storage
 from myUtils import ops_alerts
 from myUtils import platform_limits
+from myUtils import media_compliance, image_compliance, publish_media_guard, video_artifacts
 from myUtils import profiles as profile_registry
 from myUtils.sqlite_utils import connect as _db_connection
+
+def _preparation_limits_for_accounts(accounts, platforms: set[str], supplied=None,
+                                     *, backup_compatible_platforms=None) -> dict:
+    from myUtils.publish_orchestrator import _preparation_limits_for_accounts as resolve
+    return resolve(accounts, platforms, supplied, backup_compatible_platforms=backup_compatible_platforms)
+
 
 # Platforms that publish by handing the platform a public media URL (the
 # platform fetches the bytes itself), so they require a publicly-reachable
@@ -408,8 +416,27 @@ def prepare_campaign_media_artifacts(
     db_path: Path,
     public_base_url: str | None = None,
 ) -> dict:
+    request_data = dict(request_data)
     watermark_spec = _derive_watermark_spec(profile, request_data)
     selected_platforms = set(selected_platforms or set())
+    generation = uuid.uuid4().hex
+    backup_platforms = platform_limits.backup_compatible_platforms(request_data) & selected_platforms
+    accounts = []
+    if selected_platforms:
+        # Resolve current selected accounts before any media/queue write work.
+        from myUtils.preparation_context import configure_request
+        try:
+            campaign = campaign_store.get_campaign(campaign_id, db_path=db_path)
+            selected_ids = set(campaign.selected_account_ids)
+            accounts = [account for account in profile_registry.list_accounts(
+                profile_id=profile.id, enabled=True, db_path=db_path) if account.id in selected_ids]
+        except (LookupError, sqlite3.Error):
+            accounts = []
+        has_video = any(item.get("role") == "video" or _is_video_file(item["file_path"]) for item in media_files
+                        if item.get("role") not in media_compliance.CONTEXT_KINDS)
+        request_data, _backup_contexts = configure_request(accounts, selected_platforms, request_data,
+                                                         settings=profile.settings, has_video=has_video)
+        backup_platforms = platform_limits.backup_compatible_platforms(request_data) & selected_platforms
     tiktok_only = selected_platforms == {profile_registry.PLATFORM_TIKTOK}
     # Remote-host media only when a URL-fetch platform is targeted (TikTok/
     # Meta/Threads pull media by URL). An explicit uploadToRemote overrides;
@@ -447,10 +474,14 @@ def prepare_campaign_media_artifacts(
         p = _resolve_aux_path(fid)
         if p:
             intro_paths.append(p)
+        else:
+            raise media_compliance.MediaPreparationError("Selected intro media cannot be restored")
     for fid in outro_ids:
         p = _resolve_aux_path(fid)
         if p:
             outro_paths.append(p)
+        else:
+            raise media_compliance.MediaPreparationError("Selected outro media cannot be restored")
 
     artifacts_context = {
         "imageUrls": [],
@@ -510,16 +541,24 @@ def prepare_campaign_media_artifacts(
     screenshots_enabled = bool(screenshots_spec.get("enabled"))
     screenshots_count = int(screenshots_spec.get("count") or 0) if screenshots_enabled else 0
     screenshots_timestamps = screenshots_spec.get("timestamps") if isinstance(screenshots_spec.get("timestamps"), list) else None
+    if screenshots_count > 100 or (screenshots_timestamps and len(screenshots_timestamps) > 100):
+        raise media_compliance.MediaPreparationError("Screenshot request exceeds the bounded preparation count")
+    if len(media_files) > image_compliance.MAX_SET_IMAGES:
+        raise media_compliance.MediaPreparationError("Campaign media exceeds the bounded preparation count")
+    pending_rows, image_inputs, original_sources = [], [], []
 
     for media_file in media_files:
+        if publish_media_guard.is_context_artifact({"local_path": media_file["file_path"],
+                "artifact_kind": media_file.get("role"), "metadata": {"role": media_file.get("role")}}):
+            continue
         raw_path = Path(media_file["file_path"]).expanduser()
         if not raw_path.is_absolute():
             # file_records stores filenames relative to videoFile/ (the
             # /upload endpoint writes there). Resolve to the canonical
             # absolute location so downstream ffmpeg / Pillow calls work
             # regardless of the worker's current working directory.
-            candidate = Path(BASE_DIR) / "videoFile" / raw_path
-            if candidate.exists():
+            candidate = _resolve_video_file_path_safely(str(raw_path))
+            if candidate is not None and candidate.exists():
                 raw_path = candidate
         if not raw_path.exists():
             # The offload cron moves published media to Drive and deletes the
@@ -537,6 +576,20 @@ def prepare_campaign_media_artifacts(
             if downloaded:
                 raw_path = downloaded
         source_path = raw_path.resolve()
+        if not source_path.is_file() or source_path.stat().st_size <= 0:
+            raise media_compliance.MediaPreparationError("Selected source is missing or empty after restore")
+        expected = media_file.get("sha256") or (media_file.get("metadata") or {}).get("sha256")
+        if expected:
+            media_compliance.verify_checksum(source_path, expected)
+        source_sha = media_compliance.sha256_file(source_path)
+        original_sources.append((source_path, source_sha))
+        media_file = {**media_file, "original_source_path": str(source_path), "original_source_sha256": source_sha}
+        if _is_image_file(source_path):
+            image_info = image_compliance.probe_image(source_path)
+        elif _is_video_file(source_path):
+            media_compliance._source_metadata(source_path)
+        else:
+            raise media_compliance.MediaPreparationError("Selected source contains no supported image/video")
         publish_path = source_path
         artifact_kind = None
 
@@ -547,36 +600,31 @@ def prepare_campaign_media_artifacts(
                 campaign_id,
                 source_path,
                 artifact_kind="concat",
+                generation=generation,
             )
             try:
-                media_pipeline.concat_videos(concat_parts, concat_output)
+                media_pipeline.concat_videos(concat_parts, concat_output, runner=_bounded_media_runner)
                 source_path = concat_output
                 publish_path = concat_output
             except Exception as exc:
-                logging.getLogger(__name__).warning(
-                    "Intro/outro concat failed for campaign %d, file %s: %s",
-                    campaign_id, source_path, exc,
-                )
-
-        # Pre-publish compression: shrink oversized source videos before
-        # watermarking/upload. This is where large GDrive originals get
-        # re-encoded to the publishing profile (1080x1920, CRF~22, <=30fps),
-        # with the size ceiling taken from whichever target platform has the
-        # strictest cap.
-        if _is_video_file(publish_path):
-            publish_path = _shrink_for_publish(
-                publish_path, campaign_id, selected_platforms
-            )
+                raise media_compliance.MediaPreparationError("Selected intro/outro concatenation failed; content was not dropped") from exc
 
         if watermark_spec and not tiktok_only and _is_image_file(source_path):
             artifact_kind = "watermarked_image"
+            # Watermarking strips EXIF: orient/color-convert BEFORE that transform.
+            watermark_source = source_path
+            if image_info["orientation"] not in {None, 1} or image_info["color_space"] != "sRGB":
+                normalized = media_pipeline.prepare_campaign_artifact_path(campaign_id, source_path,
+                             artifact_kind="watermark_input", generation=generation, suffix=".png")
+                watermark_source = image_compliance.materialise_srgb(source_path, normalized)
             publish_path = media_pipeline.prepare_campaign_artifact_path(
                 campaign_id,
                 source_path,
                 artifact_kind=artifact_kind,
+                generation=generation,
             )
             media_pipeline.apply_image_watermark(
-                source_path,
+                watermark_source,
                 publish_path,
                 watermark_text=watermark_spec.get("text"),
                 watermark_image_path=watermark_spec.get("imagePath"),
@@ -592,6 +640,8 @@ def prepare_campaign_media_artifacts(
                 campaign_id,
                 source_path,
                 artifact_kind=artifact_kind,
+                generation=generation,
+                suffix=".mp4",
             )
             media_pipeline.apply_video_watermark(
                 source_path,
@@ -605,27 +655,26 @@ def prepare_campaign_media_artifacts(
                 opacity=float(watermark_spec.get("opacity", 0.5)),
                 fontsize=int(watermark_spec.get("fontSize", 24)),
                 color=watermark_spec.get("color", "white"),
+                runner=_bounded_media_runner,
             )
 
-        if artifact_kind is not None:
-            campaign_store.add_campaign_artifact(
-                campaign_id,
-                source_file_record_id=media_file["file_record_id"],
-                artifact_kind=artifact_kind,
-                local_path=str(publish_path),
-                metadata={"role": media_file["role"]},
-                db_path=db_path,
-            )
+        # No intermediate watermark/raw file is registered as publishable.
+        if _is_video_file(publish_path) and publish_path != source_path:
+            before = media_compliance._source_metadata(source_path)
+            after = media_compliance._source_metadata(publish_path)
+            if abs(before["duration"] - after["duration"]) > 0.2:
+                raise media_compliance.MediaPreparationError("Final watermark changed the complete source duration")
 
         if screenshots_enabled and _is_video_file(publish_path):
             try:
-                shots_dir = media_pipeline.build_campaign_workspace(campaign_id) / "screenshots"
+                shots_dir = media_pipeline.build_campaign_workspace(campaign_id) / generation / "screenshots"
                 shots = media_pipeline.extract_video_screenshots(
                     publish_path,
                     shots_dir,
                     count=screenshots_count if not screenshots_timestamps else None,
                     timestamps=screenshots_timestamps,
                     seed=campaign_id * 1000 + int(media_file["file_record_id"]),
+                    runner=_bounded_media_runner,
                 )
                 for shot_path in shots:
                     artifacts_context["screenshotPaths"].append(str(shot_path))
@@ -645,18 +694,12 @@ def prepare_campaign_media_artifacts(
                                 "Screenshot remote upload failed for campaign %d: %s",
                                 campaign_id, exc,
                             )
-                    campaign_store.add_campaign_artifact(
-                        campaign_id,
-                        source_file_record_id=media_file["file_record_id"],
-                        artifact_kind="screenshot",
-                        local_path=str(shot_path),
-                        public_url=public_shot_url,
-                        metadata={
-                            "role": media_file["role"],
-                            "source_video": str(publish_path),
-                        },
-                        db_path=db_path,
-                    )
+                    image_compliance.probe_image(shot_path)
+                    pending_rows.append({"source_file_record_id": media_file["file_record_id"],
+                        "artifact_kind": "screenshot", "local_path": str(shot_path), "public_url": public_shot_url,
+                        "metadata": {"role": "cover", "source_video": str(publish_path),
+                                     "sha256": media_compliance.sha256_file(shot_path),
+                                     "size_bytes": shot_path.stat().st_size}})
             except Exception as exc:  # noqa: BLE001
                 logging.getLogger(__name__).warning(
                     "Screenshot extraction failed for campaign %d, file %s: %s",
@@ -665,285 +708,56 @@ def prepare_campaign_media_artifacts(
 
         public_url = None
         raw_public_url = None
-        if upload_to_remote:
-            remote_source = source_path if tiktok_only else publish_path
-            remote_kind = "raw_remote_upload" if tiktok_only else "remote_upload"
-            remote_artifact = media_remote_storage.upload_artifact(
-                remote_source,
-                campaign_id=campaign_id,
-                artifact_subdir="videos" if _is_video_file(remote_source) else "images",
+        if _is_video_file(publish_path):
+            if not selected_platforms:
+                raise media_compliance.MediaPreparationRequired("Video preparation needs selected platforms")
+            prepared = video_artifacts.prepare_and_register_video(
+                campaign_id=campaign_id, media_file=media_file,
+                source_path=source_path, publish_path=publish_path,
+                selected_platforms=selected_platforms, request_data=request_data,
+                upload_to_remote=upload_to_remote, db_path=db_path,
+                public_base_url=public_base_url,
+                register=False,
             )
-            public_url = remote_artifact.public_url
-            _backend_id = _resolve_backend_id_for_artifact(remote_artifact, db_path=db_path)
-            campaign_store.add_campaign_artifact(
-                campaign_id,
-                source_file_record_id=media_file["file_record_id"],
-                artifact_kind=remote_kind,
-                local_path=str(remote_source),
-                public_url=remote_artifact.public_url,
-                remote_path=remote_artifact.remote_path,
-                storage_backend_id=_backend_id,
-                metadata={"role": media_file["role"]},
-                db_path=db_path,
-            )
-            if not tiktok_only and publish_path != source_path:
-                raw_remote_artifact = media_remote_storage.upload_artifact(
-                    source_path,
-                    campaign_id=campaign_id,
-                    artifact_subdir="videos" if _is_video_file(source_path) else "images",
-                )
-                raw_public_url = raw_remote_artifact.public_url
-                _raw_backend_id = _resolve_backend_id_for_artifact(raw_remote_artifact, db_path=db_path)
-                campaign_store.add_campaign_artifact(
-                    campaign_id,
-                    source_file_record_id=media_file["file_record_id"],
-                    artifact_kind="raw_remote_upload",
-                    local_path=str(source_path),
-                    public_url=raw_remote_artifact.public_url,
-                    remote_path=raw_remote_artifact.remote_path,
-                    storage_backend_id=_raw_backend_id,
-                    metadata={"role": media_file["role"]},
-                    db_path=db_path,
-                )
+            public_url = prepared["public_url"]
+            raw_public_url = prepared["raw_public_url"]
+            pending_rows.extend(prepared["artifacts"])
+        elif _is_image_file(publish_path):
+            image_inputs.append({"media_file": media_file, "source_path": source_path, "publish_path": publish_path})
         else:
-            # No remote upload. Cookie/byte-upload platforms use the local file
-            # directly; only emit a /getFile URL when it would actually be
-            # reachable. Never hand a URL-fetch platform an unreachable
-            # localhost URL (that guarantees a downstream 4xx) — leave it None
-            # so the publisher raises a clear "no public media URL" error.
-            public_url = None
-            base_url = ""
-            try:
-                # Prefer the configured public origin. Outside a Flask request
-                # (the worker path) the caller passes ``public_base_url``; when
-                # neither is available the artifact gets no URL rather than an
-                # invented, unreachable hostname.
-                base_url = (
-                    ops_alerts.public_app_origin()
-                    or (public_base_url or "")
-                ).rstrip("/")
-                if not base_url:
-                    raise RuntimeError("no public origin configured")
-                # Serveable path relative to whichever media root holds the
-                # file (videoFile/ for staged source, generated/ for watermarked
-                # campaign artifacts), not the absolute /app/… path — otherwise
-                # /getFile rejects it as outside the root. A path that is already
-                # relative (the staged / file-record convention) is videoFile-
-                # relative and used as-is.
-                _pp = Path(publish_path)
-                _rel = None
-                if _pp.is_absolute():
-                    for _rname in ("videoFile", "generated", "uploads"):
-                        _rbase = (Path(BASE_DIR) / _rname).resolve()
-                        try:
-                            _rel = _pp.resolve().relative_to(_rbase).as_posix()
-                            break
-                        except (ValueError, OSError):
-                            continue
-                    if _rel is None:
-                        _rel = _pp.name
-                else:
-                    _rel = _pp.as_posix()
-                served_filename = _urlparse.quote(_rel)
-                candidate = f"{base_url}/getFile?filename={served_filename}"
-                # ``public_url`` must be publicly reachable, whether or not a
-                # URL-fetch platform is targeted: a byte-upload platform
-                # (Bluesky/Reddit) falls back to this URL when its local copy
-                # is gone, which is exactly how targets #3449/#3450 reached a
-                # 404. Suppress an unreachable host entirely and let the
-                # publisher report the missing URL instead.
-                if _is_public_base_url(base_url):
-                    public_url = candidate
-                else:
-                    logging.getLogger(__name__).warning(
-                        "campaign %d has no publicly reachable origin (%s); "
-                        "suppressing unreachable public_url %s",
-                        campaign_id, base_url, candidate,
-                    )
-            except RuntimeError:
-                public_url = None
-            campaign_store.add_campaign_artifact(
-                campaign_id,
-                source_file_record_id=media_file["file_record_id"],
-                artifact_kind="local",
-                local_path=str(publish_path),
-                public_url=public_url,
-                metadata={"role": media_file["role"]},
-                db_path=db_path,
-            )
-            # Also store a raw (un-watermarked) artifact for TikTok when
-            # watermarks were applied in a mixed-platform batch. The artifact is
-            # still created (TikTok can byte-upload from ``local_path``) but its
-            # ``public_url`` is left null when the origin is not reachable.
-            if (
-                base_url
-                and not tiktok_only
-                and publish_path != source_path
-                and profile_registry.PLATFORM_TIKTOK in selected_platforms
-            ):
-                try:
-                    raw_served_filename = Path(source_path).name
-                    raw_public_url = (
-                        f"{base_url}/getFile?filename={raw_served_filename}"
-                        if _is_public_base_url(base_url)
-                        else None
-                    )
-                except (RuntimeError, NameError):
-                    raw_public_url = None
-                campaign_store.add_campaign_artifact(
-                    campaign_id,
-                    source_file_record_id=media_file["file_record_id"],
-                    artifact_kind="raw_local",
-                    local_path=str(source_path),
-                    public_url=raw_public_url,
-                    metadata={"role": media_file["role"]},
-                    db_path=db_path,
-                )
-
-        # A video over a platform's duration OR size cap is split into several
-        # equal parts (one post each) so nothing is dropped; platforms whose
-        # caps it already meets (IG 900s, YouTube 12h) keep the full _pub.mp4.
-        if _is_video_file(publish_path) and selected_platforms:
-            duration_probe_failed = False
-            try:
-                duration = float((media_prep.probe(publish_path) or {}).get("duration") or 0)
-            except Exception as exc:  # noqa: BLE001
-                # Do NOT treat "could not measure" as "fits": a probe failure
-                # silently disabled duration splitting for EVERY platform, which
-                # is how a 600s source reached Threads unsplit. When we cannot
-                # measure the duration, we cannot verify the video fits the
-                # platform cap, so we must raise instead of silently publishing
-                # an oversized file that the platform will reject.
-                duration_probe_failed = True
-                duration = 0.0
-                # Check if any target platform has a duration cap
-                has_duration_cap = any(
-                    platform_limits.video_max_seconds(p) is not None
-                    for p in selected_platforms
-                )
-                if has_duration_cap:
-                    raise ValueError(
-                        f"Campaign {campaign_id}: cannot probe video duration for "
-                        f"{publish_path}. Target platforms have duration caps and the "
-                        f"video cannot be verified to fit. Probe error: {exc}"
-                    ) from exc
-                logging.getLogger(__name__).warning(
-                    "media prep could not probe the duration of %s for campaign "
-                    "%d (%s); no target platform has a duration cap, continuing "
-                    "with size-based checks only",
-                    publish_path, campaign_id, exc,
-                )
-            try:
-                size_bytes = int(Path(publish_path).stat().st_size)
-            except OSError:
-                size_bytes = 0
-            # One plan per distinct (seconds, MB) cap pair that the source
-            # exceeds, tagging which platforms asked for it so a large-cap
-            # platform (YouTube) never picks a small-cap platform's parts.
-            #
-            # MB here is DECIMAL, matching platform_limits and the publisher's
-            # `size_bytes > limit * 1_000_000` check. Using 1024*1024 made prep
-            # believe a 305 MB file fit Instagram's 300 MB cap (305e6 <
-            # 314.6e6) while the publisher refused it (305e6 > 300e6), so the
-            # split never happened and the publish always failed.
-            plans: dict[tuple[float | None, float | None], set[str]] = {}
-            for platform_name in selected_platforms:
-                sec = platform_limits.video_max_seconds(platform_name)
-                mb = platform_limits.media_max_mb(platform_name)
-                over_time = bool(sec and duration and duration > float(sec))
-                over_size = bool(mb and size_bytes and size_bytes > float(mb) * 1_000_000)
-                if over_time or over_size:
-                    plans.setdefault((float(sec) if sec else None, float(mb) if mb else None), set()).add(
-                        str(platform_name)
-                    )
-            for (sec, mb), split_for in sorted(plans.items(), key=lambda item: (item[0][0] or 0, item[0][1] or 0)):
-                try:
-                    parts = media_prep.split_to_seconds(
-                        publish_path,
-                        media_pipeline.build_campaign_workspace(campaign_id),
-                        sec,
-                        # Decimal MB: platform_limits and the publisher both use
-                        # `bytes > limit * 1_000_000`, so the split target must
-                        # use the same unit or a part can still exceed the cap.
-                        max_bytes=(mb * 1_000_000) if mb else None,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    # A split failure must NOT silently fall back to the original
-                    # oversized file. That is how a 600s source reached Threads
-                    # (300s cap) unsplit and the publisher rejected it with
-                    # "duration exceeds limit". Raise instead so the campaign
-                    # fails with a clear, actionable message.
-                    raise ValueError(
-                        f"Campaign {campaign_id}: media split failed for platforms "
-                        f"{sorted(split_for)} (max_seconds={sec}, max_mb={mb}). "
-                        f"The source video ({duration:.0f}s, {size_bytes / 1_000_000:.0f} MB) "
-                        f"exceeds the platform cap and cannot be split: {exc}"
-                    ) from exc
-                if len(parts) <= 1:
-                    # The split returned only the original file, which means it
-                    # did not actually split. This is also a failure - the video
-                    # is over the cap but was not split. Raise instead of
-                    # silently using the oversized file.
-                    raise ValueError(
-                        f"Campaign {campaign_id}: media split did not produce multiple parts "
-                        f"for platforms {sorted(split_for)} (max_seconds={sec}, max_mb={mb}). "
-                        f"The source video ({duration:.0f}s, {size_bytes / 1_000_000:.0f} MB) "
-                        f"exceeds the platform cap but split_to_seconds returned only 1 part. "
-                        f"This indicates the split logic failed to divide the video."
-                    )
-                part_seconds = (duration / len(parts)) if duration else None
-                # Decimal MB to match the cap the publisher enforces.
-                part_mb = (size_bytes / len(parts) / 1_000_000) if size_bytes else None
-                for index, part in enumerate(parts, start=1):
-                    part_remote = None
-                    part_public = None
-                    if upload_to_remote:
-                        try:
-                            part_remote = media_remote_storage.upload_artifact(
-                                part,
-                                campaign_id=campaign_id,
-                                artifact_subdir="videos",
-                            )
-                            part_public = part_remote.public_url
-                        except Exception as exc:  # noqa: BLE001
-                            logging.getLogger(__name__).warning(
-                                "media split remote upload failed for campaign %d: %s",
-                                campaign_id, exc,
-                            )
-                    part_backend_id = _resolve_backend_id_for_artifact(part_remote, db_path=db_path) if part_remote else None
-                    campaign_store.add_campaign_artifact(
-                        campaign_id,
-                        source_file_record_id=media_file["file_record_id"],
-                        artifact_kind="remote_upload" if part_public else "local",
-                        local_path=str(part),
-                        public_url=part_public,
-                        remote_path=getattr(part_remote, "remote_path", None) if part_remote else None,
-                        storage_backend_id=part_backend_id,
-                        metadata={
-                            "role": media_file["role"],
-                            "max_duration_seconds": part_seconds,
-                            "max_media_mb": part_mb,
-                            "part_index": index,
-                            "part_count": len(parts),
-                            "split_for": sorted(split_for),
-                        },
-                        db_path=db_path,
-                    )
-
-        if _is_image_file(publish_path):
-            artifacts_context["imageLocalPaths"].append(str(publish_path))
-            artifacts_context["rawImageLocalPaths"].append(str(source_path))
-            if public_url:
-                artifacts_context["imageUrls"].append(public_url)
-            if raw_public_url:
-                artifacts_context["rawImageUrls"].append(raw_public_url)
-        elif _is_video_file(publish_path):
+            raise media_compliance.MediaPreparationError("Final transform contains no supported media")
+        if _is_video_file(publish_path):
             artifacts_context["videoLocalPath"] = str(publish_path)
             artifacts_context["rawVideoLocalPath"] = str(source_path)
             if public_url:
                 artifacts_context["videoUrl"] = public_url
             if raw_public_url:
                 artifacts_context["rawVideoUrl"] = raw_public_url
+
+    if image_inputs:
+        prepared_images = video_artifacts.prepare_and_register_images(
+            campaign_id=campaign_id, images=image_inputs, selected_platforms=selected_platforms,
+            request_data=request_data, upload_to_remote=upload_to_remote, db_path=db_path,
+            public_base_url=public_base_url, register=False,
+            video_present=any(row["artifact_kind"] == "prepared_video" for row in pending_rows))
+        pending_rows.extend(prepared_images["artifacts"])
+        by_platform = prepared_images["by_platform"]
+        defaults = next((values for platform, values in by_platform.items() if platform != "tiktok" and values),
+                        by_platform.get("tiktok") or [])
+        raw_defaults = by_platform.get("tiktok") or []
+        artifacts_context["imageLocalPaths"] = [row["local_path"] for row in defaults]
+        artifacts_context["imageUrls"] = [row["public_url"] for row in defaults if row.get("public_url")]
+        artifacts_context["rawImageLocalPaths"] = [row["local_path"] for row in raw_defaults] or [str(item["source_path"]) for item in image_inputs]
+        artifacts_context["rawImageUrls"] = [row["public_url"] for row in raw_defaults if row.get("public_url")]
+    for source, checksum in original_sources:
+        media_compliance.verify_checksum(source, checksum)
+    if pending_rows:
+        # The complete campaign set is registered atomically only AFTER all
+        # final files/routes pass. No encodes run inside the write transaction.
+        campaign_store.add_campaign_artifact_set(campaign_id, pending_rows, db_path=db_path)
+    elif media_files:
+        raise media_compliance.MediaPreparationError("No complete publishable media set was prepared")
+    artifacts_context["preparedArtifacts"] = pending_rows
 
     ai_config = _resolve_ai_config(profile)
     has_ai = bool(
@@ -1024,3 +838,24 @@ def prepare_campaign_media_artifacts(
             )
 
     return artifacts_context
+
+
+def _bounded_media_runner(command, **kwargs):
+    """Existing watermark/concat runner, with shared slots, CPU/time bounds."""
+    argv = list(command)
+    if argv and Path(str(argv[0])).name.startswith("ffmpeg"):
+        argv = ["-n" if value == "-y" else value for value in argv]
+        argv[1:1] = ["-threads", "2", "-filter_threads", "2", "-filter_complex_threads", "2"]
+        if Path(str(argv[-1])).suffix.lower() == ".mp4":
+            # The legacy watermark runner copies audio; PCM/etc cannot be
+            # muxed into MP4. Normalize in the SAME bounded watermark encode.
+            for index in range(len(argv) - 1):
+                if argv[index] == "-c:a" and argv[index + 1] == "copy":
+                    argv[index + 1] = "aac"
+            argv[-1:-1] = ["-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+                           "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000", "-movflags", "+faststart"]
+        argv[-1:-1] = ["-threads", "2"]
+        kwargs.setdefault("timeout", 21_600)
+    else:
+        kwargs.setdefault("timeout", 90)
+    return media_prep._run(argv, check=True, **kwargs)

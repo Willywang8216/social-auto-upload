@@ -8,7 +8,7 @@ import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
-from myUtils import platform_limits
+from myUtils import platform_limits, text_limits
 
 
 # The LLM is asked for a single ``message`` string, but it sometimes answers
@@ -303,8 +303,10 @@ def get_platform_rule(platform: str) -> PlatformRule:
         raise ValueError(f"Unsupported platform rule: {platform!r}") from exc
 
 
-def trim_to_max_length(message: str, max_chars: int | None) -> str:
+def trim_to_max_length(message: str, max_chars: int | None, *, platform: str | None = None) -> str:
     text = (message or "").strip()
+    if platform is not None:
+        return text_limits.truncate_message(text, platform, max_length=max_chars)
     if max_chars is None or len(text) <= max_chars:
         return text
     if max_chars <= 1:
@@ -366,8 +368,23 @@ def prepare_platform_draft(
     contact_details: str | None = None,
     cta: str | None = None,
     default_hashtags: list[str] | None = None,
+    preserve_approved: bool = False,
 ) -> dict:
     rule = get_platform_rule(platform)
+    if preserve_approved:
+        # Recovery must not normalize labels, append hashtags/CTA, or shorten
+        # already-approved fields. Return the exact draft or fail for review.
+        prepared = dict(draft)
+        text_limits.validate_message(prepared.get("message", ""), platform)
+        if platform == "youtube":
+            if prepared.get("title") is not None:
+                text_limits.validate_message(prepared["title"], platform, field="title")
+            tags = prepared.get("tags") or prepared.get("hashtags") or []
+            if isinstance(tags, str):
+                tags = [item.strip() for item in tags.split(",") if item.strip()]
+            text_limits.validate_youtube_tags(tags)
+        prepared["charCount"] = text_limits.message_length(prepared.get("message", ""), platform)
+        return prepared
     prepared = normalize_draft_fields(dict(draft))
     message = str(prepared.get("message", "") or "").strip()
     hashtags = normalize_hashtags(
@@ -412,8 +429,8 @@ def prepare_platform_draft(
     prepared["hashtags"] = hashtags
     prepared["contactDetails"] = prepared_contact_details
     prepared["cta"] = prepared_cta
-    prepared["message"] = trim_to_max_length(message, rule.max_chars)
-    prepared["charCount"] = len(prepared["message"])
+    prepared["message"] = trim_to_max_length(message, rule.max_chars, platform=platform)
+    prepared["charCount"] = text_limits.message_length(prepared["message"], platform)
     return prepared
 
 
@@ -456,13 +473,15 @@ def build_sheet_row(
     pinterest_board: str = "",
     alt_text: str = "",
     post_preset: str = "",
+    preserve_approved: bool = False,
 ) -> dict[str, str]:
     month, day, year, hour, minute = _schedule_parts(schedule)
     image_url_value = ",".join(image_urls or [])
     if image_url_value and video_url:
         raise ValueError("ImageURL and VideoURL cannot both be populated")
     if platform:
-        message = trim_to_max_length(message, SHEET_MESSAGE_MAX_CHARS.get(platform))
+        message = (text_limits.validate_message(message, platform) if preserve_approved else
+                   trim_to_max_length(message, SHEET_MESSAGE_MAX_CHARS.get(platform), platform=platform))
     return {
         "Message": message,
         "Link": link,

@@ -12,16 +12,18 @@ B5 - a probe failure was swallowed as ``duration = 0``, which reads as "fits"
 and disabled duration splitting for EVERY platform, silently.
 """
 
-import logging
+import tempfile
 import unittest
 from unittest.mock import patch
+from pathlib import Path
+from types import SimpleNamespace
 
 REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
 import sys
 
 sys.path.insert(0, str(REPO_ROOT))
 
-from myUtils import campaign_media_prep, platform_limits  # noqa: E402
+from myUtils import campaign_media_prep, platform_limits, media_compliance  # noqa: E402
 
 
 def _plan_for(duration, size_bytes, platforms):
@@ -71,20 +73,35 @@ class SplitPlanUnitTests(unittest.TestCase):
 
 
 class ProbeFailureIsNotSilentTests(unittest.TestCase):
-    def test_a_probe_failure_logs_a_warning(self):
-        # B5: the old code had a bare `except Exception: duration = 0.0` with no
-        # log, so "could not measure" was indistinguishable from "fits".
-        source = (
-            REPO_ROOT / "myUtils" / "campaign_media_prep.py"
-        ).read_text(encoding="utf-8")
-        self.assertIn("duration_probe_failed", source)
-        self.assertIn("could not probe the duration", source)
+    def test_a_probe_failure_is_reported_before_any_registration(self):
+        # A failed measurement must stop, not masquerade as a zero duration.
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "broken.mp4"
+            source.write_bytes(b"synthetic invalid video")
+            with (
+                patch.object(campaign_media_prep.campaign_store, "get_campaign", side_effect=LookupError),
+                patch.object(campaign_media_prep.media_prep, "probe", side_effect=RuntimeError("synthetic probe failure")) as probe,
+                patch.object(campaign_media_prep.video_artifacts, "prepare_and_register_video") as prepare,
+                patch.object(campaign_media_prep.campaign_store, "add_campaign_artifact_set") as register,
+                self.assertRaisesRegex(media_compliance.MediaPreparationError, "Cannot probe video"),
+            ):
+                campaign_media_prep.prepare_campaign_media_artifacts(
+                    1, SimpleNamespace(id=1, settings={}),
+                    [{"file_record_id": 1, "role": "video", "file_path": str(source)}],
+                    {"uploadToRemote": False}, selected_platforms={"instagram"},
+                    db_path=Path(temporary) / "isolated.db",
+                )
+            probe.assert_called_once_with(source.resolve())
+            prepare.assert_not_called()
+            register.assert_not_called()
 
     def test_split_target_uses_decimal_mb(self):
-        source = (
-            REPO_ROOT / "myUtils" / "campaign_media_prep.py"
-        ).read_text(encoding="utf-8")
-        self.assertIn("max_bytes=(mb * 1_000_000) if mb else None", source)
+        limits = media_compliance.effective_limits("instagram")
+        self.assertEqual(limits["max_bytes"], platform_limits.media_max_mb("instagram") * 1_000_000)
+        self.assertEqual(limits["max_bytes"], 300_000_000)
+        # An arbitrary 305 MB request cannot turn the 300 MB transport cap into MiB.
+        tightened = media_compliance.effective_limits("instagram", limits={"max_bytes": 305_000_000})
+        self.assertEqual(tightened["max_bytes"], 300_000_000)
 
 
 if __name__ == "__main__":

@@ -142,7 +142,8 @@ class StructuredLoggingTests(unittest.TestCase):
         path = job_logging.job_log_path(1)
         body = path.read_text()
         self.assertIn("target_id=1", body)
-        self.assertIn("retry budget exhausted", body)
+        self.assertIn("publishing routes stopped", body)
+        self.assertEqual(jobs.get_target(1, db_path=self.db_path).status, jobs.TARGET_FAILED)
         self.assertIn("RuntimeError: boom", body)
 
 

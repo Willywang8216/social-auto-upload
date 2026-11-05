@@ -374,7 +374,7 @@ def test_failed_dispatch_is_live_but_never_ready(setup, monkeypatch):
     assert jobs.worker_health(db_path=setup.db)["ok"] is True
 
 
-def test_pending_poll_delay_is_bounded_and_persisted(setup):
+def test_pending_poll_delay_honours_provider_reset_and_is_persisted(setup):
     from datetime import timezone
     from myUtils import worker
     job = jobs.enqueue_job(jobs.JobSpec(platform="telegram", payload={},
@@ -390,9 +390,19 @@ def test_pending_poll_delay_is_bounded_and_persisted(setup):
     result = jobs.get_target(target.id, db_path=setup.db)
     assert result.status == jobs.TARGET_AWAITING_DELIVERY
     due = jobs._utc_datetime(result.next_attempt_at).replace(tzinfo=timezone.utc).timestamp()
-    assert 3595 <= due - time.time() <= 3601
+    # Provider/account reset deadlines must not be shortened to one hour.
+    assert 999995 <= due - time.time() <= 1000001
+    assert result.lease_token is None
     assert result.checkpoint["provider_receipt"]["id"] == "existing-receipt"
     assert jobs.get_job(job.id, db_path=setup.db).status == jobs.JOB_AWAITING_DELIVERY
+
+
+@pytest.mark.parametrize("hint", ["nan", "inf", "-inf", "-10", "garbage"])
+def test_invalid_provider_retry_hint_cannot_create_an_unbounded_delay(hint):
+    from myUtils.worker import _retry_after_seconds
+    error = RuntimeError("synthetic provider hint")
+    error.details = {"retryAfter": hint}
+    assert _retry_after_seconds(error) == 0.0
 
 
 @pytest.mark.parametrize("status", [429, 503])

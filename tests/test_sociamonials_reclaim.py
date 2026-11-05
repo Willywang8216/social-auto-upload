@@ -628,32 +628,26 @@ def test_collect_used_assets_parses_a_reference(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Fallback integration: the guard runs before an upload and the ids are returned
+# Publishing integration must never reclaim library assets to free quota.
 # --------------------------------------------------------------------------- #
 
-def test_fallback_reclaims_before_upload_and_returns_used_assets(tmp_path, db_path):
+def test_fallback_full_pooled_storage_never_deletes_or_uploads(tmp_path, db_path):
     _add_target(db_path, target_id=1, job_id=1, status="succeeded", filename="old.mp4")
-
-    session = FlowSession(storage=_storage(995, 1000), assets=[_asset(10, "old.mp4", 500)])
+    storage = {**_storage(995, 1000), "max_upload_bytes": {"image": 15_728_640, "video": 1_073_741_824},
+               "enforcement": True, "pooled": True, "unmetered": False}
+    session = FlowSession(storage=storage, assets=[_asset(10, "old.mp4", 500)])
     local = tmp_path / "new.mp4"
     local.write_bytes(b"y" * 10)
     used: list[dict] = []
-    reference = sm._resolve_local_media(
-        session,
-        {"Authorization": "Bearer test"},
-        "26985",
-        local,
-        timeout=1.0,
-        db_path=db_path,
-        used_assets=used,
-    )
-    # The reuse lookup found nothing, so the guard reclaimed old.mp4 and the new
-    # file was uploaded instead of failing on a full library.
-    assert reference == "asset://77"
-    assert session.uploads == 1
-    deletes = [int(c[1].rsplit("/", 1)[-1]) for c in session.deletes()]
-    assert deletes == [10]
-    assert used and used[0]["asset_id"] == 77
+    with pytest.raises(sm.SociamonialsFallbackError, match="[Pp]ooled storage"):
+        sm._resolve_local_media(
+            session, {"Authorization": "Bearer synthetic"}, "26985", local,
+            timeout=1.0, db_path=db_path, used_assets=used,
+        )
+    assert session.uploads == 0
+    assert session.deletes() == []
+    assert used == []
+    assert local.read_bytes() == b"y" * 10
 
 
 def test_unconfirmed_success_retains_receipted_media(db_path):

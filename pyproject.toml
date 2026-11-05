@@ -29,6 +29,8 @@ dependencies = [
   # 13.0.0 clears the PYSEC-2026-* / CVE-2026-* advisories that affect 11.x and
   # 12.x. It requires Python >=3.11, which is why the project now targets 3.12+.
   "pillow==13.0.0",
+  # Proper Unicode extended graphemes for field-specific publishing limits.
+  "regex>=2024.11.6,<2027",
   "qrcode==8.2",
   # 2.33.0 carries the fixes for PYSEC-2026-1872 / PYSEC-2026-2275.
   "requests==2.33.0",

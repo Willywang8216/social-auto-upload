@@ -300,3 +300,42 @@ def test_prepared_full_never_displaces_existing_platform_split():
     prepared = _video(1, artifact_kind="watermarked_video")
     parts = [_part(2, 1), _part(3, 2), _part(4, 3)]
     assert services._select_videos_for_platform([prepared, *parts], "threads") == parts
+
+
+def test_complete_image_generation_batched_in_source_order_before_scheduling(tmp_path):
+    from PIL import Image
+    from myUtils import image_compliance, publish_orchestrator
+    sources = []
+    for index in range(9):
+        source = tmp_path / f"image{index}.jpg"
+        Image.new("RGB", (64, 64), "red").save(source)
+        sources.append(source)
+    parts = image_compliance.prepare_images(sources, tmp_path / "outputs", platform="bluesky")
+    artifacts = [{"id": index + 1, "artifact_kind": "prepared_image", "source_file_record_id": index,
+                  "local_path": str(part.path), "metadata": part.metadata, "alt_text": f"Alt {index}"}
+                 for index, part in enumerate(parts)]
+    files = [{"file_record_id": index, "role": "image"} for index in range(9)]
+    groups = publish_orchestrator._prepared_post_groups(artifacts, "bluesky", files,
+        supports_multi_media=True, artifact_payloads_for_platform=lambda values, platform: [values[0]])
+    assert [len(group) for group, _ in groups] == [4, 4, 1]
+    assert [item["source_file_record_id"] for group, _ in groups for item in group] == list(range(9))
+    assert [item["alt_text"] for group, _ in groups for item in group] == [f"Alt {index}" for index in range(9)]
+    with pytest.raises(ValueError, match="Incomplete"):
+        publish_orchestrator._prepared_post_groups(artifacts[:-1], "bluesky", files,
+            supports_multi_media=True, artifact_payloads_for_platform=services._artifact_payloads_for_platform)
+
+
+def test_selected_account_overrides_tighten_each_allowance_before_merge():
+    from myUtils import publish_orchestrator
+    accounts = [SimpleNamespace(platform="youtube", config={"channelStatus": {"longUploadsStatus": "allowed"}})]
+    assert publish_orchestrator._preparation_limits_for_accounts(accounts, {"youtube"})["youtube"]["max_seconds"] == 43200
+    assert publish_orchestrator._preparation_limits_for_accounts(accounts, {"youtube"},
+        {"youtube": {"max_seconds": 1200}})["youtube"]["max_seconds"] == 1200
+    accounts.append(SimpleNamespace(platform="youtube", config={}))
+    assert publish_orchestrator._preparation_limits_for_accounts(accounts, {"youtube"},
+        {"youtube": {"max_seconds": 43200}})["youtube"]["max_seconds"] == 900
+    telegram = [SimpleNamespace(platform="telegram", config={})]
+    assert publish_orchestrator._preparation_limits_for_accounts(telegram, {"telegram"},
+        {"telegram": {"max_bytes": 2_000_000_000}})["telegram"]["max_bytes"] == 50_000_000
+    assert publish_orchestrator._preparation_limits_for_accounts(accounts, {"youtube"},
+        backup_compatible_platforms={"youtube"})["youtube"]["max_bytes"] == 1_000_000_000

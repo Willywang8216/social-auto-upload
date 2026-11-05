@@ -31,8 +31,9 @@ class BuildFiltersTests(unittest.TestCase):
 
     def test_tall_4k_content_normalizes_to_portrait_target(self) -> None:
         filters = media_prep.build_filters({"width": 2160, "height": 3810, "fps": 30})
-        # src aspect 2160/3810 = 0.5669 vs target 0.5625 -> within tolerance (crop path)
-        self.assertIn("crop=1080:1920", filters)
+        # Near-portrait geometry must retain the frame edges, never crop them.
+        self.assertIn("pad=1080:1920", filters)
+        self.assertNotIn("crop=", filters)
         self.assertIn("scale=", filters)
         self.assertIn("setsar=1", filters)
         self.assertNotIn("fps=", filters)  # exactly at the cap -> no fps filter
@@ -41,7 +42,7 @@ class BuildFiltersTests(unittest.TestCase):
         filters = media_prep.build_filters({"width": 2160, "height": 3810, "fps": 60})
         self.assertIn("fps=30", filters)
         self.assertIn("scale=", filters)
-        self.assertIn("crop=1080:1920", filters)
+        self.assertIn("pad=1080:1920", filters)
 
     def test_landscape_16x9_gets_letterboxed(self) -> None:
         filters = media_prep.build_filters({"width": 1920, "height": 1080, "fps": 24})
@@ -53,15 +54,15 @@ class BuildFiltersTests(unittest.TestCase):
         self.assertIn("pad=1080:1920", filters)
         self.assertNotIn("crop=", filters)
 
-    def test_exact_9_16_passthrough_geometry_is_crop_path(self) -> None:
+    def test_exact_9_16_passthrough_geometry_is_padded(self) -> None:
         filters = media_prep.build_filters({"width": 1080, "height": 1920, "fps": 24})
         self.assertIn("scale=1080:1920", filters)
-        self.assertIn("crop=1080:1920", filters)
+        self.assertIn("pad=1080:1920", filters)
 
-    def test_near_9_16_uses_crop_not_pad(self) -> None:
+    def test_near_9_16_uses_pad_not_crop(self) -> None:
         filters = media_prep.build_filters({"width": 1088, "height": 1920, "fps": 24})
-        self.assertIn("crop=1080:1920", filters)
-        self.assertNotIn("pad=", filters)
+        self.assertIn("pad=1080:1920", filters)
+        self.assertNotIn("crop=", filters)
 
     def test_missing_dimensions_raises(self) -> None:
         with self.assertRaises(ValueError):
@@ -383,6 +384,7 @@ class ShrinkEncodeTests(unittest.TestCase):
                     "-f", "lavfi",
                     "-i", "sine=frequency=440:duration=3",
                     "-c:v", "libx264", "-crf", "23",
+                    "-threads", "2",
                     "-c:a", "aac", "-shortest",
                     str(src),
                 ],
@@ -581,4 +583,9 @@ class EncodeThrottleCoverageTests(unittest.TestCase):
         from myUtils import prepared_publishers
 
         source = inspect.getsource(prepared_publishers._bluesky_shrink_video)
-        self.assertIn("encode_slot", source)
+        self.assertIn("media_compliance.prepare_video", source)
+        from myUtils import media_compliance
+        self.assertIn("media_prep._run", inspect.getsource(media_compliance._encode))
+        self.assertIn("encode_slot", inspect.getsource(media_prep._run))
+        # The uploader itself is validation-only, never a hidden transcode.
+        self.assertNotIn("_bluesky_shrink_video(", inspect.getsource(prepared_publishers.publish_bluesky_sync))

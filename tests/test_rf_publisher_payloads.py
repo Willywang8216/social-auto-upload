@@ -229,46 +229,38 @@ def test_sociamonials_preserves_already_encoded_urls():
 
 
 def test_sociamonials_delivery_failure_on_inaccessible_url():
-    """When delivery fails due to inaccessible URL, raise a clear error."""
-    class FakeSession:
-        def __init__(self):
-            self.calls = []
+    """Exact-destination failure retains its receipt and actionable reason."""
+    from tests.test_sociamonials_fallback import ContractSession, Response
 
-        def post(self, url, **kwargs):
-            self.calls.append(("POST", url, kwargs))
-            if url.endswith("/api/v1/posts"):
-                return _FakeResponse({"post_id": 123, "status": "published"})
-            return _FakeResponse({})
+    reason = "Video URL not accessible after retries"
 
-        def get(self, url, **kwargs):
-            self.calls.append(("GET", url, kwargs))
-            if "/api/v1/posts/123" in url:
-                return _FakeResponse({
-                    "networks": {
-                        "tw": {
-                            "delivery_status": "failed",
-                            "delivered": False,
-                            "error": "Video URL not accessible after retries"
-                        }
-                    }
-                })
-            return _FakeResponse({})
+    def failure(method, url, kwargs):
+        if method == "GET" and "/api/v1/posts/999" in url:
+            body = session.last_body
+            return Response({
+                "post_id": 999, "workspace_registration_id": body["workspace_registration_id"], "approved": True,
+                "networks": {"tw": {
+                    "delivery_status": "failed", "delivered": False, "error": reason,
+                    "profiles": [{"profile_ref": ref, "delivery_state": "needs_attention",
+                                  "platform_post_id": None, "reason": "MEDIA_URL_NOT_ACCESSIBLE", "error": reason}
+                                 for ref in body["networks"]["tw"]["profile_refs"]],
+                }},
+            })
 
-    session = FakeSession()
-    try:
-        sm.publish_via_sociamonials(
-            platform="twitter",
-            account=SimpleNamespace(id=77, config={}),
-            payload={"draft": {"message": "test"}},
-            api_key="sm_agent_x",
-            session=session,
-            delivery_timeout=5,
-        )
-        assert False, "Should have raised SociamonialsFallbackError"
-    except sm.SociamonialsFallbackError as exc:
-        error_msg = str(exc)
-        assert "Video URL not accessible" in error_msg
-        assert "delivery failed" in error_msg.lower()
+    session = ContractSession(override=failure)
+    payload = {"draft": {"message": "Original caption"}}
+    arguments = dict(
+        platform="twitter", account=SimpleNamespace(id=77, platform="twitter", config={}, enabled=True),
+        payload=payload, target_id=123, api_key="sm_agent_rf_fixture", session=session, delivery_timeout=5,
+    )
+    result = sm.publish_via_sociamonials(**arguments)
+    assert result["status"] == "failed" and result["delivered"] is False and result["ok"] is False
+    assert result["details"]["reason"] == "MEDIA_URL_NOT_ACCESSIBLE"
+    assert "exact destination" in result["delivery_error"]
+    assert payload["_delivery"]["provider_receipt"]["id"] == "999"
+    assert payload["_delivery"]["provider_receipt"]["status"] == "failed"
+    assert sm.publish_via_sociamonials(**arguments)["status"] == "failed"
+    assert len(session.calls_for("POST", "/posts", create=True)) == 1
 
 
 # --------------------------------------------------------------------------- #

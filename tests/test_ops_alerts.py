@@ -105,7 +105,7 @@ class TelegramChunkingTests(unittest.TestCase):
 
         # Deliberately exercise the real transport with a mocked HTTP layer.
         # The sender otherwise refuses to alert from a test process.
-        with patch.dict(os.environ, {"SAU_ALERTS_ALLOW_UNDER_TEST": "1"}):
+        with patch.dict(os.environ, {"SAU_ALERTS_ALLOW_UNDER_TEST": "1", "SAU_ALERTS_DISABLED": "0"}):
             with patch.object(ops_alerts, "requests", FakeRequests):
                 ok = ops_alerts._send_telegram("SUBJ", body)
         return ok, calls
@@ -139,7 +139,7 @@ class TelegramChunkingTests(unittest.TestCase):
             def post(url, json=None, timeout=None):
                 return _FakeResponse(400)
 
-        with patch.dict(os.environ, {"SAU_ALERTS_ALLOW_UNDER_TEST": "1"}):
+        with patch.dict(os.environ, {"SAU_ALERTS_ALLOW_UNDER_TEST": "1", "SAU_ALERTS_DISABLED": "0"}):
             with patch.object(ops_alerts, "requests", FailingRequests):
                 with self.assertRaises(RuntimeError):
                     ops_alerts._send_telegram("SUBJ", "body")
@@ -199,3 +199,48 @@ class TestRunNeverAlertsProduction(unittest.TestCase):
             },
         ):
             self.assertFalse(ops_alerts.send_ops_alert(subject="s", body="b"))
+
+
+def test_emoji_notification_chunks_fit_utf16_and_preserve_all_text():
+    from myUtils.text_limits import utf16_length
+    body = ("中文 👨‍👩‍👧‍👦 💥 <safe>\n" * 1000)
+    chunks = ops_alerts._split_message(body)
+    assert "".join(chunks) == body
+    assert all(utf16_length(chunk) <= 3900 for chunk in chunks)
+    payloads = ops_alerts._telegram_payloads("💥" * 256, body)
+    assert all(utf16_length(plain) <= 4096 for _html, plain in payloads)
+    assert all("&lt;safe&gt;" in markup for markup, _plain in payloads)
+
+
+def test_oversized_combining_sequence_does_not_discard_notice():
+    from myUtils.text_limits import utf16_length
+    body = "a" + "\u0301" * 9000
+    chunks = ops_alerts._split_message(body)
+    assert "".join(chunks) == body
+    assert all(utf16_length(chunk) <= 3900 for chunk in chunks)
+
+
+def test_disable_guard_blocks_every_alert_transport_even_with_test_opt_in(monkeypatch):
+    monkeypatch.setenv("SAU_ALERTS_DISABLED", "1")
+    monkeypatch.setenv("SAU_ALERTS_ALLOW_UNDER_TEST", "1")
+    monkeypatch.setenv("SAU_ALERT_WEBHOOK_URL", "https://fixture.invalid/hook")
+    monkeypatch.setenv("SAU_ALERT_SMTP_HOST", "smtp.fixture.invalid")
+    monkeypatch.setenv("SAU_ALERT_SMTP_FROM", "fixture@example.invalid")
+    monkeypatch.setenv("SAU_ALERT_SMTP_TO", "fixture@example.invalid")
+    with patch.object(ops_alerts, "requests") as http, patch.object(ops_alerts.smtplib, "SMTP") as smtp:
+        assert ops_alerts.send_ops_alert(subject="Fixture", body="Never send") is False
+        http.post.assert_not_called()
+        smtp.assert_not_called()
+
+
+def test_pytest_guard_blocks_webhook_and_smtp_without_explicit_disable(monkeypatch):
+    monkeypatch.setenv("SAU_ALERTS_DISABLED", "0")
+    monkeypatch.setenv("SAU_ALERTS_ALLOW_UNDER_TEST", "0")
+    monkeypatch.setenv("SAU_ALERT_WEBHOOK_URL", "https://fixture.invalid/hook")
+    monkeypatch.setenv("SAU_ALERT_SMTP_HOST", "smtp.fixture.invalid")
+    monkeypatch.setenv("SAU_ALERT_SMTP_FROM", "fixture@example.invalid")
+    monkeypatch.setenv("SAU_ALERT_SMTP_TO", "fixture@example.invalid")
+    with patch.object(ops_alerts, "requests") as http, patch.object(ops_alerts.smtplib, "SMTP") as smtp:
+        assert ops_alerts.send_ops_alert(subject="Fixture", body="Never send") is False
+        http.post.assert_not_called()
+        smtp.assert_not_called()

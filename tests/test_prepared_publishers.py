@@ -1201,7 +1201,7 @@ class PreparedPublisherTests(unittest.TestCase):
                     },
                     session=session,
                 )
-        self.assertIn('4096 MB', str(ctx.exception))
+        self.assertIn('4000 MB', str(ctx.exception))
 
     def test_tiktok_video_rejects_duration_over_sixty_minutes(self):
         session = _RecordingSession([
@@ -2321,6 +2321,16 @@ class TelegramMtprotoTests(unittest.TestCase):
 class BlueskyPublisherTests(unittest.TestCase):
     """Bluesky (AT Protocol) publisher: session -> blob upload -> createRecord."""
 
+    def _write_video(self, path):
+        import shutil
+        import subprocess
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg required for a real prepared video fixture")
+        subprocess.run(["ffmpeg", "-v", "error", "-n", "-f", "lavfi", "-i",
+                        "color=red:size=640x360:rate=30", "-t", "1", "-c:v", "libx264",
+                        "-profile:v", "high", "-pix_fmt", "yuv420p", "-threads", "2",
+                        "-movflags", "+faststart", str(path)], check=True, capture_output=True, timeout=60)
+
     def _session(self):
         session = _RecordingSession([
             _FakeResponse({"accessJwt": "jwt1", "did": "did:plc:abc", "handle": "sexualwill.bsky.social"}),
@@ -2333,7 +2343,8 @@ class BlueskyPublisherTests(unittest.TestCase):
         session = self._session()
         with tempfile.TemporaryDirectory() as tmp:
             img = Path(tmp) / "cover.jpg"
-            img.write_bytes(b"jpg")
+            from PIL import Image
+            Image.new("RGB", (64, 64), "red").save(img, format="JPEG")
             account = SimpleNamespace(config={
                 "handle": "sexualwill.bsky.social",
                 "appPassword": "app-pass",
@@ -2434,17 +2445,12 @@ class BlueskyPublisherTests(unittest.TestCase):
             )
             self.assertEqual(src.stat().st_size, before)
 
-    def test_shrink_failure_never_raises(self):
-        # A missing file must fall through to the caller, not explode - the
-        # service's own error is a better signal than a local crash.
-        self.assertEqual(
-            prepared_publishers._bluesky_shrink_image("/tmp/does-not-exist.png"),
-            "/tmp/does-not-exist.png",
-        )
-        self.assertEqual(
-            prepared_publishers._bluesky_shrink_video("/tmp/does-not-exist.mp4"),
-            "/tmp/does-not-exist.mp4",
-        )
+    def test_shrink_failure_fails_closed(self):
+        from myUtils.media_compliance import MediaPreparationError
+        with self.assertRaises(MediaPreparationError):
+            prepared_publishers._bluesky_shrink_image("/tmp/does-not-exist.png")
+        with self.assertRaises(MediaPreparationError):
+            prepared_publishers._bluesky_shrink_video("/tmp/does-not-exist.mp4")
 
     def test_publish_video_uses_embed_video(self):
         session = _RecordingSession([
@@ -2454,7 +2460,7 @@ class BlueskyPublisherTests(unittest.TestCase):
         ])
         with tempfile.TemporaryDirectory() as tmp:
             vid = Path(tmp) / "clip.mp4"
-            vid.write_bytes(b"mp4")
+            self._write_video(vid)
             account = SimpleNamespace(config={
                 "handle": "sexualwill.bsky.social",
                 "appPassword": "app-pass",
@@ -2485,7 +2491,7 @@ class BlueskyPublisherTests(unittest.TestCase):
         ])
         with tempfile.TemporaryDirectory() as tmp:
             vid = Path(tmp) / "clip.mp4"
-            vid.write_bytes(b"mp4")
+            self._write_video(vid)
             account = SimpleNamespace(config={"handle": "h", "appPassword": "p"})
             with patch.object(
                 prepared_publishers.media_pipeline,
@@ -2514,7 +2520,7 @@ class BlueskyPublisherTests(unittest.TestCase):
         ])
         with tempfile.TemporaryDirectory() as tmp:
             vid = Path(tmp) / "clip.mp4"
-            vid.write_bytes(b"mp4")
+            self._write_video(vid)
             account = SimpleNamespace(config={"handle": "h", "appPassword": "p"})
             with patch.object(
                 prepared_publishers.media_pipeline,
@@ -2766,10 +2772,8 @@ class UntaggedSplitFallbackTests(unittest.TestCase):
 class BlueskyDurationToleranceTests(unittest.TestCase):
     """A clip authored as exactly the cap must not be rejected.
 
-    Container muxing adds sub-millisecond noise, so a 600 s clip probes as
-    600.0000004. A bare ``>`` rejected it with the absurd message "600.0s exceeds
-    the 600s limit by 0.0s". The guard now allows a 0.5 s tolerance - far below
-    any real platform tolerance, far above the noise.
+    Preparation leaves muxing headroom; the publisher cannot raise the hard
+    ceiling by inventing a half-second allowance.
     """
 
     def test_tolerance_boundary(self):
@@ -2777,14 +2781,12 @@ class BlueskyDurationToleranceTests(unittest.TestCase):
 
         cap = pl.video_max_seconds("bluesky")
         self.assertEqual(cap, 600.0)
-        # Accepted: at, marginally over, and within tolerance.
-        for value in (599.9, 600.0, 600.0000004, 600.4, 600.5):
+        for value in (599.9, 600.0):
             with self.subTest(seconds=value):
-                self.assertFalse(value > cap + 0.5)
-        # Rejected: genuinely over.
-        for value in (600.6, 601.2, 900.0):
+                self.assertFalse(value > cap)
+        for value in (600.0000004, 600.4, 600.5, 600.6, 601.2, 900.0):
             with self.subTest(seconds=value):
-                self.assertTrue(value > cap + 0.5)
+                self.assertTrue(value > cap)
 
     def test_guard_message_reports_the_real_overage(self):
         import inspect
@@ -2793,8 +2795,8 @@ class BlueskyDurationToleranceTests(unittest.TestCase):
 
         source = inspect.getsource(prepared_publishers.publish_bluesky_sync)
         self.assertIn("limit by {over_by:.1f}s", source)
-        # And the comparison must carry the tolerance.
-        self.assertIn("BLUESKY_MAX_VIDEO_SECONDS + 0.5", source)
+        self.assertIn("duration > BLUESKY_MAX_VIDEO_SECONDS", source)
+        self.assertNotIn("BLUESKY_MAX_VIDEO_SECONDS + 0.5", source)
 
 
 class RedditNoSelfPostsTests(unittest.TestCase):

@@ -126,7 +126,7 @@ class WatermarkFontTests(unittest.TestCase):
     def test_resolve_returns_none_when_nothing_exists(self) -> None:
         env = {k: v for k, v in os.environ.items() if k != "SAU_WATERMARK_FONT"}
         with mock.patch.dict(os.environ, env, clear=True):
-            with mock.patch("os.path.exists", return_value=False):
+            with mock.patch("os.path.exists", return_value=False), mock.patch.object(media_pipeline.glob, "glob", return_value=[]):
                 self.assertIsNone(media_pipeline.resolve_watermark_font())
 
     def test_drawtext_builders_embed_fontfile_when_given(self) -> None:

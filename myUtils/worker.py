@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
 from utils.conf_defaults import BASE_DIR
-from myUtils import jobs
+from myUtils import jobs, platform_limits
 from myUtils import bundle_social
 from myUtils import campaign_prep
 from myUtils import campaigns as campaign_store
@@ -101,20 +101,11 @@ TARGET_EXECUTION_TIMEOUT_SECONDS = float(
 
 
 def _x_direct_publish_enabled() -> bool:
-    """Whether the direct X (API/browser) path should run before the fallback.
-
-    The X developer account is out of credits, so direct X media uploads fail
-    deterministically and the cookie/browser path can hang. When the
-    Sociamonials fallback is on and this is unset, skip the direct path and
-    hand X straight to Sociamonials. Set ``SAU_X_DIRECT_PUBLISH=1`` after
-    topping up credits to restore direct-first behaviour.
-    """
+    """Native first unless the operator explicitly selected the managed route."""
     raw = str(os.environ.get("SAU_X_DIRECT_PUBLISH", "")).strip().lower()
-    if raw in {"1", "true", "yes", "on"}:
-        return True
     if raw in {"0", "false", "no", "off"}:
         return False
-    return not sociamonials_fallback.is_enabled()
+    return True
 
 
 def _reddit_direct_publish_enabled() -> bool:
@@ -200,7 +191,16 @@ def _retry_after_seconds(exc: BaseException) -> float:
     details = getattr(exc, "details", None) or {}
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", {}) or {}
-    value = details.get("retryAfter", headers.get("Retry-After", 0)) if isinstance(details, dict) else 0
+    lower_headers = {str(key).lower(): value for key, value in headers.items()}
+    value = details.get("retryAfter", lower_headers.get("retry-after", 0)) if isinstance(details, dict) else 0
+    if not value:
+        reset = details.get("rateLimitReset") if isinstance(details, dict) else None
+        reset = reset or lower_headers.get("x-ratelimit-reset") or lower_headers.get("x-rate-limit-reset")
+        if reset is not None:
+            try:
+                value = float(reset) - time.time()
+            except (TypeError, ValueError, OverflowError):
+                value = 0
     try:
         seconds = float(value)
     except (ValueError, TypeError):
@@ -208,7 +208,8 @@ def _retry_after_seconds(exc: BaseException) -> float:
             seconds = parsedate_to_datetime(str(value)).timestamp() - time.time()
         except (ValueError, TypeError, OverflowError):
             return 0.0
-    return min(3600.0, max(0.0, seconds)) if math.isfinite(seconds) else 0.0
+    # A daily quota reset must not be shortened to one hour.
+    return max(0.0, seconds) if math.isfinite(seconds) else 0.0
 
 
 # A target executor takes (platform, payload, target) and returns an awaitable
@@ -695,9 +696,14 @@ class PublishWorker:
     async def _run_maintenance_tick(self) -> None:
         """Background scan-and-refresh for stale OAuth accounts."""
         try:
+            from myUtils import publish_alert_outbox
+            await asyncio.to_thread(publish_alert_outbox.flush_due, db_path=self._db_path)
+        except Exception as exc:
+            _logger.warning(f"worker notification retry failed: {_scrub_secrets(str(exc))}")
+        try:
             accounts = await asyncio.to_thread(profile_registry.list_accounts, enabled=True, db_path=self._db_path)
         except Exception as exc:
-            _logger.warning(f"worker self-maintenance: could not list accounts: {exc}")
+            _logger.warning(f"worker self-maintenance: could not list accounts: {_scrub_secrets(str(exc))}")
             return
 
         stale = []
@@ -969,12 +975,15 @@ class PublishWorker:
                 )
 
     def _transition(self, target, transition, *args, **kwargs) -> bool:
+        if transition in (jobs.mark_target_failed, jobs.mark_target_blocked, jobs.mark_target_needs_review):
+            kwargs.setdefault("alert_max_attempts", self._config.retry.max_attempts)
         return transition(target.id, *args, lease_token=getattr(target, "lease_token", None),
                           db_path=self._db_path, **kwargs)
 
     def _target_payload(self, target, job) -> dict:
         payload = copy.deepcopy(job.payload or {})
         checkpoint = copy.deepcopy(getattr(target, "checkpoint", None) or {})
+        delivery.publish_routes({"_delivery": checkpoint})
         payload.update(checkpoint.get("payload") or {})
         payload.update(_db_path=str(self._db_path), _telegramDeliveryKey=str(target.id),
                        _delivery=checkpoint)
@@ -1010,18 +1019,39 @@ class PublishWorker:
             job = jobs.get_job(target.job_id, db_path=self._db_path)
             payload = self._target_payload(target, job)
             self._payloads[target.id] = payload
+            disabled = str(os.environ.get(f"SAU_{job.platform.upper()}_ENABLED", "")).lower().strip()
+            if disabled in {"0", "false", "no", "off"}:
+                reason = f"{job.platform} publishing is disabled by the operator"
+                if self._transition(target, jobs.mark_target_blocked, reason):
+                    self._alert_publish_failure(target, reason)
+                return
             receipt = delivery.state(payload).get("provider_receipt") or {}
-            # A saved receipt owns its provider even if the configured route
-            # changed. Never send through a second provider to resume a receipt.
+            # Receipts own their provider. A pinned backup without a receipt
+            # resumes the SAME key and budget, never native publishing again.
             fallback_only = receipt.get("provider") == "sociamonials"
             if not receipt:
-                fallback_only = job.platform == "twitter" and not _x_direct_publish_enabled()
+                fallback_only = delivery.active_route(payload) == "sociamonials"
+                fallback_only = fallback_only or (job.platform == "twitter" and not _x_direct_publish_enabled())
                 if not fallback_only and target.account_ref.startswith("account:"):
                     route_account = pre_flight._resolve_account(target.account_ref, self._db_path)
                     fallback_only = sociamonials_fallback.prefers_sociamonials(route_account, platform=job.platform)
             check = pre_flight.run_pre_flight(
                 account_ref=target.account_ref, job_id=job.id, platform=job.platform,
                 payload=payload, db_path=self._db_path, validate_credentials=not fallback_only)
+            credential_only = (check.checks.get("needs_reconnect") is False
+                               or check.checks.get("token_valid") is False)
+            if not check.ok and credential_only and not receipt and sociamonials_fallback.is_enabled():
+                route_account = pre_flight._resolve_account(target.account_ref, self._db_path)
+                mapping = sociamonials_fallback.resolve_mapping(
+                    getattr(route_account, "id", None), account=route_account, platform=job.platform)
+                if mapping and mapping.get("network") == sociamonials_fallback._platform_network(job.platform):
+                    # Skip ONLY native credentials, then repeat every campaign,
+                    # destination, ownership, language and content-policy guard.
+                    delivery.route_outcome(payload, "native", "credential_unavailable", check.reason)
+                    check = pre_flight.run_pre_flight(
+                        account_ref=target.account_ref, job_id=job.id, platform=job.platform,
+                        payload=payload, db_path=self._db_path, validate_credentials=False)
+                    fallback_only = True
             if not check.ok:
                 transition = jobs.mark_target_failed if check.category == "permanent" else jobs.mark_target_blocked
                 if self._transition(target, transition, check.reason):
@@ -1067,12 +1097,15 @@ class PublishWorker:
                     if await self._try_bundle_social_fallback(target, "Configured bundle.social route", log):
                         return
                     raise _fc.ClassifiedFailure("bundle.social route is unavailable", _fc.PERMANENT)
+                if not receipt:
+                    routes = delivery.publish_routes(payload)
+                    if "native" not in routes:
+                        routes["native"] = {"attempts": max(0, target.attempts - 1)}
+                        delivery.checkpoint(payload, publish_routes=routes)
+                    delivery.begin_route_attempt(payload, "native", max_attempts=self._config.retry.max_attempts)
                 log.info("target claimed; starting execution")
                 result = self._executor(job.platform, payload, target)
                 if inspect.isawaitable(result):
-                    # Real publishers run in an owned child process. A coroutine
-                    # timeout would leave their blocking thread running and permit
-                    # duplicate delivery; the parent enforces the hard deadline.
                     outcome = await result if self._executor is default_executor else await asyncio.wait_for(
                         result, timeout=TARGET_EXECUTION_TIMEOUT_SECONDS)
                 else:
@@ -1082,6 +1115,7 @@ class PublishWorker:
                     raise prepared_publishers.PreparedPublishError(
                         str(outcome.get("error") or "Partial delivery"),
                         details=outcome.get("details"), retryable=True)
+                delivery.route_outcome(payload, "native", "delivered")
                 if self._transition(target, jobs.mark_target_success):
                     log.success("target succeeded")
         except delivery.LeaseLost:
@@ -1089,8 +1123,9 @@ class PublishWorker:
         except asyncio.CancelledError:
             current = delivery.state(payload)
             if current.get("submission_started"):
-                self._transition(target, jobs.mark_target_needs_review,
-                                 "Execution interrupted after submission began; verify delivery before retrying")
+                if self._transition(target, jobs.mark_target_needs_review,
+                                 "Execution interrupted after submission began; verify delivery before retrying"):
+                    self._alert_publish_failure(target, "Execution interrupted; delivery requires review")
             else:
                 self._transition(target, jobs.mark_target_retry, "Cancelled before submission", delay_seconds=5)
             raise
@@ -1110,62 +1145,102 @@ class PublishWorker:
             message += " | details=" + _scrub_secrets(json.dumps(error_details, ensure_ascii=False, default=str))
         payload = self._payloads.get(target.id, {})
         checkpoint = delivery.state(payload) or getattr(target, "checkpoint", None) or {}
+        try:
+            route = delivery.active_route(payload or {"_delivery": checkpoint})
+        except delivery.DeliveryUnknown:
+            if self._transition(target, jobs.mark_target_needs_review, message):
+                self._alert_publish_failure(target, message)
+            return
         if isinstance(exc, delivery.DeliveryPending):
-            self._transition(target, jobs.mark_target_awaiting_delivery, checkpoint,
+            delivery.route_outcome(payload, route, "awaiting_delivery", message)
+            self._transition(target, jobs.mark_target_awaiting_delivery, delivery.state(payload) or checkpoint,
                              delay_seconds=max(30, _retry_after_seconds(exc)))
             log.info("Provider accepted the post; awaiting confirmed delivery")
             return
         if isinstance(exc, delivery.DeliveryUnknown):
+            delivery.route_outcome(payload, route, "needs_review", message)
             if self._transition(target, jobs.mark_target_needs_review, message):
                 self._alert_publish_failure(target, message)
             return
-        if isinstance(exc, sociamonials_fallback.SociamonialsNotConfigured):
-            if self._transition(target, jobs.mark_target_blocked, message):
+        if (isinstance(exc, sociamonials_fallback.SociamonialsNotConfigured)
+                and not delivery.has_unresolved_submission({"_delivery": checkpoint})):
+            delivery.route_outcome(payload, "sociamonials", "unavailable", message)
+            native = delivery.publish_routes(payload).get("native") or {}
+            transition = jobs.mark_target_failed if native.get("outcome") == "failed" else jobs.mark_target_blocked
+            if self._transition(target, transition, message):
                 self._alert_publish_failure(target, message)
             return
-        # Transport failure after an irreversible request may hide acceptance.
-        # Never turn it into a second publish without a durable receipt.
-        ambiguous = (_ambiguous_transport_error(exc)
-                     or str(checkpoint.get("operation") or "").startswith("browser-publish:")
-                     or (isinstance(error_details, dict) and error_details.get("retrySafe") is False))
-        if checkpoint.get("submission_started") and ambiguous:
+        definite = _fc.proven_non_delivery(exc)
+        recorded_receipt = (checkpoint.get("provider_receipt") or checkpoint.get("completed_operations")
+                            or checkpoint.get("provider_operations") or checkpoint.get("telegramCompletedByDelivery"))
+        if recorded_receipt or (delivery.has_unresolved_submission({"_delivery": checkpoint}) and not definite):
             try:
                 delivery.pending_or_unknown({"_delivery": checkpoint}, message)
             except delivery.DeliveryPending:
-                self._transition(target, jobs.mark_target_awaiting_delivery, checkpoint,
+                delivery.route_outcome(payload, route, "awaiting_delivery", message)
+                self._transition(target, jobs.mark_target_awaiting_delivery, delivery.state(payload) or checkpoint,
                                  delay_seconds=max(30, _retry_after_seconds(exc)))
             except delivery.DeliveryUnknown:
+                delivery.route_outcome(payload, route, "needs_review", message)
                 if self._transition(target, jobs.mark_target_needs_review, message):
                     self._alert_publish_failure(target, message)
             return
         category = _fc.classify_failure(exc, message=message).category
-        if category is _fc.PERMANENT:
-            if self._transition(target, jobs.mark_target_failed, message):
-                log.error(f"target failed without retry: {message}")
-                self._alert_publish_failure(target, message)
+        routes = delivery.publish_routes(payload) if payload else checkpoint.get("publish_routes") or {}
+        detail = routes.get(route) or {}
+        attempts = detail.get("attempts", target.attempts)
+        if type(attempts) is not int or attempts < 0:
+            if self._transition(target, jobs.mark_target_needs_review, "Invalid persisted attempt budget"):
+                self._alert_publish_failure(target, "Invalid persisted attempt budget")
             return
-        # The same finite budget applies to transient AND recoverable failures.
-        if target.attempts >= self._config.retry.max_attempts:
-            if allow_fallback and not checkpoint.get("submission_started") and not payload.get("_fallback_attempted"):
-                try:
-                    if await self._try_sociamonials_fallback(target, message, log):
-                        return
-                except Exception as fallback_error:
-                    await self._handle_failure(target, fallback_error, log, allow_fallback=False)
+        stored_budget = detail.get("max_attempts", self._config.retry.max_attempts)
+        if type(stored_budget) is not int or stored_budget < 1:
+            if self._transition(target, jobs.mark_target_needs_review, "Invalid persisted provider attempt budget"):
+                self._alert_publish_failure(target, "Invalid persisted provider attempt budget")
+            return
+        exhausted = attempts >= min(self._config.retry.max_attempts, stored_budget) or isinstance(exc, delivery.RouteExhausted)
+        if definite and payload:
+            delivery.record_non_delivery(payload, provider=route, reason=message)
+        delivery.route_outcome(payload, route, "failed" if exhausted or category is _fc.PERMANENT else "retrying", message)
+        can_backup = (route == "native" and allow_fallback and (category is _fc.PERMANENT or exhausted)
+                      and _fc.backup_eligible(exc, checkpoint=checkpoint)
+                      and not payload.get("_fallback_attempted"))
+        if can_backup:
+            reset_delay = _retry_after_seconds(exc)
+            if reset_delay > 0 and sociamonials_fallback.is_enabled():
+                job = jobs.get_job(target.job_id, db_path=self._db_path)
+                route_account = pre_flight._resolve_account(target.account_ref, self._db_path)
+                mapping = sociamonials_fallback.resolve_mapping(
+                    getattr(route_account, "id", None), account=route_account, platform=job.platform)
+                if mapping and mapping.get("network") == sociamonials_fallback._platform_network(job.platform):
+                    delivery.select_backup(payload)
+                    delivery.route_outcome(payload, "sociamonials", "waiting_for_reset", message)
+                    self._transition(target, jobs.mark_target_retry, message,
+                                     delay_seconds=reset_delay, error_category=category.value)
+                    log.warning(f"Backup pinned; provider/account reset retained for {reset_delay:.1f}s")
                     return
+            try:
+                if await self._try_sociamonials_fallback(target, message, log):
+                    return
+            except delivery.LeaseLost:
+                return
+            except Exception as fallback_error:
+                await self._handle_failure(target, fallback_error, log, allow_fallback=False)
+                return
+        if category is _fc.PERMANENT or exhausted:
+            if route == "native" and not delivery.publish_routes(payload).get("sociamonials"):
+                delivery.route_outcome(payload, "sociamonials", "unavailable" if can_backup else "not_safe_or_not_applicable")
             if self._transition(target, jobs.mark_target_failed, message):
-                log.error(f"retry budget exhausted: {message}")
+                log.error(f"publishing routes stopped: {message}")
                 self._alert_publish_failure(target, message)
             return
-        delay = self._config.retry.backoff_for(target.attempts)
+        delay = self._config.retry.backoff_for(attempts)
         if category is _fc.RECOVERABLE:
             delay = min(self._config.retry.max_backoff_seconds, delay * 2)
         delay = max(delay, _retry_after_seconds(exc))
-        # Persist eligibility and release the slot instead of sleeping while
-        # holding a target in running state. Restarts retain this deadline.
         self._transition(target, jobs.mark_target_retry, message,
                          delay_seconds=delay, error_category=category.value)
-        log.warning(f"target will retry in {delay:.1f}s: {message}")
+        log.warning(f"{route} will retry in {delay:.1f}s: {message}")
 
     async def _try_sociamonials_fallback(
         self, target: jobs.Target, message: str, log, *, only_platform: str | None = None
@@ -1178,7 +1253,7 @@ class PublishWorker:
         if not sociamonials_fallback.is_enabled():
             return False
         job = jobs.get_job(target.job_id, db_path=self._db_path)
-        if only_platform and job.platform != only_platform:
+        if (only_platform and job.platform != only_platform) or not sociamonials_fallback._platform_network(job.platform):
             return False
         try:
             account = _resolve_structured_account(target.account_ref, db_path=self._db_path)
@@ -1190,9 +1265,21 @@ class PublishWorker:
         if payload is None:
             payload = self._target_payload(target, job)
             self._payloads[target.id] = payload
+        receipt = delivery.state(payload).get("provider_receipt") or {}
+        if receipt and receipt.get("provider") != "sociamonials":
+            raise delivery.DeliveryUnknown("A native receipt exists; reconcile it before using another provider")
         payload["_fallback_attempted"] = True
+        delivery.select_backup(payload)
         settings = profile_registry.get_profile(job.profile_id, db_path=self._db_path).settings if job.profile_id else None
-        if delivery.receipt_for(payload, "sociamonials") is None:
+        if not receipt:
+            delivery.begin_route_attempt(payload, "sociamonials", max_attempts=self._config.retry.max_attempts)
+            # A legacy video target must not become a text-only backup.
+            if not payload.get("artifacts") and Path(target.file_ref).suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".jpg", ".jpeg", ".png"}:
+                path = await asyncio.to_thread(_resolve_file_path, target.file_ref, db_path=self._db_path)
+                payload["artifacts"] = [{"local_path": str(path)}]
+            from myUtils.publish_media_guard import is_context_artifact
+            payload["artifacts"] = [a for a in payload.get("artifacts") or []
+                                    if isinstance(a, dict) and not is_context_artifact(a)]
             await asyncio.to_thread(_ensure_artifact_paths_local, payload, db_path=self._db_path)
         for artifact in payload.get("artifacts") or []:
             if isinstance(artifact, dict) and artifact.get("public_url"):
@@ -1205,7 +1292,8 @@ class PublishWorker:
                 settings=settings, idempotency_suffix=None,
             )
         except sociamonials_fallback.SociamonialsNotConfigured:
-            return False
+            delivery.route_outcome(payload, "sociamonials", "unavailable", "Verified backup is unavailable")
+            raise
         prior = delivery.receipt_for(payload, "sociamonials") or {}
         post_id = result.get("post_id") or prior.get("id")
         if isinstance(post_id, bool) or not isinstance(post_id, (str, int)) or not str(post_id).strip():
@@ -1213,17 +1301,21 @@ class PublishWorker:
         if post_id and delivery.receipt_for(payload, "sociamonials") is None:
             delivery.accepted(payload, provider="sociamonials", receipt_id=str(post_id),
                               network=result.get("network"), workspace_id=result.get("workspace_id"),
+                              profile_refs=result.get("profile_refs") or [],
                               used_assets=result.get("used_assets") or [])
         state = str(result.get("delivery_state") or "unknown").lower()
         if result.get("requires_approval") or state == "requires_approval":
             raise delivery.DeliveryUnknown("Sociamonials is holding this post for approval; release it at the provider")
         if state == "failed":
             reason = "Sociamonials delivery failed: " + _scrub_secrets(str(result.get("delivery_error") or "provider rejected post"))
+            delivery.route_outcome(payload, "sociamonials", "failed", reason)
             if self._transition(target, jobs.mark_target_failed, reason):
                 self._alert_publish_failure(target, reason)
             return True
-        if state != "delivered" and result.get("delivered") is not True:
-            delivery.pending_or_unknown(payload, "Sociamonials delivery is still unconfirmed")
+        if result.get("delivered") is not True:
+            delivery.pending_or_unknown(payload, "Sociamonials delivery is still unconfirmed",
+                                        retry_after=result.get("retry_after"))
+        delivery.route_outcome(payload, "sociamonials", "delivered")
         delivery.confirmed(payload, provider="sociamonials", receipt_id=str(post_id))
         transitioned = self._transition(target, jobs.mark_target_success)
         if transitioned:
@@ -1477,13 +1569,10 @@ class PublishWorker:
         return f"{base}/{fragment}"
 
     def _alert_publish_failure(self, target: jobs.Target, error: str) -> None:
-        """Alert the operator that a target has permanently failed.
+        """Persist actionable terminal alerts and attempt immediate delivery.
 
-        Best-effort by contract: the target already transitioned in the DB, so
-        an alerting problem must never propagate back into the worker. Every
-        failure path is swallowed and logged. The alert carries the ids,
-        platform, account, profile, attempt count and error needed to act, and
-        a deep link when one can be built without guessing a hostname.
+        Notification transport failures retain the event for maintenance retries;
+        they never change the already recorded publishing outcome.
         """
 
         try:
@@ -1506,6 +1595,16 @@ class PublishWorker:
                     f"{_scrub_secrets(repr(lookup_exc))}"
                 )
 
+            from myUtils import publish_alert_outbox
+            generation = (getattr(target_row, "checkpoint", None) or {}).get("recovery_generation", "initial")
+            event_key = publish_alert_outbox.stop_event_key(target.id, str(generation))
+            with jobs._connect(self._db_path, must_exist=True) as conn:
+                existing = conn.execute("SELECT id FROM publish_alert_outbox WHERE event_key=?", (event_key,)).fetchone()
+            if existing is not None:
+                # The event was committed WITH the terminal outcome. Sending
+                # happens after that transaction; a crash here leaves it due.
+                publish_alert_outbox.flush_due(db_path=self._db_path, event_key=event_key, limit=1)
+                return
             platform = (job.platform if job is not None else "") or "unknown"
             profile_id = job.profile_id if job is not None else None
             account_ref = str(getattr(target_row, "account_ref", "") or "unknown")
@@ -1523,9 +1622,12 @@ class PublishWorker:
             max_attempts = self._config.retry.max_attempts
             safe_error = _scrub_secrets(error)
 
+            status = str(getattr(target_row, "status", "failed"))
+            next_action = ("Verify the existing provider receipt before any retry."
+                           if status == jobs.TARGET_NEEDS_REVIEW else
+                           "Fix the cause, preprocess media and use guarded recovery; no automatic retry.")
             lines = [
-                "A publish target exhausted its retry budget and failed "
-                "permanently. It will not be retried automatically.",
+                f"Publishing stopped with outcome: {status}. {next_action}",
                 "",
                 f"Job: #{target.job_id} ({platform})",
                 f"Target: #{target.id}",
@@ -1538,15 +1640,14 @@ class PublishWorker:
             if link:
                 lines.extend(["", f"Open in UI: {link}"])
 
-            from myUtils import ops_alerts
-
-            ops_alerts.send_ops_alert(
-                subject=(
-                    f"[SAU] Publish failed: {platform} target #{target.id} "
-                    f"(job #{target.job_id})"
-                ),
-                body="\n".join(lines),
+            # Compatibility for injected executors without a persisted target.
+            # Production stop events always come from the atomic job transition.
+            publish_alert_outbox.enqueue_alert(
+                db_path=self._db_path, event_key=event_key,
+                subject=f"[SAU] Publish failed: {platform} target #{target.id} (job #{target.job_id})",
+                body="\n".join(lines)[:publish_alert_outbox.MAX_BODY_LENGTH],
             )
+            publish_alert_outbox.flush_due(db_path=self._db_path, event_key=event_key, limit=1)
         except Exception as alert_exc:  # noqa: BLE001 — alerting must never
             # change the worker's outcome; the target is already failed.
             _logger.warning(
@@ -1643,6 +1744,9 @@ def _backfill_artifact_public_urls(artifacts: list, db_path) -> None:
                         c for c in candidates
                         if _Path(str(c.get("local_path") or "")).name == wanted_name
                     ]
+                wanted_sha = (artifact.get("metadata") or {}).get("sha256")
+                if wanted_sha:
+                    candidates = [c for c in candidates if (c.get("metadata") or {}).get("sha256") == wanted_sha]
                 if not candidates:
                     continue
                 # Prefer a sibling whose artifact_kind matches this one (the
@@ -1709,7 +1813,8 @@ def _fallback_media_paths(payload: dict) -> list[str]:
     for artifact in payload.get("artifacts") or []:
         if not isinstance(artifact, dict):
             continue
-        if str(artifact.get("artifact_kind") or "") in {"watermarked_image", "watermarked_video"}:
+        from myUtils.publish_media_guard import media_kind
+        if not media_kind(artifact):
             continue
         raw_local_path = str(artifact.get("local_path") or "").strip()
         if raw_local_path:
@@ -2187,9 +2292,12 @@ def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
 
 
 def _prepared_artifact_local_paths(payload: dict) -> list[Path]:
+    from myUtils.publish_media_guard import media_kind
     paths: list[Path] = []
     seen: set[str] = set()
     for artifact in payload.get("artifacts", []) or []:
+        if not isinstance(artifact, dict) or not media_kind(artifact):
+            continue
         local_path = artifact.get("local_path")
         if not local_path or local_path in seen:
             continue
@@ -3213,10 +3321,18 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
 
     structured_account = _resolve_structured_account(target.account_ref, db_path=db_path)
     canonical_account_file = _resolve_account_path(target.account_ref, db_path=db_path)
-    if payload.get("campaignId") and payload.get("campaignPostId"):
+    if (payload.get("campaignId") and payload.get("campaignPostId")) or (
+            structured_account is not None and platform in PREPARED_PUBLISHER_REGISTRY
+            and (payload.get("preparedPart") or payload.get("preparedPost")
+                 or any(isinstance(a, dict) and str(a.get("artifact_kind") or "").startswith("prepared_")
+                        for a in payload.get("artifacts") or []))):
         # Ensure artifact files are available locally
         if db_path and not delivery.state(payload).get("provider_receipt"):
             await asyncio.to_thread(_ensure_artifact_paths_local, payload, db_path=db_path)
+        if not delivery.state(payload).get("provider_receipt"):
+            from myUtils.publish_media_guard import ensure_single_payload
+            await asyncio.to_thread(ensure_single_payload, payload, platform=platform,
+                                    account_config=(structured_account.config if structured_account else {}))
         if structured_account is not None and structured_account.cookie_path:
             with decrypted_storage_state(canonical_account_file) as plain_path:
                 return await _run_prepared_campaign_upload(
@@ -3239,6 +3355,11 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
     if platform == "twitter":
         thread_file_refs = payload.get("threadFileRefs") or [target.file_ref]
         thread_file_paths = [_resolve_file_path(file_ref, db_path=db_path) for file_ref in thread_file_refs]
+        from myUtils.publish_media_guard import ensure_single_payload
+        payload.setdefault("artifacts", [{"local_path": str(path)} for path in thread_file_paths])
+        await asyncio.to_thread(ensure_single_payload, payload, platform=platform,
+                                account_config=(structured_account.config if structured_account else {}))
+        thread_file_paths = _prepared_artifact_local_paths(payload)
         with decrypted_storage_state(canonical_account_file) as plain_path:
             delivery.starting(payload, operation=f"browser-publish:{platform}")
             await _run_platform_upload(
@@ -3251,6 +3372,12 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
         return
 
     file_path = _resolve_file_path(target.file_ref, db_path=db_path)
+    if platform in platform_limits.SUPPORTED_PLATFORMS:
+        from myUtils.publish_media_guard import ensure_single_payload
+        payload.setdefault("artifacts", [{"local_path": str(file_path)}])
+        await asyncio.to_thread(ensure_single_payload, payload, platform=platform,
+                                account_config=(structured_account.config if structured_account else {}))
+        file_path = _prepared_artifact_local_paths(payload)[0]
     with decrypted_storage_state(canonical_account_file) as plain_path:
         delivery.starting(payload, operation=f"browser-publish:{platform}")
         await _run_platform_upload(

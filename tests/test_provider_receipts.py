@@ -9,6 +9,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from tests.test_prepared_publishers import _FakeResponse as Response
 from tests.test_prepared_publishers import _RecordingSession
@@ -468,7 +469,7 @@ def test_bluesky_completed_blob_is_reused_after_second_blob_rejection(tmp_path):
     artifacts = []
     for index in range(2):
         path = tmp_path / f"blob-{index}.jpg"
-        path.write_bytes(b"synthetic image")
+        Image.new("RGB", (64, 64), "steelblue").save(path, format="JPEG")
         artifacts.append({"local_path": str(path), "artifact_kind": "image"})
     store = Checkpoints({"message": "Synthetic photos", "artifacts": artifacts})
     blob = lambda cid: Response({"blob": {"$type": "blob", "ref": {"$link": cid},

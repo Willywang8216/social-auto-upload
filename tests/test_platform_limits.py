@@ -22,7 +22,10 @@ class TableTests(unittest.TestCase):
     def test_bluesky_current_limits(self) -> None:
         self.assertEqual(pl.media_max_mb("bluesky"), 300)
         self.assertEqual(pl.video_max_seconds("bluesky"), 600.0)
-        self.assertEqual(pl.max_images("bluesky"), 10)
+        self.assertEqual(pl.max_images("bluesky"), 4)
+        images = pl.image_preparation_limits("bluesky")
+        self.assertEqual(images["max_bytes"], 2_000_000)
+        self.assertEqual(images["target_bytes"], 1_900_000)
 
     def test_x_current_limits(self) -> None:
         self.assertEqual(pl.message_max_chars("twitter"), 280)
@@ -120,11 +123,18 @@ class FallbackNetworkCoverageTests(unittest.TestCase):
     def test_every_mapped_network_gets_its_message_limit(self) -> None:
         from myUtils import sociamonials_fallback as sm
 
-        for code, platform in pl.NETWORK_TO_PLATFORM.items():
+        # Test only networks whose backup character contract is implemented.
+        # Native-only / unsupported networks are not silently enabled here.
+        for code, backup_cap in sm.NETWORK_MAX_MESSAGE_CHARS.items():
+            if code not in pl.NETWORK_TO_PLATFORM:
+                continue  # backup-only/manual routes are owned by its adapter
+            platform = pl.NETWORK_TO_PLATFORM[code]
             expected = pl.message_max_chars(platform)
-            if expected is None:
-                continue
-            self.assertEqual(sm.NETWORK_MAX_MESSAGE_CHARS.get(code), expected, code)
+            self.assertIsNotNone(expected, code)
+            self.assertGreater(backup_cap, 0, code)
+            self.assertLessEqual(backup_cap, expected, code)
+        # Byte-scoped YouTube fields are covered by text_limits, not this map.
+        self.assertEqual(pl.YOUTUBE_DESCRIPTION_MAX_BYTES, 5000)
 
     def test_instagram_and_threads_video_caps_present(self) -> None:
         from myUtils import sociamonials_fallback as sm

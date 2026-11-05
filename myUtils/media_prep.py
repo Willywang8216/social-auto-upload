@@ -5,7 +5,7 @@ uploading to a social platform we re-encode with the project's proven
 publishing profile:
 
 * H.264 High, yuv420p pixel format, +faststart MP4
-* <= 1080x1920 (9:16 vertical), centre-crop-or-letterbox to exactly 1080x1920
+* <= 1080x1920 (9:16 vertical), scale-to-fit and pad (never destructive crop)
 * <= 30 fps
 * AAC stereo, 128 kbps, 48 kHz
 * Single-pass CRF ~22 (~80 s clip typically lands between 20 and 30 MB)
@@ -216,14 +216,15 @@ def probe(path: str | Path) -> dict:
         "-show_streams",
         str(src),
     ]
-    completed = _run(cmd, capture_output=True, text=True)
+    completed = _run(cmd, capture_output=True, text=True, timeout=90)
     if completed.returncode != 0:
         raise ValueError(
             f"ffprobe failed on {src}: {completed.stderr.strip()[-2000:]}"
         )
     payload = json.loads(completed.stdout or "{}")
     streams = payload.get("streams", [])
-    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    video = next((s for s in streams if s.get("codec_type") == "video"
+                  and not (s.get("disposition") or {}).get("attached_pic")), None)
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     fmt = payload.get("format", {})
 
@@ -243,19 +244,32 @@ def probe(path: str | Path) -> dict:
         "height": int(video.get("height") or 0) if video else 0,
         "fps": float(fps) if fps else 0.0,
         "codec": (video or {}).get("codec_name"),
+        "video_stream_index": (video or {}).get("index", 0),
         "has_audio": audio is not None,
         "audio_channels": int(audio.get("channels") or 0) if audio else 0,
+        "format_name": fmt.get("format_name") or "",
+        "major_brand": (fmt.get("tags") or {}).get("major_brand") or "",
+        "profile": (video or {}).get("profile") or "",
+        "pix_fmt": (video or {}).get("pix_fmt") or "",
+        "field_order": (video or {}).get("field_order") or "",
+        "sample_aspect_ratio": (video or {}).get("sample_aspect_ratio") or "",
+        "audio_codec": (audio or {}).get("codec_name") or "",
+        "audio_profile": (audio or {}).get("profile") or "",
+        "audio_sample_rate": int((audio or {}).get("sample_rate") or 0),
+        "audio_bit_rate": int((audio or {}).get("bit_rate") or 0),
+        "video_bit_rate": int((video or {}).get("bit_rate") or 0),
+        "rotation": next((int(item.get("rotation") or 0)
+                          for item in (video or {}).get("side_data_list", [])
+                          if "rotation" in item), 0),
     }
 
 
 def build_filters(meta: dict) -> str:
     """Build the ffmpeg ``-vf`` chain to normalize ``meta`` to 1080x1920.
 
-    When the input aspect ratio is within ``ASPECT_TOLERANCE`` of the 9:16
-    target we scale-to-cover and centre-crop exactly to 1080x1920; otherwise
-    (e.g. landscape, 4:3, 1:1) we scale-to-fit and letterbox with bars. Frames
-    above ``MAX_FPS`` are dropped down to it and ``setsar=1`` normalizes the
-    pixel aspect ratio at the end.
+    Source framing is preserved even near 9:16: scale-to-fit and pad, never
+    crop away edge content. Frames above MAX_FPS are dropped down to it and
+    setsar=1 normalizes the pixel aspect ratio at the end.
     """
     width = int(meta.get("width") or 0)
     height = int(meta.get("height") or 0)
@@ -263,17 +277,10 @@ def build_filters(meta: dict) -> str:
         raise ValueError("meta must include positive width and height")
     fps_in = float(meta.get("fps") or 0)
 
-    aspect = width / height
-    if abs(aspect - _TARGET_ASPECT) / _TARGET_ASPECT <= ASPECT_TOLERANCE:
-        geometry = (
-            f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase"
-            f":force_divisible_by=2,crop={TARGET_W}:{TARGET_H}"
-        )
-    else:
-        geometry = (
-            f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease"
-            f":force_divisible_by=2,pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2"
-        )
+    geometry = (
+        f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease"
+        f":force_divisible_by=2,pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2"
+    )
 
     parts = [geometry]
     if fps_in > MAX_FPS:
@@ -469,6 +476,10 @@ def _probe_size_bytes(path: Path) -> int:
 
 def _split_count(duration: float, size_bytes: int, max_seconds: float | None, max_bytes: float | None) -> int:
     """How many equal parts are needed to satisfy both caps (>=1)."""
+    if (not math.isfinite(duration) or duration <= 0 or size_bytes <= 0
+            or any(value is not None and (isinstance(value, bool) or not math.isfinite(value) or value <= 0)
+                   for value in (max_seconds, max_bytes))):
+        raise ValueError("Invalid measured video or split constraints")
     count = 1
     if max_seconds and duration > max_seconds:
         count = max(count, int(math.ceil(duration / max_seconds)))
@@ -492,7 +503,7 @@ def split_into(
     meta = probe(src_path)
     duration = float(meta.get("duration") or 0.0)
     if duration <= 0:
-        return [src_path]
+        raise ValueError("Cannot split a video with invalid or missing duration")
     part_len = duration / count
     out_dir_path = Path(out_dir).expanduser().resolve()
     out_dir_path.mkdir(parents=True, exist_ok=True)

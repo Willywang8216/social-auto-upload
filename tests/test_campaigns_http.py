@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import os
 import sqlite3
 import sys
@@ -12,6 +13,8 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
+
+from PIL import Image
 
 import db.createTable as create_table
 
@@ -89,7 +92,7 @@ class CampaignApiTests(unittest.TestCase):
 
     def test_profile_account_media_group_campaign_flow(self) -> None:
         source_file = self.base_dir / "source.jpg"
-        source_file.write_bytes(b"img")
+        Image.new("RGB", (64, 64), "steelblue").save(source_file, format="JPEG")
         file_record_id = self._insert_file_record("source.jpg", str(source_file))
 
         profile_response = self.client.post(
@@ -166,7 +169,7 @@ class CampaignApiTests(unittest.TestCase):
         reporting "no publishable posts were queued" would read as a failure.
         """
         source_file = self.base_dir / "source.jpg"
-        source_file.write_bytes(b"img")
+        Image.new("RGB", (64, 64), "steelblue").save(source_file, format="JPEG")
         file_record_id = self._insert_file_record("source.jpg", str(source_file))
         profile_id = self.client.post(
             "/profiles", json={"name": "Regression brand"}
@@ -221,7 +224,7 @@ class CampaignApiTests(unittest.TestCase):
 
     def test_campaign_prepare_builds_drafts_per_account_language(self) -> None:
         source_file = self.base_dir / "source.jpg"
-        source_file.write_bytes(b"img")
+        Image.new("RGB", (64, 64), "steelblue").save(source_file, format="JPEG")
         file_record_id = self._insert_file_record("source.jpg", str(source_file))
         profile_response = self.client.post("/profiles", json={
             "name": "Mixed-language brand",
@@ -260,7 +263,7 @@ class CampaignApiTests(unittest.TestCase):
 
     def test_campaign_prepare_missing_expected_media_context_is_not_an_error(self) -> None:
         source_file = self.base_dir / "context-fallback.jpg"
-        source_file.write_bytes(b"img")
+        Image.new("RGB", (64, 64), "steelblue").save(source_file, format="JPEG")
         file_id = self._insert_file_record(source_file.name, str(source_file))
         profile = self.client.post("/profiles", json={"name": "Safe sheet"}).get_json()["data"]
         account = self.client.post(f"/profiles/{profile['id']}/accounts", json={
@@ -295,7 +298,7 @@ class CampaignApiTests(unittest.TestCase):
         Surfacing the failure at prepare time is the fix.
         """
         source_file = self.base_dir / "brief-only.jpg"
-        source_file.write_bytes(b"img")
+        Image.new("RGB", (64, 64), "steelblue").save(source_file, format="JPEG")
         file_id = self._insert_file_record(source_file.name, str(source_file))
         profile = self.client.post("/profiles", json={"name": "Brief only"}).get_json()["data"]
         account = self.client.post(f"/profiles/{profile['id']}/accounts", json={
@@ -345,9 +348,9 @@ class CampaignApiTests(unittest.TestCase):
         self.assertTrue(body["warnings"])
         self.assertIn("TikTok", body["warnings"][0])
 
-    def test_campaign_prepare_tiktok_with_watermark_uses_raw_remote_artifacts(self) -> None:
+    def test_campaign_prepare_tiktok_with_watermark_uses_prepared_unwatermarked_remote_artifacts(self) -> None:
         source_file = self.base_dir / "clip.jpg"
-        source_file.write_bytes(b"img")
+        Image.new("RGB", (64, 64), "steelblue").save(source_file, format="JPEG")
         file_record_id = self._insert_file_record("clip.jpg", str(source_file))
 
         profile_response = self.client.post(
@@ -393,7 +396,11 @@ class CampaignApiTests(unittest.TestCase):
             uploads.append(Path(local_path).name)
             return _RemoteArtifact(local_path)
 
-        with patch.object(self.sau_backend.media_remote_storage, "upload_artifact", side_effect=fake_upload),              patch.dict("os.environ", {"SAU_DEFAULT_RCLONE_REMOTE": "demo-remote", "TIKTOK_ACCESS_TOKEN": "token"}, clear=False):
+        with (
+            patch.object(self.sau_backend.media_remote_storage, "upload_artifact", side_effect=fake_upload),
+            patch("myUtils.campaign_media_prep.media_pipeline.apply_image_watermark") as watermark,
+            patch.dict(os.environ, {"SAU_DEFAULT_RCLONE_REMOTE": "demo-remote", "TIKTOK_ACCESS_TOKEN": "token"}, clear=False),
+        ):
             prepare_response = self.client.post(
                 "/campaigns/prepare",
                 json={
@@ -407,12 +414,17 @@ class CampaignApiTests(unittest.TestCase):
                 },
             )
         self.assertEqual(prepare_response.status_code, 200)
+        watermark.assert_not_called()
         self.assertGreaterEqual(len(uploads), 1)
         campaign_payload = prepare_response.get_json()["data"]
         artifacts = self.sau_backend._artifact_payloads_for_platform(campaign_payload["artifacts"], "tiktok")
-        artifact_kinds = {artifact["artifact_kind"] for artifact in artifacts}
-        self.assertIn("raw_remote_upload", artifact_kinds)
-        self.assertTrue(any(artifact["artifact_kind"] == "raw_remote_upload" for artifact in artifacts))
+        self.assertEqual({artifact["artifact_kind"] for artifact in artifacts}, {"prepared_image"})
+        for artifact in artifacts:
+            metadata = artifact["metadata"]
+            self.assertTrue(metadata["unwatermarked"])
+            self.assertEqual(metadata["prepared_for"], ["tiktok"])
+            self.assertEqual(metadata["origin_source_sha256"], hashlib.sha256(source_file.read_bytes()).hexdigest())
+            self.assertEqual(metadata["sha256"], hashlib.sha256(Path(artifact["local_path"]).read_bytes()).hexdigest())
 
     def test_tiktok_admin_status_reports_expected_review_configuration(self) -> None:
         response = self.client.get('/admin/tiktok/status')

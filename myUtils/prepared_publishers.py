@@ -21,7 +21,7 @@ from urllib.parse import parse_qsl, quote, quote_plus, unquote, urlencode, urlpa
 logger = logging.getLogger(__name__)
 
 from myUtils import media_pipeline
-from myUtils import platform_limits
+from myUtils import platform_limits, text_limits, image_compliance, media_compliance
 from myUtils import tiktok_auth
 from myUtils import delivery, generic_delivery
 
@@ -79,24 +79,26 @@ TIKTOK_MAX_CAPTION_CHARS = platform_limits.message_max_chars("tiktok") or 2200
 TIKTOK_ALLOWED_VIDEO_SUFFIXES = {".mp4", ".webm"}
 
 
-def _enforce_message_limit(message: str, platform: str) -> str:
-    """Trim a caption to the platform's hard message limit.
+def _enforce_message_limit(message: str, platform: str, *, payload: dict | None = None,
+                           field: str = "message", strict: bool = False, ellipsis: str = "…") -> str:
+    """Shared counts; approved recovery copy is rejected, NEVER shortened."""
+    try:
+        if strict or (payload is not None and text_limits.preserves_approved_text(payload)):
+            return text_limits.validate_message(message, platform, field=field)
+        return text_limits.truncate_message(message, platform, field=field, ellipsis=ellipsis)
+    except ValueError as exc:
+        raise PreparedPublishError(str(exc), details=getattr(exc, "details", {}), retryable=False) from exc
 
-    Generation already trims, but a prepared/import/API payload arrives with a
-    finished draft and skips that path; the publisher is the last line of
-    defence. Returns the message unchanged when the platform has no cap.
-    """
-    limit = platform_limits.message_max_chars(platform)
-    text = str(message or "")
-    if limit is None or len(text) <= limit:
-        return text
-    logger.warning(
-        "%s message is %d chars, over the %d-char limit; truncating",
-        platform,
-        len(text),
-        limit,
-    )
-    return text[: limit - 1].rstrip() + "…"
+
+def _validate_immutable_media(payload: dict, platform: str, config: dict) -> None:
+    """Scheduled artifacts are validation-only; uploaders never re-encode them."""
+    if any((item.get("metadata") or {}).get("preparation_policy_version") or "sha256" in (item.get("metadata") or {})
+           for item in payload.get("artifacts") or [] if isinstance(item, dict)):
+        from myUtils.publish_media_guard import validate_payload
+        try:
+            validate_payload(payload, platform=platform, account_config=config)
+        except ValueError as exc:
+            raise PreparedPublishError(str(exc), details=getattr(exc, "details", {}), retryable=False) from exc
 
 
 def _enforce_video_limits(local_path: str, platform: str) -> None:
@@ -194,8 +196,12 @@ class PreparedPublishError(RuntimeError):
 def _first_comment_text(payload: dict) -> str:
     """Return the trimmed first-comment text, or empty string."""
     draft = payload.get("draft") or {}
-    text = str(draft.get("firstComment") or payload.get("firstComment") or "").strip()
-    return text
+    value = draft.get("firstComment") or payload.get("firstComment") or ""
+    if text_limits.preserves_approved_text(payload):
+        if not isinstance(value, str):
+            raise PreparedPublishError("Approved first comment must be a string", retryable=False)
+        return value
+    return str(value).strip()
 
 
 def _try_post_first_comment(
@@ -376,11 +382,19 @@ def _config_value(config: dict[str, Any], key: str, *, default_env: str | None =
 
 
 def _payload_message(payload: dict) -> str:
-    return str(payload.get("message") or payload.get("draft", {}).get("message", "")).strip()
+    raw = payload.get("message") or (payload.get("draft") or {}).get("message", "")
+    if text_limits.preserves_approved_text(payload):
+        raw = payload.get("message") if "message" in payload else (payload.get("draft") or {}).get("message", "")
+        if not isinstance(raw, str):
+            raise PreparedPublishError("Approved copy must be a string", retryable=False)
+        return raw
+    return str(raw).strip()
 
 
 def _message_title(payload: dict, *, fallback: str = "Campaign post") -> str:
     raw = _payload_message(payload) or fallback
+    if text_limits.preserves_approved_text(payload):
+        return raw.splitlines()[0] or fallback
     return raw.splitlines()[0].strip()[:100] or fallback
 
 
@@ -661,61 +675,44 @@ def _normalize_public_url(url: str) -> str:
     )
 
 
-def _extract_media(payload: dict) -> dict[str, list[dict[str, str]]]:
-    items_by_key: dict[str, dict[str, str]] = {}
+def _extract_media(payload: dict) -> dict[str, list[dict]]:
+    """Preserve exact identity, alt text and cover metadata; exclude TXT/WAV."""
+    from myUtils.publish_media_guard import is_context_artifact, is_support_artifact, media_kind
+    items_by_key = {}
     for artifact in payload.get("artifacts", []) or []:
+        if not isinstance(artifact, dict) or is_context_artifact(artifact):
+            continue
         local_path = artifact.get("local_path") or ""
         public_url = _normalize_public_url(artifact.get("public_url") or "")
         key = local_path or public_url
         if not key:
             continue
-        existing = items_by_key.get(key)
-        if existing is None:
-            existing = {
-                "local_path": local_path,
-                "public_url": public_url,
-                "artifact_kind": artifact.get("artifact_kind", ""),
-            }
-            items_by_key[key] = existing
-        elif public_url and not existing.get("public_url"):
-            existing["public_url"] = public_url
-
-    images: list[dict[str, str]] = []
-    videos: list[dict[str, str]] = []
+        metadata = artifact.get("metadata") or {}
+        item = {**artifact, "local_path": local_path, "public_url": public_url,
+                "metadata": metadata, "alt_text": artifact.get("alt_text", artifact.get("altText",
+                    metadata.get("alt_text", metadata.get("altText", (payload.get("draft") or {}).get("alt_text", "")))))}
+        prior = items_by_key.get(key)
+        if prior is None:
+            items_by_key[key] = item
+        elif public_url and not prior.get("public_url"):
+            if (prior.get("metadata") or {}).get("sha256") != metadata.get("sha256"):
+                raise PreparedPublishError("Media aliases refer to different approved bytes", retryable=False)
+            prior["public_url"] = public_url
+    result = {"images": [], "videos": [], "covers": []}
     for item in items_by_key.values():
-        probe = item.get("local_path") or item.get("public_url") or ""
-        suffix = Path(probe).suffix.lower()
-        kind = item.get("artifact_kind", "")
-        if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"} or "image" in kind:
-            images.append(item)
-            continue
-        if suffix in {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"} or "video" in kind:
-            videos.append(item)
-            continue
-        # Neither the suffix nor the kind says. An upload with no extension at
-        # all lands here (the operator put "...__sfw" on the Drive inbox), and
-        # the old code dropped it, so the platform got "artifacts were supplied
-        # but none is a supported image/video" for every target of the campaign.
-        # Ask the file itself rather than discarding a 400 MB video.
-        local = item.get("local_path")
-        if local:
-            try:
-                from myUtils.campaign_media_prep import probe_media_kind
-
-                probed = probe_media_kind(local)
-            except Exception:  # noqa: BLE001 - a probe failure must not break publishing
-                probed = None
-            if probed == "image":
-                images.append(item)
-            elif probed == "video":
-                videos.append(item)
-    return {"images": images, "videos": videos}
+        if is_support_artifact(item):
+            result["covers"].append(item)
+        else:
+            kind = media_kind(item)
+            if kind:
+                result["images" if kind == "image" else "videos"].append(item)
+    return result
 
 
 def _telegram_caption_chunks(message: str) -> tuple[str, str]:
-    if len(message) <= 1024:
+    if text_limits.message_length(message, "telegram", field="caption") <= platform_limits.TELEGRAM_CAPTION_MAX_CHARS:
         return message, ""
-    return message[:1024], message
+    return text_limits.truncate_message(message, "telegram", field="caption", ellipsis=""), message
 
 
 def _telegram_chat_id_list(value: Any) -> list[str]:
@@ -1045,6 +1042,7 @@ def _telegram_is_mtproto(config: dict[str, Any]) -> bool:
 
 def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
     config = account.config or {}
+    _validate_immutable_media(payload, "telegram", config)
     artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
     attachments = [*media["videos"], *media["images"]]
@@ -1054,6 +1052,9 @@ def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
         raise PreparedPublishError("Telegram supports at most 10 media items per album")
     if len(attachments) > 1 and any(item not in media["images"] for item in attachments):
         raise PreparedPublishError("Telegram media groups support image albums only; split video and mixed-media jobs")
+    if text_limits.preserves_approved_text(payload):
+        _enforce_message_limit(_payload_message(payload), "telegram", payload=payload,
+                               field="caption" if attachments else "message")
     for item in attachments:
         local_path = str(item.get("local_path") or "").strip()
         public_url = str(item.get("public_url") or "").strip()
@@ -1074,7 +1075,7 @@ def publish_telegram_sync(account, payload: dict, *, session=None) -> list[Any]:
         raise PreparedPublishError("Telegram publish requires chatId or chatIds")
 
     http = _get_session(session)
-    message = _payload_message(payload)
+    message = _enforce_message_limit(_payload_message(payload), "telegram", payload=payload)
     caption, overflow_message = _telegram_caption_chunks(message)
     parse_mode = str(config.get("parseMode") or "").strip() or None
     silent = "true" if bool(config.get("silent", False)) else "false"
@@ -1312,7 +1313,7 @@ def _publish_telegram_mtproto_sync(account, payload: dict, *, session=None) -> l
         raise PreparedPublishError(f"Telegram MTProto apiId must be an integer, got {api_id_raw!r}") from exc
 
     session_string = _telegram_mtproto_session_string(config)
-    message = _payload_message(payload)
+    message = _enforce_message_limit(_payload_message(payload), "telegram", payload=payload)
     caption, overflow_message = _telegram_caption_chunks(message)
     silent = bool(config.get("silent", False))
     media = _extract_media(payload)
@@ -1404,7 +1405,8 @@ def publish_discord_sync(account, payload: dict, *, session=None) -> list[Any]:
     if len(all_media) > 10:
         raise PreparedPublishError("Discord webhook supports at most 10 files per post")
 
-    message = _payload_message(payload) or _message_title(payload)
+    _validate_immutable_media(payload, "discord", config)
+    message = _enforce_message_limit(_payload_message(payload) or _message_title(payload), "discord", payload=payload)
     content_lines = [message] if message else []
     embeds = []
     files: dict[str, tuple[str, Any]] = {}
@@ -1588,7 +1590,7 @@ def publish_facebook_sync(account, payload: dict, *, session=None) -> dict[str, 
         raise PreparedPublishError("Facebook publish requires accessToken or accessTokenEnv")
 
     http = _get_session(session)
-    message = _enforce_message_limit(_payload_message(payload), "facebook")
+    message = _enforce_message_limit(_payload_message(payload), "facebook", payload=payload)
     title = _message_title(payload)
     first_comment = _first_comment_text(payload)
     # Completed photo uploads can also be attached without their local files.
@@ -1596,6 +1598,8 @@ def publish_facebook_sync(account, payload: dict, *, session=None) -> dict[str, 
     resuming = (operations.get("video") or operations.get("post")
                 or (saved_photos and all(operations.get(name) for name in saved_photos)))
     media = {"images": [], "videos": []} if resuming else _extract_media(payload)
+    if not resuming:
+        _validate_immutable_media(payload, "facebook", config)
     if not resuming:
         if payload.get("artifacts") and not (media["videos"] or media["images"]):
             raise PreparedPublishError("Facebook media artifacts were supplied but none is a supported image/video")
@@ -1837,7 +1841,7 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
         raise PreparedPublishError("Instagram publish requires accessToken or accessTokenEnv")
 
     http = _get_session(session)
-    message = _enforce_message_limit(_payload_message(payload), "instagram")
+    message = _enforce_message_limit(_payload_message(payload), "instagram", payload=payload)
     first_comment = _first_comment_text(payload)
 
     def _do_post():
@@ -1847,6 +1851,7 @@ def publish_instagram_sync(account, payload: dict, *, session=None) -> dict:
                                     access_token=access_token, payload=payload, container_id=prior["id"],
                                     finalize=not bool(first_comment))
         # A saved container bypasses all local-media validation above this point.
+        _validate_immutable_media(payload, "instagram", config)
         artifacts = payload.get("artifacts") or []
         media = _extract_media(payload)
         if artifacts and not (media["videos"] or media["images"]):
@@ -2040,18 +2045,8 @@ def publish_threads_sync(account, payload: dict, *, session=None) -> dict:
         result = finish_container(http, platform="threads", user_id=user_id,
                                   access_token=access_token, payload=payload, container_id=prior["id"])
         return {**result, "updated_config": config}
-    message = _payload_message(payload)
-    # Threads caps post text at 500 characters and returns
-    # `HTTP 500: Param text must be at most 500 characters long` when
-    # exceeded. Truncate to the platform limit (mirrors the TikTok caption
-    # truncation) so a long auto-generated caption fails locally before the
-    # API call and the post still goes out.
-    if len(message) > THREADS_MAX_TEXT_CHARS:
-        logger.warning(
-            "Threads text exceeds %d characters; truncating %d -> %d",
-            THREADS_MAX_TEXT_CHARS, len(message), THREADS_MAX_TEXT_CHARS,
-        )
-        message = message[:THREADS_MAX_TEXT_CHARS]
+    _validate_immutable_media(payload, "threads", config)
+    message = _enforce_message_limit(_payload_message(payload), "threads", payload=payload, ellipsis="")
     artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
     if artifacts and not (media["videos"] or media["images"]):
@@ -2175,8 +2170,7 @@ def query_tiktok_creator_info(config: dict[str, Any], *, access_token: str | Non
 
 
 def _validate_tiktok_video_artifact(item: dict[str, Any], *, message: str, config: dict[str, Any]) -> None:
-    if len(message) > TIKTOK_MAX_CAPTION_CHARS:
-        raise PreparedPublishError(f"TikTok caption exceeds {TIKTOK_MAX_CAPTION_CHARS} characters for direct publishing")
+    _enforce_message_limit(message, "tiktok", field="caption", strict=True)
 
     public_url = str(item.get("public_url") or "").strip()
     local_path = str(item.get("local_path") or "").strip()
@@ -2210,8 +2204,7 @@ def _validate_tiktok_video_artifact(item: dict[str, Any], *, message: str, confi
             )
         # Check against creator_info's max_video_post_duration_sec if available,
         # otherwise fall back to the hardcoded maximum.
-        creator_max = config.get("_tiktok_max_video_duration_sec")
-        max_sec = creator_max if creator_max and creator_max > 0 else TIKTOK_MAX_VIDEO_SECONDS
+        max_sec = media_compliance.effective_limits("tiktok", account_config=config)["max_seconds"]
         if duration_seconds > max_sec:
             raise PreparedPublishError(
                 f"TikTok video duration ({duration_seconds:.0f}s) exceeds the limit ({max_sec:.0f}s)",
@@ -2228,8 +2221,7 @@ def _validate_tiktok_video_artifact(item: dict[str, Any], *, message: str, confi
 
 
 def _validate_tiktok_photo_payload(public_urls: list[str], *, message: str) -> None:
-    if len(message) > TIKTOK_MAX_CAPTION_CHARS:
-        raise PreparedPublishError(f"TikTok caption exceeds {TIKTOK_MAX_CAPTION_CHARS} characters for direct publishing")
+    _enforce_message_limit(message, "tiktok", field="caption", strict=True)
     if len(public_urls) > 35:
         raise PreparedPublishError("TikTok photo publish supports up to 35 images")
 
@@ -2350,11 +2342,10 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     if len(media["images"]) > 35:
         raise PreparedPublishError("TikTok photo posts support at most 35 images")
     creator_info = query_tiktok_creator_info(config, access_token=access_token, session=http)
-    # Store creator_info's max duration for video validation
+    # Only this fresh response grants a creator duration allowance.
     ci_data = creator_info.get("data") or creator_info
-    max_dur = ci_data.get("max_video_post_duration_sec")
-    if max_dur:
-        config["_tiktok_max_video_duration_sec"] = int(max_dur)
+    config["creator_info"] = ci_data
+    _validate_immutable_media(payload, "tiktok", config)
     if updated_config is not None:
         updated_config = _apply_tiktok_token_payload(updated_config, {'access_token': access_token}, creator_info)
     message = _payload_message(payload)
@@ -2382,8 +2373,10 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         local_path = str(video_item.get("local_path") or "").strip()
 
         # Use reviewed title from TikTokPostSettings if present, otherwise fall back to message
-        reviewed_title = str(tt_settings.get("title") or "").strip()
-        post_title = reviewed_title[:TIKTOK_MAX_CAPTION_CHARS] if reviewed_title else message[:TIKTOK_MAX_CAPTION_CHARS]
+        reviewed_title = tt_settings.get("title") or ""
+        if not text_limits.preserves_approved_text(payload):
+            reviewed_title = str(reviewed_title).strip()
+        post_title = _enforce_message_limit(reviewed_title or message, "tiktok", payload=payload, field="caption")
 
         # TikTok rejects the request with "invalid_params: The request post info is empty or incorrect"
         # when the title is empty. Validate early and raise a clear error.
@@ -2544,12 +2537,14 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
                 _tiktok_validate_pull_from_url(url)
         _validate_tiktok_photo_payload(public_urls, message=message)
         # Use reviewed title from TikTokPostSettings if present
-        reviewed_title = str(tt_settings.get("title") or "").strip()
+        reviewed_title = tt_settings.get("title") or ""
+        if not text_limits.preserves_approved_text(payload):
+            reviewed_title = str(reviewed_title).strip()
         photo_title = reviewed_title if reviewed_title else _message_title(payload)
 
         photo_post_info = {
-            "title": photo_title[:TIKTOK_MAX_CAPTION_CHARS],
-            "description": message[:TIKTOK_MAX_CAPTION_CHARS],
+            "title": _enforce_message_limit(photo_title, "tiktok", payload=payload, field="caption"),
+            "description": _enforce_message_limit(message, "tiktok", payload=payload, field="caption"),
             "privacy_level": privacy_level,
             "disable_comment": bool(tt_settings.get("disableComment", config.get("disableComment", False))),
             "disable_duet": bool(tt_settings.get("disableDuet", config.get("disableDuet", False))),
@@ -3013,7 +3008,8 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
         )
 
     http = _get_session(session)
-    message = _enforce_message_limit(_payload_message(payload), "twitter")
+    _validate_immutable_media(payload, "twitter", config)
+    message = _enforce_message_limit(_payload_message(payload), "twitter", payload=payload)
     artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
     media_items = media["images"][:4] + media["videos"][:1]
@@ -3554,7 +3550,8 @@ def publish_reddit_sync(account, payload: dict, *, session=None) -> list[Any]:
         "Authorization": f"Bearer {access_token}",
         "User-Agent": user_agent,
     }
-    message = _enforce_message_limit(_payload_message(payload), "reddit")
+    _validate_immutable_media(payload, "reddit", config)
+    message = _enforce_message_limit(_payload_message(payload), "reddit", payload=payload)
     artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
     if artifacts and not (media["videos"] or media["images"]):
@@ -3851,6 +3848,7 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
         return _finish_youtube_upload(http, payload, config, operations, access_token,
                                       {"id": prior["id"]})
 
+    _validate_immutable_media(payload, "youtube", config)
     media = _extract_media(payload)
     if not media["videos"]:
         raise PreparedPublishError(
@@ -3875,49 +3873,20 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
     access_token = _google_access_token(config, session=http)
     headers = {"Authorization": f"Bearer {access_token}"}
 
-    # Extract metadata from draft and config
-    draft = payload.get("draft") or {}
-
-    # Title: use draft.title if set, otherwise first line of message
-    raw_title = str(draft.get("title") or "").strip()
-    if not raw_title:
-        raw_message = str(draft.get("message") or payload.get("message", "")).strip()
-        lines = [l.strip() for l in raw_message.split("\n") if l.strip()]
-        for line in lines:
-            if not line.startswith("publish-center") and not line.startswith("campaign"):
-                raw_title = line
-                break
-        if not raw_title and lines:
-            raw_title = lines[0]
-    title = raw_title[:100] or "Untitled"
-
-    # Description
-    raw_message = str(draft.get("message") or payload.get("message", "")).strip()
-    message_lines = raw_message.split("\n")
-    if message_lines and message_lines[0].strip() == raw_title:
-        description = "\n".join(message_lines[1:]).strip()
-    else:
-        description = raw_message
-    first_comment = str(draft.get("firstComment") or "").strip()
-    if first_comment and first_comment not in description:
-        description = f"{description}\n\n{first_comment}" if description else first_comment
-    description = _enforce_message_limit(description, "youtube")
-
-    # Tags
-    tags = draft.get("hashtags") or draft.get("tags") or []
-    if isinstance(tags, str):
-        tags = [t.strip() for t in tags.split(",") if t.strip()]
-    tags = [t.lstrip("#") for t in tags if t]
+    # Field materialization measures UTF-8 bytes, title characters and the
+    # aggregate tag comma/quote allowance without editing approved recovery.
+    fields = youtube_text_fields(payload)
+    title, description, tags = fields["title"], fields["description"], fields["tags"]
 
     # Build snippet
     snippet = {
         "title": title,
-        "description": description[:5000],
+        "description": description,
         "channelId": channel_id,
         "categoryId": str(config.get("categoryId") or "22"),
     }
     if tags:
-        snippet["tags"] = tags[:500]
+        snippet["tags"] = tags
     if config.get("defaultLanguage"):
         snippet["defaultLanguage"] = config["defaultLanguage"]
     if config.get("defaultAudioLanguage"):
@@ -4029,10 +3998,52 @@ def _finish_youtube_upload(http, payload, config, operations, access_token, resu
     return result
 
 
+def youtube_text_fields(payload: dict) -> dict:
+    """Read-only native text mapping; strict recovery preserves approved fields."""
+    draft = payload.get("draft") or {}
+    strict = text_limits.preserves_approved_text(payload)
+    raw_message = _payload_message(payload)
+    raw_title = draft.get("title") or ""
+    if not strict:
+        raw_title = str(raw_title).strip()
+    if not raw_title:
+        lines = [line.strip() for line in raw_message.splitlines() if line.strip()]
+        raw_title = next((line for line in lines if not line.startswith(("publish-center", "campaign"))),
+                         lines[0] if lines else "Untitled")
+    title = _enforce_message_limit(raw_title, "youtube", payload=payload, field="title", ellipsis="")
+    description = draft.get("description") if draft.get("description") is not None else raw_message
+    if not strict:
+        lines = description.split("\n")
+        if lines and lines[0].strip() == raw_title:
+            description = "\n".join(lines[1:]).strip()
+    first_comment = draft.get("firstComment") or ""
+    if first_comment and first_comment not in description:
+        if strict:
+            raise PreparedPublishError("Approved YouTube first comment cannot be moved into the description; review required", retryable=False)
+        description = f"{description}\n\n{str(first_comment).strip()}" if description else str(first_comment).strip()
+    description = _enforce_message_limit(description, "youtube", payload=payload, field="description")
+    tags = (draft.get("tags", draft.get("hashtags", [])) if strict else
+            draft.get("tags") or draft.get("hashtags") or [])
+    if isinstance(tags, str):
+        tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
+    if not strict:
+        tags = [str(tag).lstrip("#") for tag in tags if tag]
+    try:
+        if not isinstance(tags, (list, tuple)):
+            raise ValueError("YouTube tags must be an array of approved strings")
+        if not strict:
+            while tags and text_limits.youtube_tags_length(tags) > platform_limits.YOUTUBE_TAGS_MAX_CHARS:
+                tags.pop()
+        text_limits.validate_youtube_tags(tags)
+    except ValueError as exc:
+        raise PreparedPublishError(str(exc), details=getattr(exc, "details", {}), retryable=False) from exc
+    return {"title": title, "description": description, "tags": tags}
+
+
 def _find_thumbnail(media: dict, video_path: Path) -> Path | None:
     """Find a thumbnail image for the video."""
     # Check if there's an image artifact
-    for img in media.get("images", []):
+    for img in [*media.get("covers", []), *media.get("images", [])]:
         if img.get("local_path"):
             p = Path(img["local_path"])
             if p.exists():
@@ -4053,7 +4064,7 @@ def _upload_youtube_thumbnail(http, access_token: str, video_id: str, thumbnail_
             url,
             headers={
                 "Authorization": f"Bearer {access_token}",
-                "Content-Type": "image/png",
+                "Content-Type": mimetypes.guess_type(thumbnail_path.name)[0] or "image/jpeg",
             },
             data=f.read(),
             timeout=60,
@@ -4714,134 +4725,37 @@ def _bluesky_create_session(http, cfg: dict[str, str]) -> dict[str, str]:
     return {"accessJwt": access_jwt, "did": did, "handle": data.get("handle") or cfg["handle"]}
 
 
-# Bluesky's app.bsky.embed.images blob ceiling. The service advertises a larger
-# limit than it enforces in practice; keep a safety margin so a 413 does not
-# depend on exactly how the PDS rounds. Oversized media is downscaled rather
-# than dropped, because a post with no media is still a failed post.
-BLUESKY_MAX_IMAGE_BYTES = 900_000
-# Videos: the app.bsky.embed.video lexicon now allows 300,000,000 bytes and a
-# 10-minute post, so the safety ceiling sits just under 300 MB (the earlier 90 MB
-# figure predated the August 2026 increase and needlessly re-encoded valid clips).
-BLUESKY_MAX_VIDEO_BYTES = 295_000_000
+# Implemented app.bsky.embed.images, NOT the separate gallery schema.
+BLUESKY_MAX_IMAGE_BYTES = 2_000_000
+BLUESKY_IMAGE_TARGET_BYTES = 1_900_000
+BLUESKY_MAX_VIDEO_BYTES = 300_000_000
 BLUESKY_MAX_VIDEO_SECONDS = platform_limits.video_max_seconds("bluesky") or 600.0
 
 
 def _bluesky_shrink_image(local_path: str, *, max_bytes: int = BLUESKY_MAX_IMAGE_BYTES) -> str:
-    """Return a path to an image no larger than ``max_bytes``.
-
-    Re-encodes to JPEG and steps the longest side down until the encoded size
-    fits. Returns the original path unchanged when it already fits, when
-    Pillow is unavailable, or when downscaling cannot get it under the limit —
-    the caller then surfaces the service's own 413 rather than a silent drop.
-    """
-    from pathlib import Path as _Path
-
-    path = _Path(local_path)
+    """Legacy offline helper only. Fail closed; never overwrite the source."""
+    limits = {"max_bytes": max_bytes}
     try:
-        if path.stat().st_size <= max_bytes:
-            return local_path
-    except OSError:
+        image_compliance.validate_image(local_path, platform="bluesky", limits=limits)
         return local_path
-
-    try:
-        import io
-        import tempfile
-
-        from PIL import Image
-    except Exception:  # noqa: BLE001 — Pillow is optional
-        return local_path
-
-    try:
-        with Image.open(path) as image:
-            image.load()
-            if image.mode not in ("RGB", "L"):
-                background = Image.new("RGB", image.size, (255, 255, 255))
-                if image.mode in ("RGBA", "LA", "P"):
-                    rgba = image.convert("RGBA")
-                    background.paste(rgba, mask=rgba.split()[-1])
-                else:
-                    background.paste(image.convert("RGB"))
-                working = background
-            else:
-                working = image.convert("RGB")
-
-            longest = max(working.size)
-            for _ in range(8):
-                buffer = io.BytesIO()
-                working.save(buffer, format="JPEG", quality=85, optimize=True)
-                if buffer.tell() <= max_bytes:
-                    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                    tmp.write(buffer.getvalue())
-                    tmp.close()
-                    logger.info(
-                        "bluesky: downscaled image %s (%d -> %d bytes, longest %d)",
-                        path.name, path.stat().st_size, buffer.tell(), longest,
-                    )
-                    return tmp.name
-                longest = int(longest * 0.8)
-                if longest < 320:
-                    break
-                width = max(1, int(working.width * 0.8))
-                height = max(1, int(working.height * 0.8))
-                working = working.resize((width, height), Image.LANCZOS)
-        return local_path
-    except Exception as exc:  # noqa: BLE001 — never let a resize break the post
-        logger.warning("bluesky: image downscale failed for %s: %s", local_path, exc)
-        return local_path
+    except media_compliance.MediaPreparationError:
+        prepared = image_compliance.prepare_image(local_path, Path(local_path).parent / "prepared-media",
+                                                  platform="bluesky", limits=limits)
+        return str(prepared.path)
 
 
 def _bluesky_shrink_video(local_path: str, *, max_bytes: int = BLUESKY_MAX_VIDEO_BYTES) -> str:
-    """Return a path to an mp4 no larger than ``max_bytes`` via ffmpeg.
-
-    Best-effort: returns the original path when ffmpeg is unavailable or the
-    re-encode fails, so the caller still sees the service's own error.
-    """
-    from pathlib import Path as _Path
-
-    path = _Path(local_path)
+    """Legacy offline helper only; the publisher validates, never re-encodes."""
+    limits = {"max_bytes": max_bytes}
     try:
-        size = path.stat().st_size
-    except OSError:
+        media_compliance.validate_video(local_path, platform="bluesky", limits=limits)
         return local_path
-    if size <= max_bytes:
-        return local_path
-
-    try:
-        import subprocess
-        import tempfile
-
-        tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-        tmp.close()
-        # Scale the longest side to 720 and re-encode at a conservative bitrate;
-        # faststart so Bluesky can probe it without the whole file. Gated on the
-        # shared transcode throttle: this is a full re-encode on the publish
-        # path, so without it a batch of oversized clips could start more encodes
-        # than the box has cores.
-        from myUtils import media_prep as _media_prep
-
-        with _media_prep.encode_slot():
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-i", str(path),
-                    "-vf", "scale='min(720,iw)':-2",
-                    "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
-                    "-c:a", "aac", "-b:a", "96k",
-                    "-movflags", "+faststart",
-                    tmp.name,
-                ],
-                capture_output=True,
-                timeout=1800,
-                check=True,
-            )
-        if _Path(tmp.name).stat().st_size < size:
-            logger.info(
-                "bluesky: re-encoded video %s (%d -> %d bytes)",
-                path.name, size, _Path(tmp.name).stat().st_size,
-            )
-            return tmp.name
-    except Exception as exc:  # noqa: BLE001 — best-effort
-        logger.warning("bluesky: video re-encode failed for %s: %s", local_path, exc)
-    return local_path
+    except media_compliance.MediaPreparationError:
+        parts = media_compliance.prepare_video(local_path, Path(local_path).parent / "prepared-media",
+                                               platform="bluesky", limits=limits)
+        if len(parts) != 1:
+            raise media_compliance.MediaPreparationRequired("Schedule ALL Bluesky video parts before publication")
+        return str(parts[0].path)
 
 
 def _bluesky_upload_blob(http, *, jwt: str, service: str, local_path: str, mime: str | None = None) -> dict:
@@ -4902,7 +4816,8 @@ def _bluesky_message_and_media(payload: dict) -> tuple[str, list[dict], list[dic
     images use ``app.bsky.embed.images`` (up to 4 images).
     """
     draft = payload.get("draft") or {}
-    message = str(draft.get("message") or payload.get("message") or "").strip()
+    raw = draft.get("message") or payload.get("message") or ""
+    message = raw if text_limits.preserves_approved_text(payload) else str(raw).strip()
     if not message:
         raise PreparedPublishError("Bluesky publish requires a message (300 char max)")
     hashtags = draft.get("hashtags") or []
@@ -4911,10 +4826,10 @@ def _bluesky_message_and_media(payload: dict) -> tuple[str, list[dict], list[dic
     for tag in hashtags:
         tag_text = str(tag).lstrip("#")
         if tag_text and f"#{tag_text}" not in message:
+            if text_limits.preserves_approved_text(payload):
+                raise PreparedPublishError("Approved Bluesky hashtags are not in the message; review required", retryable=False)
             message = f"{message} #{tag_text}"
-    # Bluesky's hard post length is 300 chars (graphemes).
-    if len(message) > 300:
-        message = message[:297].rstrip() + "…"
+    message = _enforce_message_limit(message, "bluesky", payload=payload)
     media = _extract_media(payload)
     return message, list(media["images"]), list(media["videos"])
 
@@ -4932,6 +4847,7 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
     http = _get_session(session)
 
     message, image_items, video_items = _bluesky_message_and_media(payload)
+    _validate_immutable_media(payload, "bluesky", config)
     artifacts = payload.get("artifacts") or []
     if artifacts and not (image_items or video_items):
         raise PreparedPublishError("Bluesky media artifacts were supplied but none is a supported image/video")
@@ -4944,6 +4860,12 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
         public_url = str(item.get("public_url") or "").strip()
         if not (local.is_file() and local.stat().st_size > 0) and not public_url:
             raise PreparedPublishError("Bluesky media artifact has no readable local file or public URL")
+        if local.is_file():
+            try:
+                validator = image_compliance.validate_image if item in image_items else media_compliance.validate_video
+                validator(local, platform="bluesky", expected_sha256=(item.get("metadata") or {}).get("sha256"))
+            except ValueError as exc:
+                raise PreparedPublishError(str(exc), details=getattr(exc, "details", {}), retryable=False) from exc
     operations.plan([f"blob:{index}" for index in range(len(video_items) + len(image_items))] + ["post"])
     auth = _bluesky_create_session(http, cfg)
 
@@ -4994,14 +4916,9 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
                 duration = media_pipeline.probe_video_duration(local_path)
             except Exception:  # noqa: BLE001 - a probe failure is not a rejection
                 duration = None
-            # ``>`` with a small tolerance, not a bare comparison: container
-            # muxing (and ffmpeg's own timebase) routinely adds a few
-            # milliseconds, so a clip authored as exactly 600 s probes as
-            # 600.0000004. Rejecting that prints the absurd "600.0s exceeds the
-            # 600s limit by 0.0s" and fails a publish that is within the cap.
-            # 0.5 s is far below any real platform tolerance and far above the
-            # sub-millisecond noise, so a genuinely over-length clip still fails.
-            if duration and duration > BLUESKY_MAX_VIDEO_SECONDS + 0.5:
+            # Preparation leaves muxing headroom; a publisher cannot relax the
+            # hard ceiling with a half-second allowance of its own.
+            if duration and duration > BLUESKY_MAX_VIDEO_SECONDS:
                 over_by = duration - BLUESKY_MAX_VIDEO_SECONDS
                 # retryable=False: the clip's duration is fixed, so a retry can
                 # only fail again and delay the operator seeing the real problem.
@@ -5011,7 +4928,9 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
                     "re-encode or split a shorter cut",
                     retryable=False,
                 )
-            shrunk_path = _bluesky_shrink_video(local_path)
+            media_compliance.validate_video(local_path, platform="bluesky", account_config=config,
+                                            expected_sha256=(video.get("metadata") or {}).get("sha256"))
+            shrunk_path = local_path  # immutable final bytes; no publish-time transforms
             delivery.checkpoint(payload)
             blob = _bluesky_upload_blob(
                 http, jwt=auth["accessJwt"], service=cfg["service"],
@@ -5028,7 +4947,7 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
             if ratio:
                 embed["aspectRatio"] = ratio
             if str(video.get("alt_text") or "").strip():
-                embed["alt"] = str(video["alt_text"]).strip()
+                embed["alt"] = str(video["alt_text"])
             record["embed"] = embed
             uploaded_media["videos"] = 1
         finally:
@@ -5039,23 +4958,25 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
     elif image_items:
         blobs: list[dict] = []
         alt_texts: list[str] = []
-        for index, item in enumerate(image_items[:4]):
+        for index, item in enumerate(image_items):
             prior_blob = _saved_blob(index)
             if prior_blob:
                 blobs.append(prior_blob)
-                alt_texts.append(str(item.get("alt_text") or "").strip())
+                alt_texts.append(str(item.get("alt_text") or ""))
                 continue
             local_path, tmp_path = _resolve_local(item)
             shrunk_path = None
             try:
-                shrunk_path = _bluesky_shrink_image(local_path)
+                image_compliance.validate_image(local_path, platform="bluesky",
+                    expected_sha256=(item.get("metadata") or {}).get("sha256"))
+                shrunk_path = local_path  # compression belongs BEFORE scheduling
                 delivery.checkpoint(payload)
                 blob = _bluesky_upload_blob(http, jwt=auth["accessJwt"], service=cfg["service"], local_path=shrunk_path)
                 if not blob:
                     raise PreparedPublishError("Bluesky image upload returned no blob")
                 _remember_blob(index, blob)
                 blobs.append(blob)
-                alt_texts.append(str(item.get("alt_text") or "").strip())
+                alt_texts.append(str(item.get("alt_text") or ""))
             finally:
                 if shrunk_path and shrunk_path != local_path:
                     Path(shrunk_path).unlink(missing_ok=True)
@@ -5093,14 +5014,14 @@ def publish_bluesky_sync(account, payload: dict, *, session=None) -> list[dict[s
     operations.record("post", result.get("uri"),
                       status="complete" if result.get("cid") else "processing",
                       cid=str(result.get("cid") or ""), handle=auth["handle"], did=auth["did"],
-                      chars=len(message), **uploaded_media)
+                      chars=text_limits.message_length(message, "bluesky"), **uploaded_media)
     operations.finish()
     return [{
         "uri": result.get("uri"),
         "cid": result.get("cid"),
         "handle": auth["handle"],
         "did": auth["did"],
-        "chars": len(message),
+        "chars": text_limits.message_length(message, "bluesky"),
         **uploaded_media,
     }]
 

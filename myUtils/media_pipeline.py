@@ -137,9 +137,15 @@ def prepare_campaign_artifact_path(
     artifact_kind: str,
     suffix: str | None = None,
     base_dir: Path | None = None,
+    generation: str | None = None,
 ) -> Path:
     source = Path(source_path)
     workspace = build_campaign_workspace(campaign_id, base_dir=base_dir)
+    if generation is not None:
+        if (not isinstance(generation, str) or len(generation) != 32
+                or any(char not in "0123456789abcdef" for char in generation)):
+            raise ValueError("Invalid media preparation generation")
+        workspace = workspace / "preparation" / generation
     artifact_dir = workspace / artifact_kind
     artifact_dir.mkdir(parents=True, exist_ok=True)
     ext = suffix if suffix is not None else source.suffix

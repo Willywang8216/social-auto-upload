@@ -119,10 +119,39 @@ class FakeSession:
     def __init__(self):
         self.bodies = []
 
+    def response(self, body):
+        return SimpleNamespace(status_code=200, json=lambda: copy.deepcopy(body), text="", headers={})
+
+    def get(self, url, **kwargs):
+        permissions = {name: True for name in ("posts.read", "posts.create", "profiles.read",
+                                               "posts.publish_direct", "assets.read", "assets.write")}
+        if url.endswith("/api/v1/me"):
+            return self.response({"agent": {"id": 1, "status": "active", "type": "workspace"},
+                "credential": {"name": "fixture"}, "entitlement": {"state": "active"},
+                "workspaces": {"123": {"permissions": permissions, "requires_approval_for_posting": False,
+                    "social_profiles": [{"network": "thrd", "profile_ref": "fixture-only"}]}}})
+        if url.endswith("/social-profiles"):
+            return self.response({"workspace_registration_id": 123, "profiles": [{"network": "thrd",
+                "profile_ref": "fixture-only", "connected": True, "agent_can_publish_to": True,
+                "unavailable_reason": None, "capabilities": ["text", "image", "video"]}]})
+        if url.endswith("/api/v1/posts/123"):
+            return self.response({"post_id": 123, "workspace_registration_id": 123,
+                "networks": {"thrd": {"profiles": [{"network": "thrd", "profile_ref": "fixture-only",
+                    "status": "delivered", "delivered": True, "platform_post_id": "fixture-post-123"}]}}})
+        raise AssertionError(f"Unexpected fixture GET: {url}")
+
     def post(self, url, **kwargs):
         assert url == sm.POSTS_URL
-        self.bodies.append(copy.deepcopy(kwargs["json"]))
-        return SimpleNamespace(status_code=200, json=lambda: {"post_id": 123}, text="", headers={})
+        body = kwargs["json"]
+        if body.get("validate_only") is True:
+            return self.response({"valid": True, "validate_only": True, "post_id": None,
+                "mode": "publish_now", "requires_approval": False, "warnings": [],
+                "profile_resolution": {"mode": "explicit", "preset": None, "warnings": [],
+                    "resolved_profiles": [{"network": "thrd", "profile_ref": "fixture-only"}]}})
+        self.bodies.append(copy.deepcopy(body))
+        return self.response({"post_id": 123, "workspace_registration_id": 123,
+            "networks": {"thrd": {"profiles": [{"network": "thrd", "profile_ref": "fixture-only",
+                "status": "delivered", "delivered": True, "platform_post_id": "fixture-post-123"}]}}})
 
 
 def test_recovery_generation_changes_only_the_deliberate_recovery_key():
@@ -152,8 +181,11 @@ def test_invalid_recovery_generation_never_creates_a_post():
 @pytest.mark.parametrize("artifacts", [[{}], [{"public_url": "https://example.test/video.mp4"}]])
 def test_declared_media_is_never_silently_replaced_by_text(monkeypatch, artifacts):
     session = FakeSession()
+    from myUtils.media_compliance import MediaPreparationRequired
+    expected = MediaPreparationRequired if artifacts[0].get("public_url") else sm.SociamonialsFallbackError
+    message = "Materialise" if expected is MediaPreparationRequired else "refusing a text-only replacement"
     monkeypatch.setattr(sm, "_verify_remote_media", lambda *_args, **_kwargs: False)
-    with pytest.raises(sm.SociamonialsFallbackError, match="refusing a text-only replacement"):
+    with pytest.raises(expected, match=message):
         sm.publish_via_sociamonials(
             platform="threads", account={"id": 900, "config": managed_config()},
             payload={"message": "fixture", "artifacts": artifacts}, target_id=99,
@@ -171,11 +203,13 @@ def test_real_managed_helper_blocks_unavailable_configuration(database, monkeypa
     finally:
         conn.close()
     jobs.enqueue_job(jobs.JobSpec(platform="threads", profile_id=900, payload={"message": "fixture"},
-                     targets=[("account:900", "/fixture.mp4", None)]), db_path=database)
+                     targets=[("account:900", "campaign_post:900", None)]), db_path=database)
     target = jobs.claim_next_targets(db_path=database)[0]
     saved = None
     if receipt:
-        saved = {"provider": "sociamonials", "id": "keep-this", "submitted_at": delivery.utc_now()}
+        saved = {"provider": "sociamonials", "id": "keep-this", "submitted_at": delivery.utc_now(),
+                 "network": "thrd", "profile_refs": ["fixture-only"], "workspace_id": "123",
+                 "api_key_env": "SOCIAMONIALS_API_KEY"}
         jobs.save_target_checkpoint(target.id, {"submission_started": True, "provider_receipt": saved},
                                     lease_token=target.lease_token, db_path=database)
         target = jobs.get_target(target.id, db_path=database)
@@ -188,7 +222,7 @@ def test_real_managed_helper_blocks_unavailable_configuration(database, monkeypa
     monkeypatch.setattr(sm, "publish_via_sociamonials", publish)
     asyncio.run(instance._run_target_inline(target))
     current = jobs.get_target(target.id, db_path=database)
-    assert current.status == "blocked"
+    assert current.status == ("awaiting_delivery" if receipt else "blocked")
     if receipt:
         assert current.checkpoint["provider_receipt"] == saved
     if reason == "disabled":

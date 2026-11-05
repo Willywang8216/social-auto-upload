@@ -902,6 +902,44 @@ def add_campaign_artifact(
     return get_campaign_artifact(artifact_id, db_path=db_path)
 
 
+def add_campaign_artifact_set(campaign_id: int, artifacts: list[dict], *,
+                              db_path: Path | None = None) -> list[CampaignArtifact]:
+    """Register a whole measured generation atomically, including restore rows."""
+    from myUtils.media_integrity import artifact_metadata
+    from myUtils.media_compliance import sha256_file
+
+    if not artifacts:
+        raise ValueError("A prepared artifact set must not be empty")
+    records = []
+    for artifact in artifacts:
+        path = Path(artifact["local_path"])
+        if not path.is_file():
+            raise ValueError("Prepared artifact disappeared before registration")
+        metadata = artifact_metadata(str(path), artifact.get("metadata"))
+        if (metadata.get("sha256") != sha256_file(path)
+                or metadata.get("size_bytes") != path.stat().st_size):
+            raise ValueError("Prepared artifact changed before registration")
+        records.append({**artifact, "metadata": metadata})
+    identifiers = []
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM campaigns WHERE id=?", (campaign_id,)).fetchone() is None:
+            raise LookupError("Preparation campaign no longer exists")
+        for artifact in records:
+            _ensure_artifact_file_record(conn, artifact["local_path"])
+            cursor = conn.execute(
+                "INSERT INTO campaign_artifacts "
+                "(campaign_id, source_file_record_id, artifact_kind, local_path, public_url, "
+                "remote_path, storage_backend_id, metadata_json) VALUES (?,?,?,?,?,?,?,?)",
+                (campaign_id, artifact.get("source_file_record_id"), artifact["artifact_kind"],
+                 artifact["local_path"], artifact.get("public_url"), artifact.get("remote_path"),
+                 artifact.get("storage_backend_id"), json.dumps(artifact["metadata"], allow_nan=False)),
+            )
+            identifiers.append(cursor.lastrowid)
+        conn.commit()
+    return [get_campaign_artifact(identifier, db_path=db_path) for identifier in identifiers]
+
+
 def _ensure_artifact_file_record(conn: sqlite3.Connection, local_path: str) -> int | None:
     """Ensure a ``file_records`` row exists for ``local_path``; return its id.
 

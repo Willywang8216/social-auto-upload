@@ -18,7 +18,7 @@ from myUtils import campaign_media_prep
 from myUtils import content_generator, content_rules, humanize, llm_client
 from myUtils import jobs as job_runtime
 from myUtils import media_groups as media_group_store
-from myUtils import ops_alerts, platform_limits
+from myUtils import ops_alerts, platform_limits, media_compliance, image_compliance, publish_media_guard
 from myUtils import profiles as profile_registry
 from myUtils.campaign_media_prep import _resolve_ai_config
 from myUtils.submissions import ensure_file_record_for_path, submit_publish as submit_publish
@@ -26,6 +26,26 @@ from myUtils.sqlite_utils import connect as _db_connection
 
 
 def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> list[dict]:
+    # New immutable generations are selected as WHOLE sets; legacy raw/variant
+    # aliases cannot leak back in, including on the TikTok raw-source route.
+    prepared = [a for a in artifacts if (a.get("metadata") or {}).get("preparation_policy_version")
+                and not publish_media_guard.is_context_artifact(a) and not publish_media_guard.is_support_artifact(a)]
+    if prepared:
+        cleaned = [a for a in artifacts if not publish_media_guard.is_context_artifact(a)]
+        supports = [a for a in cleaned if publish_media_guard.is_support_artifact(a)]
+        video_sources = list(dict.fromkeys(a.get("source_file_record_id") for a in cleaned
+                                          if publish_media_guard.media_kind(a) == "video"))
+        selected = []
+        for source_id in video_sources:
+            selected.extend(media_compliance.select_prepared_parts(
+                [a for a in cleaned if publish_media_guard.media_kind(a) == "video"
+                 and a.get("source_file_record_id") == source_id], platform))
+        images = [a for a in cleaned if publish_media_guard.media_kind(a) == "image"]
+        if any((a.get("metadata") or {}).get("preparation_policy_version") for a in images):
+            images = image_compliance.select_prepared_images(images, platform)
+            if platform == "tiktok" and any((a.get("metadata") or {}).get("unwatermarked") is not True for a in images):
+                raise media_compliance.MediaPreparationError("TikTok requires the prepared unwatermarked images")
+        return [*supports, *images, *selected]
     raw_kinds = {"raw_remote_upload", "raw_local"}
     # Context artifacts created by the prep pipeline are NOT publishable media.
     # The backend auto-transcribes whenever the submit carried no transcript, so
@@ -38,6 +58,7 @@ def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> lis
     # were queued). Twitter raises "Unsupported prepared Twitter media type"
     # instead, which is how it surfaced. Never publish them.
     context_kinds = {"audio", "transcript"}
+    artifacts = [a for a in artifacts if not publish_media_guard.is_context_artifact(a)]
     if platform != profile_registry.PLATFORM_TIKTOK:
         # Drop the un-prepared raw artifacts and, for every video source, pick
         # the duration-safe cut(s) for this platform: the trimmed/split parts
@@ -80,7 +101,8 @@ def _artifact_payloads_for_platform(artifacts: list[dict], platform: str) -> lis
     return [*passthrough, *selected]
 
 
-def _artifact_part_groups_for_platform(artifacts: list[dict], platform: str) -> list[list[dict]]:
+def _artifact_part_groups_for_platform(artifacts: list[dict], platform: str, *,
+                                       backup_compatible: bool = False, account_config=None) -> list[list[dict]]:
     """Group a platform's artifacts into one list per post.
 
     A video too long for the platform is re-encoded into parts; each part is
@@ -88,6 +110,13 @@ def _artifact_part_groups_for_platform(artifacts: list[dict], platform: str) -> 
     caller that ignores this helper still publishes exactly as before.
     """
     selected = _artifact_payloads_for_platform(artifacts, platform)
+    if any((a.get("metadata") or {}).get("preparation_policy_version") for a in selected):
+        covers = [a for a in selected if publish_media_guard.is_support_artifact(a)]
+        images = [a for a in selected if publish_media_guard.media_kind(a) == "image"]
+        videos = [a for a in selected if publish_media_guard.media_kind(a) == "video"]
+        groups = image_compliance.ordered_batches(images, platform, account_config=account_config,
+                                                  backup_compatible=backup_compatible) if images else []
+        return [covers + group for group in groups] + [covers + [video] for video in videos]
     video_items = [a for a in selected if (a.get("metadata") or {}).get("role") == "video"]
     source_ids = {a.get("source_file_record_id") for a in video_items}
     if len(video_items) <= 1 or len(source_ids) > 1:
@@ -110,6 +139,8 @@ def _select_videos_for_platform(items: list[dict], platform: str) -> list[dict]:
     """
     if not items:
         return []
+    if any((a.get("metadata") or {}).get("preparation_policy_version") for a in items):
+        return media_compliance.select_prepared_parts(items, platform)
     max_seconds = platform_limits.video_max_seconds(platform)
     if max_seconds is None:
         return [items[0]]
@@ -430,13 +461,6 @@ def _generate_platform_draft(
     raw_draft = None
     if should_use_llm:
         try:
-            system_prompt, user_prompt = _build_generation_prompt(
-                platform,
-                profile,
-                media_group,
-                request_data,
-                media_context,
-            )
             kwargs = {}
             if ai_config["api_base_url"]:
                 kwargs["api_base_url"] = ai_config["api_base_url"]
@@ -444,6 +468,14 @@ def _generate_platform_draft(
                 kwargs["api_key"] = ai_config["api_key"]
             if ai_config["model"]:
                 kwargs["model"] = ai_config["model"]
+            from myUtils.llm_context import prepare_transcript_context
+            bounded_context = prepare_transcript_context(
+                media_context,
+                summarize=lambda system, user: llm_client.generate_chat_completion(
+                    system, user, **kwargs).content,
+            )
+            system_prompt, user_prompt = _build_generation_prompt(
+                platform, profile, media_group, request_data, bounded_context)
             # Send the actual image(s) so the copy describes what is shown
             # rather than inventing from the filename. Text-only models that
             # reject the image parts fall through to the except below and the

@@ -338,7 +338,7 @@ def test_terminal_or_invalid_parent_intent_cannot_be_reopened(db_path, state):
 @pytest.mark.parametrize("platform,flag,value", [
     ("reddit", "SAU_REDDIT_ENABLED", "1"), ("reddit", "SAU_REDDIT_ENABLED", "0"),
     ("threads", "SAU_THREADS_ENABLED", "0"), ("twitter", "SAU_X_DIRECT_PUBLISH", "off"),
-    ("twitter", "SAU_SOCIAMONIALS_FALLBACK", "1"), ("threads", "SAU_THREADS_ENABLED", "malformed"),
+    ("threads", "SAU_THREADS_ENABLED", "malformed"),
 ])
 def test_resolved_selection_never_overrides_retired_or_disabled_routes(db_path, monkeypatch, platform, flag, value):
     _update(db_path, "accounts", 101, platform=platform)
@@ -792,3 +792,24 @@ def test_x_recovery_validates_profile_override_instead_of_builtin_mapping(db_pat
     _update(db_path, "profiles", 100, settings_json=json.dumps(settings))
     assert not _entries(_plan(db_path, target_ids=[target]))
     _assert_refused_unchanged(db_path, plan)
+
+
+def test_recovery_cannot_raise_or_disable_current_pacing(db_path, monkeypatch):
+    monkeypatch.setattr(recovery.publish_orchestrator, "MAX_POSTS_PER_ACCOUNT_PER_DAY", 3)
+    _target(db_path)
+    for cap in (None, 4, 999, 0):
+        assert _entries(_plan(db_path, per_day_cap=cap))[0]["per_day_cap"] == 3
+    assert _entries(_plan(db_path, per_day_cap=2))[0]["per_day_cap"] == 2
+
+
+@pytest.mark.parametrize("status", ["succeeded", "running", "awaiting_delivery", "needs_review"])
+def test_shared_delivered_and_inflight_history_consumes_capacity(db_path, monkeypatch, status):
+    monkeypatch.setattr(recovery.publish_orchestrator, "MAX_POSTS_PER_ACCOUNT_PER_DAY", 1)
+    _account(db_path, 102, config={"threadUserId": "identity-101"})
+    _target(db_path, account_ref="account:102", file_ref="different.mp4", status=status,
+            finished=NOW.isoformat())
+    with closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.execute("UPDATE publish_job_targets SET schedule_at=?", (NOW.isoformat(),))
+    selected = _target(db_path)
+    plan = _entries(_plan(db_path, target_ids=[selected]))
+    assert len(plan) == 1 and plan[0]["slot"][:10] > NOW.date().isoformat()

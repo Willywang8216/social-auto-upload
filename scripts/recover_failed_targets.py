@@ -120,7 +120,7 @@ def _route_policy(platform: str, *, account=None, settings=None) -> dict:
         raise RecoveryRefused("invalid managed publishing route") from None
     if platform == "twitter":
         direct = flags["SAU_X_DIRECT_PUBLISH"]
-        managed = managed or direct in _FALSE or (not direct and flags["SAU_SOCIAMONIALS_FALLBACK"] in _TRUE)
+        managed = managed or direct in _FALSE
     if managed:
         mapping = sociamonials_fallback.resolve_mapping(
             account.get("id") if account else None, account=account, platform=platform, settings=settings)
@@ -200,14 +200,41 @@ def _identity_for_ref(aliases: dict[str, list[str]], account_ref: str) -> str:
 
 
 def _booked_slots(conn, aliases: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Bookings AND delivered/unresolved history share one destination's cap."""
     identities = {ref: key for key, refs in aliases.items() for ref in refs}
     booked: dict[str, list[str]] = {}
     for row in conn.execute(
-        "SELECT account_ref, schedule_at FROM publish_job_targets "
-        "WHERE status IN ('pending', 'retrying') AND schedule_at IS NOT NULL"
+        "SELECT account_ref,status,schedule_at,started_at,finished_at,checkpoint_json "
+        "FROM publish_job_targets WHERE status IN "
+        "('pending','retrying','running','awaiting_delivery','needs_review','succeeded')"
     ):
-        booked.setdefault(identities[row["account_ref"]], []).append(row["schedule_at"])
+        moment = row["schedule_at"]
+        if row["status"] == "succeeded":
+            checkpoint = job_runtime._decode_checkpoint(row["checkpoint_json"])
+            receipt = checkpoint.get("provider_receipt") or {}
+            moment = receipt.get("delivered_at") if isinstance(receipt, dict) else None
+            moment = moment or row["finished_at"] or row["started_at"] or row["schedule_at"]
+        elif not moment:
+            moment = row["started_at"] or job_runtime._now_iso()
+        if moment:
+            try:
+                canonical = job_runtime._utc_datetime(moment).isoformat(timespec="seconds")
+            except ValueError:
+                raise RecoveryRefused("unreadable destination booking history") from None
+            booked.setdefault(identities[row["account_ref"]], []).append(canonical)
     return booked
+
+
+def effective_daily_cap(requested: int | None = None) -> int:
+    """Recovery may tighten the configured pacing, never raise or disable it."""
+    configured = publish_orchestrator.MAX_POSTS_PER_ACCOUNT_PER_DAY
+    _integer(configured, "configured daily cap", minimum=0)
+    if requested is None:
+        return configured
+    _integer(requested, "per_day_cap", minimum=0)
+    if configured == 0:
+        return requested
+    return min(configured, requested) if requested else configured
 
 
 def _recorded_id(value) -> int | None:
@@ -277,9 +304,9 @@ def _campaign_context(conn, target, job, payload) -> dict:
     campaign = conn.execute("SELECT * FROM campaigns WHERE id=?", (post["campaign_id"],)).fetchone()
     if campaign is None:
         raise RecoveryRefused("missing campaign intent")
-    if (post["status"] in {"cancelled", "succeeded", "published"}
-            or campaign["status"] in {"cancelled", "succeeded", "published", "preparing"}):
-        raise RecoveryRefused("terminal or preparing campaign intent")
+    if (post["status"] in {"cancelled", "succeeded", "published", "draft", "needs_review"}
+            or campaign["status"] in {"cancelled", "succeeded", "published", "preparing", "draft", "needs_review"}):
+        raise RecoveryRefused("terminal, preparing or unapproved campaign intent")
     if (_platform(post["platform"]) != _platform(job["platform"])
             or campaign["profile_id"] != job["profile_id"]
             or post["workspace_id"] != job["workspace_id"]
@@ -397,8 +424,7 @@ def plan_recovery(
     _integer(lookback_days, "lookback_days")
     if limit is not None:
         _integer(limit, "limit")
-    if per_day_cap is not None:
-        _integer(per_day_cap, "per_day_cap", minimum=0)
+    per_day_cap = effective_daily_cap(per_day_cap)
     selected = _ids(target_ids, "target_ids")
     resolved = _ids(resolved_target_ids, "resolved_target_ids")
     explicit = target_ids is not None or resolved_target_ids is not None
@@ -508,6 +534,8 @@ def _validate_plan(plan: list[dict]) -> None:
 
 
 def _revalidate(conn, item: dict) -> str:
+    if item["per_day_cap"] != effective_daily_cap(item["per_day_cap"]):
+        raise RecoveryRefused("recovery would raise the configured pacing cap")
     state = _snapshot(conn, item["target_id"], resolved=item["resolved_permanent"])
     if (state["target"]["job_id"] != item["job_id"]
             or state["target"]["account_ref"] != item["account_ref"]
@@ -561,8 +589,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target-id", type=int, action="append", default=None)
     parser.add_argument("--resolved-target-id", type=int, action="append", default=None,
                         help="select a target whose historical permanent failure has been resolved")
-    parser.add_argument("--per-day-cap", type=int, default=4,
-                        help="posts allowed per account/day (default 4; 0 = unlimited)")
+    parser.add_argument("--per-day-cap", type=int, default=None,
+                        help="optional tighter cap; default preserves configured pacing")
     parser.add_argument("--apply", action="store_true", help="write the plan (default: dry-run)")
     args = parser.parse_args(argv)
     db_path = Path(args.db_path)
