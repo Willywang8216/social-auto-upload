@@ -44,6 +44,17 @@ missing/invalid routes block rather than silently fall back to a different
 account. Teaching uses its separate workspace and API-key configuration.
 `SAU_SOCIAMONIALS_FALLBACK` must remain enabled for this route to execute.
 
+Authorization requires the current exact workspace permission map and a fresh
+`GET /api/v1/workspaces/{workspaceId}/social-profiles` response containing exactly
+one matching network/profile reference, `connected=true`, literal
+`agent_can_publish_to=true`, no unavailable reason, and the required capabilities.
+The identity endpoint's assignment summary may be empty or absent; this is never
+a wildcard grant and cannot substitute for the per-profile decision. See the
+[provider reference](https://www.sociamonials.com/developers.php). Standalone text
+requires the `text` capability; an image/video caption uses its media capability
+and must still preserve approved text and pass the provider's strict intent and
+caption validation.
+
 A saved receipt continues with its original provider, regardless of a later
 configuration change. A Sociamonials receipt does not require a valid direct
 Threads/Meta token to be polled. A direct Meta receipt is not permission to create

@@ -486,13 +486,18 @@ def _identity(http: _HTTP, headers: Mapping[str, str], ws: str, *, timeout: floa
 def _required_capabilities(payload: Mapping[str, Any] | None = None, *, intent: Mapping[str, Any] | None = None) -> set[str]:
     source = payload or {}
     required = set()
-    if (intent or {}).get("message") or compose_message(source, network="fb"):
-        required.add("text")
     media = collect_media(source)
-    for item in media:
-        if item["kind"] != "thumbnail":
-            required.add(item["kind"])
-    if len([item for item in media if item["kind"] == "image"]) > 1:
+    main = [item for item in media if item["kind"] != "thumbnail"]
+    # "text" is a standalone-post capability, not a media-caption grant.
+    # The API documents message/caption fields on image/video posts even for
+    # networks (including TikTok) whose static capabilities omit "text".
+    # Caption length and original options are still checked by strict intent
+    # validation; explicit caller-supplied capabilities are never removed.
+    if not main and ((intent or {}).get("message") or compose_message(source, network="fb")):
+        required.add("text")
+    for item in main:
+        required.add(item["kind"])
+    if len([item for item in main if item["kind"] == "image"]) > 1:
         required.add("carousel")
     if ((intent or {}).get("top_fields") or {}).get("first_comment") or _first_comment(source):
         required.add("first_comment")
@@ -510,10 +515,9 @@ def _verify_route(http: _HTTP, headers: Mapping[str, str], mapping: Mapping[str,
     if _workspace_int(ws) is None:
         raise SociamonialsNotConfigured("Backup requires an explicit usable workspace id")
     identity = _identity(http, headers, ws, timeout=timeout, permissions=("posts.read", "posts.create", "profiles.read"))
-    assigned = identity.get("social_profiles")
-    if (not isinstance(assigned, list) or len([row for row in assigned if isinstance(row, Mapping)
-                                              and row.get("network") == network and row.get("profile_ref") == refs[0]]) != 1):
-        raise SociamonialsNotConfigured("Credential has no exact network/profile-ref grant in this workspace")
+    # /me proves workspace permissions; its assignment summary may be empty.
+    # Only the fresh exact profile below can prove destination authorization.
+    # An empty/missing summary is NEVER interpreted as a wildcard grant.
     response = http.get(f"{BASE_URL}/api/v1/workspaces/{ws}/social-profiles", headers=dict(headers),
                         timeout=timeout, context="profile grants")
     _raise_for_status(response, context="profile grants", side_effects=False)

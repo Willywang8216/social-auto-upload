@@ -67,6 +67,79 @@ def test_missing_exact_workspace_permission_blocks_all_writes(permission):
     assert_no_publication(session)
 
 
+class SparseIdentitySession(ContractSession):
+    """The live identity summary can omit assignments; profile flags decide."""
+    summary = []
+
+    def _wrap(self, body):
+        if "agent" in body and "workspaces" in body:
+            for entry in body["workspaces"].values():
+                if self.summary == "omitted":
+                    entry.pop("social_profiles", None)
+                else:
+                    entry["social_profiles"] = copy.deepcopy(self.summary)
+        return super()._wrap(body)
+
+
+@pytest.mark.parametrize("summary", [[], None, {}, "omitted"])
+def test_sparse_identity_summary_needs_fresh_exact_profile_authorization(summary):
+    session = SparseIdentitySession(profiles=[profile()])
+    session.summary = summary
+    result = sm.verify_destination(platform="twitter", account=Account(),
+        payload={"message": "Approved original"}, session=session, api_key="fixture-only")
+    assert result["verified"] is True and result["mapping"]["profile_refs"] == ["14100"]
+    assert len(session.calls_for("GET", "/social-profiles")) == 1
+    assert_no_publication(session)
+
+
+@pytest.mark.parametrize("rows", [[], [profile(ref="other")], [profile(agent_can_publish_to=False)],
+    [profile(connected=False)], [profile(), profile()]])
+def test_empty_identity_summary_is_never_a_wildcard_grant(rows):
+    session = SparseIdentitySession(profiles=rows)
+    with pytest.raises(sm.SociamonialsNotConfigured):
+        publish(session)
+    assert len(session.calls_for("GET", "/social-profiles")) == 1
+    assert_no_publication(session)
+
+
+@pytest.mark.parametrize("permission", ["posts.create", "posts.read", "profiles.read"])
+def test_exact_profile_true_cannot_override_missing_workspace_permission(permission):
+    session = SparseIdentitySession(profiles=[profile()])
+    session.permissions.pop(permission)
+    with pytest.raises(sm.SociamonialsNotConfigured):
+        publish(session)
+    assert not session.calls_for("GET", "/social-profiles")
+    assert_no_publication(session)
+
+
+@pytest.mark.parametrize("platform,account_id,network,kind", [
+    ("tiktok", 109, "tiktok", "video"), ("instagram", 72, "in", "image")])
+def test_media_caption_does_not_require_standalone_text_capability(video, image, platform, account_id, network, kind):
+    source = video if kind == "video" else image
+    payload = media_payload(source, message="Approved caption")
+    session = SparseIdentitySession(profiles=[profile(network,
+        sm.SAU_ACCOUNT_TO_SOCIAMONIALS[account_id]["profile_refs"][0], capabilities=[kind, "title"])])
+    result = sm.verify_destination(platform=platform, account=Account(account_id, platform),
+        payload=payload, session=session, api_key="fixture-only")
+    assert result["verified"] is True and payload["draft"]["message"] == "Approved caption"
+    assert_no_publication(session)
+
+
+def test_media_only_profile_still_cannot_authorize_a_standalone_text_post():
+    session = SparseIdentitySession(profiles=[profile(capabilities=["video"])])
+    with pytest.raises(sm.SociamonialsNotConfigured, match="capabilities"):
+        publish(session)
+    assert_no_publication(session)
+
+
+def test_caption_support_does_not_remove_explicit_required_capabilities(video):
+    session = SparseIdentitySession(profiles=[profile(capabilities=["video"])])
+    with pytest.raises(sm.SociamonialsNotConfigured, match="capabilities"):
+        sm.verify_destination(platform="twitter", account=Account(), payload=media_payload(video),
+            required_capabilities=["text"], session=session, api_key="fixture-only")
+    assert_no_publication(session)
+
+
 def test_current_explicit_facebook_alias_is_verified_without_changing_numeric_maps():
     mapped = {"sociamonials": {"network": "fb", "profile_refs": ["30186|255814"]}}
     session = ContractSession(profiles=[profile("fb", "30186|255814")])
