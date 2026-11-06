@@ -1170,6 +1170,23 @@ class PublishWorker:
             if self._transition(target, transition, message):
                 self._alert_publish_failure(target, message)
             return
+        if isinstance(exc, delivery.ProviderConfirmedFailure):
+            receipt = checkpoint.get("provider_receipt") or {}
+            proof = exc.details
+            matches = (isinstance(receipt, dict) and receipt.get("provider") == proof["provider"]
+                       and receipt.get("id") == proof["receiptId"] and receipt.get("status") == "failed"
+                       and receipt.get("terminal_failure") is True)
+            if matches:
+                delivery.route_outcome(payload, route, "failed", message)
+                if route == "native":
+                    delivery.route_outcome(payload, "sociamonials", "not_safe_or_not_applicable",
+                                           "Retained native receipt requires explicit reconciliation; no second post")
+                if self._transition(target, jobs.mark_target_failed, message):
+                    self._alert_publish_failure(target, message)
+            elif self._transition(target, jobs.mark_target_needs_review,
+                                  "Terminal provider failure does not match its stored receipt; reconcile before retrying"):
+                self._alert_publish_failure(target, message)
+            return
         definite = _fc.proven_non_delivery(exc)
         recorded_receipt = (checkpoint.get("provider_receipt") or checkpoint.get("completed_operations")
                             or checkpoint.get("provider_operations") or checkpoint.get("telegramCompletedByDelivery"))
@@ -2941,20 +2958,30 @@ async def _publish_prepared_youtube(
 async def _publish_prepared_tiktok(platform, payload, target, *, account, account_file):
     if account is None:
         raise ValueError("Prepared TikTok publish requires a structured account")
+    from myUtils import tiktok_delivery
     receipt = delivery.receipt_for(payload, "tiktok")
     if receipt is None:
         result = await asyncio.to_thread(prepared_publishers.publish_tiktok_sync, account, payload)
         _persist_rotated_config(account, result.get("updated_config"), payload=payload)
-        publish_id = str(((result.get("publish") or {}).get("data") or {}).get("publish_id") or "")
-        if not publish_id:
-            raise delivery.DeliveryUnknown("TikTok returned no publish receipt")
+        publish_id = ((result.get("publish") or {}).get("data") or {}).get("publish_id")
+        if not isinstance(publish_id, str) or not publish_id.strip() or len(publish_id) > 64:
+            raise delivery.DeliveryUnknown("TikTok returned no usable publish receipt")
         if delivery.receipt_for(payload, "tiktok") is None:
-            delivery.accepted(payload, provider="tiktok", receipt_id=publish_id)
+            try:
+                intent = tiktok_delivery.request_intent(dict(account.config or {}), payload)
+            except ValueError as exc:
+                raise delivery.DeliveryUnknown(str(exc)) from exc
+            delivery.accepted(payload, provider="tiktok", receipt_id=publish_id, **intent)
+        receipt = delivery.receipt_for(payload, "tiktok")
         access_token = result.get("access_token")
     else:
         publish_id = receipt["id"]
-        access_token, updated = await asyncio.to_thread(
-            prepared_publishers._ensure_tiktok_access_token, dict(account.config or {}))
+        try:
+            access_token, updated = await asyncio.to_thread(
+                prepared_publishers._ensure_tiktok_access_token, dict(account.config or {}))
+        except prepared_publishers.PreparedPublishError as exc:
+            raise delivery.DeliveryUnknown(
+                "TikTok's stored receipt needs a working credential; reconnect and poll it, do not resubmit") from exc
         _persist_rotated_config(account, updated, payload=payload)
     if not access_token:
         raise delivery.DeliveryUnknown("TikTok receipt exists but its credential is unavailable")
@@ -2964,25 +2991,52 @@ async def _publish_prepared_tiktok(platform, payload, target, *, account, accoun
         raise
     except prepared_publishers.PreparedPublishError as exc:
         if not exc.retryable:
-            raise
+            raise delivery.DeliveryUnknown(
+                "TikTok rejected a stored-receipt status check; fix its credential and reconcile without reposting") from exc
         delivery.pending_or_unknown(payload, "TikTok receipt status is temporarily unavailable",
                                     retry_after=_retry_after_seconds(exc))
     except Exception:
         delivery.pending_or_unknown(payload, "TikTok receipt status is temporarily unavailable")
     data = response.get("data") or {}
-    status = str(data.get("status") or "processing").lower()
-    reason = str(data.get("fail_reason") or "")
+    try:
+        intent = tiktok_delivery.receipt_intent(receipt or {}, payload)
+        view = tiktok_delivery.delivery_view(data, intent)
+    except ValueError as exc:
+        raise delivery.DeliveryUnknown(str(exc)) from exc
+    status = view["provider_status"]
+    ids = view["public_post_ids"]
+    reason = _scrub_secrets(str(data.get("fail_reason") or ""))
+    metadata = {"provider_status": status, "public_post_ids": ids, "terminal_failure": view["state"] == "failed"}
+    if view.get("publication_visibility"):
+        metadata["publication_visibility"] = view["publication_visibility"]
+    delivery.accepted(payload, provider="tiktok", receipt_id=publish_id,
+                      status="awaiting_public_moderation" if status == "publish_complete" and view["state"] == "pending" else view["state"],
+                      **metadata)
+    from urllib.parse import urlparse
+    platform_url = data.get("platform_url")
+    try:
+        parsed = urlparse(platform_url) if isinstance(platform_url, str) else None
+        if (parsed is None or parsed.scheme != "https" or parsed.hostname not in {"www.tiktok.com", "tiktok.com"}
+                or parsed.username or parsed.password):
+            platform_url = None
+    except ValueError:
+        platform_url = None
+    username = (receipt or {}).get("creator_username")
+    if platform_url is None and ids and isinstance(username, str) and re.fullmatch(r"[A-Za-z0-9_.]{1,32}", username):
+        platform_url = f"https://www.tiktok.com/@{username}/video/{ids[0]}"
     db_path = Path(payload["_db_path"]) if payload.get("_db_path") else None
     jobs.upsert_tiktok_publish_status(publish_id, job_id=str(target.job_id), account_id=str(account.id),
         status=status, fail_reason=reason or None,
-        post_id=str(data.get("publicaly_available_post_id") or data.get("post_id") or "") or None,
-        platform_url=data.get("platform_url"), db_path=db_path)
-    if status == "publish_complete":
+        post_id=ids[0] if ids else None, platform_url=platform_url, db_path=db_path)
+    if view["state"] == "delivered":
         delivery.confirmed(payload, provider="tiktok", receipt_id=publish_id)
         return
-    if status == "failed":
-        raise prepared_publishers.PreparedPublishError(f"TikTok publish failed: {reason}", retryable=False)
-    delivery.pending_or_unknown(payload, "TikTok is still processing the stored publish receipt")
+    if view["state"] == "failed":
+        raise delivery.ProviderConfirmedFailure("tiktok", publish_id,
+                                                f"TikTok publish failed: {reason or 'provider rejected post'}")
+    if view["state"] == "needs_review":
+        raise delivery.DeliveryUnknown(view["reason"])
+    delivery.pending_or_unknown(payload, view["reason"])
 
 
 async def _publish_prepared_facebook(

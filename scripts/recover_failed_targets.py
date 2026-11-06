@@ -37,8 +37,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from myUtils import jobs as job_runtime  # noqa: E402
 from myUtils import profiles, publish_orchestrator, sociamonials_fallback  # noqa: E402
-from myUtils.account_identity import canonical_account_key, structured_account_id  # noqa: E402
-from myUtils.sqlite_utils import connect as sqlite_connect  # noqa: E402
+from myUtils.account_identity import structured_account_id  # noqa: E402
+from myUtils import destination_pacing  # noqa: E402
 
 DB_PATH = Path(os.environ.get("SAU_DB_PATH") or (REPO_ROOT / "db" / "database.db"))
 
@@ -133,109 +133,33 @@ def _route_policy(platform: str, *, account=None, settings=None) -> dict:
 
 
 def _connect(db_path: Path):
-    path = Path(db_path)
-    if not path.is_file():
-        raise FileNotFoundError("Recovery database must be an existing regular file")
-    # mode=ro prevents creation even if the file disappears after is_file(). All
-    # planning reads (including bookings) share this one consistent snapshot.
-    conn = sqlite_connect(path.resolve().as_uri() + "?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only = ON")
-    return conn
+    # Planning reads (including bookings) keep the caller's read-only snapshot.
+    return destination_pacing.connect_readonly(db_path)
 
 
 def _account_refs(conn) -> dict[str, list[str]]:
-    """Union native identities and managed destinations, including old aliases."""
-    parents: dict[str, str] = {}
-    native: dict[str, str] = {}
-
-    def root(key):
-        parents.setdefault(key, key)
-        if parents[key] != key:
-            parents[key] = root(parents[key])
-        return parents[key]
-
-    def join(left, right):
-        left, right = root(left), root(right)
-        parents[max(left, right)] = min(left, right)
-
-    for target in conn.execute("SELECT DISTINCT account_ref FROM publish_job_targets"):
-        ref = target["account_ref"]
-        native[ref] = canonical_account_key(conn, ref)
-        root(native[ref])
-        identifier = structured_account_id(ref)
-        if identifier is None:
-            continue
-        row = conn.execute(
-            "SELECT a.id,a.platform,a.config_json,p.settings_json FROM accounts a "
-            "LEFT JOIN profiles p ON p.id=a.profile_id WHERE a.id=?", (identifier,),
-        ).fetchone()
-        if row is None:
-            continue
-        try:
-            config = _object(row["config_json"], "account history")
-            settings = _object(row["settings_json"], "profile history")
-            mapping = sociamonials_fallback.resolve_mapping(
-                identifier, account={"id": identifier, "config": config},
-                platform=_platform(row["platform"]), settings=settings,
-            )
-            if not mapping or mapping["network"] != sociamonials_fallback._platform_network(row["platform"]):
-                continue
-            workspace = str(int(mapping.get("workspace_id") or sociamonials_fallback.get_workspace_id()))
-        except (RecoveryRefused, TypeError, ValueError):
-            # Native identity still protects this history. An unreadable current
-            # target configuration is rejected by _snapshot, never guessed here.
-            continue
-        for profile_ref in mapping["profile_refs"]:
-            destination = json.dumps((workspace, mapping["network"], profile_ref), separators=(",", ":"))
-            join(native[ref], "managed-" + hashlib.sha256(destination.encode()).hexdigest())
-    aliases: dict[str, list[str]] = {}
-    for ref, key in native.items():
-        aliases.setdefault(root(key), []).append(ref)
-    return aliases
+    """Compatibility wrapper: include current rows even without target history."""
+    return destination_pacing.account_refs(conn)
 
 
 def _identity_for_ref(aliases: dict[str, list[str]], account_ref: str) -> str:
-    return next(key for key, refs in aliases.items() if account_ref in refs)
+    return destination_pacing.identity_for_ref(aliases, account_ref)
 
 
-def _booked_slots(conn, aliases: dict[str, list[str]]) -> dict[str, list[str]]:
-    """Bookings AND delivered/unresolved history share one destination's cap."""
-    identities = {ref: key for key, refs in aliases.items() for ref in refs}
-    booked: dict[str, list[str]] = {}
-    for row in conn.execute(
-        "SELECT account_ref,status,schedule_at,started_at,finished_at,checkpoint_json "
-        "FROM publish_job_targets WHERE status IN "
-        "('pending','retrying','running','awaiting_delivery','needs_review','succeeded')"
-    ):
-        moment = row["schedule_at"]
-        if row["status"] == "succeeded":
-            checkpoint = job_runtime._decode_checkpoint(row["checkpoint_json"])
-            receipt = checkpoint.get("provider_receipt") or {}
-            moment = receipt.get("delivered_at") if isinstance(receipt, dict) else None
-            moment = moment or row["finished_at"] or row["started_at"] or row["schedule_at"]
-        elif not moment:
-            moment = row["started_at"] or job_runtime._now_iso()
-        if moment:
-            try:
-                canonical = job_runtime._utc_datetime(moment).isoformat(timespec="seconds")
-            except ValueError:
-                raise RecoveryRefused("unreadable destination booking history") from None
-            booked.setdefault(identities[row["account_ref"]], []).append(canonical)
-    return booked
+def _booked_slots(
+    conn, aliases: dict[str, list[str]], *, now: datetime | str | None = None,
+) -> dict[str, list[str]]:
+    try:
+        return destination_pacing.booked_slots(conn, aliases, now=now if now is not None else job_runtime._now_iso())
+    except destination_pacing.PacingRefused as exc:
+        raise RecoveryRefused(str(exc)) from None
 
 
 def effective_daily_cap(requested: int | None = None) -> int:
     """Recovery may tighten the configured pacing, never raise or disable it."""
-    configured = publish_orchestrator.MAX_POSTS_PER_ACCOUNT_PER_DAY
-    _integer(configured, "configured daily cap", minimum=0)
-    if requested is None:
-        return configured
-    _integer(requested, "per_day_cap", minimum=0)
-    if configured == 0:
-        return requested
-    return min(configured, requested) if requested else configured
-
+    return destination_pacing.effective_daily_cap(
+        publish_orchestrator.MAX_POSTS_PER_ACCOUNT_PER_DAY, requested,
+    )
 
 def _recorded_id(value) -> int | None:
     if isinstance(value, str) and value.isascii() and value.isdecimal() and len(value) <= 19:
@@ -463,7 +387,7 @@ def plan_recovery(
             ).fetchall()
         rows = sorted(rows, key=lambda row: (row["finished_at"] or "", row["id"]))
         aliases = _account_refs(conn)
-        booked = _booked_slots(conn, aliases)
+        booked = _booked_slots(conn, aliases, now=now)
         reserved: dict[str, set[tuple]] = {}
         for row in rows:
             if platform is not None and _platform(row["platform"]) != platform:
@@ -566,10 +490,11 @@ def apply_recovery(plan: list[dict], *, db_path: Path = DB_PATH) -> dict:
         if "_skipped" in item:
             continue
         try:
-            job_runtime.reschedule_failed_target(
-                item["target_id"], item["slot"], expected_fingerprint=item["expected_fingerprint"],
-                revalidate=lambda conn: _revalidate(conn, item), db_path=db_path,
-            )
+            with publish_orchestrator.slot_reservation_lock(db_path):
+                job_runtime.reschedule_failed_target(
+                    item["target_id"], item["slot"], expected_fingerprint=item["expected_fingerprint"],
+                    revalidate=lambda conn: _revalidate(conn, item), db_path=db_path,
+                )
             applied += 1
         except Exception as exc:  # noqa: BLE001 - report safely, never abort the batch
             # Never echo arbitrary provider errors, database values or credentials.

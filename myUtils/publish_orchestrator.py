@@ -14,7 +14,7 @@ The interesting business logic this module owns is:
 * the *single-media-only platform* split: when a platform such as TikTok or
   Tencent only accepts one media item per post and the user uploaded
   several, we create N campaign posts pinned to one media file each and
-  stagger their ``schedule_at`` 5 minutes apart;
+  stagger them through the destination's minimum gap and daily budget;
 * deterministic base-time scheduling so a deferred "Publish at" timestamp
   applies uniformly across every target the user just queued.
 """
@@ -26,7 +26,8 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
+from functools import wraps
 from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -39,6 +40,8 @@ from myUtils import jobs as job_runtime
 from myUtils import media_groups as media_group_store
 from myUtils import platform_capabilities
 from myUtils import media_compliance, image_compliance, platform_limits, publish_media_guard
+from myUtils import destination_pacing
+from myUtils.account_identity import canonical_account_keys, external_account_identity, structured_account_id
 
 _logger = logging.getLogger(__name__)
 from myUtils import profiles as profile_registry
@@ -60,116 +63,79 @@ MAX_POSTS_PER_ACCOUNT_PER_DAY = int(
 )
 
 
-# Provider-side identity behind an account row. The operator deliberately shares
-# ONE SFW set across profiles ("they are the same as NW since it's all SFW"), so
-# two account rows (profile 1 and profile 3) point at the same Facebook page /
-# Instagram user / Threads user. The queue guard keys on the internal account id,
-# which let the same media be queued through both rows and posted twice to one
-# page — 10+ media groups were in that state on 2026-10-28.
-_META_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
-    "facebook": ("pageId",),
-    "instagram": ("igUserId",),
-    "threads": ("threadUserId", "userId"),
-}
+def _serialize_slot_allocation(function):
+    """Use the same cross-process reservation for sync and async finalizers."""
+    @wraps(function)
+    def reserved(*args, **kwargs):
+        with slot_reservation_lock(kwargs["db_path"]):
+            return function(*args, **kwargs)
+    return reserved
 
 
 def _external_account_identity(account) -> tuple[str, str] | None:
-    """``(platform, provider_id)`` for a Meta account row, else ``None``."""
-    platform = str(getattr(account, "platform", "") or "").strip().lower()
-    fields = _META_IDENTITY_FIELDS.get(platform)
-    if not fields:
-        return None
-    config = getattr(account, "config", None) or {}
-    for field in fields:
-        value = str(config.get(field) or "").strip()
-        if value:
-            return platform, value
-    return None
+    """Compatibility wrapper for every supported stable native provider ID."""
+    return external_account_identity(account)
 
 
 def _account_ids_with_identity(platform: str, value: str, *, db_path: Path) -> list[int]:
-    """Every enabled account row whose Meta identity is ``(platform, value)``."""
-    fields = _META_IDENTITY_FIELDS.get(platform, ())
-    ids: list[int] = []
+    """All rows with the exact stable native ID, without decrypting credentials."""
+    platform = "twitter" if platform.strip().lower() == "x" else platform.strip().lower()
     try:
-        with _db_connection(db_path) as conn:
-            for field in fields:  # fixed whitelist, never caller input
-                rows = conn.execute(
-                    f"SELECT id FROM accounts WHERE platform = ? "
-                    f"AND json_extract(config_json, '$.{field}') = ?",
-                    (platform, value),
-                ).fetchall()
-                ids.extend(int(row[0]) for row in rows)
-    except Exception:  # noqa: BLE001 - a lookup miss must never block a publish
+        with destination_pacing.connect_readonly(db_path) as conn:
+            return [row["id"] for row in conn.execute("SELECT id,platform,config_json FROM accounts ORDER BY id")
+                    if external_account_identity(row) == (platform, str(value).strip())]
+    except (sqlite3.Error, FileNotFoundError):
         return []
-    return sorted(set(ids))
 
 
-def _shared_identity_already_queued(account, media_group_id: int, *, db_path: Path) -> bool:
-    """True when the same provider account is already queued via another profile."""
-    identity = _external_account_identity(account)
-    if identity is None:
-        return False
-    platform, value = identity
-    for other_id in _account_ids_with_identity(platform, value, db_path=db_path):
-        if other_id == int(getattr(account, "id", -1)):
-            continue
-        if _already_queued_for_media(other_id, media_group_id, db_path=db_path):
-            return True
-    return False
+def _shared_identity_already_queued(
+    account, media_group_id: int, *, db_path: Path, account_keys: dict[str, str] | None = None,
+) -> bool:
+    """Compatibility wrapper: queued/evidenced media through another alias row."""
+    return _already_queued_for_media(
+        account.id, media_group_id, db_path=db_path, account_keys=account_keys, _other_rows_only=True,
+    )
 
 
 def _already_queued_for_media(
-    account_id: int, media_group_id: int, *, db_path: Path
+    account_id: int, media_group_id: int, *, db_path: Path,
+    account_keys: dict[str, str] | None = None, _other_rows_only: bool = False,
 ) -> bool:
-    """True when this account already has a live target for the same media.
+    """Same whole original media group/file set at this canonical destination.
 
-    ``publish_job_targets`` is UNIQUE on ``(job_id, account_ref, file_ref)``,
-    which stops a duplicate *within* one job but not the same media arriving
-    again under a new ``job_id``. That gap let the same clip be queued to the
-    same Telegram account 4-5 times, turning 356 distinct files into 662
-    targets and pushing one account's horizon to 2027-04.
-
-    Identity is matched on **two** keys:
-
-    1. the media *group* - an exact resubmit of one submission;
-    2. the underlying **file-record set** - because a retried submit builds a
-       NEW media group around the SAME files, so a group-only check never
-       matched. That blind spot is measurable: file_record 1142 appeared in 6
-       distinct media groups and produced 103 duplicate pending jobs for one
-       media+platform. A retrying client (the 499 loop) is exactly how that
-       happened.
-
-    The file match is a *set* comparison, not "shares any one file". Sharing a
-    single asset is common and legitimate (a multi-media post that reuses one
-    clip, or a single-media split of a larger group), so requiring the whole
-    group's file set to be identical is what distinguishes a retry from a
-    genuine new submission. Two intentional posts of the same asset are still
-    allowed when they use different accounts, and terminal states
-    (succeeded/failed/cancelled) do not count, so a genuine re-publish after a
-    failure still works.
+    Check once BEFORE an account's complete part set is enqueued, never between
+    parts. Equality is bidirectional on the ORIGINAL group's file records, not
+    partial overlap on individual prepared parts or shared thumbnails. Live,
+    review and persisted submission/delivery evidence all prevent a duplicate;
+    terminal failures without evidence remain eligible for deliberate re-publish.
     """
+    account_ref = f"account:{int(account_id)}"
     try:
-        with _db_connection(db_path) as conn:
-            row = conn.execute(
-                """
+        with destination_pacing.connect_readonly(db_path) as conn:
+            conn.execute("BEGIN")
+            keys = account_keys if account_keys is not None else canonical_account_keys(conn, (account_ref,))
+            identity = keys.get(account_ref)
+            refs = [ref for ref, key in keys.items() if key == identity] if identity else [account_ref]
+            if _other_rows_only:
+                refs = [ref for ref in refs if ref != account_ref]
+            if not refs:
+                return False
+            params = {f"ref{index}": ref for index, ref in enumerate(refs)}
+            params["media_group_id"] = int(media_group_id)
+            placeholders = ",".join(f":ref{index}" for index in range(len(refs)))
+            rows = conn.execute(
+                f"""
                 WITH candidate AS (
-                    SELECT DISTINCT file_record_id
-                    FROM media_group_items
+                    SELECT DISTINCT file_record_id FROM media_group_items
                     WHERE media_group_id = :media_group_id
                 )
-                SELECT 1
+                SELECT t.status,t.checkpoint_json,t.delivery_state
                 FROM publish_job_targets t
                 JOIN campaign_posts cp ON ('campaign_post:' || cp.id) = t.file_ref
                 JOIN campaigns c ON c.id = cp.campaign_id
-                WHERE t.account_ref = :account_ref
-                  AND t.status IN ('pending', 'retrying', 'running')
+                WHERE t.account_ref IN ({placeholders})
                   AND (
-                        -- (1) exact resubmit of the same submission
                         c.media_group_id = :media_group_id
-                        -- (2) a retry, which rebuilds the group around the
-                        -- same files: require the *whole* file-record set to
-                        -- match (both directions), never just one shared file.
                         OR (
                             EXISTS (SELECT 1 FROM candidate)
                             AND NOT EXISTS (
@@ -190,21 +156,19 @@ def _already_queued_for_media(
                             )
                         )
                   )
-                LIMIT 1
-                """,
-                {
-                    "account_ref": f"account:{int(account_id)}",
-                    "media_group_id": int(media_group_id),
-                },
-            ).fetchone()
-        return row is not None
-    except Exception:  # noqa: BLE001 - a lookup miss must never block a publish
-        _logger.warning(
-            "duplicate-queue check failed for account=%s media_group=%s",
-            account_id,
-            media_group_id,
-            exc_info=True,
-        )
+                """, params,
+            )
+            for row in rows:
+                if row["status"] in {"pending", "retrying", "running", "awaiting_delivery", "needs_review"}:
+                    return True
+                if job_runtime._recovery_has_submission_evidence(row["checkpoint_json"], row["delivery_state"]):
+                    return True
+        return False
+    except (sqlite3.Error, FileNotFoundError):
+        # Standalone legacy lookups are fail-soft; normal finalizers first require
+        # a trustworthy booking snapshot, which fails closed on missing schema.
+        _logger.warning("duplicate-queue check unavailable for account=%s media_group=%s",
+                        account_id, media_group_id, exc_info=True)
         return False
 
 
@@ -256,10 +220,9 @@ def _operator_timezone() -> tzinfo:
 def _resolve_base_time(schedule: dict | None, *, now_fn=datetime.now) -> datetime | None:
     """Resolve the user-requested base publish time.
 
-    Returns ``None`` when the user asked for an immediate publish so the
-    worker can pick targets up as soon as it sees them. Otherwise returns
-    a timezone-naive UTC datetime so all downstream stagger arithmetic is
-    consistent with what ``publish_job_targets.schedule_at`` expects.
+    Returns ``None`` as the publish-now signal; allocation still applies the
+    destination's budget from the current UTC time. Otherwise returns a
+    timezone-naive UTC datetime, as ``publish_job_targets.schedule_at`` expects.
 
     An offset-aware input is converted to UTC. A *naive* input is taken as the
     operator's local wall clock and converted from ``_operator_timezone()``,
@@ -613,6 +576,7 @@ def _prepared_post_groups(artifacts, platform, media_files, *, supports_multi_me
     return groups
 
 
+@_serialize_slot_allocation
 def submit_publish(
     *,
     profile_ids: list[int],
@@ -671,15 +635,10 @@ def submit_publish(
     queued_jobs: list[dict] = []
     skipped: list[dict] = []
     stagger_offset = 0  # global ordering of targets across profiles
-    # Serialise slot allocation against other submits for the whole pass.
-    # ``_next_free_slot`` reads the bookings loaded here and appends its choice,
-    # and each choice is written out per post, so two submits interleaving in
-    # that gap both saw the same free minute - the live database held nine such
-    # collisions. The lock is held only for this allocation pass, not the whole
-    # submit, and is best-effort (an unavailable lock logs and proceeds).
-    _slot_lock = slot_reservation_lock(db_path)
-    _slot_lock.__enter__()
-    booked_slots = _load_booked_slots(db_path)
+    # All aliases (including rows with no targets yet) share mutable calendars.
+    allocation_time = now_fn().astimezone(timezone.utc).replace(tzinfo=None)
+    account_keys: dict[str, str] = {}
+    booked_slots = _load_booked_slots(db_path, account_keys=account_keys, now=allocation_time)
 
     # Content rating is derived from the filenames — the operator's rule is
     # that only a name starting or ending with "sfw" is SFW, everything else is
@@ -840,9 +799,7 @@ def submit_publish(
                 # accumulated 662 targets for 356 files. Skip (and report) rather
                 # than silently piling on more scheduled sends.
                 if _already_queued_for_media(
-                    account.id, media_group.id, db_path=db_path
-                ) or _shared_identity_already_queued(
-                    account, media_group.id, db_path=db_path
+                    account.id, media_group.id, db_path=db_path, account_keys=account_keys
                 ):
                     skipped.append({
                         "profileId": profile_id,
@@ -851,7 +808,7 @@ def submit_publish(
                         "platform": account.platform,
                         "reason": "this media is already queued for this account "
                                   "(directly, or through another profile's row for "
-                                  "the same provider account)",
+                                  "the same publishing destination)",
                     })
                     continue
                 routing_skip = language_routing_skip_reason(
@@ -943,11 +900,8 @@ def submit_publish(
                 # The complete generation was checked before any post is added.
                 # Every video part uses the same draft/options and the existing
                 # queue, with source order followed by part order.
-                part_base = base_time
-                if len(post_groups) > 1:
-                    # Publish-now split posts still need the allocator's gap and
-                    # daily-cap guard (its legacy None path only adds 5 minutes).
-                    part_base = base_time or now_fn().astimezone(timezone.utc).replace(tzinfo=None)
+                part_base = base_time or allocation_time
+                previous_part_slot = None
                 for part_index, (part_artifacts, file_ids) in enumerate(post_groups, start=1):
                     post = campaign_store.add_campaign_post(
                         campaign.id, platform, account_ids=[account.id], draft=draft,
@@ -964,8 +918,10 @@ def submit_publish(
                     if len(post_groups) > 1:
                         payload["partIndex"] = part_index
                         payload["partCount"] = len(post_groups)
-                    targets = [(f"account:{account.id}", f"campaign_post:{post.id}",
-                                _next_free_slot(account.id, part_base, stagger_offset, booked_slots))]
+                    part_slot = _next_free_slot(account.id, part_base, stagger_offset, booked_slots,
+                                                not_before=previous_part_slot)
+                    targets = [(f"account:{account.id}", f"campaign_post:{post.id}", part_slot)]
+                    previous_part_slot = part_slot
                     stagger_offset += 1
                     queued_jobs.append(_enqueue_post(
                         platform, payload, targets, campaign, post, job_to_payload, db_path))
@@ -990,7 +946,6 @@ def submit_publish(
             db_path=db_path,
         )
 
-    _slot_lock.__exit__(None, None, None)
     return SubmitResult(campaign_ids=campaign_ids, jobs=queued_jobs, skipped=skipped)
 
 
@@ -1003,56 +958,33 @@ def _compute_schedule_at(base_time: datetime | None, offset_index: int) -> datet
 
 @contextmanager
 def slot_reservation_lock(db_path: Path | str):
-    """Serialise slot allocation across processes for this database.
+    """Serialize finalizers and guarded recovery before their queue writes.
 
-    Slot allocation reads every booked ``schedule_at`` for an account and then
-    writes the new target, so two concurrent submits can interleave - both
-    reading the same free minute. The live database carried nine such collisions
-    (account:120 held three pending targets at 2026-10-14T22:00), created by
-    submits minutes apart rather than by a single burst.
-
-    A ``BEGIN IMMEDIATE`` on the main database would lock it for the whole
-    submit, which does far more than allocate. This takes a dedicated advisory
-    lock instead - a tiny separate SQLite file beside the database, held only for
-    the allocation pass. It works across processes and needs no schema change; a
-    UNIQUE index on ``(account_ref, schedule_at)`` would be wrong, because
-    different profiles legitimately share a wall-clock minute.
-
-    Best-effort: if the lock cannot be taken the caller proceeds unlocked rather
-    than failing a publish.
+    The separate SQLite write reservation avoids holding the main database
+    throughout preparation. A timeout or unavailable reservation is a refusal,
+    never permission to allocate against a concurrently stale calendar.
+    Missing databases/parents are not created by this helper.
     """
-    path = Path(str(db_path))
+    path = Path(str(db_path)).resolve()
+    if not path.is_file():
+        raise FileNotFoundError("Slot reservation requires an existing regular database")
     lock_path = path.with_name(path.name + ".slots.lock")
     connection = None
     try:
-        # mkdir is inside the try on purpose: an unwritable or nonexistent parent
-        # raises here (FileNotFoundError/PermissionError/OSError), and the lock is
-        # best-effort - losing it must degrade to unlocked allocation, never to a
-        # failed publish.
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(str(lock_path), timeout=30)
-        # Take the file's write lock now and hold it until rollback, so a second
-        # allocator waits instead of reading the same pre-allocation state.
         connection.execute("BEGIN IMMEDIATE")
-    except (sqlite3.Error, OSError, ValueError) as exc:  # pragma: no cover
-        # OSError covers FileNotFoundError, PermissionError and - importantly -
-        # FileExistsError, which `mkdir(exist_ok=True)` raises when a *file*
-        # already occupies the would-be directory. All of them mean "no lock",
-        # which must degrade to unlocked allocation, never fail the publish.
-        _logger.warning(
-            "could not take the slot reservation lock (%s); allocating unlocked", exc
-        )
+    except (sqlite3.Error, OSError, ValueError) as exc:
         if connection is not None:
             connection.close()
-        connection = None
+        raise destination_pacing.PacingRefused(
+            "Slot reservation unavailable; retry after the current finalizer or recovery finishes"
+        ) from exc
     try:
         yield
     finally:
-        if connection is not None:
-            try:
-                connection.rollback()
-            except sqlite3.Error:
-                pass
+        try:
+            connection.rollback()
+        finally:
             connection.close()
 
 
@@ -1071,33 +1003,30 @@ def _parse_schedule(value: object) -> datetime | None:
     return parsed
 
 
-def _load_booked_slots(db_path: Path | str) -> dict[int, list[str]]:
-    """Account id -> schedule_at strings already queued for that account.
+def _load_booked_slots(
+    db_path: Path | str, *, account_keys: dict[str, str] | None = None,
+    now: datetime | str | None = None,
+) -> dict[int, list[str]]:
+    """Row aliases share one mutable destination calendar from a read-only snapshot.
 
-    Read-only and best-effort: a missing/older schema must never break a
-    publish submit, so any failure falls back to an empty booking map.
+    Include booked, active, unresolved and succeeded history. Missing databases,
+    incompatible schema or corrupt history fail closed, never allocate as empty.
+    ``account_keys`` optionally receives the same union for finalizer guards.
     """
+    with destination_pacing.connect_readonly(db_path) as conn:
+        conn.execute("BEGIN")
+        keys = canonical_account_keys(conn)
+        aliases: dict[str, list[str]] = {}
+        for ref, key in keys.items():
+            aliases.setdefault(key, []).append(ref)
+        grouped = destination_pacing.booked_slots(conn, aliases, now=now)
+    if account_keys is not None:
+        account_keys.update(keys)
     booked: dict[int, list[str]] = {}
-    try:
-        conn = sqlite3.connect(str(db_path))
-        try:
-            rows = conn.execute(
-                "SELECT account_ref, schedule_at FROM publish_job_targets "
-                "WHERE status IN ('pending', 'retrying') "
-                "AND schedule_at IS NOT NULL AND account_ref LIKE 'account:%'"
-            ).fetchall()
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return booked
-    for account_ref, schedule_at in rows:
-        try:
-            account_id = int(str(account_ref).split(":", 1)[1])
-        except (IndexError, ValueError):
-            continue
-        booked.setdefault(account_id, []).append(str(schedule_at))
-    for times in booked.values():
-        times.sort()
+    for ref, key in keys.items():
+        identifier = structured_account_id(ref)
+        if identifier is not None:
+            booked[identifier] = grouped.setdefault(key, [])
     return booked
 
 
@@ -1109,45 +1038,21 @@ def _next_free_slot(
     *,
     min_gap_minutes: int | None = None,
     max_per_day: int | None = None,
-) -> datetime | None:
-    """A collision-free schedule slot for one target of ``account_id``.
+    now_fn: Callable | None = None,
+    not_before: datetime | None = None,
+) -> datetime:
+    """Safe UTC slot for scheduled AND publish-now work at this destination.
 
-    ``base_time is None`` (publish-now) keeps the historical behaviour: the
-    first target is immediate, later ones are nudged by the stagger so a
-    single-media fan-out does not fire all at once. A scheduled submit is
-    walked forward until it clears every existing booking for the account.
-    ``min_gap_minutes`` / ``max_per_day`` override the module defaults (used
-    by the recovery tool, which admits a few extra posts a day).
+    Requests may only tighten the configured daily cap/gap. The daily budget
+    uses the operator timezone; corrupt calendars or an exhausted finite horizon
+    refuse allocation. The existing row-ID interface retains shared alias lists.
     """
-    candidate = _compute_schedule_at(base_time, offset_index)
-    if candidate is None or base_time is None:
-        return candidate
-
-    gap = timedelta(
-        minutes=max(1, min_gap_minutes if min_gap_minutes is not None else MIN_GAP_MINUTES)
+    return destination_pacing.allocate_slot(
+        booked.setdefault(int(account_id), []), base_time, offset_index,
+        configured_gap=MIN_GAP_MINUTES, configured_cap=MAX_POSTS_PER_ACCOUNT_PER_DAY,
+        requested_gap=min_gap_minutes, requested_cap=max_per_day, stagger_minutes=STAGGER_MINUTES,
+        operator_timezone=_operator_timezone(), now_fn=now_fn, not_before=not_before,
     )
-    cap = max(
-        0,
-        max_per_day if max_per_day is not None else MAX_POSTS_PER_ACCOUNT_PER_DAY,
-    )
-    taken = booked.setdefault(int(account_id), [])
-    slot_time = candidate.time()  # keep the intended wall-clock slot when rolling a day
-    while True:
-        existing_times = [t for t in (_parse_schedule(v) for v in taken) if t is not None]
-        same_day = sum(1 for t in existing_times if t.date() == candidate.date())
-        conflict = any(
-            abs((t - candidate).total_seconds()) < gap.total_seconds()
-            for t in existing_times
-        )
-        if not conflict and not (cap and same_day >= cap):
-            break
-        if cap and same_day >= cap:
-            # The day is full: roll to the same wall-clock slot tomorrow.
-            candidate = datetime.combine(candidate.date() + timedelta(days=1), slot_time)
-        else:
-            candidate = candidate + gap
-    taken.append(candidate.isoformat(timespec="seconds"))
-    return candidate
 
 
 def _build_payload(

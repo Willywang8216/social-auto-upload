@@ -102,16 +102,34 @@ class SlotLockTests(unittest.TestCase):
         thread.join(timeout=5)
         self.assertEqual(done, [True])
 
-    def test_an_unwritable_lock_path_does_not_raise(self):
-        # Best-effort by design: a lock problem must never fail a publish.
-        # A directory where the lock file cannot be created stands in for a
-        # read-only or missing parent.
+    def test_missing_or_unwritable_parent_refuses_without_creating_it(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         blocked = Path(tmp.name) / "blocked"
         blocked.mkdir()
-        (blocked / "ro").write_bytes(b"")  # parent is a FILE, not a directory
-        with po.slot_reservation_lock(blocked / "ro" / "x.db"):
+        (blocked / "ro").write_bytes(b"")
+        with self.assertRaises(FileNotFoundError):
+            with po.slot_reservation_lock(blocked / "ro" / "x.db"):
+                self.fail("An unavailable reservation cannot run unlocked")
+
+    def test_timeout_refuses_an_unlocked_finalizer_and_releases_the_connection(self):
+        import sqlite3
+        from unittest.mock import patch
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = Path(tmp.name) / "queue.db"
+        db.write_bytes(b"")
+        connect = sqlite3.connect
+        def short_wait(path, *args, **kwargs):
+            if str(path).endswith(".slots.lock"):
+                kwargs["timeout"] = .01
+            return connect(path, *args, **kwargs)
+        with po.slot_reservation_lock(db):
+            with patch.object(po.sqlite3, "connect", side_effect=short_wait):
+                with self.assertRaisesRegex(po.destination_pacing.PacingRefused, "Slot reservation unavailable"):
+                    with po.slot_reservation_lock(db):
+                        self.fail("A timed-out finalizer cannot proceed unlocked")
+        with po.slot_reservation_lock(db):
             pass
 
 

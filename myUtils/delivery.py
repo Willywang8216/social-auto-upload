@@ -23,6 +23,19 @@ class DeliveryUnknown(RuntimeError):
     """Delivery may have happened but cannot be reconciled automatically."""
 
 
+class ProviderConfirmedFailure(RuntimeError):
+    """The stored provider receipt reached a confirmed terminal failure.
+
+    Keep its receipt, finalize the stop event now, and never convert this into
+    another submission or automatic backup. The worker verifies receipt binding.
+    """
+    retryable = False
+
+    def __init__(self, provider: str, receipt_id: str, reason: str):
+        super().__init__(reason)
+        self.details = {"provider": provider, "receiptId": receipt_id, "retrySafe": False}
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 

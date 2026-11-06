@@ -1,6 +1,6 @@
 # Platform publishing limits and preprocessing
 
-Updated 2026-11-05. Enforcement is owned by `myUtils/platform_limits.py`, `myUtils/text_limits.py`, and the media validators. [API rate limits](platform-api-rate-limits.md) contains essential citations; `logs/platform-limits-research.md` records the 25 Exa request IDs, numerical evidence, units, and uncertainty.
+Updated 2026-11-06. Enforcement is owned by `myUtils/platform_limits.py`, `myUtils/text_limits.py`, and the media validators. [API rate limits](platform-api-rate-limits.md) contains essential citations; `logs/platform-limits-research.md` records the 24 fresh Exa search request IDs, source-retrieval evidence, units, and uncertainty. Earlier source records remain in Git history.
 
 These are route-specific ceilings and conservative SAU compatibility policies, not consumer-app limits or automatic plan entitlements. MB/GB below are decimal unless exact bytes are stated. Fresh account allowances and upload grants may tighten the prepared output; request overrides cannot raise them. Unknown constraints do not grant unlimited upload permission.
 
@@ -13,7 +13,7 @@ These are route-specific ceilings and conservative SAU compatibility policies, n
 | Facebook Page `/videos` | 4,000,000,000 | 14,460 s | Existing conservative Page-video policy. Universal Meta maxima were not independently retrieved. **Not the Reels route.** |
 | Instagram Reels API | 300,000,000 | 3–900 s | Qualified compatibility profile corroborated by publishing references; Meta reference retrieval returned 403. |
 | Threads API | 1,000,000,000 | >0–300 s | Qualified compatibility profile; Meta reference retrieval returned 403. |
-| TikTok Content Posting | 4,000,000,000 | ≤600 s and fresh creator allowance | Offline baseline 180 s. Fresh `creator_info.max_video_post_duration_sec` can resolve a different allowance up to the upload-route cap. |
+| TikTok Content Posting | 4,000,000,000 | SAU ≤600 s and fresh creator allowance | Offline baseline 180 s. The documented inbox-upload ceiling is 600 s; Direct Post uses creator-specific allowances. SAU retains a conservative 600-second compatibility ceiling rather than automatically enabling longer creator entitlements. |
 | YouTube Data API | 256,000,000,000 | ≤43,200 s | Default 900 s unless fresh channel status confirms long uploads are allowed. Shorts remain a separate intended post type. |
 | Telegram cloud Bot API multipart | 50,000,000 | No general documented duration cap | HTTP URL ingestion is separately limited to 20,000,000 bytes. Existing `file_id` is a different transport. |
 | Telegram explicitly configured MTProto user | 2,000,000,000 | No general documented duration cap | Existing conservative user profile; no inferred Premium entitlement, local Bot API server, or silent transport switch. |
@@ -30,6 +30,7 @@ Fresh creator/channel allowances must come from the exact selected account, not 
 - Facebook Page Reels' retrieved 3–90-second, 9:16 API contract does not govern `/videos`. Consumer rollout announcements cannot remove an API validator.
 - Instagram's implemented API carousel remains 2–10 children. Threads retains the implemented conservative ten-image cap even where other API/app references describe twenty. Split videos are separate scheduled posts, not silently changed into carousel children.
 - TikTok privacy, interactions, disclosures, creator consent, and direct-post versus inbox mode remain part of the original intent.
+- Direct video uses `/v2/post/publish/video/init/`; explicit inbox video uses `/v2/post/publish/inbox/video/init/` with `source_info` only. Video `post_mode` is not a substitute for endpoint selection. Public intent is never silently changed to `SELF_ONLY`. A public `PUBLISH_COMPLETE` still awaits moderation when its structured public-post-ID list is empty; inbox handoff requires creator action and review notification.
 - X `tweet_video` differs from `dm_video`; upload completion is not proof that the posting account can attach it to a Post.
 - Bluesky `app.bsky.embed.images` supports four images. The newer gallery is a different schema and is not implemented by increasing a constant.
 
@@ -103,3 +104,9 @@ Douyin, Bilibili, Kuaishou, Xiaohongshu, WeChat Channels, Baijiahao, Discord, Li
 ## Existing bounded AI context
 
 Before caption generation, long transcripts are deduplicated only for adjacent identical lines, split at UTF-8-safe boundaries into at most 32 batches, and summarized through at most three reduction passes. The full source stays intact. A source hash reuses summaries across accounts rather than sending the same transcript repeatedly. Empty or oversized summaries fail instead of looping. These byte budgets are application policy, not model TPM entitlements; provider/account limits and returned wait/reset values remain authoritative. This release does not redesign caption generation or regenerate approved recovery copy.
+
+## Shared NW/SW SFW TikTok
+
+Keep separate profile-owned account entries with the exact existing destination, never a copied OAuth refresh credential or a foreign account selection. Native-first remains available where the selected account can publish publicly; an explicitly configured managed alias may use the verified same-account Sociamonials connection. Teaching remains isolated. Shared aliases receive one duplicate guard, one lease exclusion and one mutable booking calendar across synchronous/asynchronous finalization and recovery. Same original media sets are queued once without losing ordered tail parts.
+
+`myUtils/destination_pacing.py` owns the shared booking/allocation contract. Daily budgets use the configured operator timezone; queue timestamps remain UTC. Confirmed identical provider receipts count once, while running/unknown and overdue unresolved work consume capacity. Publish-now requests are paced and request overrides cannot raise or disable a configured positive cap. Missing/corrupt booking history blocks allocation instead of creating an empty calendar.

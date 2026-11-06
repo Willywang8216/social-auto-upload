@@ -201,3 +201,30 @@ pause and SIGTERM; never escalate over active work. Verify an online SQLite back
 and isolated restore, apply additive Alembic migrations with writers stopped, then
 verify matched web/worker images, schema and held readiness. Database rollback over
 newer delivery receipts is not allowed. See [release gates](ci-watch.md).
+
+## Shared reservations, ordered parts, and confirmed TikTok failure
+
+Normal synchronous/asynchronous finalizers and both guarded recovery applications
+take the same database-side slot reservation **before** queue writes. A busy or
+unavailable reservation refuses the operation; it never proceeds
+unlocked. Recovery still revalidates its saved plan in the main write transaction,
+and media probing/encoding and external capability reads stay outside it.
+
+Every next part has the previous allocated part as its lower bound, including
+midnight and daily-cap rollover. A tail cannot obtain an earlier free date merely
+because its initial stagger crossed midnight. Cancelling a target does not erase
+its accepted/unknown or confirmed delivery evidence from destination capacity.
+Unreadable delivery history refuses allocation rather than becoming empty space.
+
+A TikTok tracking receipt preserves its original mode and chosen visibility.
+Public completion with no moderated public IDs remains pending; explicit private
+completion is labelled non-public, and inbox handoff needs creator action. A
+provider-confirmed `FAILED` result finalizes its failure and durable stop event
+immediately while retaining the receipt, rather than polling that terminal result
+for another 24 hours. It is not permission to create another native/backup post.
+
+An already held release must retain its verified recovery bundle and pause
+ownership. Do not clear a foreign pause to force deployment, or restore an older
+database over newer receipts. Any explicit superseding rollout must first verify
+the held seal, stop all writers gracefully under the deployment lock, preserve
+the old hold evidence, and use the normal gated helper for the new held candidate.

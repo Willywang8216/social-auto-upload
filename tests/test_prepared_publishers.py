@@ -756,7 +756,6 @@ class PreparedPublisherTests(unittest.TestCase):
     def test_tiktok_publish_auto_refreshes_stale_token(self):
         session = _RecordingSession([
             _FakeResponse({'access_token': 'fresh-token', 'refresh_token': 'fresh-refresh', 'expires_in': 3600}),
-            _FakeResponse({'data': {'user': {'display_name': 'Demo', 'avatar_url': 'https://example.com/a.jpg'}}}),
             _FakeResponse({'data': {'creator_avatar_url': 'x'}}),
             _FakeResponse({'data': {'publish_id': 'tt-video-2'}}),
         ])
@@ -777,6 +776,8 @@ class PreparedPublisherTests(unittest.TestCase):
         self.assertEqual(session.calls[0][1], prepared_publishers.tiktok_auth.TIKTOK_OAUTH_TOKEN_URL)
         self.assertEqual(result['updated_config']['accessToken'], 'fresh-token')
         self.assertEqual(result['request']['source_info']['video_url'], 'https://cdn.example/video.mp4')
+        self.assertEqual(result['publish']['data']['publish_id'], 'tt-video-2')
+        self.assertEqual(len(session.calls), 3)
 
     def test_tiktok_video_direct_post_uses_video_init(self):
         session = _RecordingSession([

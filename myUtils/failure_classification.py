@@ -300,6 +300,8 @@ def backup_eligible(exc: BaseException, *, checkpoint: dict | None = None) -> bo
     if re.search(r"banned|user_banned|restricted by|community violation|deleted account|"
                  r"content policy|does not match|missing (?:media|file)|requires human approval", text, re.I):
         return False
+    if isinstance(details, dict) and details.get("accountRestriction") is True:
+        return False
     if isinstance(details, dict) and details.get("retrySafe") is False:
         return False
     credential_failure = (_matches_any(text, _CREDENTIAL_DEAD_PATTERNS)

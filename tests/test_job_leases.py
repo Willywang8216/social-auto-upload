@@ -87,6 +87,7 @@ def test_migration_defaults_and_legacy_dataclass_constructor(db_path):
     ("instagram", ({"igUserId": "same"}, {"igUserId": "same"})),
     ("threads", ({"threadUserId": "same"}, {"userId": "same"})),
     ("youtube", ({"channelId": "same"}, {"channelId": "same"})),
+    ("tiktok", ({"openId": "same"}, {"open_id": "same"})),
 ])
 def test_canonical_duplicate_rows_are_excluded_within_batch_and_across_claims(db_path, platform, configs):
     a = _account(db_path, 101, platform=platform, config=configs[0])
@@ -436,3 +437,54 @@ def test_invalid_lease_or_delay_does_not_mutate_target(db_path, seconds):
                                lease_token=target.lease_token, db_path=db_path)
     assert jobs.get_target(target.id, db_path=db_path) == target
     assert jobs.get_job(job.id, db_path=db_path).status == "running"
+
+
+def _managed_tiktok_config(*, workspace="26985", profile_ref="3917"):
+    return {"publishingProvider": "sociamonials", "sociamonials": {
+        "workspace_id": workspace, "network": "tiktok", "profile_refs": [profile_ref],
+    }}
+
+
+def test_native_backup_and_managed_alias_share_one_lease_but_teaching_proceeds(db_path):
+    native = _account(db_path, 109, platform="tiktok", config={"openId": "fixture-native"})
+    managed = _account(db_path, 451, platform="tiktok", profile_id=101, config=_managed_tiktok_config())
+    teaching = _account(db_path, 100, platform="tiktok", profile_id=102, config={"open_id": "fixture-teaching"})
+    _enqueue(db_path, (native, managed, teaching), platform="tiktok")
+    first = _claim(db_path, limit=10)
+    assert [target.account_ref for target in first] == [native, teaching]
+    assert jobs.claim_next_targets(owner="other-process", limit=10, db_path=db_path) == []
+    assert not jobs.has_claimable_targets(db_path=db_path)
+    assert jobs.mark_target_success(first[0].id, lease_token=first[0].lease_token, db_path=db_path)
+    assert _claim(db_path)[0].account_ref == managed
+
+
+def test_new_managed_alias_excludes_native_before_alias_has_target_history(db_path):
+    native = _account(db_path, 109, platform="tiktok", config={"open_id": "fixture-native"})
+    alias = _account(db_path, 451, platform="tiktok", profile_id=101, config=_managed_tiktok_config())
+    unrelated = _account(db_path, 452, platform="tiktok", config=_managed_tiktok_config(workspace="34293"))
+    _enqueue(db_path, (native, unrelated), platform="tiktok")
+    with patch.object(jobs, "canonical_account_keys", wraps=jobs.canonical_account_keys) as build:
+        claimed = _claim(db_path, limit=10, excluded_accounts=[alias])
+    assert [target.account_ref for target in claimed] == [unrelated]
+    assert build.call_count == 1
+
+
+def test_two_processes_cannot_claim_native_and_managed_destination_simultaneously(db_path):
+    native = _account(db_path, 109, platform="tiktok", config={"openId": "fixture-native"})
+    alias = _account(db_path, 451, platform="tiktok", profile_id=101, config=_managed_tiktok_config())
+    _enqueue(db_path, (native, alias), platform="tiktok")
+    code = ("import sys; from pathlib import Path; from myUtils.jobs import claim_next_targets; "
+            "print(len(claim_next_targets(owner=sys.argv[2], limit=5, db_path=Path(sys.argv[1]))))")
+    processes = [subprocess.Popen([sys.executable, "-c", code, str(db_path), f"managed-worker-{i}"],
+                                  cwd=Path(__file__).resolve().parents[1],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 for i in range(2)]
+    try:
+        outputs = [process.communicate(timeout=30) for process in processes]
+        assert all(process.returncode == 0 for process in processes), outputs
+        assert sorted(int(stdout.strip()) for stdout, _ in outputs) == [0, 1]
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()

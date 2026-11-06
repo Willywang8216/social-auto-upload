@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 from myUtils import media_pipeline
 from myUtils import platform_limits, text_limits, image_compliance, media_compliance
-from myUtils import tiktok_auth
+from myUtils import tiktok_auth, tiktok_delivery
 from myUtils import delivery, generic_delivery
 
 try:
@@ -70,6 +70,7 @@ THREADS_ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v"}
 TIKTOK_API_ROOT = "https://open.tiktokapis.com"
 TIKTOK_CREATOR_INFO_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/creator_info/query/"
 TIKTOK_VIDEO_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/video/init/"
+TIKTOK_INBOX_VIDEO_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/inbox/video/init/"
 TIKTOK_CONTENT_INIT_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/content/init/"
 TIKTOK_STATUS_FETCH_URL = f"{TIKTOK_API_ROOT}/v2/post/publish/status/fetch/"
 TIKTOK_MAX_PULL_FROM_URL_BYTES = (platform_limits.media_max_mb("tiktok") or 4096) * 1_000_000
@@ -335,38 +336,49 @@ def _raise_for_status(response) -> None:
         raise PreparedPublishError(f"Telegram API error: {description}")
 
 
-def _raise_tiktok_error(response) -> None:
-    """Raise a PreparedPublishError with TikTok-specific error details."""
+def _raise_tiktok_error(response, *, submission_rejection: bool = False) -> None:
+    """Business errors are not success; only init rejections prove non-delivery."""
     try:
         body = response.json()
         error = body.get("error") or {}
         code = str(error.get("code") or "").strip()
-        message = str(error.get("message") or "").strip()
-    except Exception:  # noqa: BLE001
-        code = ""
-        message = ""
-    if code == "invalid_params":
-        raise PreparedPublishError(
-            f"TikTok API error (invalid_params): {message or 'The post parameters are invalid'}",
-            retryable=False,
-        )
+        message = _redact_tokens(str(error.get("message") or "").strip())
+    except (ValueError, TypeError, AttributeError):
+        code, message = "", ""
+    if code == "ok" and response.status_code < 400:
+        return
+    details = {"provider": "tiktok", "providerErrorCode": code}
+    if submission_rejection and tiktok_delivery.definite_init_rejection(response.status_code, code):
+        details.update(definitiveNonDelivery=True, retrySafe=True)
+    retry_after = (getattr(response, "headers", {}) or {}).get("Retry-After")
+    if retry_after is not None:
+        details["retryAfter"] = retry_after
     if code == "unaudited_client_can_only_post_to_private_accounts":
+        if submission_rejection:
+            details["nativePublicRestriction"] = True
         raise PreparedPublishError(
-            "TikTok app is in development mode — can only post to private accounts. "
-            "Submit your app for review at developers.tiktok.com or set your TikTok account to private for testing.",
-            retryable=False,
+            "TikTok's unaudited API client cannot publish the requested public post. "
+            "Use the verified same-account publishing connection or complete the app audit; "
+            "the requested visibility has not been changed.",
+            details=details, retryable=False,
         )
     if code == "url_ownership_unverified":
         raise PreparedPublishError(
-            "TikTok requires domain ownership verification for PULL_FROM_URL. "
-            "Using FILE_UPLOAD mode instead."
+            "TikTok requires verified domain ownership for PULL_FROM_URL; use an exact prepared local file.",
+            details=details, retryable=False,
         )
-    if message:
+    permanent_codes = {"invalid_params", "privacy_level_option_mismatch", "scope_not_authorized",
+                       "access_token_invalid", "spam_risk_user_banned_from_posting"}
+    if code == "spam_risk_user_banned_from_posting":
+        details["accountRestriction"] = True
+    if code == "privacy_level_option_mismatch":
+        details["accountRestriction"] = True
+    if code not in {"", "ok"}:
         raise PreparedPublishError(
-            f"TikTok API error ({code}): {message}",
-            retryable=code not in {"invalid_params"},
+            f"TikTok API error ({code}): {message or 'request rejected'}",
+            details=details, retryable=code not in permanent_codes,
         )
-    response.raise_for_status()
+    _raise_for_status(response)
 
 
 def _config_value(config: dict[str, Any], key: str, *, default_env: str | None = None) -> Any:
@@ -2301,70 +2313,97 @@ def _tiktok_file_upload(
 
 
 def _tiktok_submit(http, url, payload, **kwargs):
-    from myUtils import delivery
+    """Fence init and bind the tracking receipt to its original safe intent."""
+    intent = payload.get("_tiktok_submission_intent")
+    if not isinstance(intent, dict) or intent.get("publish_mode") not in {"direct", "inbox"}:
+        raise PreparedPublishError("TikTok init requires validated original intent", retryable=False)
+    if delivery.has_unresolved_submission(payload):
+        raise delivery.DeliveryUnknown("TikTok has an unresolved submission; poll its stored receipt, do not initialize again")
     delivery.starting(payload, operation="tiktok-init")
-    response = http.post(url, **kwargs)
-    if 400 <= response.status_code < 500:
-        delivery.checkpoint(payload, submission_started=False)
+    try:
+        response = http.post(url, **kwargs)
+    except delivery.LeaseLost:
+        raise
+    except Exception as exc:
+        raise delivery.DeliveryUnknown("TikTok init response was lost; reconcile before submitting again") from exc
     try:
         body = response.json()
+        if not isinstance(body, dict) or not isinstance(body.get("data", {}), dict) or not isinstance(body.get("error", {}), dict):
+            raise ValueError("Invalid response shape")
     except (ValueError, TypeError):
         raise delivery.DeliveryUnknown("TikTok returned an unreadable submission response") from None
-    data = body.get("data") or {}
-    if data.get("publish_id"):
-        delivery.accepted(payload, provider="tiktok", receipt_id=str(data["publish_id"]))
-    elif (body.get("error") or {}).get("code") not in (None, "", "ok"):
-        delivery.checkpoint(payload, submission_started=False)
+    data, error = body.get("data") or {}, body.get("error") or {}
+    receipt_id = data.get("publish_id")
+    if receipt_id:
+        if not isinstance(receipt_id, str) or not receipt_id.strip() or len(receipt_id) > 64:
+            raise delivery.DeliveryUnknown("TikTok returned an unusable tracking receipt")
+        delivery.accepted(payload, provider="tiktok", receipt_id=receipt_id, **intent)
+    elif tiktok_delivery.definite_init_rejection(response.status_code, error.get("code")):
+        delivery.record_non_delivery(payload, provider="native",
+            reason=f"TikTok init rejected: {error.get('code') or response.status_code}")
+    else:
+        raise delivery.DeliveryUnknown("TikTok init returned no tracking receipt; acceptance is unknown")
     return response
 
 
 def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
     config = dict(account.config or {})
+    if delivery.has_unresolved_submission(payload):
+        raise delivery.DeliveryUnknown("TikTok has an unresolved submission; resume status polling instead of uploading again")
+    try:
+        intent = tiktok_delivery.request_intent(config, payload)
+    except ValueError as exc:
+        raise PreparedPublishError(str(exc), retryable=False) from exc
+    publish_mode = intent["publish_mode"]
+    privacy_level = intent["privacy_level"]
+    tt_settings = payload.get("tiktokPostSettings") or {}
+    if (publish_mode == "direct" and privacy_level != "SELF_ONLY"
+            and os.environ.get("TIKTOK_CLIENT_KEY", "").startswith("sb")):
+        raise PreparedPublishError(
+            "TikTok's sandbox API client cannot publish the requested visibility; "
+            "use a verified same-account connection or complete the app audit. No private post was created.",
+            details={"provider": "tiktok", "nativePublicRestriction": True,
+                     "definitiveNonDelivery": True, "retrySafe": True}, retryable=False,
+        )
     artifacts = payload.get("artifacts") or []
     media = _extract_media(payload)
-    payload_direct_post = payload.get("tiktokDirectPost")
-    if isinstance(payload_direct_post, bool):
-        publish_mode = "direct" if payload_direct_post else "draft"
-    else:
-        publish_mode = str(config.get("publishMode") or "direct").strip().lower()
     if media["images"] and not media["videos"] and publish_mode != "direct":
         raise PreparedPublishError(
-            "TikTok photo posts require Direct Post; change the per-post mode "
-            "or remove this photo destination.",
+            "TikTok photo posts require Direct Post; change the per-post mode or remove this photo destination.",
             retryable=False,
         )
-    http = _get_session(session)
-    access_token, updated_config = _ensure_tiktok_access_token(config, session=http)
     if artifacts and not (media["videos"] or media["images"]):
         raise PreparedPublishError("TikTok media artifacts were supplied but none is a supported image/video")
     if len(media["videos"]) > 1:
         raise PreparedPublishError("TikTok supports one video per post")
     if len(media["images"]) > 35:
         raise PreparedPublishError("TikTok photo posts support at most 35 images")
-    creator_info = query_tiktok_creator_info(config, access_token=access_token, session=http)
-    # Only this fresh response grants a creator duration allowance.
-    ci_data = creator_info.get("data") or creator_info
-    config["creator_info"] = ci_data
+    http = _get_session(session)
+    access_token, updated_config = _ensure_tiktok_access_token(config, session=http)
+    creator_info = {}
+    if publish_mode == "direct":
+        creator_info = query_tiktok_creator_info(config, access_token=access_token, session=http)
+        ci_data = creator_info.get("data") or creator_info
+        config["creator_info"] = ci_data
+        options = ci_data.get("privacy_level_options")
+        if options is not None and (not isinstance(options, list) or privacy_level not in options):
+            raise PreparedPublishError(
+                "TikTok requested privacy does not match this creator's current options; review the account settings.",
+                details={"accountRestriction": True}, retryable=False,
+            )
+        username = ci_data.get("creator_username")
+        if isinstance(username, str) and re.fullmatch(r"[A-Za-z0-9_.]{1,32}", username):
+            intent["creator_username"] = username
+        if updated_config is not None:
+            updated_config = _apply_tiktok_token_payload(updated_config, {'access_token': access_token}, creator_info)
+    else:
+        # Inbox uploads need video.upload, not the video.publish creator query.
+        # Do not grant a stale cached creator allowance to a new upload.
+        config.pop("creator_info", None)
     _validate_immutable_media(payload, "tiktok", config)
-    if updated_config is not None:
-        updated_config = _apply_tiktok_token_payload(updated_config, {'access_token': access_token}, creator_info)
+    payload["_tiktok_submission_intent"] = dict(intent)
     message = _payload_message(payload)
-    # Per-publish override has precedence over the account-level default.
     post_mode = "DIRECT_POST" if publish_mode == "direct" else "MEDIA_UPLOAD"
-    # Per-post TikTok settings from the frontend override account-level config.
-    # This is required for TikTok audit compliance: privacy, interactions, and
-    # content disclosure must be chosen per-post by the user.
-    tt_settings = payload.get("tiktokPostSettings") or {}
-    privacy_level = str(
-        tt_settings.get("privacyLevel")
-        or config.get("privacyLevel")
-        or "SELF_ONLY"
-    ).strip().upper()
-
-    # Sandbox/development apps (client_key starts with "sb") can ONLY use SELF_ONLY
-    client_key = os.environ.get("TIKTOK_CLIENT_KEY", "")
-    if client_key.startswith("sb") and privacy_level != "SELF_ONLY":
-        privacy_level = "SELF_ONLY"
 
     if media["videos"]:
         video_item = media["videos"][0]
@@ -2380,7 +2419,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
 
         # TikTok rejects the request with "invalid_params: The request post info is empty or incorrect"
         # when the title is empty. Validate early and raise a clear error.
-        if not post_title:
+        if publish_mode == "direct" and not post_title:
             raise PreparedPublishError(
                 "TikTok publish requires a non-empty title/description. "
                 "The payload message is empty; provide a message or set tiktokPostSettings.title.",
@@ -2407,119 +2446,47 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
         # Prefer PULL_FROM_URL when we have a public URL — avoids chunk-size
         # issues with small files and is more reliable than FILE_UPLOAD.
         # Fall back to FILE_UPLOAD if domain ownership is not verified.
-        pull_from_url_attempted = False
-        if public_url:
-            pull_from_url_attempted = True
-            request_body = {
-                "post_info": post_info,
-                "source_info": {
-                    "source": "PULL_FROM_URL",
-                    "video_url": public_url,
-                },
-                "post_mode": post_mode,
-            }
-            response = _tiktok_submit(http, TIKTOK_VIDEO_INIT_URL, payload,
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json",
-                },
-                json=request_body,
-                timeout=120,
-            )
-            if response.status_code == 200:
-                _raise_tiktok_error(response)
-                return {
-                    "creator_info": creator_info,
-                    "publish": _response_payload(response),
-                    "request": request_body,
-                    "updated_config": updated_config,
-                    "access_token": access_token,
-                }
-            # Check if it's a domain verification error — fall through to FILE_UPLOAD
-            try:
-                resp_json = response.json()
-                error_obj = resp_json.get("error", {}) or {}
-                error_code = str(error_obj.get("code") or "").strip()
-                logger.info("TikTok PULL_FROM_URL error: code=%s, status=%s, body=%s",
-                         error_code, response.status_code, resp_json)
-                if error_code == "url_ownership_unverified":
-                    logger.warning("TikTok PULL_FROM_URL failed (domain not verified), falling back to FILE_UPLOAD")
-                else:
-                    _raise_tiktok_error(response)
-            except PreparedPublishError:
-                raise
-            except Exception as e:
-                logger.warning("Failed to parse TikTok error response: %s", e)
-                _raise_tiktok_error(response)
+        video_init_url = TIKTOK_VIDEO_INIT_URL if publish_mode == "direct" else TIKTOK_INBOX_VIDEO_INIT_URL
 
+        def submit_video(source_info):
+            request_body = {"source_info": source_info}
+            if publish_mode == "direct":
+                request_body["post_info"] = post_info
+            # Video APIs select mode by endpoint. post_mode is a PHOTO field.
+            response = _tiktok_submit(http, video_init_url, payload,
+                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                json=request_body, timeout=120)
+            _raise_tiktok_error(response, submission_rejection=True)
+            return response, request_body
+
+        def result(response, request_body):
+            return {"creator_info": creator_info, "publish": _response_payload(response),
+                    "request": request_body, "updated_config": updated_config, "access_token": access_token}
+
+        if public_url:
+            try:
+                response, request_body = submit_video({"source": "PULL_FROM_URL", "video_url": public_url})
+                return result(response, request_body)
+            except PreparedPublishError as exc:
+                if (exc.details.get("providerErrorCode") != "url_ownership_unverified"
+                        or not local_path or not Path(local_path).expanduser().resolve().is_file()):
+                    raise
+                # The first init was definitively rejected, so another transport
+                # for THESE exact prepared bytes cannot duplicate a publication.
+                logger.info("TikTok rejected URL ownership; using the exact prepared local file")
         if local_path and Path(local_path).expanduser().resolve().is_file():
-            # FILE_UPLOAD for local files (non-Direct-Post or no public URL)
             video_path = Path(local_path).expanduser().resolve()
             file_size = video_path.stat().st_size
-            # TikTok declares chunk_size in [5MB, 64MB] and computes
-            # total_chunk_count = floor(video_size / chunk_size), merging the
-            # trailing remainder into the final chunk (up to 128 MB).
             chunk_size, total_chunks = _tiktok_chunk_plan(file_size)
-            request_body = {
-                "post_info": post_info,
-                "source_info": {
-                    "source": "FILE_UPLOAD",
-                    "video_size": file_size,
-                    "chunk_size": chunk_size,
-                    "total_chunk_count": total_chunks,
-                },
-                "post_mode": post_mode,
-            }
-            response = _tiktok_submit(http, TIKTOK_VIDEO_INIT_URL, payload,
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json",
-                },
-                json=request_body,
-                timeout=120,
-            )
-            if response.status_code != 200:
-                _raise_tiktok_error(response)
-            resp_data = response.json()
-            resp_data_inner = resp_data.get("data") or resp_data
-            upload_url = resp_data_inner.get("upload_url") or ""
+            response, request_body = submit_video({"source": "FILE_UPLOAD", "video_size": file_size,
+                "chunk_size": chunk_size, "total_chunk_count": total_chunks})
+            resp_data = _response_payload(response)
+            upload_url = (resp_data.get("data") or {}).get("upload_url") or ""
             if not upload_url:
-                raise PreparedPublishError("TikTok FILE_UPLOAD init did not return an upload_url")
+                raise delivery.DeliveryUnknown("TikTok accepted FILE_UPLOAD but returned no upload URL; keep its receipt")
             _tiktok_file_upload(http, video_path, upload_url, chunk_size, total_chunks)
-            return {
-                "creator_info": creator_info,
-                "publish": resp_data,
-                "request": request_body,
-                "updated_config": updated_config,
-                "access_token": access_token,
-            }
-        else:
-            # Fallback to PULL_FROM_URL when we only have a public URL
-            request_body = {
-                "post_info": post_info,
-                "source_info": {
-                    "source": "PULL_FROM_URL",
-                    "video_url": public_url,
-                },
-                "post_mode": post_mode,
-            }
-            response = _tiktok_submit(http, TIKTOK_VIDEO_INIT_URL, payload,
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json",
-                },
-                json=request_body,
-                timeout=120,
-            )
-            if response.status_code != 200:
-                _raise_tiktok_error(response)
-            return {
-                "creator_info": creator_info,
-                "publish": _response_payload(response),
-                "request": request_body,
-                "updated_config": updated_config,
-                "access_token": access_token,
-            }
+            return result(response, request_body)
+        raise PreparedPublishError("TikTok video requires an accessible prepared local file or public URL", retryable=False)
 
     if media["images"]:
         if post_mode != "DIRECT_POST":
@@ -2574,8 +2541,7 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             json=request_body,
             timeout=120,
         )
-        if response.status_code >= 400:
-            _raise_tiktok_error(response)
+        _raise_tiktok_error(response, submission_rejection=True)
         return {
             "creator_info": creator_info,
             "publish": _response_payload(response),
@@ -2605,7 +2571,11 @@ def fetch_tiktok_publish_status(access_token: str, publish_id: str, *, session=N
         timeout=60,
     )
     _raise_for_status(resp)
-    return resp.json()
+    _raise_tiktok_error(resp)
+    body = resp.json()
+    if not isinstance(body, dict) or not isinstance(body.get("data"), dict):
+        raise delivery.DeliveryUnknown("TikTok returned an unreadable status response; retain its receipt")
+    return body
 
 
 def refresh_reddit_access_token(config: dict[str, Any], *, session=None) -> dict:

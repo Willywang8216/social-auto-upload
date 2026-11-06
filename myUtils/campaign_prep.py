@@ -53,6 +53,7 @@ def _resolve_campaign_accounts(
     )
 
 
+@publish_orchestrator._serialize_slot_allocation
 def finalize_campaign(
     campaign: campaign_store.Campaign,
     *,
@@ -90,7 +91,8 @@ def finalize_campaign(
     queued_jobs: list[dict] = []
     skipped: list[dict] = []
     stagger_offset = 0
-    booked_slots = publish_orchestrator._load_booked_slots(db_path)
+    account_keys: dict[str, str] = {}
+    booked_slots = publish_orchestrator._load_booked_slots(db_path, account_keys=account_keys)
     if base_time is None:
         base_time = _base_time(campaign.metadata or {})
     link_in_first_comment = bool((options or {}).get("linkInFirstComment"))
@@ -115,14 +117,16 @@ def finalize_campaign(
         for account in platform_accounts:
             # Cross-job duplicate guard, identical to submit_publish.
             if publish_orchestrator._already_queued_for_media(
-                account.id, media_group.id, db_path=db_path
+                account.id, media_group.id, db_path=db_path, account_keys=account_keys
             ):
                 skipped.append({
                     "profileId": profile_id,
                     "accountId": account.id,
                     "accountName": account.nickname or account.account_name,
                     "platform": account.platform,
-                    "reason": "this media is already queued for this account",
+                    "reason": "this media is already queued for this account "
+                              "(directly, or through another profile's row for "
+                              "the same publishing destination)",
                 })
                 continue
 
@@ -205,98 +209,50 @@ def finalize_campaign(
                 elif not link_in_first_comment:
                     draft["firstComment"] = ""
 
-            if supports_multi_media or len(publishable_files) <= 1:
+            # Select the WHOLE source/part set before enqueueing any member.
+            # Splitting multiple source files must not discard each source's
+            # prepared tail parts, or compare siblings as cross-alias duplicates.
+            def parts_for(selected_artifacts):
                 if artifact_part_groups_for_platform is not None:
-                    part_groups = artifact_part_groups_for_platform(artifacts, platform)
-                else:
-                    part_groups = [artifact_payloads_for_platform(artifacts, platform)]
-                for part_index, part_artifacts in enumerate(part_groups, start=1):
-                    post = campaign_store.add_campaign_post(
-                        campaign.id,
-                        platform,
-                        account_ids=[account.id],
-                        draft=draft,
-                        status=campaign_store.CAMPAIGN_POST_READY,
-                        db_path=db_path,
-                    )
-                    account_tt_settings = (
-                        tiktok_post_settings.get(str(account.id))
-                        or tiktok_post_settings.get(account.id)
-                    )
-                    payload = publish_orchestrator._build_payload(
-                        campaign, post, draft, part_artifacts, platform,
-                        tiktok_direct_post=tiktok_direct_post,
-                        tiktok_post_settings=(
-                            account_tt_settings
-                            if isinstance(account_tt_settings, dict)
-                            else None
-                        ),
-                    )
-                    if len(part_groups) > 1:
-                        payload["partIndex"] = part_index
-                        payload["partCount"] = len(part_groups)
-                    targets = [
-                        (
-                            f"account:{account.id}",
-                            f"campaign_post:{post.id}",
-                            publish_orchestrator._next_free_slot(
-                                account.id, _base_time(campaign.metadata or {}),
-                                stagger_offset, booked_slots,
-                            ),
-                        )
-                    ]
-                    stagger_offset += 1
-                    queued_jobs.append(
-                        publish_orchestrator._enqueue_post(
-                            platform, payload, targets, campaign, post,
-                            job_to_payload, db_path,
-                        )
-                    )
+                    return artifact_part_groups_for_platform(selected_artifacts, platform)
+                return [artifact_payloads_for_platform(selected_artifacts, platform)]
+
+            if supports_multi_media or len(publishable_files) <= 1:
+                post_groups = [(parts, None) for parts in parts_for(artifacts)]
             else:
+                post_groups = []
                 for media_file in publishable_files:
                     single_id = int(media_file["file_record_id"])
-                    post = campaign_store.add_campaign_post(
-                        campaign.id,
-                        platform,
-                        account_ids=[account.id],
-                        draft=draft,
-                        file_record_ids=[single_id],
-                        status=campaign_store.CAMPAIGN_POST_READY,
-                        db_path=db_path,
-                    )
-                    account_tt_settings = (
-                        tiktok_post_settings.get(str(account.id))
-                        or tiktok_post_settings.get(account.id)
-                    )
-                    payload = publish_orchestrator._build_payload(
-                        campaign, post, draft,
-                        artifact_payloads_for_platform(artifacts, platform),
-                        platform,
-                        tiktok_direct_post=tiktok_direct_post,
-                        tiktok_post_settings=(
-                            account_tt_settings
-                            if isinstance(account_tt_settings, dict)
-                            else None
-                        ),
-                    )
-                    payload["fileRecordIds"] = [single_id]
-                    targets = [
-                        (
-                            f"account:{account.id}",
-                            f"campaign_post:{post.id}",
-                            publish_orchestrator._next_free_slot(
-                                account.id, _base_time(campaign.metadata or {}),
-                                stagger_offset, booked_slots,
-                            ),
-                        )
-                    ]
-                    stagger_offset += 1
-                    queued_jobs.append(
-                        publish_orchestrator._enqueue_post(
-                            platform, payload, targets, campaign, post,
-                            job_to_payload, db_path,
-                        )
-                    )
+                    selected = [artifact for artifact in artifacts
+                                if artifact.get("source_file_record_id") in {None, single_id}]
+                    post_groups.extend((parts, [single_id]) for parts in parts_for(selected))
+            previous_part_slot = None
+            for part_index, (part_artifacts, file_ids) in enumerate(post_groups, start=1):
+                post = campaign_store.add_campaign_post(
+                    campaign.id, platform, account_ids=[account.id], draft=draft,
+                    file_record_ids=file_ids, status=campaign_store.CAMPAIGN_POST_READY, db_path=db_path,
+                )
+                account_tt_settings = (
+                    tiktok_post_settings.get(str(account.id)) or tiktok_post_settings.get(account.id)
+                )
+                payload = publish_orchestrator._build_payload(
+                    campaign, post, draft, part_artifacts, platform,
+                    tiktok_direct_post=tiktok_direct_post,
+                    tiktok_post_settings=account_tt_settings if isinstance(account_tt_settings, dict) else None,
+                )
+                if file_ids is not None:
+                    payload["fileRecordIds"] = file_ids
+                if len(post_groups) > 1:
+                    payload["partIndex"] = part_index
+                    payload["partCount"] = len(post_groups)
+                part_slot = publish_orchestrator._next_free_slot(
+                    account.id, base_time, stagger_offset, booked_slots, not_before=previous_part_slot)
+                targets = [(f"account:{account.id}", f"campaign_post:{post.id}", part_slot)]
+                previous_part_slot = part_slot
+                stagger_offset += 1
+                queued_jobs.append(publish_orchestrator._enqueue_post(
+                    platform, payload, targets, campaign, post, job_to_payload, db_path,
+                ))
 
     return {"jobs": queued_jobs, "skipped": skipped}
 

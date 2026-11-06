@@ -35,7 +35,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
-from myUtils.account_identity import canonical_account_key
+from myUtils.account_identity import canonical_account_key, canonical_account_keys
 from myUtils.secret_redaction import is_secret_key
 from utils.conf_defaults import BASE_DIR, default_db_path
 
@@ -329,13 +329,12 @@ def _claimable_clause(now: str) -> tuple[str, list]:
 
 
 def _eligible_targets(conn: sqlite3.Connection, now: str, excluded_accounts=()):
-    """Stream due rows, with canonical account exclusion across all processes."""
-    cache: dict[str, str] = {}
+    """Stream due rows, excluding the native/managed union on this transaction."""
+    excluded_accounts = tuple(excluded_accounts)
+    account_keys = canonical_account_keys(conn, excluded_accounts)
 
     def key(ref: str) -> str:
-        if ref not in cache:
-            cache[ref] = canonical_account_key(conn, ref)
-        return cache[ref]
+        return canonical_account_key(conn, ref, keys=account_keys)
 
     held = {key(ref) for ref in excluded_accounts}
     for row in conn.execute(

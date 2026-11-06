@@ -77,7 +77,7 @@ VIDEO_MAX_SECONDS: dict[str, float | None] = {
     "facebook": 14460.0,
     "instagram": 900.0,
     "threads": 300.0,
-    "tiktok": 600.0,        # absolute Content Posting API cap; creator may be lower
+    "tiktok": 600.0,        # SAU compatibility cap; inbox upload <=600s, Direct Post uses creator allowance
     "youtube": 43200.0,
     "reddit": 900.0,
     "linkedin": 900.0,

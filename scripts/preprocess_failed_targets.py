@@ -202,7 +202,7 @@ def prepare_plan(*, db_path: Path, target_ids: list[int], per_day_cap: int | Non
     with recovery._connect(db_path) as conn:
         conn.execute("BEGIN")
         aliases = recovery._account_refs(conn)
-        booked = recovery._booked_slots(conn, aliases)
+        booked = recovery._booked_slots(conn, aliases, now=now)
         # Reserve ALL first slots before allocating any target's tail parts.
         for item in plan:
             if "_skipped" not in item:
@@ -276,11 +276,12 @@ def apply_plan(plan: list[dict], *, db_path: Path) -> dict:
             _fresh_account_limits(state, item["account_constraints"])
             if item["backup_compatible"]:
                 _fresh_backup_context(state, item["backup_context"], db_path)
-            result = jobs.reschedule_failed_target(
-                item["target_id"], item["slot"], db_path=db_path,
-                expected_fingerprint=item["expected_fingerprint"],
-                revalidate=lambda conn: _revalidate_prepared(conn, item),
-                prepared_payloads=item["prepared_payloads"], part_schedule_ats=item["part_schedule_ats"])
+            with recovery.publish_orchestrator.slot_reservation_lock(db_path):
+                result = jobs.reschedule_failed_target(
+                    item["target_id"], item["slot"], db_path=db_path,
+                    expected_fingerprint=item["expected_fingerprint"],
+                    revalidate=lambda conn: _revalidate_prepared(conn, item),
+                    prepared_payloads=item["prepared_payloads"], part_schedule_ats=item["part_schedule_ats"])
             applied += 1
             queued_parts += len(item["prepared_payloads"])
             queued.append(result.id)

@@ -164,3 +164,30 @@ It runs on the **submit** path (`_prepare_campaign_media_artifacts`), not on
 preview — `_build_preview_media_context` returns an empty `transcriptText`. Enable
 in a submit with `options.transcribe: true`; it also runs automatically when an
 LLM is configured and no transcript exists.
+
+## Shared SFW TikTok destination — verified 2026-11-06
+
+The existing NW account `109` (`Nakedwill_TK`, profile `1`) resolves to the native
+creator `nakedwill2`. Its existing Sociamonials backup is network `tiktok`, profile
+reference `3917`, workspace `26985`; fresh identity/profile/storage checks confirmed
+that exact connection is connected and publish-authorized. Keep native-first
+posting where public Direct Post is available and preserve per-post privacy and
+consent choices. Never silently change a public request into a private post.
+
+The initial live inventory had no SW TikTok account. The shared SFW publication
+rule is to configure a separate **profile-3-owned managed entry to this same exact
+connection**, not select NW's foreign account ID or copy its OAuth refresh token.
+After that entry is configured, `SFW SW` includes the shared TikTok destination.
+Verify the live row before submitting; the historical native roster above is not
+proof that a missing managed entry exists.
+
+NW-only, SW-only, or combined `NW+SW` submissions use one canonical destination,
+duplicate guard, lease exclusion, and three/day, 30-minute-gap calendar. Combined
+selection queues the original media set once while retaining all ordered parts.
+TikTok remains excluded for NSFW content. Teaching uses its own verified `5800`
+connection/workspace `34293` and isolated credential, never the NW/SW key.
+
+For current size/duration/text policies, use `docs/platform-posting-limits.md`
+rather than the older per-platform constraint examples above. Native TikTok
+captions and the stricter Sociamonials message allowance are different contracts;
+approved copy that cannot fit the backup is a review exception, not truncated copy.

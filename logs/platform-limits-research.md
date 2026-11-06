@@ -1,136 +1,162 @@
-# Platform-limit source record — 2026-11-05
+# Platform-limit source record — 2026-11-06
 
-Enforcement lives in `myUtils/platform_limits.py`; tracked summaries are `docs/platform-posting-limits.md` and `docs/platform-api-rate-limits.md`. This recheck supersedes the numerical claims in the 2026-10-05 research record (retained in Git history), particularly the app/API equivalences, Bluesky image schema, YouTube text units, and presumed universal daily quotas.
+Enforcement is owned by `myUtils/platform_limits.py`, `myUtils/text_limits.py`, and the final media validators. The tracked summaries are `docs/platform-posting-limits.md` and `docs/platform-api-rate-limits.md`. This follow-up supersedes earlier claims that TikTok's ten-minute inbox-upload rule is a universal Direct Post ceiling. SAU retains a conservative 600-second preparation policy; it does not enable longer videos solely because a creator reports a larger allowance. The 2026-11-05 source record remains in the production Git history.
 
-## Method and evidence strength
+## Method and confidence
 
-PI-Desktop performed 25 Exa searches on 2026-11-05 using the configured official `api.exa.ai/search` service, plus Exa content retrieval. The configured Exa MCP endpoint returned Cloudflare 403; it was not retried. Queries preferred official domains. Meta's reference pages returned 403 even through Exa content retrieval, so secondary publishing references corroborate conservative policies but do not establish freshly verified universal Meta maxima. Numerical limits are bound to the named API/transport/post type. Account allowances, returned upload grants, quota/reset headers and plan entitlements remain authoritative. Recommendations and SAU quality choices are not hard provider limits.
+The planning and approved execution used **24 fresh Exa searches**, plus source retrieval through the configured official Exa API. Searches preferred official domains and returned source text, not only generated summaries. Numerical ceilings below are tied to a transport, post type, counting unit, and evidence strength. No search result, source text, or recommendation automatically grants an account entitlement. Fresh creator/channel allowances, upload grants, exact profile permissions, pooled storage and reset headers remain authoritative.
 
-### Exa request IDs
+Meta official-domain searches returned no results. The earlier Meta reference retrieval also returned 403. Existing Meta compatibility profiles therefore remain qualified, corroborated policies, not newly verified universal maxima. Unsupported/inactive browser and blog transports stay inactive or explicitly unknown; research does not enable publishing or invent a backup.
 
-| Query | Request ID |
+### Fresh Exa search request IDs
+
+| Route / query scope | Request ID |
 |---|---|
-| TikTok transfer/creator/caption | `8d0892278bea4246af7ecd53d3af05ee` |
-| Instagram official-domain search (no results) | `e9ed2f7c621d5c1f80642217af07ea9a` |
-| Threads official-domain search (no results) | `1353e28966f63283289cf2ba7dbf2e67` |
-| Bluesky video/API | `df05dd4e98a07fdb6db54e54d8d0245b` |
-| X media/Post entitlement | `8a17b9da1af761668f966e3e11c4c709` |
-| YouTube | `c0315a3f2643d30cf294302925f685e2` |
-| Facebook Page video | `bdf1d916becd4c750efd161b41388be2` |
-| Telegram | `3d62652e97b6c2bb095aeb47803ad83d` |
-| Sociamonials | `6c259fbedac099f2d28b74c8750a10fa` |
-| Instagram corroboration | `d60866474092148ab1a64a4ec6b1546f` |
-| Threads corroboration | `f2563f5a8abe3b84505168512a8cb1e0` |
-| Bluesky current gallery/video | `c0ba3569efd8d817a7b63d11f4b6e779` |
-| WordPress | `3b4927f73f026fed64569ec0afa7a3e9` |
-| Douyin | `bafaf3d185d93b3cd04e1fdea68a3b08` |
-| Bilibili | `e0e185c73ed139bea3340efa12e9271e` |
-| Kuaishou | `d8d187a6f30de48dbceb852eb60f73f3` |
-| Xiaohongshu | `958c8af2c14d75a3f3b71d4e30f63404` |
-| WeChat Channels | `5cb63f6053de36474ad6248b1cafa60b` |
-| Baijiahao | `7679da7b6d2027aa60b854f74c567e83` |
-| Discord | `5f8c8b3a4cabdeb357977a89e5a5c1fd` |
-| LinkedIn | `0bbdf0d898e497e7ae39b47aec4bd5b5` |
-| Pinterest | `f3c69f184494b76b2f6e1330fdb1292c` |
-| Medium | `7285d1e5577f9ca50b67a85d183dba88` |
-| Substack | `5f0667bbb8225e51552a2764a79a2095` |
-| Patreon | `7d4095789dc5dff1f883fa30cf50d154` |
+| TikTok direct posting, creator allowance, captions, audit and status | `1b5f43aedce28a87c175c00d672030f5` |
+| YouTube insert, quota, description and upload | `c1a1d3671710be52dd398217d1eb9837` |
+| Bluesky video service and image schema | `4ca5c3fb551bc4a26053d0f31b3d425c` |
+| X Post and native video entitlement | `88c40f858cc5d6302265fe4c971d9a73` |
+| Facebook Page videos — official search, no results | `a429ce2320fbf7054d89b5921fa908e5` |
+| Instagram publishing — official search, no results | `483b131b7f8c59f1854d79659920e4c7` |
+| Threads publishing — official search, no results | `a30db58a80935ac1b8bbe5363cfa1009` |
+| Telegram cloud Bot API multipart/URL and rate guidance | `e3ba46424e5899d7f11e66b941d259fd` |
+| Sociamonials API, profile grants, validation and storage | `716460eb1aaa921b563b547b42dc8c1c` |
+| WordPress REST media and host/PHP constraints | `59768d1c5073a6269351bb34389209f7` |
+| Douyin upload, duration and transport chunks | `95cd617eec9be03f7c4bfc0a663e19ed` |
+| Bilibili submission/upload | `3932555cf42e4920491be708f820fa8a` |
+| Kuaishou upload/fragmentation — surface-specific only | `39ddeff57966d47ea4c8f1c85a87db0e` |
+| Xiaohongshu SDK sharing / open-account FAQ | `1d96540a5a2faf7caa40f7dbf7f0560f` |
+| WeChat Channels API catalog | `3960c9a755b3e226a9809f8a6ace9d2d` |
+| Baijiahao OpenAuth / account publishing allowance | `1be765ecf001b122cdeb324c1a7ee64f` |
+| Discord attachments / rate buckets | `dfa14a4d9d668272f1567b67b1b6fbbb` |
+| LinkedIn Videos API / feed specification distinction | `0f1e155b23a9bef8a6ebff144cd0d593` |
+| Pinterest organic publishing / access-tier rates | `a69c5b1c000c39a127d52102feae6fb2` |
+| Medium legacy API | `1104a1c8187968cf30f6fa73fb8a9fa6` |
+| Substack video recommendations | `f33ad6fb10c71b7f4e23fd5b9d271787` |
+| Patreon attachments / native video surfaces | `157bc78928d6832dab8e9b2c9c5c4a3e` |
+| Reddit Data API — retired publishing remains excluded | `9c80463a91d55e22d69f57b7e265a74a` |
+| TikTok explicit inbox-upload endpoint/schema | `646d2b30a325148783a94889f93897b3` |
 
-Exa contents request `d9f51d88772b3da96bc3158a19a7f20a` retrieved Sociamonials and reported the unavailable Meta sources. The full Sociamonials reference was additionally read directly because its embedded schemas exceeded the Exa text window. Bluesky's official published `@atproto/api@0.30.0` lexicons were read directly; the former raw GitHub lexicon URLs returned 404.
+Source-retrieval request `a0f00bb66c0a297b00340399124b68fc` fetched TikTok media transfer/status and the Sociamonials public reference. Follow-up retrieval `c90f31765ae20437f5a916cc5d9dd1e5` fetched TikTok media transfer, Direct Post, inbox upload, and YouTube thumbnails. The two requests are retrievals, not additional searches.
 
-## Active network routes
+## Active-route numerical evidence
 
-### X — Post video, not DM video
+### TikTok — Direct Post is not inbox upload
 
-- [Maintained Post documentation](https://github.com/xdevplatform/docs/blob/main/x-api/posts/create-post.mdx): default account “20 minutes, 8 GB”; Premium/verified “125 minutes, 16 GB”. These follow the posting account's entitlement and `media_category`, not its developer API plan. Upload success alone does not establish permission to attach the media to a Post.
-- [Media best practices](https://x-preview.mintlify.app/x-api/media/quickstart/best-practices): `tweet_image` 5 MB, `tweet_gif` 15 MB, up to four photos or one GIF/video; `dm_video` retains 140 seconds/512 MB for default accounts. H.264 High, progressive yuv420p, square pixels and AAC-LC mono/stereo are compatible output choices.
-- SAU retains 140 seconds/512,000,000 bytes as its conservative existing preparation policy, not a universal current Post-video ceiling. X text counting weights Unicode and t.co URLs (23 units); approved recovery copy is not silently shortened.
-- [Rate table](https://x-preview.mintlify.app/x-api/fundamentals/rate-limits): endpoint/user/app buckets differ. Runtime remaining/reset values govern eligibility, not a backlog-wide retry loop.
+Sources:
 
-### Bluesky — images versus gallery
+- https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post
+- https://developers.tiktok.com/docs/en/content-posting-api-reference-query-creator-info
+- https://developers.tiktok.com/docs/en/content-posting-api-get-started-upload-content
+- https://developers.tiktok.com/doc/content-posting-api-media-transfer-guide
+- https://developers.tiktok.com/docs/en/content-posting-api-reference-get-video-status
 
-- [Official announcement](https://bsky.app/profile/bsky.app/post/3mtwf7gxkwc2r): “videos up to 10 minutes long” and “maximum file size to 300MB”.
-- [Official package lexicons](https://unpkg.com/@atproto/api@0.30.0/dist/client/lexicons.js): `app.bsky.embed.video` accepts `video/mp4`, `maxSize: 300000000`; `app.bsky.embed.images` is `maxLength: 4`, each image `maxSize: 2000000`. Gallery is a **different** schema: future-proof max 20, currently authored with a soft limit of ten. SAU's existing image route remains four; increasing a shared constant cannot implement the gallery protocol.
-- `app.bsky.feed.post`: `maxGraphemes: 300` and `maxLength: 3000` (UTF-8 bytes). Combining sequences/emoji must not be sliced as independent code points.
-- [Video tutorial](https://docs.bsky.app/docs/tutorials/video) and [rate guide](https://docs.bsky.app/docs/advanced-guides/rate-limits): email verification, video service processing until a BlobRef, current `getUploadLimits`/canUpload and remaining allowances. Historical “25 videos/10 GB per day” is not hard-coded as a current universal allowance.
+Retrieved quotations:
 
-### Instagram Reels API
+> “The maximum length is 2200 in UTF-16 runes.”
 
-- Official sources, unavailable during this recheck: [content publishing](https://developers.facebook.com/docs/instagram-platform/content-publishing/), [IG user media](https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media/).
-- Corroboration: [AdaptlyPost's quoted API specifications](https://adaptlypost.com/blog/instagram-reels-api-max-length-file-size), [Sprout publishing requirements](https://support.sproutsocial.com/hc/en-us/articles/49500207602445-Video-Requirements-per-Network-with-Sprout-Publishing), [Publora API guide](https://docs.publora.com/platforms/instagram).
-- Quoted Reels profile: “15 mins maximum, 3 seconds minimum”, “300MB maximum”; MP4/MOV, H.264/HEVC progressive closed GOP/yuv420p, AAC up to 48 kHz/mono/stereo, 23–60 fps, max 1920 horizontal pixels/25 Mbps. SAU chooses a smaller common encoding profile and validates after watermarking.
-- Feed images: conservative JPEG/8 MB and 4:5–1.91:1 framing, using padding instead of destructive cropping. Keep the existing 2–10 API carousel policy; app/other-route announcements do not authorize increasing it.
-- Caption 2,200; account-dependent publishing limits must be read from `content_publishing_limit` (`quota_total`), because published sections conflict at 50/100 per rolling 24 hours. Carousel videos, Reels and Stories are different surfaces.
+> “The longest video a developer can send via the initialize Upload Video endpoint is 10 minutes.”
 
-### Threads API
+> “Maximum of 4GB”
 
-- Official [posts reference](https://developers.facebook.com/docs/threads/posts/) could not be retrieved. [Emplifi requirements](https://docs.emplifi.io/platform/latest/home/threads-publishing.md), [PostZen API guide](https://www.postzen.dev/blog/threads-api), and [PublishQ](https://publishq.com/docs/platforms/threads-api) corroborate 1 GB, >0–300 seconds, H.264/HEVC MP4/MOV, AAC, 23–60 fps, 1920-pixel width/25 Mbps.
-- Image compatibility: JPEG/PNG, 8 MB, 320–1440 pixels wide and a bounded 10:1 ratio; choose conservative prepared output. Caption 500; some references give special emoji counting, so uncertainty is documented rather than pretending every field uses Python `len`.
-- References describe carousel 2–20; SAU retains its **conservative implemented ten-image group** and one independently scheduled video per video intent. Retrieved publishing budgets 250 posts/1,000 replies per rolling 24 hours; use returned account quotas.
+> “Different users have different maximum video-duration privileges. Developers should use this field to stop video posts that are too long.”
 
-### Facebook Page `/videos`
+Direct video posting uses `/v2/post/publish/video/init/`, `video.publish`, and `post_info` plus `source_info`. Explicit inbox video upload uses `/v2/post/publish/inbox/video/init/`, `video.upload`, and `source_info`; changing a video `post_mode` on the direct endpoint is not the documented switch. Photo `content/init` has a different schema and mode field.
 
-- [Page video reference](https://developers.facebook.com/docs/graph-api/reference/page/videos/) and [Graph quota guide](https://developers.facebook.com/docs/graph-api/overview/rate-limiting/) were not directly retrieved. Secondary Page-video references disagree, including [PostZen](https://www.postzen.dev/blog/facebook-graph-api-post-to-page), [PostGate](https://postgate.studio/how-to/facebook-graph-api-video-upload) and [Zernio](https://docs.zernio.com/platforms/facebook).
-- The existing SAU 4,000,000,000-byte/14,460-second Page-video profile is conservative application policy, **not a newly verified universal maximum**. Reels' retrieved 3–90-second/9:16 API profile does not govern the current Page `/videos` call. A consumer “no restrictions” announcement does not remove an API validator.
-- Corroborated Page images JPEG/PNG up to ten MB; SAU deliberately prepares a tighter **4,000,000-byte** compatibility output and retains ten photos per post. Caption 63,206 is retained policy/corroboration. Graph usage/reset headers and per-account capability remain authoritative.
+Creator query is limited to 20/min/token, video init to 6/min/token, and status fetch to 30/min/token. Returned reset/wait instructions govern retries. “Typical” daily creator posting allowances are variable, not a guaranteed application quota. Transport chunks are not separate publications.
 
-### TikTok Content Posting API
+The status source states that `SEND_TO_USER_INBOX` asks the creator to finish editing/posting, and that `PUBLISH_COMPLETE` in inbox mode means the user subsequently completed that flow. It defines `publicaly_available_post_id` as a **list** returned only after a public post passes moderation. A tracking receipt is not a public post ID. Empty public IDs on a requested public completion mean moderation/pending reconciliation, not permission for another provider to create a second post.
 
-- [Transfer guide](https://developers.tiktok.com/docs/en/content-posting-api-media-transfer-guide): “Maximum of 4GB”; the longest developer-sent upload video is ten minutes. Creator duration privileges differ; [creator info](https://developers.tiktok.com/docs/en/content-posting-api-reference-query-creator-info) returns `max_video_post_duration_sec` and must be queried fresh. Offline default 180 seconds, bounded by the 600-second upload route; do not use the former 3,600-second web-app assumption.
-- Video MP4 (recommended), WebM/MOV; H.264 recommended (others supported), 23–60 fps, 360–4096 pixels per side. Images JPEG/WebP, max 20 MB, maximum 1080p, separate schema up to 35 images.
-- Transport chunks: 5–64 MB except final up to 128 MB; below 5 MB whole upload, above 64 MB multiple chunks, at most 1,000 chunks, sequential. **Transport chunks are not separate posts.**
-- [Direct Post](https://developers.tiktok.com/doc/content-posting-api-reference-direct-post): caption “maximum length is 2200 in UTF-16 runes”. Creator consent, current privacy/interaction settings, branded-content/AI disclosures and app audit restrictions are retained. Do not turn an inbox upload into a public direct post in backup.
-- Creator info 20/min/token, video init six/min/token, [status](https://developers.tiktok.com/doc/content-posting-api-reference-get-video-status) 30/min. Typical creator daily quotas are variable and shared; no guaranteed 15/25-post allowance is invented.
+Live read-only creator checks on 2026-11-06 returned public visibility and a 3,600-second creator allowance for both existing configured accounts. These checks do not override SAU's retained 600-second compatibility policy or establish that an unaudited client can publish publicly. The native NW account resolved to `nakedwill2`; Teaching resolved to `weiwei_wang0`. Credentials were not recorded here.
 
-### YouTube Data API
+### YouTube
 
-- [Insert](https://developers.google.com/youtube/data/reference/rest/v3/videos/insert): “Maximum file size: 256GB”. [Long uploads](https://support.google.com/youtube/answer/71673): 12 hours or 256 GB, whichever smaller; default 15 minutes until long uploads are allowed.
-- [Video resource](https://developers.google.com/youtube/v3/docs/videos): title max 100 characters, description max **5000 bytes**, tags max 500 characters including commas and the quotes counted around tags containing spaces. Chinese text can exceed the byte cap long before 5,000 code points. The old “description 5000 characters” claim is superseded.
-- [Quota calculator](https://developers.google.com/youtube/data/determine_quota_cost): current body specifies 100 `videos.insert` calls/day in a separate bucket, one unit/call, and 10,000 combined units for most other methods; midnight Pacific reset. Older generated summaries still report obsolete costs. Actual project/channel allowances take precedence.
-- Shorts are square/vertical and at most 180 seconds; do not silently change a regular video into a Short.
+Sources:
+
+- https://developers.google.com/youtube/data/reference/rest/v3/videos/insert
+- https://developers.google.com/youtube/data/determine_quota_cost
+- https://developers.google.com/youtube/v3/docs/videos
+- https://support.google.com/youtube/answer/71673
+- https://developers.google.com/youtube/v3/docs/thumbnails/set
+
+Fresh insert text: “Maximum file size: 256GB”. The quota calculator gives separate `search.list` and `videos.insert` default buckets of 100/day and one unit/call. Older generated summaries quoting obsolete insert costs are not authoritative. The retained 5,000-UTF-8-byte description, 100-character title and 500 aggregate tag-character policies follow the video resource fields, not Python character length for descriptions. Long uploads still require exact channel entitlement; default preparation remains 900 seconds.
+
+Fresh `thumbnails.set` text states “Maximum file size: 50MB”. SAU's 2,000,000-byte prepared cover is therefore a retained conservative policy, **not** the current provider API ceiling. Cover intent/order remains unchanged.
+
+### Bluesky
+
+Sources:
+
+- https://docs.bsky.app/docs/tutorials/video
+- https://bsky.app/profile/bsky.app/post/3mni6hmaff22u
+- https://bsky.app/profile/bsky.app/post/3mtwf7gxkwc2r
+- https://unpkg.com/@atproto/api@0.30.0/dist/client/lexicons.js
+- https://docs.bsky.app/docs/advanced-guides/rate-limits
+
+Fresh official announcement: “We bumped the video upload limit from 100MB to 300MB”. This concerns `uploadVideo`, not an automatic increase in the resulting PDS blob. The official tutorial requires email verification and account-level upload allowances, and polling until a usable BlobRef. The existing `app.bsky.embed.images` policy retains the published four-image, 2,000,000-byte schema; a newer gallery is a separate protocol, not permission to increase this route's count. Retained text limits are 300 graphemes **and** 3,000 UTF-8 bytes. Video preparation retains 600 seconds/300,000,000 bytes, tightened by the exact account.
+
+### X
+
+Sources:
+
+- https://github.com/xdevplatform/docs/blob/main/x-api/posts/create-post.mdx
+- https://github.com/xdevplatform/large-video-upload-python
+- https://x-preview.mintlify.app/x-api/fundamentals/rate-limits
+
+The maintained Post source lists “Default (no Premium) | 20 minutes, 8 GB” and “X Premium / verified | 125 minutes, 16 GB”, and at most four photos/one GIF/one video. The historical official upload sample describes 140 seconds/512 MB. SAU deliberately retains the smaller 140-second/512,000,000-byte profile rather than inferring Premium or attachment entitlement from media-upload completion. Provider reset headers and posting-account authorization remain necessary.
 
 ### Telegram
 
-- [Bot API](https://core.telegram.org/bots/api/) and [sendVideo](https://core.telegram.org/bots/api/methods/sendvideo.md): cloud multipart video up to 50 MB; HTTP URL ingestion 20 MB (photos five MB); existing `file_id` is another route. [sendPhoto](https://core.telegram.org/bots/api/methods/sendphoto.md): ten MB, width+height <=10,000, ratio <=20. [Albums](https://core.telegram.org/bots/api/methods/sendmediagroup.md): 2–10 items.
-- Text-only 4,096; media caption 1,024 after entity parsing. No documented general video duration cap. [Bot FAQ](https://core.telegram.org/bots/faq/): chat/group/broadcast throughput differs; respect `parameters.retry_after`.
-- Production Telegram accounts explicitly use MTProto. SAU retains their separate conservative 2,000,000,000-byte profile; no inference of Premium and no transport switch/local Bot API server enablement.
+Sources:
 
-## Sociamonials backup contract
+- https://core.telegram.org/bots/api/methods/sendvideo.md
+- https://core.telegram.org/bots/api/
+- https://core.telegram.org/bots/faq/
 
-Primary source: [public REST/MCP reference](https://www.sociamonials.com/developers.php), fetched through Exa and directly on 2026-11-05.
+Fresh `sendVideo` text says cloud bots can send video files “up to 50 MB” and captions “0-1024 characters after entities parsing”. The sending-files section distinguishes HTTP URL ingestion, “20 MB max for other types of content”, from multipart's 50 MB. Existing `file_id` and a separately configured local Bot API server/MTProto user are different transports; no silent switch to a larger limit is authorized. FAQ guidance: avoid more than one message/second/chat, groups at most 20/min, bulk about 30/sec unless explicitly using paid broadcasting. Returned `retry_after` is authoritative.
 
-- Defaults: reads 120/min, writes 30/min per credential; AgencyPro doubles them. Media transfers have a separate 300/min default. Actual `X-RateLimit-Limit/Remaining/Reset` and 429 `Retry-After` govern retries. Identity/workspace/profile discovery endpoints are exempt.
-- All-source workspace limits: 1,000 sent/day, queue 1,500 undelivered, horizon 12 months; published provider-side YouTube ceiling ten/channel/24 hours is a Sociamonials contract, not a universal YouTube site limit.
-- External `video_url`: **1,024 MB decimal**, 1,024,000,000 bytes. Hosted video: platform default **1024 MiB = 1 GiB**, 1,073,741,824 bytes, possibly lowered by the workspace plan. Read `storage.max_upload_bytes.video`; null means hosted upload is not entitled. Both configured workspaces reported that 1 GiB effective ceiling during read-only verification. This is a time-specific reading, not permission to ignore a later lower allowance.
-- Pooled Media/library quota is enforced; Publisher media and external URLs have separate accounting. No library asset deletion is authorized by this change. Prefer exact ready SHA-verified reuse; filename+size alone is not equality. Stable verified external URLs may be used when appropriate, not oversized/stale originals.
-- Images default 15 MiB, 100 MP and 20,000-pixel longest side at hosting; network constraints can be smaller. Multipart threshold 32 MiB, API parts 16 MiB; use returned grants and ETags rather than inventing chunk plans.
-- Public text table: fb 63,206; tw 280; ln 3,000; in 2,200; pi 500; gmb 1,500; thrd 500; tiktok 150; blsk 300. The shorter TikTok field is a backup restriction, not TikTok's native 2,200-unit limit. Strict post validation is authoritative; incompatible approved copy is flagged, never silently shortened.
-- Default X posts cannot contain links; Enterprise allowance is separately limited. `first_comment` is documented for fb/in/ln/blsk/thrd, **not X**. Removing a main-post link or moving it to an unimplemented reply cannot preserve intent.
-- Read current `social-profiles`: exact network/profile reference, `agent_can_publish_to=true`, current availability and relevant capabilities. A mobile handoff is not automatic publication. An absent mapping is an exception, never a guessed similarly named destination.
-- Fresh direct reference retrieval on 2026-11-05 (HTTP 200, HTML SHA-256 `302624440de5ce307bd3c1145dfd7b16ea19ada28da43d6ba164975d200467a5`) describes `agent_can_publish_to` as **"Whether THIS agent may publish to this profile. A profile you can see is not necessarily one you can post to"**. Live exact-profile reads returned positive literal flags while `/me`'s assignment summary was empty. The adapter therefore verifies workspace permissions through `/me` and exact destination rights through the fresh `social-profiles` response; an empty summary itself grants nothing. Identity/profile/storage reads are not post acceptance.
-- The same reference allows `message` with image/video posts, including TikTok's 150-character backup field, and says Instagram/TikTok require media. Static `text` capability applies to standalone text; captions remain subject to their network text counting, supported options, original-intent checks, and strict provider validation even when that capability is absent.
-- The no-create validation contract in the linked OpenAPI is **`POST /api/v1/posts` with `validate_only=true`, `strict=true`, `mode=publish_now`**. There is no separate `/api/v1/posts/validate` route in that schema; the earlier planning claim is corrected here. Confirm `valid=true`, `validate_only=true`, no post ID, explicit exact profile resolution and no warnings before any create. Map TikTok privacy/interactions/disclosures and YouTube visibility/tags/kids/synthetic-media/Shorts settings explicitly; reject unsupported changes.
-- Asset `processing` is not ready; accepted/queued/approval-held is not delivered. Confirm the exact destination with literal delivery evidence and its network post identifier, retaining generic provider receipts for reconciliation. Ambiguous submission cannot start a second provider.
+### Sociamonials
 
-## Other configured capabilities, inactive routes and unknowns
+Source: https://www.sociamonials.com/developers.php
 
-| Route | Source evidence / limitations |
-|---|---|
-| Discord | [API reference](https://docs.discord.com/developers/reference) and [rate guide](https://docs.discord.com/developers/topics/rate-limits): current default file limit 20 MiB per file, possibly higher with an explicit entitlement; SAU chooses 20,000,000-byte conservative prep. Text 2,000. Use bucket/reset and `retry_after`; no hard-coded universal per-route rate. No production Discord account was present in the execution inventory. |
-| LinkedIn | [Videos](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/videos-api?view=li-lms-2026-10) has feed specs three seconds–30 minutes/75 KB–500 MB, while the initialization schema allows five GB. These are different upload/serving surfaces; do not infer feed compliance from upload capacity. [Posts](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api) and UGC text 3,000. Not enabled/recovered. |
-| Pinterest | [Organic API](https://developers.pinterest.com/docs/work-with-organic-content-and-users/create-boards-and-pins/), [Pin specs](https://help.pinterest.com/en/article/review-pin-specs), [rates](https://developers.pinterest.com/docs/reference/rate-limits/): organic video four seconds–five minutes, title 100/description 800 in help; API numerical byte block not independently verified. Sociamonials description is 500. Trial/Standard rate buckets differ; don't substitute ad/catalog specs. Not enabled/recovered. |
-| WordPress / blogs | [wp_max_upload_size](https://developer.wordpress.org/reference/functions/wp_max_upload_size/) derives PHP limits, with host/proxy/storage/multisite and URL embedding creating additional route differences. No universal byte/duration limit exists. Use the actual configured transport and known deployment limits; unknown does not establish unlimited uploading. Production has NW/SW blogs plus Teaching/MSL WordPress routes. |
-| Douyin | [Upload](https://developer.open-douyin.com/docs/resource/zh-CN/dop/develop/openapi/video-management/douyin/create-video/upload-video) total four GB, >300 MB must use transport chunks, >50 MB recommended; [create](https://developer.open-douyin.com/docs/resource/zh-CN/dop/develop/openapi/video-management/douyin/create-video/video-create/) <=15 minutes, 75 works/user/app/day, title <=1,000. Browser uploader is another route. No production account present; research does not enable one. |
-| Bilibili | [Submission specifications](https://openhome.bilibili.com/doc/4/0c532c6a-e6fb-0aff-8021-905ae2409095): four GB, **less than** five hours, <=4096×2160/120 fps/60 Mbps, GOP <=ten seconds, audio <=48 kHz/two channels/320 kbps. [Create](https://openhome.bilibili.com/doc/4/f7fc57dd-55a1-5cb1-cba4-61fb2994bf0f): non-official members five submissions/day, title <80. Capability approval/authorization required. No production account present. |
-| Kuaishou | [Open API](https://open.kuaishou.com/platform/openApi?menu=20): <10 MB direct uploads and <=10 MB fragments are transport recommendations, not whole-video caps. Novel-drama 20-minute material is a **different** mini-program surface. General video duration/whole-file/publishing quota not verified; unknowns remain explicit. No production account present. |
-| Xiaohongshu | Official [JS](https://agora.xiaohongshu.com/doc/js), [Android](https://agora.xiaohongshu.com/doc/android), [iOS](https://agora.xiaohongshu.com/doc/ios) sharing SDKs hand off to the client; Android image notes 1–18, video notes one video/optional cover. Numeric general browser upload size/duration and a general automatic server publishing API were not verified. No production account present; no invented Sociamonials route. |
-| WeChat Channels (`tencent`) | [API catalog](https://developers.weixin.qq.com/doc/channels/api/) and [errors](https://developers.weixin.qq.com/doc/channels/dev_before/base/commErrCode.html) concern commerce and capability quotas. No general ordinary-video publishing API or universal browser upload cap verified. No production account present. |
-| Baijiahao | [OpenAuth](https://baijiahao.baidu.com/builder/author/openauth/openauthProtection): URL ingest, video title 8–40, <=ten tags of <=ten characters, account's dynamic daily allowance. Numeric universal video size/duration/request cap not verified. Legacy HTTP examples do not authorize insecure credential transport. No production account present. |
-| Medium | [Official API archive](https://github.com/Medium/medium-api-docs/blob/master/README.md): title beyond 100 ignored, first three tags (<=25 each), image upload/embed and limited legacy API. [Help](https://help.medium.com/hc/en-us/articles/213480228-API-Importing) and [embeds](https://help.medium.com/hc/en-us/articles/214981378-Using-embeds) do not establish a new video publishing transport. No production account present. |
-| Substack | [Video help](https://support.substack.com/hc/en-us/articles/21093671091220-Guide-to-video-posts-on-Substack): recommended <=20 GB, H.264/AAC, <=8 Mbps, 1080p/1440p or smaller; recommendations are not a universal API entitlement. [App announcement](https://on.substack.com/p/publish-video-posts-directly-in-the) says files up to 20 GB. No general API guarantee or production account assumed. |
-| Patreon | [Formats](https://support.patreon.com/hc/en-us/articles/204606055-What-file-formats-are-supported-for-posts): ordinary upload two GB/attachment five GB; native Video has no file-size maximum but <=12 hours. [Hosting](https://support.patreon.com/hc/en-us/articles/6598555214477-Patreon-Video-overview) has account/monthly hour entitlements. [API](https://docs.patreon.com/) lists client 100 requests/two seconds and token 100/minute; this is not a publishing API. No production account present. |
-| Reddit | Retired by the operator. Historical figures stay in Git history; no account enablement, backup or retry is authorized. The execution inventory includes 62 failed targets referencing retired/deleted Reddit accounts, all excluded. |
+Retrieved message field:
 
-## Operational policy
+> “Limits in canonical network order: fb 63206, tw 280, ln 3000, in 2200, pi 500, gmb 1500, thrd 500, tiktok 150, blsk 300.”
 
-Use immutable original/variant references, final measured media, complete ordered parts and strict Unicode/field checks. Native-only routes retain native policy; viable backup routes can use the conservative 1,000,000,000-byte common preparation ceiling, tightened further by current account/hosting allowances. Preserve captions, brand, language, content policy, alt text, covers and platform options. Separate posts are paced by canonical destination, including aliases, delivered history and existing schedules. Production defaults three posts/day and a 30-minute minimum gap are preserved; recovery does not raise them. After all safe routes stop, a durable, deduplicated notification retries independently without resubmitting the post. Queued/accepted is never reported as delivered.
+Retrieved profile instructions require a fresh listing and literal `agent_can_publish_to=true`; references must not be guessed or substituted by a similar name. `validate_only=true` and `strict=true` use the documented `POST /api/v1/posts` no-create surface. Validation does not replace local final-byte/hash verification or actual per-destination delivery receipts.
+
+Live read-only checks on 2026-11-06 reconfirmed the existing Nakedwill TikTok profile `3917` in workspace `26985`, connected and publish-authorized, and Teaching's isolated `5800` route in `34293`. Both workspace credentials had direct-posting permission with no current approval hold. Both contexts returned `max_upload_bytes.video=1073741824` and `max_upload_bytes.image=15728640`. Storage is pooled across them; the observed available total was 2,955,575,983 bytes. These observations are not cached upload entitlements: recheck before every new upload. No assets were deleted and no plan upgrade was performed.
+
+Retained external-video URL ceiling: 1,024,000,000 bytes. Common video preparation policy: at most 1,000,000,000 bytes, tightened by native, live backup grants and available storage. An approved native TikTok caption may exceed Sociamonials' 150-unit allowance; that is an explicit exception, not permission to shorten it.
+
+### Meta and blog transports
+
+Official Meta searches produced no fresh result; earlier reference fetches were blocked. Retain qualified Facebook Page `/videos` 4,000 MB/14,460 seconds, Instagram Reels 300 MB/3–900 seconds, and Threads 1 GB/300 seconds policies. Do not apply Page Reels' 3–90-second specification to `/videos`, app carousel counts to the implemented API, or secondary publishing quotas as universal account entitlements. Essential official and corroborating references remain in the tracked API guide.
+
+WordPress REST upload checks explicitly use host/site storage and `fileupload_maxk`, while PHP `upload_max_filesize` and `post_max_size` concern single-file and total request budgets. NW/SW Git/URL-embed blogs and Teaching/MSL WordPress therefore have no invented universal video size/duration ceiling.
+
+## Inactive / legacy route evidence
+
+| Route | Fresh retrieved evidence / caveat | Source |
+|---|---|---|
+| Douyin | Upload text says total within 4 GB, over 300 MB requires transport fragments; duration error says no more than 15 minutes. Fragment sizes are not post splits. | https://developer.open-douyin.com/docs/resource/zh-CN/dop/develop/openapi/video-management/douyin/create-video/upload-video |
+| Bilibili | 4 GB, duration less than five hours, resolution at most 4096×2160, peak bitrate 60 Mbps; over 100 M uses transport chunks. Retrieved non-official-member cap is five submissions/day. | https://openhome.bilibili.com/doc/4/0c532c6a-e6fb-0aff-8021-905ae2409095 ; https://openhome.bilibili.com/doc/4/f7fc57dd-55a1-5cb1-cba4-61fb2994bf0f |
+| Kuaishou | Retrieved small-program/highlight surfaces describe 10 MB fragments. They do not establish a universal whole-video/feed publishing ceiling. No general duration/byte ceiling is invented. | https://open.kuaishou.com/docs/operate/specification/integrationGuide/apiGuide.html ; https://open.kuaishou.com/docs/develop/IndustrySolutions/highLightUploadInterface.html |
+| Xiaohongshu | JS sharing/client handoff and app-scoped frequency controls, not a verified general server video-note publisher. | https://agora.xiaohongshu.com/doc/js ; https://openaccount.xiaohongshu.com/docs/faq |
+| WeChat Channels | API catalog covers capabilities such as live commerce and quota queries; no ordinary-video posting API established. | https://developers.weixin.qq.com/doc/channels/api/ |
+| Baijiahao | Unified dynamic daily author allowance; title 8–40 characters, rich text up to 20,000 characters. URL ingestion is not a newly verified universal video byte/duration limit. | https://baijiahao.baidu.com/builder/author/openauth/openauthProtection |
+| Discord | Fresh change log increases default upload from 10 MiB to 20 MiB. SAU retains conservative 20,000,000 bytes. Parse bucket/reset and `retry_after`. | https://docs.discord.com/developers/change-log ; https://docs.discord.com/developers/topics/rate-limits |
+| LinkedIn | Same Videos API page distinguishes feed specification 3 seconds–30 minutes/75 kB–500 MB from an initialize-upload schema maximum of 5 GB. Do not equate these surfaces or enable the route. | https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/videos-api?view=li-lms-2026-10 |
+| Pinterest | Rate categories depend on Trial/Standard and per-app versus per-user scope. No universal organic video byte/duration ceiling was verified. | https://developers.pinterest.com/docs/reference/rate-limits/ ; https://developers.pinterest.com/docs/work-with-organic-content-and-users/create-boards-and-pins/ |
+| Medium | Legacy OAuth/integration-token posting API; no new native video publication entitlement. | https://github.com/Medium/medium-api-docs/ |
+| Substack | Video guide calls 20 GB a recommended maximum and recommends H.264/AAC; not a general automated API entitlement. | https://support.substack.com/hc/en-us/articles/21093671091220-Guide-to-video-posts-on-Substack |
+| Patreon | Retrieved surfaces distinguish 2 GB uploads, 5 GB attachments, and native video without a byte ceiling but at most 12 hours. No general automatic publishing API is established. | https://support.patreon.com/hc/en-us/articles/204606055-What-file-formats-are-supported-for-posts ; https://support.patreon.com/hc/en-us/articles/360017431292-Posting-videos |
+| Reddit | Official Data API access/rate/retention policy retrieved. SAU publishing remains retired; no backup or recovery enablement. | https://support.reddithelp.com/hc/en-us/articles/16160319875092-Reddit-Data-API-Wiki |
+
+## Application invariants (not provider maxima)
+
+Prepare exact originals/variants, preserve framing and approved copy, compress against measured byte budgets with headroom, split **all** content into complete ordered parts, then validate final transformed bytes and immutable hashes. Do not crop content away, discard tails, substitute originals, or split again inside an uploader.
+
+Native and managed aliases use one canonical destination for duplicates, leases, scheduling and recovery. The default three posts/day and 30-minute gap are operator policies, counted in operator-local days with UTC queue instants. Requested caps/gaps may only tighten them. Past-due unresolved bookings consume present capacity; a confirmed receipt is counted once, not once per alias.
+
+Publication receipts and uncertain requests are reconciled without blind fallback. Terminal publication outcome and alert event commit together; notification retries are independent and never republish. All production recovery plans, database snapshots, media/customer content and credentials remain private on the server, not in this evidence file or test fixtures.

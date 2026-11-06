@@ -105,9 +105,11 @@ class NextFreeSlotTests(unittest.TestCase):
         publish_orchestrator.MIN_GAP_MINUTES = self._gap
         publish_orchestrator.MAX_POSTS_PER_ACCOUNT_PER_DAY = self._cap
 
-    def test_publish_now_is_unchanged(self):
-        self.assertIsNone(publish_orchestrator._next_free_slot(1, None, 0, {}))
-        self.assertIsNotNone(publish_orchestrator._next_free_slot(1, None, 1, {}))
+    def test_publish_now_is_allocated_and_respects_existing_bookings(self):
+        booked = {}
+        self.assertEqual(publish_orchestrator._next_free_slot(1, None, 0, booked, now_fn=lambda: self.base), self.base)
+        self.assertEqual(publish_orchestrator._next_free_slot(1, None, 0, booked, now_fn=lambda: self.base),
+                         self.base + timedelta(minutes=30))
 
     def test_exact_collision_is_pushed_past_the_gap(self):
         booked = {1: ["2026-10-06T13:00:00"]}
@@ -134,10 +136,12 @@ class NextFreeSlotTests(unittest.TestCase):
         slot = publish_orchestrator._next_free_slot(2, self.base, 0, booked)
         self.assertEqual(slot, datetime(2026, 10, 6, 13, 0, 0))
 
-    def test_load_booked_slots_is_best_effort(self):
-        self.assertEqual(
-            publish_orchestrator._load_booked_slots("/nonexistent/db.sqlite"), {}
-        )
+    def test_load_booked_slots_refuses_a_missing_database_without_creating_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.db"
+            with self.assertRaises(FileNotFoundError):
+                publish_orchestrator._load_booked_slots(missing)
+            self.assertFalse(missing.exists())
 
 
 class RequestDataForOptionsTests(unittest.TestCase):

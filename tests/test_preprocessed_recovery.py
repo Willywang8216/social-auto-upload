@@ -294,3 +294,22 @@ def test_native_capability_limits_dropping_after_plan_refuses_apply(database, so
     read.return_value = {"video_limits": {**limits, "max_seconds": 1.0}, "capability_check": "fixture"}
     assert prep.apply_plan(plan, db_path=path)["applied"] == 0
     assert jobs.get_target(target.id, db_path=path).status == "failed"
+
+
+def test_prepared_recovery_shares_the_finalizer_reservation(database, source, tmp_path, monkeypatch):
+    path, _profile, _account = database
+    _job, target = failed_job(database, source)
+    plan = prep.prepare_plan(db_path=path, target_ids=[target.id], out_dir=tmp_path / "ordered", now=NOW)
+    connect = sqlite3.connect
+    def short_wait(db, *args, **kwargs):
+        if str(db).endswith(".slots.lock"):
+            kwargs["timeout"] = .01
+        return connect(db, *args, **kwargs)
+    with prep.recovery.publish_orchestrator.slot_reservation_lock(path):
+        monkeypatch.setattr(prep.recovery.publish_orchestrator.sqlite3, "connect", short_wait)
+        result = prep.apply_plan(plan, db_path=path)
+        assert result["applied"] == 0 and result["errors"]
+        assert jobs.get_target(target.id, db_path=path).status == "failed"
+        with closing(connect(path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM publish_job_targets").fetchone()[0] == 1
+    assert prep.apply_plan(plan, db_path=path)["queued_parts"] == 3

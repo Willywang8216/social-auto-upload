@@ -286,7 +286,14 @@ def test_all_receipt_and_operation_evidence_is_preserved_even_when_failed(db_pat
     target = _target(db_path)
     plan = _plan(db_path)
     _update(db_path, "publish_job_targets", target, checkpoint_json=checkpoint)
-    assert not _entries(_plan(db_path, resolved_target_ids=[target]))
+    try:
+        attempted = _plan(db_path, resolved_target_ids=[target])
+    except recovery.RecoveryRefused as exc:
+        # Corrupt delivery history now refuses the entire calendar, rather
+        # than manufacturing empty capacity. Neither outcome can write.
+        assert "unreadable destination booking history" in str(exc)
+    else:
+        assert not _entries(attempted)
     _assert_refused_unchanged(db_path, plan)
     with pytest.raises(ValueError, match="Submission evidence"):
         jobs.reschedule_failed_target(target, plan[0]["slot"], db_path=db_path,
@@ -813,3 +820,21 @@ def test_shared_delivered_and_inflight_history_consumes_capacity(db_path, monkey
     selected = _target(db_path)
     plan = _entries(_plan(db_path, target_ids=[selected]))
     assert len(plan) == 1 and plan[0]["slot"][:10] > NOW.date().isoformat()
+
+
+def test_recovery_cannot_interleave_with_a_finalizer_reservation(db_path, monkeypatch):
+    target_id = _target(db_path)
+    plan = _plan(db_path)
+    before = _dump(db_path)
+    connect = sqlite3.connect
+    def short_wait(path, *args, **kwargs):
+        if str(path).endswith(".slots.lock"):
+            kwargs["timeout"] = .01
+        return connect(path, *args, **kwargs)
+    with recovery.publish_orchestrator.slot_reservation_lock(db_path):
+        monkeypatch.setattr(recovery.publish_orchestrator.sqlite3, "connect", short_wait)
+        result = recovery.apply_recovery(plan, db_path=db_path)
+        assert result["applied"] == 0 and result["errors"]
+        assert _dump(db_path) == before
+        assert jobs.get_target(target_id, db_path=db_path).status == "failed"
+    assert recovery.apply_recovery(plan, db_path=db_path)["applied"] == 1
