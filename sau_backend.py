@@ -2760,6 +2760,11 @@ def _effective_refresh_skew(platform: str, skew_seconds: int) -> int:
 
 def _is_refreshable_account_stale(account: profile_registry.Account, *, skew_seconds: int = 300) -> bool:
     config = dict(account.config or {})
+    if (account.platform == profile_registry.PLATFORM_TIKTOK
+            and str(config.get('publishingProvider') or 'direct').strip().lower() == 'sociamonials'):
+        from myUtils import sociamonials_fallback
+        if sociamonials_fallback.prefers_sociamonials(account, platform=account.platform):
+            return False
     if config.get('_needsReconnect'):
         return False
     retry_at = prepared_publishers._parse_iso_datetime(str(config.get('_nextMaintenanceAttemptAt') or ''))

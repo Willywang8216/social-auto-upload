@@ -40,6 +40,15 @@ def _account(platform: str, config: dict) -> profile_registry.Account:
     )
 
 
+def _managed_tiktok() -> profile_registry.Account:
+    return profile_registry.Account(
+        id=3, profile_id=3, platform="tiktok", account_name="Synthetic_SW_TK",
+        cookie_path="", auth_type="api", enabled=True, status=1,
+        config={"publishingProvider": "sociamonials", "sociamonials": {
+            "network": "tiktok", "workspace_id": 26985, "profile_refs": [3917]}},
+    )
+
+
 async def _noop_executor(platform, payload, target):  # pragma: no cover - never run
     return None
 
@@ -114,6 +123,12 @@ class WorkerStalenessTests(unittest.TestCase):
         acct = _account("douyin", {"accessToken": "a", "accessTokenExpiresAt": _aware(timedelta(minutes=1))})
         self.assertFalse(self.worker._is_account_stale(acct))
 
+    def test_managed_tiktok_does_not_require_native_oauth(self) -> None:
+        managed = _managed_tiktok()
+        self.assertFalse(self.worker._is_account_stale(managed))
+        native = _account("tiktok", {"sociamonials": managed.config["sociamonials"]})
+        self.assertTrue(self.worker._is_account_stale(native))
+
 
 flask_available = importlib.util.find_spec("flask") is not None
 
@@ -169,6 +184,14 @@ class BackendEffectiveSkewTests(unittest.TestCase):
             "_nextMaintenanceAttemptAt": _aware(timedelta(minutes=5)),
         })
         self.assertFalse(_is_refreshable_account_stale(backed_off_twitter, skew_seconds=3600))
+
+    def test_managed_tiktok_does_not_require_native_oauth(self) -> None:
+        from sau_backend import _is_refreshable_account_stale
+
+        managed = _managed_tiktok()
+        self.assertFalse(_is_refreshable_account_stale(managed))
+        native = _account("tiktok", {"sociamonials": managed.config["sociamonials"]})
+        self.assertTrue(_is_refreshable_account_stale(native))
 
 
 @unittest.skipUnless(flask_available, "Flask not installed (optional [web] extra)")

@@ -459,6 +459,13 @@ class PublishWorker:
         if platform not in self._REFRESHABLE_PLATFORMS:
             return False
 
+        # Managed TikTok uses the existing workspace agent, not a copied
+        # native OAuth token. Optional backup leaves native refresh unchanged.
+        if (platform == "tiktok"
+                and str(config.get("publishingProvider") or "direct").strip().lower() == "sociamonials"
+                and sociamonials_fallback.prefers_sociamonials(account, platform=platform)):
+            return False
+
         # A cookie-based account has no refreshable OAuth credential. Compare
         # the normalized mode so "Cookie"/"API" casing and a platform key that
         # lives only on the row's ``auth_type`` column both resolve correctly.
