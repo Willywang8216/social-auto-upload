@@ -40,7 +40,7 @@ accounts — they are two sets, both receiving the same media with different cop
 
 | language | accounts |
 |---|---|
-| `en` | facebook `SW-FB` · instagram `SW_IG` · reddit `Sexualwill Reddit OAuth` · threads `SW_threads` · twitter `sexualwill` · bluesky `SW Bluesky EN` · telegram `SW TG 本人` |
+| `en` | facebook `SW-FB` · instagram `SW_IG` · reddit `Sexualwill Reddit OAuth` · tiktok `SW_TK_shared_NW` · threads `SW_threads` · twitter `sexualwill` · bluesky `SW Bluesky EN` · telegram `SW TG 本人` |
 | `zh-Hant` | bluesky `SW Bluesky ZH` · telegram `SW TG 中文` · twitter `光光` |
 | `en,zh-Hant` | nw_sw_blog `SW Blog` (bilingual — accepts either script) |
 
@@ -76,7 +76,7 @@ bluesky ×2 · nw_sw_blog · reddit · telegram ×2 · twitter ×2
 ## `SFW SW` — all SW accounts
 
 bluesky ×2 · facebook · instagram · nw_sw_blog · reddit · telegram ×2 ·
-threads · twitter ×2
+threads · tiktok · twitter ×2
 
 ## `NSFW SW` — SW minus the restricted platforms
 
@@ -174,12 +174,17 @@ that exact connection is connected and publish-authorized. Keep native-first
 posting where public Direct Post is available and preserve per-post privacy and
 consent choices. Never silently change a public request into a private post.
 
-The initial live inventory had no SW TikTok account. The shared SFW publication
-rule is to configure a separate **profile-3-owned managed entry to this same exact
-connection**, not select NW's foreign account ID or copy its OAuth refresh token.
-After that entry is configured, `SFW SW` includes the shared TikTok destination.
-Verify the live row before submitting; the historical native roster above is not
-proof that a missing managed entry exists.
+The verified live SW entry is account `137` (`SW_TK_shared_NW`), owned by profile
+`3`, English, enabled, with an explicit Sociamonials primary route to the same
+network `tiktok`, reference `3917`, workspace `26985`, and default workspace
+credential selector. It has no native OAuth tokens or cookie; neither was copied
+from NW. `SFW SW` therefore includes this shared TikTok destination without
+selecting NW's foreign account ID. Account configuration is not delivery evidence.
+
+NW's prior account default was private (`SELF_ONLY`); existing unstarted queued
+and recoverable historical parts must retain that original intent explicitly
+before changing the default for future submissions. Successful history without
+public IDs is not a failed-publication backlog and must not be blindly resent.
 
 NW-only, SW-only, or combined `NW+SW` submissions use one canonical destination,
 duplicate guard, lease exclusion, and three/day, 30-minute-gap calendar. Combined
