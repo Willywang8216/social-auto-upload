@@ -84,10 +84,12 @@ class TikTokStatusTests(unittest.TestCase):
         self.fail("script ended without a terminal delivery outcome")
 
     def test_terminal_failed_status_raises_non_retryable(self):
-        with self.assertRaises(prepared_publishers.PreparedPublishError) as raised:
+        with self.assertRaises(delivery.ProviderConfirmedFailure) as raised:
             self._run([{"data": {"status": "failed", "fail_reason": "duration_check_failed"}}])
         self.assertFalse(raised.exception.retryable)
         self.assertIn("duration_check_failed", str(raised.exception))
+        self.assertEqual(raised.exception.details,
+                         {"provider": "tiktok", "receiptId": "pub-1", "retrySafe": False})
 
     def test_publish_complete_returns_normally(self):
         recorded = self._run([{"data": {"status": "publish_complete"}}])
