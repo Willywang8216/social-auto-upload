@@ -895,6 +895,11 @@ def _run_held_deploy(fixture, *, fault="", flags=None, runtime_head=_HELD_REVISI
                     ROLLBACK_IMAGE=_PREVIOUS_IMAGE)
     harness = "\n".join(f"{key}={shlex.quote(value)}" for key, value in settings.items()) + r'''
 set -euo pipefail
+# This harness advances sleep without waiting. Unset Bash's special wall-clock
+# SECONDS first so helper CPU time cannot be counted again as virtual sleep.
+# Production deploy-local.sh still uses the real Bash clock and unchanged bounds.
+unset SECONDS
+SECONDS=0
 export SAU_RELEASE_PYTHON=release_python
 export SAU_RELEASE_DRAIN_SECONDS=10 SAU_RELEASE_STOP_SECONDS=10 SAU_RELEASE_READY_SECONDS=10
 unset SAU_RELEASE_LOCK_FD
@@ -1174,7 +1179,7 @@ def test_failed_replacement_retains_current_db_and_only_rolls_back_images(held_r
     assert (candidates[0] / "baseline/replaced-stage.json").read_bytes() == stage
     migrated = fault in {"migration", "readiness", "fast-forward"}
     assert values(fixture.db) == ["original", "receipt since old snapshot"] + (["migration receipt"] if migrated else [])
-    assert ("rollback-images" in run.commands) == migrated
+    assert ("rollback-images" in run.commands) == migrated, run.diagnostic
     assert "python:restore|" not in run.commands and "Claims released" not in run.diagnostic
     assert "--signal=KILL" not in run.commands and "MISSING" not in run.commands
     assert (fixture.runtime / "logs/ci-watch.state").read_text() == "previous successful revision"
