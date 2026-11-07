@@ -1,8 +1,8 @@
 """Shared publishing ceilings and conservative preparation policies.
 
-Video sources were rechecked with Exa on 2026-11-05; citations and uncertainty
-are recorded in ``logs/platform-limits-research.md``. A configured route may
-have a lower limit than its consumer app (notably TikTok and Telegram).
+Sources were rechecked with Exa on 2026-11-07; citations and uncertainty
+are in ``docs/platform-limits-evidence-2026-11-07.md`` and the historical
+``logs/platform-limits-research.md``. API and consumer-app limits differ.
 
 Sizes here use decimal MB as a conservative interpretation unless the source
 specifies exact bytes. The tables include compatibility policies, not just
@@ -24,7 +24,7 @@ MESSAGE_MAX_CHARS: dict[str, int | None] = {
     "facebook": 63206,
     "instagram": 2200,
     "threads": 500,
-    "tiktok": 2200,          # API cap (in-app allows 4000)
+    "tiktok": 2200,          # video caption; photo title/description are separate
     "youtube": 5000,         # description UTF-8 BYTES; title is separate below
     "reddit": 40000,         # self-post body
     "telegram": 4096,        # text-only message; media caption is 1024
@@ -47,6 +47,8 @@ REDDIT_TITLE_MAX_CHARS = 300
 BLUESKY_BYTE_MAX = 3000
 YOUTUBE_DESCRIPTION_MAX_BYTES = 5000
 TIKTOK_CAPTION_MAX_UTF16 = 2200
+TIKTOK_PHOTO_TITLE_MAX_UTF16 = 90
+TIKTOK_PHOTO_DESCRIPTION_MAX_UTF16 = 4000
 
 # Largest single media file, decimal MB. The publisher that fetches from a URL
 # is bound by the server-side fetch ceiling; the send path is bound by the
@@ -179,7 +181,7 @@ def limits_for_network(network: str | None) -> dict:
 # Offline processing policy, separate from an account's runtime entitlement.
 # 30 fps / H.264 / AAC / MP4 is a compatibility output, not a claim that other
 # encodings are universally forbidden. Content framing is preserved by padding.
-PREPARATION_POLICY_VERSION = "2026-11-05-v3"
+PREPARATION_POLICY_VERSION = "2026-11-07-v4"
 TIKTOK_DEFAULT_PREP_SECONDS = 180.0
 TELEGRAM_CLOUD_UPLOAD_BYTES = 50_000_000
 TELEGRAM_URL_FETCH_BYTES = 20_000_000
@@ -208,8 +210,10 @@ IMAGE_PREPARATION_POLICIES: dict[str, dict] = {
     "threads": {"route": "Graph carousel (qualified compatibility)",
                 "max_bytes": 8_000_000, "formats": ("JPEG", "PNG"),
                 "min_aspect_ratio": 0.1, "max_aspect_ratio": 10.0},
+    # The transfer guide says "Maximum 1080p" without defining both axes.
+    # A 1080-pixel long edge is a conservative, orientation-independent policy.
     "tiktok": {"route": "Direct Post photo compatibility", "max_bytes": 20_000_000,
-               "formats": ("JPEG",)},
+               "formats": ("JPEG",), "max_width": 1080, "max_height": 1080},
     "reddit": {"route": "native gallery compatibility", "max_bytes": 20_000_000,
                "formats": ("JPEG", "PNG")},
     "telegram": {"route": "Bot API sendPhoto / media group", "max_bytes": 10_000_000,

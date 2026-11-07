@@ -1,6 +1,6 @@
 # Platform publishing limits and preprocessing
 
-Updated 2026-11-06. Enforcement is owned by `myUtils/platform_limits.py`, `myUtils/text_limits.py`, and the media validators. [API rate limits](platform-api-rate-limits.md) contains essential citations; `logs/platform-limits-research.md` records the 24 fresh Exa search request IDs, source-retrieval evidence, units, and uncertainty. Earlier source records remain in Git history.
+Updated 2026-11-07. Enforcement is owned by `myUtils/platform_limits.py`, `myUtils/text_limits.py`, and the media validators. The [fresh Exa evidence and route matrix](platform-limits-evidence-2026-11-07.md) records source excerpts, request IDs, route applicability, and uncertainty; [API rate limits](platform-api-rate-limits.md) gives the compact reference. Earlier research remains in `logs/platform-limits-research.md` and Git history.
 
 These are route-specific ceilings and conservative SAU compatibility policies, not consumer-app limits or automatic plan entitlements. MB/GB below are decimal unless exact bytes are stated. Fresh account allowances and upload grants may tighten the prepared output; request overrides cannot raise them. Unknown constraints do not grant unlimited upload permission.
 
@@ -45,7 +45,7 @@ The following are **prepared-output policies**. Lower live backup grants also ap
 | Facebook Page photos | 10 | 4,000,000 | Conservative SAU output policy, below corroborated provider ceilings. |
 | Instagram feed/carousel | 10 | 8,000,000 | JPEG; conservative 320–1080 px width and 4:5–1.91:1 framing profile. |
 | Threads carousel | 10 | 8,000,000 | JPEG/PNG; qualified compatibility profile and conservative count. |
-| TikTok Direct Post photos | 35 native; 10 common backup | 20,000,000 native | JPEG compatibility output; photo and video schemas differ. Current backup hosting may be tighter. |
+| TikTok Direct Post photos | 35 native; 10 common backup | 20,000,000 native | JPEG output; conservative 1080-pixel long edge for the guide's “maximum 1080p,” preserving framing. Current backup hosting may be tighter. |
 | Telegram photo/media group | 10 | 10,000,000 | Width + height ≤10,000; ratio ≤20. Albums and text-only messages use different contracts. |
 | YouTube thumbnail | Cover only | 2,000,000 | Not a standalone image publication; retain the exact cover intent. |
 
@@ -60,6 +60,7 @@ Support thumbnails/covers stay attached to their intended video and are not coun
 | X main Post | 280 | twitter-text-style Unicode weights; HTTP(S) URLs count as 23 |
 | Bluesky Post | 300 and 3,000 | Graphemes **and** UTF-8 bytes |
 | TikTok video caption | 2,200 | UTF-16 units |
+| TikTok photo title / description | 90 / 4,000 | UTF-16 units; shared pre-queue and upload mapping, not the video-caption limit |
 | YouTube description | 5,000 | **UTF-8 bytes**, not Python characters |
 | YouTube title / tags | 100 / 500 | Title characters; aggregate tags include commas and quotes around tags with spaces |
 | Instagram caption | 2,200 | Retained qualified character policy |
@@ -85,7 +86,7 @@ An explicit recovery may derive a new generation from an intact checksum-verifie
 
 Sociamonials is a transport backup, not a policy or destination bypass. Resolve the effective per-account mapping, exact workspace, current connected profile, grants, capabilities, approval policy, and storage. Teaching never falls back to the default workspace's credential.
 
-The live hosted-video ceiling observed on 2026-11-05 was **1,073,741,824 bytes (1 GiB)** in both configured workspaces. External `video_url` has a separate **1,024,000,000-byte** ceiling. The common video preparation profile uses at most **1,000,000,000 bytes**, tightened by current native/backup allowances. Pooled storage is rechecked before each upload; no asset deletion or plan upgrade is authorized. Reuse requires exact ready media identity; a stable public URL must be accessible and byte-verified.
+Live checks on 2026-11-07 reconfirmed a hosted-video ceiling of **1,073,741,824 bytes (1 GiB)** in both configured workspaces. SAU interprets the reference's “1,024 MB” conservatively as **1,024,000,000 bytes** for external video. The common video preparation profile uses at most **1,000,000,000 bytes**, tightened by current native/backup allowances. Pooled storage is rechecked before each upload; no asset deletion or plan upgrade is authorized. Reuse requires exact ready media identity; a stable public URL must be accessible and byte-verified.
 
 Strict no-create provider validation (`POST /api/v1/posts`, `validate_only=true`, `strict=true`) precedes submission. Privacy, interactions, disclosures, YouTube settings, post type, copy, covers, and alt text must be supported unchanged. Literal per-destination confirmed delivery with a usable network post receipt is success. Processing, partial delivery, approval holds, and uncertain requests retain receipts for reconciliation/review.
 

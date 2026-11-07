@@ -1,3 +1,7 @@
+# Follow-up source record — 2026-11-07
+
+The tracked `docs/platform-limits-evidence-2026-11-07.md` records the fresh Exa agent run, seven direct search request IDs, three retrieval requests, official excerpts, failed retrievals, live constraint checks, and complete route coverage. It supersedes the photo-field/resolution assumptions below: native TikTok photo title/description are 90/4,000 UTF-16 units; video caption remains 2,200. The guide's “maximum 1080p” is conservatively implemented as a 1080-pixel long edge with full-frame scaling. Preparation policy is `2026-11-07-v4`; other video ceilings are unchanged. The historical 2026-11-06 evidence follows unchanged.
+
 # Platform-limit source record — 2026-11-06
 
 Enforcement is owned by `myUtils/platform_limits.py`, `myUtils/text_limits.py`, and the final media validators. The tracked summaries are `docs/platform-posting-limits.md` and `docs/platform-api-rate-limits.md`. This follow-up supersedes earlier claims that TikTok's ten-minute inbox-upload rule is a universal Direct Post ceiling. SAU retains a conservative 600-second preparation policy; it does not enable longer videos solely because a creator reports a larger allowance. The 2026-11-05 source record remains in the production Git history.

@@ -1,6 +1,6 @@
 # API publication and request limits: source evidence
 
-Research refreshed 2026-11-06 using **24 fresh Exa API searches** plus source retrieval; exact request IDs, quotations, numerical units and uncertainty are in `logs/platform-limits-research.md`. The configured official Exa API works; official Meta searches returned no results and earlier reference retrieval was unavailable. Earlier dated records remain in Git history. This supplements [publishing policies](platform-posting-limits.md). Limits belong to the named API/transport/post type, not automatically a consumer app, ad product, API plan, or every account.
+Research refreshed 2026-11-07 through Exa's research agent, official-domain searches and full source retrieval. The [fresh evidence matrix](platform-limits-evidence-2026-11-07.md) records exact request IDs, source excerpts, route coverage and failed retrievals; `logs/platform-limits-research.md` retains the earlier dated record. Official Meta reference retrieval again returned 403, so its retained figures remain qualified compatibility policies. This supplements [publishing policies](platform-posting-limits.md). Limits belong to the named API/transport/post type, not automatically a consumer app, ad product, API plan, or every account.
 
 ## Active API routes
 
@@ -48,5 +48,6 @@ Reddit stays retired. WordPress/blog upload constraints depend on host/PHP/proxy
 ### Follow-up distinctions
 
 - TikTok direct and inbox video use different documented endpoints/schemas. `publicaly_available_post_id` is a list of moderated public IDs; a tracking `publish_id` or an inbox notification is not public delivery. Preserve original visibility with the receipt and never silently downgrade a public request.
+- TikTok's [photo reference](https://developers.tiktok.com/doc/content-posting-api-reference-photo-post) defines **90 UTF-16 units for the title and 4,000 for the description**, distinct from the 2,200-unit video caption. The transfer guide's “maximum 1080p” is implemented conservatively as a 1080-pixel long-edge photo preparation policy, without cropping or changing originals. Both pre-queue validation and upload use the same field mapping.
 - Fresh YouTube [`thumbnails.set`](https://developers.google.com/youtube/v3/docs/thumbnails/set) reference states a 50 MB API upload ceiling. SAU retains a smaller 2,000,000-byte prepared-cover policy; it is not the provider maximum.
 - NW/SW aliases to the same exact TikTok connection share destination capacity and duplicate/lease protection. Teaching's workspace/credential remains separate. Operator-local daily budgets, UTC instants, confirmed receipt deduplication, and overdue unresolved bookings use the shared destination pacing helper; publish-now cannot bypass the configured budget.

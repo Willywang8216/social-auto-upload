@@ -99,6 +99,11 @@ def field_limit(platform: str, field: str = "message") -> tuple[int | None, str]
             return pl.YOUTUBE_TAGS_MAX_CHARS, "tag_characters"
         if field in {"message", "description", "caption"}:
             return pl.YOUTUBE_DESCRIPTION_MAX_BYTES, "utf8_bytes"
+    if platform == "tiktok":
+        if field == "photo_title":
+            return pl.TIKTOK_PHOTO_TITLE_MAX_UTF16, "utf16_units"
+        if field == "photo_description":
+            return pl.TIKTOK_PHOTO_DESCRIPTION_MAX_UTF16, "utf16_units"
     if platform == "reddit" and field == "title":
         return pl.REDDIT_TITLE_MAX_CHARS, "characters"
     if platform == "telegram" and field == "caption":

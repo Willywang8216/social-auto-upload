@@ -147,7 +147,12 @@ def _validate_approved_text(payload: dict, platform: str, *, has_media: bool) ->
         return
     draft = payload.get("draft") or {}
     message = payload.get("message") if "message" in payload else draft.get("message", "")
+    tiktok_photo = (platform == "tiktok" and has_media
+                    and {media_kind(item) for item in payload.get("artifacts") or []
+                         if not is_context_artifact(item) and not is_support_artifact(item)} == {"image"})
     field = "caption" if platform == "telegram" and has_media else "message"
+    if tiktok_photo:
+        field = "photo_description"
     text_limits.validate_message(message, platform, field=field)
     if platform == "youtube":
         if draft.get("title") is not None:
@@ -160,8 +165,12 @@ def _validate_approved_text(payload: dict, platform: str, *, has_media: bool) ->
         text_limits.validate_youtube_tags([str(tag).lstrip("#") for tag in tags])
         from myUtils.prepared_publishers import youtube_text_fields
         youtube_text_fields(payload)  # same read-only mapping as the native publisher
-    elif platform == "tiktok" and (payload.get("tiktokPostSettings") or {}).get("title") is not None:
-        text_limits.validate_message(payload["tiktokPostSettings"]["title"], platform, field="caption")
+    elif platform == "tiktok":
+        if tiktok_photo:
+            from myUtils.prepared_publishers import tiktok_photo_text_fields
+            tiktok_photo_text_fields(payload)  # also validate the exact fallback title
+        elif (payload.get("tiktokPostSettings") or {}).get("title") is not None:
+            text_limits.validate_message(payload["tiktokPostSettings"]["title"], platform, field="caption")
 
 
 def validate_payload(payload: dict, *, platform: str, account_config: dict | None = None,

@@ -2232,8 +2232,21 @@ def _validate_tiktok_video_artifact(item: dict[str, Any], *, message: str, confi
                 raise PreparedPublishError("TikTok video_cover_timestamp_ms must not exceed the video duration")
 
 
+def tiktok_photo_text_fields(payload: dict) -> dict[str, str]:
+    """Shared photo mapping for preparation and upload; preserve approved copy."""
+    reviewed_title = (payload.get("tiktokPostSettings") or {}).get("title") or ""
+    if not text_limits.preserves_approved_text(payload):
+        reviewed_title = str(reviewed_title).strip()
+    return {
+        "title": _enforce_message_limit(reviewed_title or _message_title(payload), "tiktok",
+                                        payload=payload, field="photo_title"),
+        "description": _enforce_message_limit(_payload_message(payload), "tiktok",
+                                              payload=payload, field="photo_description"),
+    }
+
+
 def _validate_tiktok_photo_payload(public_urls: list[str], *, message: str) -> None:
-    _enforce_message_limit(message, "tiktok", field="caption", strict=True)
+    _enforce_message_limit(message, "tiktok", field="photo_description", strict=True)
     if len(public_urls) > 35:
         raise PreparedPublishError("TikTok photo publish supports up to 35 images")
 
@@ -2503,15 +2516,10 @@ def publish_tiktok_sync(account, payload: dict, *, session=None) -> dict:
             for url in public_urls:
                 _tiktok_validate_pull_from_url(url)
         _validate_tiktok_photo_payload(public_urls, message=message)
-        # Use reviewed title from TikTokPostSettings if present
-        reviewed_title = tt_settings.get("title") or ""
-        if not text_limits.preserves_approved_text(payload):
-            reviewed_title = str(reviewed_title).strip()
-        photo_title = reviewed_title if reviewed_title else _message_title(payload)
+        photo_fields = tiktok_photo_text_fields(payload)
 
         photo_post_info = {
-            "title": _enforce_message_limit(photo_title, "tiktok", payload=payload, field="caption"),
-            "description": _enforce_message_limit(message, "tiktok", payload=payload, field="caption"),
+            **photo_fields,
             "privacy_level": privacy_level,
             "disable_comment": bool(tt_settings.get("disableComment", config.get("disableComment", False))),
             "disable_duet": bool(tt_settings.get("disableDuet", config.get("disableDuet", False))),
