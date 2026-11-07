@@ -8,7 +8,7 @@ unset PYTHONOPTIMIZE
 SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME="$SOURCE"
 PYTHON="${SAU_RELEASE_PYTHON:-python3}"
-REVISION=""
+REVISION="" REPLACE_HELD=""
 NO_BUILD=0 BUILD_ONLY=0 HOLD=0 RESUME=0 ALLOW_LEGACY=0
 while (( $# )); do
   case "$1" in
@@ -17,15 +17,23 @@ while (( $# )); do
     --no-build) NO_BUILD=1; shift ;;
     --build-only) BUILD_ONLY=1; shift ;;
     --hold) HOLD=1; shift ;;
+    --replace-held)
+      [[ $# -ge 2 && -z "$REPLACE_HELD" && "$2" =~ ^[0-9a-f]{40}$ ]] \
+        || { echo '--replace-held requires one full lowercase prior SHA.' >&2; exit 2; }
+      REPLACE_HELD="$2"; shift 2 ;;
     --resume) RESUME=1; NO_BUILD=1; shift ;;
     --legacy-stop-web) ALLOW_LEGACY=1; shift ;;
     -h|--help)
-      echo 'deploy-local.sh [--revision FULL_SHA] [--runtime-root DIR] [--build-only|--hold|--resume] [--no-build] [--legacy-stop-web]'
+      echo 'deploy-local.sh [--revision FULL_SHA] [--runtime-root DIR] [--build-only|--hold|--resume] [--no-build] [--legacy-stop-web] [--replace-held FULL_OLD_SHA --hold]'
       exit 0 ;;
     *) echo "Unknown release option: $1" >&2; exit 2 ;;
   esac
 done
 (( HOLD + RESUME + BUILD_ONLY <= 1 )) || exit 2
+if [[ -n "$REPLACE_HELD" ]]; then
+  (( HOLD == 1 && RESUME == 0 && BUILD_ONLY == 0 && ALLOW_LEGACY == 0 )) \
+    || { echo '--replace-held requires --hold; it cannot resume, build-only, or stop legacy web.' >&2; exit 2; }
+fi
 [[ "$(uname -s)" == Linux ]] || { echo 'Deployment requires Linux.' >&2; exit 1; }
 for command in git docker flock "$PYTHON"; do command -v "$command" >/dev/null; done
 CHECKS="$SOURCE/scripts/release_checks.py"
@@ -34,6 +42,8 @@ RECOVERY="$SOURCE/scripts/release_recovery.py"
 HEAD="$("$PYTHON" "$CHECKS" --root "$SOURCE" clean)"
 REVISION="${REVISION:-$HEAD}"
 [[ "$REVISION" == "$HEAD" && "$REVISION" =~ ^[0-9a-f]{40}$ ]] || exit 1
+[[ -z "$REPLACE_HELD" || "$REPLACE_HELD" != "$REVISION" ]] \
+  || { echo 'Replacement must name a different candidate revision.' >&2; exit 2; }
 LOG_DIR="$RUNTIME/logs"
 mkdir -p "$LOG_DIR/releases"
 LOCK="$LOG_DIR/ci-watch.lock"
@@ -190,16 +200,19 @@ PROJECT="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project
 [[ -n "$PROJECT" && "$PROJECT" != '<no value>' ]] || fail 'Cannot establish the existing Compose project.'
 
 pair_ready() {
-  local phase="$1" since="${2:-}" args=()
+  local phase="$1" since="${2:-}" expected_image="${3:-$IMAGE_ID}" expected_revision="${4:-$REVISION}" args=()
   [[ "$phase" != paused ]] || args+=(--allow-paused)
   [[ -z "$since" ]] || args+=(--since "$since")
-  [[ "$(docker inspect -f '{{.Image}}' "$WEB")" == "$IMAGE_ID" ]] || return 1
-  [[ "$(docker inspect -f '{{.Image}}' "$WORKER")" == "$IMAGE_ID" ]] || return 1
+  [[ "$(docker inspect -f '{{.Image}}' "$WEB")" == "$expected_image" ]] || return 1
+  [[ "$(docker inspect -f '{{.Image}}' "$WORKER")" == "$expected_image" ]] || return 1
   for name in "$WEB" "$WORKER"; do
-    [[ "$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name")" == "$REVISION" ]] || return 1
+    running "$name" || return 1
+    [[ "$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name")" == "$expected_revision" ]] || return 1
   done
-  docker exec "$WORKER" python scripts/release_probe.py worker --revision "$REVISION" "${args[@]}" || return 1
-  docker exec "$WEB" python scripts/release_probe.py web --revision "$REVISION" "${args[@]}" || return 1
+  # Probes also require each role's environment revision, shared pause and a
+  # fresh, owned draining heartbeat; health=healthy cannot stand in for these.
+  docker exec "$WORKER" python scripts/release_probe.py worker --revision "$expected_revision" "${args[@]}" || return 1
+  docker exec "$WEB" python scripts/release_probe.py web --revision "$expected_revision" "${args[@]}" || return 1
   if [[ "$phase" == active ]]; then
     for name in "$WEB" "$WORKER"; do
       [[ "$(docker inspect -f '{{.State.Health.Status}}' "$name")" == healthy ]] || return 1
@@ -214,6 +227,38 @@ wait_ready() {
   done
   return 1
 }
+
+# This is explicit adoption of a finished owner's hold, never a watcher force
+# option. Do not set PAUSE_OWNED (or stop/tag services) until EVERY check passes.
+held_ready() {
+  local previous
+  "$PYTHON" "$RECOVERY" verify "$HELD_DIR" --candidate-image "$HELD_IMAGE" >>"$DETAIL_LOG" 2>&1 \
+    || fail 'Held recovery bundle verification failed; original hold is unchanged.'
+  for previous in "$HELD_IMAGE" "$(cat "$HELD_DIR/baseline/web-image")" "$(cat "$HELD_DIR/baseline/worker-image")"; do
+    [[ -n "$previous" ]] || continue  # the original baseline may predate the split
+    [[ "$(docker image inspect -f '{{.Id}}' "$previous" 2>>"$DETAIL_LOG")" == "$previous" ]] \
+      || fail 'Held release or recorded rollback image is unavailable; original hold is unchanged.'
+  done
+  [[ "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$HELD_IMAGE")" == "$REPLACE_HELD" ]] \
+    || fail 'Held image revision differs from its stage; original hold is unchanged.'
+  pair_ready paused '' "$HELD_IMAGE" "$REPLACE_HELD" >>"$DETAIL_LOG" 2>&1 \
+    || fail 'Held pair is not the matching running split, freshly paused release; refusing adoption.'
+  activity_check || fail 'Held release has active/ambiguous work; refusing adoption, not draining it on behalf of another owner.'
+}
+if [[ -n "$REPLACE_HELD" ]]; then
+  HELD_STATE="$(PYTHONPATH="$SOURCE" "$PYTHON" - "$RUNTIME" "$REPLACE_HELD" <<'PY'
+import json, pathlib, sys
+from scripts.release_recovery import held_state
+try:
+    print(json.dumps(held_state(pathlib.Path(sys.argv[1]), sys.argv[2])))
+except (OSError, ValueError, RuntimeError):
+    raise SystemExit('Invalid held pause/stage ownership; original hold is unchanged') from None
+PY
+)" || fail 'Held pause/stage validation failed.'
+  HELD_DIR="$("$PYTHON" -c 'import json,sys; print(json.loads(sys.argv[1])["release_dir"])' "$HELD_STATE")"
+  HELD_IMAGE="$("$PYTHON" -c 'import json,sys; print(json.loads(sys.argv[1])["image_id"])' "$HELD_STATE")"
+  held_ready
+fi
 
 if (( RESUME == 1 )); then
   [[ -f "$PAUSE" && ! -L "$PAUSE" && "$(cat "$PAUSE")" == "$REVISION" ]] || fail 'No matching release-owned pause to resume.'
@@ -243,7 +288,7 @@ PY
   PAUSE_OWNED=1 TOUCHED=1
   wait_ready paused || fail 'Staged candidate is no longer safe to activate.'
 else
-  [[ ! -e "$PAUSE" && ! -L "$PAUSE" && ! -e "$STAGED" ]] || fail 'Existing pause/staged release requires explicit operator recovery or --resume.'
+  [[ ! -e "$PAUSE" && ! -L "$PAUSE" && ! -e "$STAGED" && ! -L "$STAGED" ]] || [[ -n "$REPLACE_HELD" ]] || fail 'Existing pause/staged release requires explicit operator recovery or --resume.'
   # A runtime marker must not make the later fast-forward cleanliness check fail.
   # Older checkouts can use the same exact rule in .git/info/exclude.
   git -C "$RUNTIME" check-ignore -q -- db/publish.pause \
@@ -256,13 +301,18 @@ else
   else
     [[ "$OLD_WORKER" == "$OLD_WEB" ]] || fail 'Existing web/worker images differ; investigate instead of overwriting.'
   fi
-  docker tag "$OLD_WEB" "${IMAGE_BASE}:previous"
+  if [[ -n "$REPLACE_HELD" ]]; then
+    [[ "$OLD_WEB" == "$HELD_IMAGE" && "$OLD_WORKER" == "$HELD_IMAGE" ]] || fail 'Held pair changed before baseline capture.'
+  else
+    docker tag "$OLD_WEB" "${IMAGE_BASE}:previous"
+  fi
   RELEASE_DIR="$RUNTIME/backups/releases/$(date -u +%Y%m%dT%H%M%S)-${REVISION}-$$"
-  mkdir -p "$RELEASE_DIR/baseline"
+  mkdir -p "$RUNTIME/backups/releases"
+  mkdir -m 700 "$RELEASE_DIR" "$RELEASE_DIR/baseline"  # never reuse/overwrite an old bundle
   chmod 700 "$RELEASE_DIR" "$RELEASE_DIR/baseline"
   printf '%s\n' "$OLD_WEB" >"$RELEASE_DIR/baseline/web-image"
   printf '%s\n' "$OLD_WORKER" >"$RELEASE_DIR/baseline/worker-image"
-  printf '%s\n' "$RUNTIME_HEAD" >"$RELEASE_DIR/baseline/git-revision"
+  printf '%s\n' "${REPLACE_HELD:-$RUNTIME_HEAD}" >"$RELEASE_DIR/baseline/git-revision"
   docker inspect "$WEB" >"$RELEASE_DIR/baseline/web-inspect.json"
   if [[ -n "$OLD_WORKER" ]]; then docker inspect "$WORKER" >"$RELEASE_DIR/baseline/worker-inspect.json"; fi
   render() {
@@ -341,8 +391,25 @@ for name, filename in (('social-auto-upload', 'web-inspect.json'), ('worker', 'w
 baseline_path.write_text(json.dumps(baseline))
 PY
   "$PYTHON" "$CHECKS" --root "$RUNTIME" clean --revision "$RUNTIME_HEAD" >/dev/null
-  (set -o noclobber; printf '%s\n' "$REVISION" >"$PAUSE")
-  PAUSE_OWNED=1
+  if [[ -n "$REPLACE_HELD" ]]; then
+    # Config capture can take time: recheck evidence, images, probes and activity
+    # before comparing the original marker identities and atomically adopting.
+    held_ready
+    PYTHONPATH="$SOURCE" "$PYTHON" - "$RUNTIME" "$HELD_STATE" "$REVISION" "$RELEASE_DIR" <<'PY'
+import json, pathlib, sys
+from scripts.release_recovery import adopt_held_pause
+try:
+    adopt_held_pause(pathlib.Path(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3], pathlib.Path(sys.argv[4]))
+except (OSError, ValueError, RuntimeError):
+    raise SystemExit('Held pause adoption failed; preserve pause and all evidence') from None
+PY
+    PAUSE_OWNED=1
+    docker tag "$OLD_WEB" "${IMAGE_BASE}:previous"
+    log "Adopted finished hold $REPLACE_HELD without releasing claims; original bundle: $HELD_DIR"
+  else
+    (set -o noclobber; printf '%s\n' "$REVISION" >"$PAUSE")
+    PAUSE_OWNED=1
+  fi
   log 'Claims paused; waiting for targets, leased preps and worker heartbeat to drain.'
   wait_drained || fail 'Drain failed/timed out; no forced restart or migration is allowed.'
   if [[ -n "$OLD_WORKER" ]]; then stop_gracefully "$WORKER" || fail 'Worker has not exited gracefully; aborting.'; fi

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import pytest
 import yaml
 
 from scripts import release_checks, release_probe, release_recovery, sqlite_backup
+from tests.test_ci_watch_identity import _bash
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -718,3 +720,473 @@ def test_resume_verification_and_config_preflight_precede_activation():
     assert normal.index('"$RECOVERY" seal') < normal.index("social-auto-upload -m myUtils.db_bootstrap")
     assert source.index('"$RECOVERY" verify') < source.index('rm "$PAUSE"')
     assert '"$BACKUP" restore' not in source
+
+
+_HELD_REVISION = "e" * 40
+_NEW_REVISION = "f" * 40
+
+
+@pytest.fixture
+def held_release(recovery_bundle):
+    fixture = recovery_bundle
+    destination = fixture.runtime / "backups/releases" / ("held-" + _HELD_REVISION)
+    destination.parent.mkdir(parents=True)
+    fixture.path.rename(destination)
+    fixture.path = destination.resolve()
+    release_recovery.seal(fixture.path)
+    (fixture.runtime / "logs").mkdir()
+    fixture.pause = fixture.runtime / "db/publish.pause"
+    fixture.pause.write_bytes((_HELD_REVISION + "\n").encode("ascii"))
+    fixture.stage = fixture.runtime / "logs/release-staged.json"
+    fixture.stage.write_text(json.dumps(dict(revision=_HELD_REVISION, image_id=_CANDIDATE_IMAGE,
+                                            release_dir=str(fixture.path))), encoding="utf-8")
+    (fixture.runtime / "logs/ci-watch.state").write_text("previous successful revision", encoding="ascii")
+    fixture.db = fixture.runtime / "db/database.db"
+    make_db(fixture.db)
+    with sqlite3.connect(fixture.db) as conn:
+        conn.executescript("CREATE TABLE publish_job_targets(status TEXT, lease_token TEXT);"
+                           "CREATE TABLE campaigns(status TEXT, metadata_json TEXT);")
+        conn.execute("INSERT INTO entries VALUES ('receipt since old snapshot')")
+        conn.execute("INSERT INTO publish_job_targets VALUES ('retrying', NULL)")
+        conn.execute("INSERT INTO campaigns VALUES ('preparing', ?)",
+                     (json.dumps({"prepRequest": {"title": "must stay queued"}}),))
+    return fixture
+
+
+def _bundle_bytes(path):
+    return {item.relative_to(path).as_posix(): item.read_bytes() for item in path.rglob("*") if item.is_file()}
+
+
+def test_held_adoption_is_one_atomic_rename_with_private_prior_stage(held_release, monkeypatch):
+    fixture = held_release
+    expected = release_recovery.held_state(fixture.runtime, _HELD_REVISION)
+    before = _bundle_bytes(fixture.path)
+    stage = fixture.stage.read_bytes()
+    destination = fixture.path.parent / "new-bundle"
+    (destination / "baseline").mkdir(parents=True)
+    real_replace = os.replace
+    calls = []
+    def replace_while_still_paused(source, target):
+        assert Path(target) == fixture.pause
+        assert fixture.pause.read_bytes() == (_HELD_REVISION + "\n").encode("ascii")
+        assert fixture.stage.read_bytes() == stage
+        assert (destination / "baseline/replaced-stage.json").read_bytes() == stage
+        real_replace(source, target)
+        assert fixture.pause.read_bytes() == (_NEW_REVISION + "\n").encode("ascii")
+        calls.append((source, target))
+    monkeypatch.setattr(release_recovery.os, "replace", replace_while_still_paused)
+    release_recovery.adopt_held_pause(fixture.runtime, expected, _NEW_REVISION, destination)
+    assert len(calls) == 1 and not list(fixture.pause.parent.glob(".publish-pause-*"))
+    assert _bundle_bytes(fixture.path) == before
+    assert values(fixture.db) == ["original", "receipt since old snapshot"]
+    if os.name == "posix":
+        assert (destination / "baseline/replaced-stage.json").stat().st_mode & 0o077 == 0
+        assert fixture.pause.stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize("marker", ["pause", "stage"])
+@pytest.mark.parametrize("change", ["content", "inode", "late-content"])
+def test_held_adoption_rechecks_original_marker_identity(held_release, monkeypatch, marker, change):
+    fixture = held_release
+    expected = release_recovery.held_state(fixture.runtime, _HELD_REVISION)
+    destination = fixture.path.parent / "new-bundle"
+    (destination / "baseline").mkdir(parents=True)
+    path = getattr(fixture, marker)
+    original = path.read_bytes()
+    def change_marker():
+        if change == "inode":
+            replacement = path.with_suffix(".racing-marker")
+            replacement.write_bytes(original)
+            os.replace(replacement, path)
+        else:
+            path.write_bytes(b"other owner's state")
+    if change == "late-content":
+        real_mkstemp = release_recovery.tempfile.mkstemp
+        def raced_mkstemp(*args, **kwargs):
+            change_marker()
+            return real_mkstemp(*args, **kwargs)
+        monkeypatch.setattr(release_recovery.tempfile, "mkstemp", raced_mkstemp)
+    else:
+        change_marker()
+    before = _bundle_bytes(fixture.path)
+    with pytest.raises(ValueError):
+        release_recovery.adopt_held_pause(fixture.runtime, expected, _NEW_REVISION, destination)
+    assert path.read_bytes() == (original if change == "inode" else b"other owner's state")
+    assert _bundle_bytes(fixture.path) == before
+    assert values(fixture.db) == ["original", "receipt since old snapshot"]
+    assert not list(fixture.pause.parent.glob(".publish-pause-*"))
+
+
+@pytest.mark.parametrize("marker", ["pause", "stage"])
+@pytest.mark.parametrize("kind", ["missing", "directory", "symlink"])
+def test_held_metadata_requires_regular_nonsymlink_markers(held_release, marker, kind):
+    fixture = held_release
+    path = getattr(fixture, marker)
+    saved = path.with_suffix(".saved")
+    path.rename(saved)
+    if kind == "directory":
+        path.mkdir()
+    elif kind == "symlink":
+        try:
+            path.symlink_to(saved)
+        except OSError:
+            pytest.skip("symlink creation is not permitted on this host")
+    with pytest.raises((OSError, ValueError)):
+        release_recovery.held_state(fixture.runtime, _HELD_REVISION)
+    assert saved.exists()
+
+
+@pytest.mark.parametrize("change", ["wrong-sha", "short-sha", "wrong-image", "outside", "parent", "symlink"])
+def test_held_metadata_must_match_and_point_inside_release_backups(held_release, change):
+    fixture = held_release
+    state = json.loads(fixture.stage.read_text())
+    if change in {"wrong-sha", "short-sha"}:
+        state["revision"] = _NEW_REVISION if change == "wrong-sha" else _HELD_REVISION[:12]
+    elif change == "wrong-image":
+        state["image_id"] = "mutable:latest"
+    elif change == "outside":
+        state["release_dir"] = str(fixture.runtime)
+    elif change == "parent":
+        state["release_dir"] = str(fixture.path / ".." / fixture.path.name)
+    else:
+        link = fixture.path.parent / "linked-bundle"
+        try:
+            link.symlink_to(fixture.path, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlink creation is not permitted on this host")
+        state["release_dir"] = str(link)
+    fixture.stage.write_text(json.dumps(state), encoding="utf-8")
+    with pytest.raises(ValueError):
+        release_recovery.held_state(fixture.runtime, _HELD_REVISION)
+
+
+def _run_held_deploy(fixture, *, fault="", flags=None, runtime_head=_HELD_REVISION):
+    """Actual deploy shell, the watcher harness's Bash, and fail-closed fakes.
+
+    Only Docker/Git/gate/platform boundaries are faked; real ownership, seal,
+    snapshot, restore-verification, config-capture and atomic stage code runs.
+    All files/SQLite writes are synthetic and remain inside pytest's temp dir.
+    """
+    if not _bash():
+        pytest.skip("Bash is required to exercise the deployment shell")
+    root = fixture.runtime
+    compose = (json.loads(json.dumps(fixture.render_compose)) if hasattr(fixture, "render_compose")
+               else json.loads((fixture.path / "candidate.compose.json").read_text()))
+    for name, service in compose["services"].items():
+        role = "worker" if name == "worker" else "web"
+        actual = dict(service["environment"], SAU_BUILD_REVISION=_HELD_REVISION)
+        inspect = [{"Image": _CANDIDATE_IMAGE, "Config": {
+            "Env": [f"{key}={value}" for key, value in actual.items()],
+            "Cmd": service.get("command", ["gunicorn", "wsgi:app"]),
+            "Entrypoint": None, "User": "1000:1000",
+        }}]
+        (root / f"{role}-inspect.json").write_text(json.dumps(inspect), encoding="utf-8")
+    (root / "render-old.json").write_text(json.dumps(compose), encoding="utf-8")
+    for service in compose["services"].values():
+        service["image"] = _OTHER_IMAGE
+    if fault == "config":
+        compose["services"]["worker"]["pull_policy"] = "always"
+    (root / "render-new.json").write_text(json.dumps(compose), encoding="utf-8")
+    trace = root / "commands.log"
+    settings = dict(TRACE=trace.as_posix(), TEST_ROOT=root.as_posix(),
+                    REAL_PYTHON=Path(sys.executable).as_posix(), FAULT=fault,
+                    NEW_REV=_NEW_REVISION, HELD_REV=_HELD_REVISION, RUNTIME_REV=runtime_head,
+                    NEW_IMAGE=_OTHER_IMAGE, HELD_IMAGE_FIXTURE=_CANDIDATE_IMAGE,
+                    ROLLBACK_IMAGE=_PREVIOUS_IMAGE)
+    harness = "\n".join(f"{key}={shlex.quote(value)}" for key, value in settings.items()) + r'''
+set -euo pipefail
+export SAU_RELEASE_PYTHON=release_python
+export SAU_RELEASE_DRAIN_SECONDS=10 SAU_RELEASE_STOP_SECONDS=10 SAU_RELEASE_READY_SECONDS=10
+unset SAU_RELEASE_LOCK_FD
+LIVE_WEB_IMAGE="$HELD_IMAGE_FIXTURE" LIVE_WORKER_IMAGE="$HELD_IMAGE_FIXTURE"
+LIVE_WEB_REV="$HELD_REV" LIVE_WORKER_REV="$HELD_REV"
+WEB_RUNNING=true WORKER_RUNNING=true
+case "$FAULT" in
+  web-image) LIVE_WEB_IMAGE="$ROLLBACK_IMAGE" ;;
+  worker-image) LIVE_WORKER_IMAGE="$ROLLBACK_IMAGE" ;;
+  web-revision) LIVE_WEB_REV="$NEW_REV" ;;
+  worker-revision) LIVE_WORKER_REV="$NEW_REV" ;;
+  stopped-web) WEB_RUNNING=false ;;
+  stopped-worker) WORKER_RUNNING=false ;;
+esac
+trace() {
+  local pause=MISSING
+  if [[ -f "$TEST_ROOT/db/publish.pause" ]]; then pause="$(cat "$TEST_ROOT/db/publish.pause")"; fi
+  printf '%s|%s\n' "$*" "$pause" >>"$TRACE"
+}
+uname() { printf 'Linux\n'; }  # platform/daemon gates still require real Linux outside this harness
+flock() { trace lock; [[ "$FAULT" != lock ]]; }
+sleep() { SECONDS=$((SECONDS + $1)); }
+git() {
+  trace "git:${*:3}"
+  case "$3" in
+    merge-base) [[ "$FAULT" != divergent ]] ;;
+    check-ignore) [[ "$FAULT" != ignored ]] ;;
+    merge) [[ "$4" == --ff-only && "$FAULT" != fast-forward ]] ;;
+    *) return 96 ;;
+  esac
+}
+bash() {
+  trace gates
+  [[ "$1" == */release-gates.sh && "$2" == verify && "$FAULT" != gates ]]
+}
+release_python() {
+  if [[ "$1" == */release_checks.py ]]; then
+    if [[ "$*" == *' clean'* ]]; then
+      trace clean
+      [[ "$FAULT" != dirty ]] || return 1
+      if [[ "$3" == "$SOURCE" ]]; then printf '%s\n' "$NEW_REV";
+      else printf '%s\n' "$RUNTIME_REV"; fi
+      return 0
+    fi
+    trace image-receipt
+    [[ "$2" == verify && "$*" == *"--image-id $NEW_IMAGE"* && "$FAULT" != image-receipt ]]
+    return
+  fi
+  if [[ "$1" == */sqlite_backup.py || "$1" == */release_recovery.py ]]; then
+    trace "python:$2"
+    [[ "$FAULT" != "$2" || "$2" == verify ]] || return 1
+    if [[ "$2" == activity && "$FAULT" == drain && "$(cat "$TEST_ROOT/db/publish.pause")" == "$NEW_REV" ]]; then return 3; fi
+  fi
+  # Windows Git Bash converts path arguments when launching native Python.
+  "$REAL_PYTHON" "$@"
+}
+docker() {
+  trace "docker:$*"
+  if [[ "$1 $2" == 'image inspect' ]]; then
+    local image="${@: -1}"
+    [[ "$image" != "$ROLLBACK_IMAGE" || "$FAULT" != missing-rollback ]] || return 1
+    case "$4" in
+      *revision*)
+        if [[ "$image" == "$NEW_IMAGE" ]]; then printf '%s\n' "$NEW_REV";
+        elif [[ "$FAULT" == image-revision ]]; then printf '%s\n' "$NEW_REV";
+        else printf '%s\n' "$HELD_REV"; fi ;;
+      *Id*)
+        case "$image" in
+          *:commit-*) printf '%s\n' "$NEW_IMAGE" ;;
+          "$NEW_IMAGE"|"$HELD_IMAGE_FIXTURE"|"$ROLLBACK_IMAGE") printf '%s\n' "$image" ;;
+          *) return 95 ;;
+        esac ;;
+      *) return 95 ;;
+    esac
+    return 0
+  fi
+  if [[ "$1" == inspect ]]; then
+    local name="${@: -1}" image="$LIVE_WEB_IMAGE" revision="$LIVE_WEB_REV" running="$WEB_RUNNING" role=web
+    if [[ "$name" == social-auto-upload-worker ]]; then
+      [[ "$FAULT" != legacy ]] || return 1
+      image="$LIVE_WORKER_IMAGE" revision="$LIVE_WORKER_REV" running="$WORKER_RUNNING" role=worker
+    fi
+    if [[ "$2" != -f ]]; then cat "$TEST_ROOT/$role-inspect.json"; return; fi
+    case "$3" in
+      *Image*) printf '%s\n' "$image" ;;
+      *revision*) printf '%s\n' "$revision" ;;
+      *project*) printf 'test-project\n' ;;
+      *Running*) printf '%s\n' "$running" ;;
+      *) return 95 ;;
+    esac
+    return 0
+  fi
+  if [[ "$1" == exec ]]; then
+    [[ "$*" == *--allow-paused* ]] || return 94  # no activation probe is allowed
+    if [[ "$LIVE_WEB_IMAGE" == "$HELD_IMAGE_FIXTURE" ]]; then
+      case "$FAULT" in non-draining|stale-probe|active-web|env-revision|web-role|worker-role) return 1 ;; esac
+    elif [[ "$FAULT" == readiness ]]; then return 1; fi
+    return 0
+  fi
+  if [[ "$1" == tag || "$1" == update ]]; then return 0; fi
+  if [[ "$1" == kill ]]; then
+    [[ "$2" == --signal=TERM ]] || return 94
+    if [[ "$3" == social-auto-upload-worker ]]; then WORKER_RUNNING=false; else WEB_RUNNING=false; fi
+    return 0
+  fi
+  if [[ "$1" == compose ]]; then
+    if [[ "$*" == *' config --format json' ]]; then
+      if [[ "${SAU_IMAGE:-}" == "$NEW_IMAGE" ]]; then cat "$TEST_ROOT/render-new.json";
+      else cat "$TEST_ROOT/render-old.json"; fi
+      return 0
+    fi
+    if [[ "$*" == *' run '* ]]; then
+      [[ "$WEB_RUNNING" == false && "$WORKER_RUNNING" == false && "$*" == *' -m myUtils.db_bootstrap' ]] || return 94
+      "$REAL_PYTHON" -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("INSERT INTO entries VALUES (\"migration receipt\")"); c.commit(); c.close()' "$TEST_ROOT/db/database.db"
+      [[ "$FAULT" != migration ]]; return
+    fi
+    if [[ "$*" == *' up '* ]]; then
+      [[ "$WEB_RUNNING" == false && "$WORKER_RUNNING" == false ]] || return 94
+      WEB_RUNNING=true WORKER_RUNNING=true
+      if [[ "$*" == *baseline/compose.json* ]]; then
+        trace rollback-images
+        LIVE_WEB_IMAGE="$HELD_IMAGE_FIXTURE" LIVE_WORKER_IMAGE="$HELD_IMAGE_FIXTURE"
+        LIVE_WEB_REV="$HELD_REV" LIVE_WORKER_REV="$HELD_REV"
+      else
+        trace start-candidate
+        LIVE_WEB_IMAGE="$NEW_IMAGE" LIVE_WORKER_IMAGE="$NEW_IMAGE"
+        LIVE_WEB_REV="$NEW_REV" LIVE_WORKER_REV="$NEW_REV"
+      fi
+      return 0
+    fi
+  fi
+  return 95  # unknown commands must not escape to a real daemon
+}
+'''
+    arguments = ["--revision", _NEW_REVISION, "--runtime-root", root.as_posix(), "--no-build"]
+    arguments += flags if flags is not None else ["--replace-held", _HELD_REVISION, "--hold"]
+    harness += "\nsource " + shlex.quote((ROOT / "scripts/deploy-local.sh").as_posix()) + " " + shlex.join(arguments)
+    result = subprocess.run([_bash(), "-c", harness], cwd=ROOT, env={**os.environ},
+                            capture_output=True, text=True, timeout=45)
+    commands = trace.read_text(encoding="utf-8") if trace.exists() else ""
+    details = "\n".join(path.read_text(encoding="utf-8") for path in (root / "logs/releases").glob("deploy-*.log"))
+    return SimpleNamespace(result=result, commands=commands, details=details,
+                           diagnostic=result.stdout + result.stderr + details + commands)
+
+
+def test_replace_held_retains_old_bundle_and_takes_fresh_paused_baseline(held_release):
+    fixture = held_release
+    before, stage = _bundle_bytes(fixture.path), fixture.stage.read_bytes()
+    # The checkout may already carry the new candidate; baseline revision must
+    # still identify the currently held image, not blindly copy runtime HEAD.
+    run = _run_held_deploy(fixture, runtime_head=_NEW_REVISION)
+    assert run.result.returncode == 0, run.diagnostic
+    state = json.loads(fixture.stage.read_text())
+    assert state["revision"] == _NEW_REVISION and state["image_id"] == _OTHER_IMAGE
+    new = Path(state["release_dir"])
+    assert new != fixture.path and _bundle_bytes(fixture.path) == before
+    assert (new / "baseline/replaced-stage.json").read_bytes() == stage
+    assert (new / "baseline/git-revision").read_text().strip() == _HELD_REVISION
+    assert release_recovery.verify(new) == dict(candidate_image=_OTHER_IMAGE,
+                                               previous_web=_CANDIDATE_IMAGE, previous_worker=_CANDIDATE_IMAGE)
+    assert values(fixture.path / "database.db") == ["original"]
+    assert values(new / "database.db") == ["original", "receipt since old snapshot"]
+    assert values(fixture.db) == ["original", "receipt since old snapshot", "migration receipt"]
+    assert fixture.pause.read_text().strip() == _NEW_REVISION
+    assert (fixture.runtime / "logs/ci-watch.state").read_text() == "previous successful revision"
+    events = [line.rsplit("|", 1) for line in run.commands.splitlines()]
+    pauses = [pause for _, pause in events]
+    assert set(pauses) == {_HELD_REVISION, _NEW_REVISION}  # never missing/active
+    adopted = pauses.index(_NEW_REVISION)
+    assert set(pauses[:adopted]) == {_HELD_REVISION} and set(pauses[adopted:]) == {_NEW_REVISION}
+    assert not any("docker:kill" in event for event, _ in events[:adopted])
+    assert "rollback-images" not in run.commands and "Claims released" not in run.diagnostic
+    assert run.commands.index("gates|") < run.commands.index("python:verify|") < run.commands.index("docker:kill")
+    assert run.commands.index("python:snapshot|") < run.commands.index("python:seal|") < run.commands.index("start-candidate|")
+
+
+@pytest.mark.parametrize("fault", ["web-image", "worker-image", "web-revision", "worker-revision", "image-revision",
+                                   "env-revision", "web-role", "worker-role", "non-draining", "stale-probe", "active-web",
+                                   "legacy", "stopped-web", "stopped-worker", "missing-rollback", "config", "dirty",
+                                   "divergent", "ignored", "gates", "image-receipt", "lock"])
+def test_replace_held_refuses_unsafe_state_before_adoption(held_release, fault):
+    fixture = held_release
+    before, stage, pause, db = _bundle_bytes(fixture.path), fixture.stage.read_bytes(), fixture.pause.read_bytes(), fixture.db.read_bytes()
+    run = _run_held_deploy(fixture, fault=fault)
+    assert run.result.returncode != 0, run.diagnostic
+    assert fixture.stage.read_bytes() == stage and fixture.pause.read_bytes() == pause
+    assert fixture.db.read_bytes() == db and _bundle_bytes(fixture.path) == before
+    assert not any(word in run.commands for word in ("docker:kill", "docker:update", "docker:tag", "rollback-images", "python:snapshot"))
+    assert "Adopted finished hold" not in run.diagnostic
+
+
+@pytest.mark.parametrize("kind", ["active-target", "leased-prep", "bad-schema"])
+def test_replace_held_does_not_adopt_or_wait_away_active_work(held_release, kind):
+    fixture = held_release
+    with sqlite3.connect(fixture.db) as conn:
+        if kind == "active-target":
+            conn.execute("INSERT INTO publish_job_targets VALUES ('running', 'lease')")
+        elif kind == "leased-prep":
+            conn.execute("INSERT INTO campaigns VALUES ('preparing', ?)",
+                         (json.dumps({"_prepLease": {"owner": "unknown", "claimedAt": "1999-01-01"}}),))
+        else:
+            conn.execute("DROP TABLE publish_job_targets")
+    stage, pause, db = fixture.stage.read_bytes(), fixture.pause.read_bytes(), fixture.db.read_bytes()
+    run = _run_held_deploy(fixture)
+    assert run.result.returncode != 0, run.diagnostic
+    assert fixture.stage.read_bytes() == stage and fixture.pause.read_bytes() == pause and fixture.db.read_bytes() == db
+    assert "Held release has active/ambiguous work" in run.diagnostic
+    assert "docker:kill" not in run.commands and "docker:tag" not in run.commands
+
+
+@pytest.mark.parametrize("name", [release_recovery.MANIFEST, *release_recovery.REQUIRED_FILES])
+@pytest.mark.parametrize("change", ["missing", "corrupt"])
+def test_replace_held_checks_original_seal_and_baseline_before_adoption(held_release, name, change):
+    fixture = held_release
+    artifact = fixture.path / name
+    # Let the fake Compose renderer use the original JSON, even when the sealed
+    # artifact is corrupted; validation must fail on the real recovery verifier.
+    if name == "candidate.compose.json":
+        original = artifact.read_bytes()
+    else:
+        original = None
+    if change == "missing":
+        artifact.unlink()
+    else:
+        artifact.write_bytes(b"corrupt recovery evidence")
+    before, stage, pause, db = _bundle_bytes(fixture.path), fixture.stage.read_bytes(), fixture.pause.read_bytes(), fixture.db.read_bytes()
+    if original is not None:
+        # The shell must never reach rendering; a valid skeleton is sufficient
+        # for constructing mocks without reading this intentionally broken file.
+        fixture.render_compose = json.loads(original)
+    run = _run_held_deploy(fixture)
+    assert run.result.returncode != 0, run.diagnostic
+    assert fixture.stage.read_bytes() == stage and fixture.pause.read_bytes() == pause and fixture.db.read_bytes() == db
+    assert _bundle_bytes(fixture.path) == before
+    assert "Held recovery bundle verification failed" in run.diagnostic
+    assert "docker:kill" not in run.commands and "docker:tag" not in run.commands
+
+
+@pytest.mark.parametrize("flags", [
+    ["--replace-held", _HELD_REVISION],
+    ["--replace-held", _HELD_REVISION, "--hold", "--resume"],
+    ["--replace-held", _HELD_REVISION, "--hold", "--build-only"],
+    ["--replace-held", _HELD_REVISION, "--hold", "--legacy-stop-web"],
+    ["--replace-held", _HELD_REVISION[:12], "--hold"],
+    ["--replace-held", _HELD_REVISION.upper(), "--hold"],
+    ["--replace-held", _NEW_REVISION, "--hold"],
+    ["--replace-held"],
+])
+def test_replace_held_rejects_flag_combinations_and_nonfull_sha(held_release, flags):
+    stage, pause = held_release.stage.read_bytes(), held_release.pause.read_bytes()
+    run = _run_held_deploy(held_release, flags=flags)
+    assert run.result.returncode == 2, run.diagnostic
+    assert held_release.stage.read_bytes() == stage and held_release.pause.read_bytes() == pause
+    assert "docker:" not in run.commands and "gates|" not in run.commands
+
+
+@pytest.mark.parametrize("flags", [["--hold"], ["--replace-held", "d" * 40, "--hold"]])
+def test_existing_hold_still_refuses_default_deploy_and_wrong_old_sha(held_release, flags):
+    stage, pause = held_release.stage.read_bytes(), held_release.pause.read_bytes()
+    run = _run_held_deploy(held_release, flags=flags)
+    assert run.result.returncode != 0, run.diagnostic
+    assert held_release.stage.read_bytes() == stage and held_release.pause.read_bytes() == pause
+    assert "docker:kill" not in run.commands and "docker:tag" not in run.commands
+    assert "python:snapshot" not in run.commands and "rollback-images" not in run.commands
+
+
+@pytest.mark.parametrize("fault", ["drain", "snapshot", "seal", "migration", "readiness", "fast-forward"])
+def test_failed_replacement_retains_current_db_and_only_rolls_back_images(held_release, fault):
+    fixture = held_release
+    before, stage = _bundle_bytes(fixture.path), fixture.stage.read_bytes()
+    run = _run_held_deploy(fixture, fault=fault)
+    assert run.result.returncode != 0, run.diagnostic
+    assert fixture.stage.read_bytes() == stage and fixture.pause.read_text().strip() == _NEW_REVISION
+    assert _bundle_bytes(fixture.path) == before
+    candidates = [path for path in fixture.path.parent.iterdir() if path != fixture.path]
+    assert len(candidates) == 1
+    assert (candidates[0] / "baseline/replaced-stage.json").read_bytes() == stage
+    migrated = fault in {"migration", "readiness", "fast-forward"}
+    assert values(fixture.db) == ["original", "receipt since old snapshot"] + (["migration receipt"] if migrated else [])
+    assert ("rollback-images" in run.commands) == migrated
+    assert "python:restore|" not in run.commands and "Claims released" not in run.diagnostic
+    assert "--signal=KILL" not in run.commands and "MISSING" not in run.commands
+    assert (fixture.runtime / "logs/ci-watch.state").read_text() == "previous successful revision"
+
+
+def test_replacement_checks_precede_pause_adoption_and_preserve_watcher_contract():
+    source = (ROOT / "scripts/deploy-local.sh").read_text(encoding="utf-8")
+    held = source.split("held_ready() {", 1)[1].split("\nif [[ -n", 1)[0]
+    assert held.index('"$RECOVERY" verify') < held.index("docker image inspect") < held.index("pair_ready paused") < held.index("activity_check")
+    normal = source.split('else\n  [[ ! -e "$PAUSE"', 1)[1]
+    adoption = normal.index("    adopt_held_pause(")
+    assert normal.index("conf_source = require_config_file") < normal.index("    held_ready") < adoption
+    assert adoption < normal.index("    PAUSE_OWNED=1") < normal.index('stop_gracefully "$WORKER"')
+    assert '"$BACKUP" restore' not in source
+    assert "--replace-held" not in (ROOT / "scripts/ci-watch.sh").read_text(encoding="utf-8")

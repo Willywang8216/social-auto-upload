@@ -179,6 +179,48 @@ recovery evidence leaves the candidate paused without attempting rollback;
 `--resume` never creates a new seal to hide drift. Cron will not resume it or an
 unknown pause for you. Keep the private recovery bundle intact while held.
 
+### Replace a finished owner's held release without activating it
+
+Use `--replace-held FULL_OLD_SHA --hold` **only after the parent/operator confirms
+the old hold's work is finished and no other session owns it**. The shared lock
+serializes operations; it does not grant permission to take over another
+session's hold. This is not a generic force option or an automatic watcher path.
+Do not briefly `--resume` the old release to make room: queued work could publish.
+
+```bash
+# In a clean, committed NEW candidate checkout; verify this exact OLD stage first.
+OLD_SHA=f2b81f05f0e4c966ba687ba2700d3dafdcbc2695 # example; use the actual held SHA
+REV=$(git rev-parse HEAD)
+bash scripts/deploy-local.sh --revision "$REV" --build-only
+bash scripts/deploy-local.sh --revision "$REV" --runtime-root /home/will/social-auto-upload \
+  --no-build --replace-held "$OLD_SHA" --hold
+# After verifying recovery prerequisites and the operator's activation authority, activate the NEW release only:
+# bash scripts/deploy-local.sh --revision "$REV" --runtime-root /home/will/social-auto-upload --resume
+```
+
+The old SHA must be full-length and differ from the new candidate. Replacement
+requires `--hold` and rejects `--resume`, `--build-only` and `--legacy-stop-web`.
+Normal candidate gate/image receipts, clean-source and fast-forward checks still
+apply. Before adopting the pause or stopping anything, the helper checks regular
+nonsymlink pause/stage files, a matching bundle strictly under
+`runtime/backups/releases`, its original seal and isolated restore, all recorded
+rollback image IDs, and the matching **running split** web/worker images,
+revisions, roles and fresh paused probes. Active work, non-draining/stale probes,
+legacy publishers or any mismatch are refused, not adopted and then drained.
+
+The pause changes from old SHA to new SHA in one atomic rename under the lock,
+after rechecking marker identities/content; there is **no unpaused interval**.
+The entire old bundle is retained untouched, and the new private baseline saves
+the prior stage bytes as `baseline/replaced-stage.json`. Rollback now targets the
+currently held pair, not that old bundle's predecessor. The normal drain/stop
+sequence takes a **fresh online DB snapshot and new seal** from the current DB;
+it never restores the old snapshot over newer receipts. Success leaves a NEW
+stage and pause; normal `--resume` is a separate, publishing-enabling decision.
+Failure before adoption leaves the old pause/stage/services/DB unchanged. After
+adoption, retain the new pause and all evidence for explicit recovery (the old
+stage may remain if replacement did not finish); rollback is image/config-only,
+never a DB restore. Default existing-pause refusal and cron behavior are unchanged.
+
 ```bash
 bash scripts/ci-watch.sh
 CI_WATCH_FORCE=1 bash scripts/ci-watch.sh     # no safety checks are bypassed
