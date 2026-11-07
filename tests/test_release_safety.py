@@ -982,7 +982,9 @@ docker() {
       [[ "$FAULT" != legacy ]] || return 1
       image="$LIVE_WORKER_IMAGE" revision="$LIVE_WORKER_REV" running="$WORKER_RUNNING" role=worker
     fi
-    if [[ "$2" != -f ]]; then cat "$TEST_ROOT/$role-inspect.json"; return; fi
+    # Bare return in an EXIT trap inherits the original failure on Bash 5.2;
+    # model Docker's successful inspect explicitly, not that trap status.
+    if [[ "$2" != -f ]]; then cat "$TEST_ROOT/$role-inspect.json" || return 1; return 0; fi
     case "$3" in
       *Image*) printf '%s\n' "$image" ;;
       *revision*) printf '%s\n' "$revision" ;;
