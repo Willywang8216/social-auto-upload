@@ -8,7 +8,7 @@ path,methods,endpoint,source_file,source_line,auth_class,tables_detected,tables_
 /accounts/batch/refresh-tokens,POST,accounts_batch_refresh_tokens,sau_backend.py,4776,bearer,,accounts;account_events,none,oauth_tokens;config_json,none,y,strict,workspace,P0,returns _account_payload() = full accounts.config_json incl. plaintext OAuth access/refresh tokens (sau_backend.py:1902); arbitrary accountIds accepted
 /accounts/events,GET,accounts_events_list,sau_backend.py,4791,bearer,account_events,account_events,none,none,none,n,standard,workspace,P1,global event feed
 /accounts/health-summary,GET,accounts_health_summary,sau_backend.py,4811,bearer,account_events;accounts;prepared_posts;profiles,accounts;account_events;prepared_posts;profiles,none,none,none,n,standard,workspace,P1,global scan
-/accounts/import-cookies,POST,accounts_import_cookies,sau_backend.py,9354,bearer,accounts;profiles,accounts;profiles,none,none,cookies (write),y,strict,workspace,P1,
+/accounts/import-cookies,POST,accounts_import_cookies,sau_backend.py,9360,bearer,accounts;profiles,accounts;profiles,none,none,cookies (write),y,strict,workspace,P1,
 /accounts/maintenance/run,POST,accounts_maintenance_run,sau_backend.py,4937,bearer,,accounts;account_events,none,none,none,y,strict,admin-only,P1,triggers global account-maintenance scan in-process
 /accounts/maintenance/status,GET,accounts_maintenance_status,sau_backend.py,4969,bearer,,none,n/a-no-data,none,none,n,standard,admin-only,P2,
 /accounts/tiktok/refresh-stale,POST,accounts_refresh_stale_tiktok_tokens,sau_backend.py,4974,bearer,accounts;profiles,accounts;account_events,none,oauth_tokens;config_json,none,y,strict,workspace,P0,returns _account_payload() = full accounts.config_json incl. plaintext OAuth access/refresh tokens (sau_backend.py:1902); defaults to ALL stale TikTok accounts
@@ -25,25 +25,25 @@ path,methods,endpoint,source_file,source_line,auth_class,tables_detected,tables_
 /analytics/trends,GET,analytics_trends_route,sau_backend.py,8300,bearer,analytics_sync_log;video_analytics_snapshots;video_analytics_videos,video_analytics_snapshots,none,none,none,n,standard,workspace,P1,
 /analytics/videos,GET,analytics_videos_route,sau_backend.py,8249,bearer,analytics_sync_log;video_analytics_snapshots;video_analytics_videos,video_analytics_videos;video_analytics_snapshots,none,none,none,n,standard,workspace,P1,
 /analytics/videos/<platform_video_id>/history,GET,analytics_video_history_route,sau_backend.py,8266,bearer,analytics_sync_log;video_analytics_snapshots;video_analytics_videos,video_analytics_snapshots,none,none,none,n,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
-/api/accounts,GET,api_accounts,sau_backend.py,9133,bearer,accounts;prepared_posts;profiles,accounts;profiles;account_events,none,none,none,n,standard,workspace,P1,deliberately redacted projection (no raw config) — model for target DTOs
-/api/accounts/<int:account_id>/check,POST,api_account_check,sau_backend.py,9312,bearer,accounts;profiles,accounts;account_events,none,none,none,y,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
-/api/accounts/groups,GET,api_account_groups,sau_backend.py,9286,bearer,accounts;profiles,,,,,,,,,
-/api/accounts/health,GET,api_accounts_health,sau_backend.py,9296,bearer,accounts;profiles,accounts;account_events,none,none,none,n,standard,workspace,P1,global scan
-/api/accounts/profiles,GET,api_account_profiles,sau_backend.py,9271,bearer,accounts;profiles,,,,,,,,,
-/api/auth/cookies/<int:account_id>/export,GET,api_cookies_export,sau_backend.py,9328,bearer,accounts;profiles,accounts,route-permission+workspace,cookies,cookies (read+decrypt),n,strict,owner-only,P0,2026-11-03 Phase 1: owner-only via credentials:export; workspace-scoped; throttled. The old nonexistent read_cookie_file fallback is already resolved.
-/api/auth/cookies/import,POST,api_cookies_import,sau_backend.py,9469,bearer,,accounts,none,none,cookies (write),y,strict,workspace,P1,
-/api/campaigns/<int:campaign_id>/approve,POST,api_campaign_approve,sau_backend.py,8906,bearer,campaign_artifacts;campaign_posts;campaigns;prepared_posts,campaigns;prepared_posts,none,none,none,y,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
-/api/campaigns/<int:campaign_id>/export/csv,GET,api_campaign_export_csv,sau_backend.py,9017,bearer,accounts;campaign_artifacts;campaign_posts;campaigns;prepared_posts;profiles;sheet_exports,campaigns;prepared_posts,none,none,none,n,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
-/api/campaigns/<int:campaign_id>/export/google-sheet,POST,api_campaign_export_sheet,sau_backend.py,8956,bearer,campaign_artifacts;campaign_posts;campaigns;prepared_posts;sheet_exports,campaigns;prepared_posts;sheet_exports,none,none,none,y,standard,workspace,P1,exports to external Google Sheet via service account
+/api/accounts,GET,api_accounts,sau_backend.py,9139,bearer,accounts;prepared_posts;profiles,accounts;profiles;account_events,none,none,none,n,standard,workspace,P1,deliberately redacted projection (no raw config) — model for target DTOs
+/api/accounts/<int:account_id>/check,POST,api_account_check,sau_backend.py,9318,bearer,accounts;profiles,accounts;account_events,none,none,none,y,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
+/api/accounts/groups,GET,api_account_groups,sau_backend.py,9292,bearer,accounts;profiles,,,,,,,,,
+/api/accounts/health,GET,api_accounts_health,sau_backend.py,9302,bearer,accounts;profiles,accounts;account_events,none,none,none,n,standard,workspace,P1,global scan
+/api/accounts/profiles,GET,api_account_profiles,sau_backend.py,9277,bearer,accounts;profiles,,,,,,,,,
+/api/auth/cookies/<int:account_id>/export,GET,api_cookies_export,sau_backend.py,9334,bearer,accounts;profiles,accounts,route-permission+workspace,cookies,cookies (read+decrypt),n,strict,owner-only,P0,2026-11-03 Phase 1: owner-only via credentials:export; workspace-scoped; throttled. The old nonexistent read_cookie_file fallback is already resolved.
+/api/auth/cookies/import,POST,api_cookies_import,sau_backend.py,9475,bearer,,accounts,none,none,cookies (write),y,strict,workspace,P1,
+/api/campaigns/<int:campaign_id>/approve,POST,api_campaign_approve,sau_backend.py,8912,bearer,campaign_artifacts;campaign_posts;campaigns;prepared_posts,campaigns;prepared_posts,none,none,none,y,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
+/api/campaigns/<int:campaign_id>/export/csv,GET,api_campaign_export_csv,sau_backend.py,9023,bearer,accounts;campaign_artifacts;campaign_posts;campaigns;prepared_posts;profiles;sheet_exports,campaigns;prepared_posts,none,none,none,n,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
+/api/campaigns/<int:campaign_id>/export/google-sheet,POST,api_campaign_export_sheet,sau_backend.py,8962,bearer,campaign_artifacts;campaign_posts;campaigns;prepared_posts;sheet_exports,campaigns;prepared_posts;sheet_exports,none,none,none,y,standard,workspace,P1,exports to external Google Sheet via service account
 /api/campaigns/<int:campaign_id>/generate,POST,api_campaign_generate,sau_backend.py,8738,bearer,accounts;campaign_artifacts;campaign_posts;campaigns;media_assets;prepared_posts;profiles,campaigns;campaign_posts;prepared_posts,none,none,none,y,strict,workspace,P1,calls LLM
-/api/campaigns/<int:campaign_id>/posts,GET,api_campaign_posts,sau_backend.py,8929,bearer,campaign_artifacts;campaign_posts;campaigns;prepared_posts,campaigns;prepared_posts,none,none,none,n,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
-/api/campaigns/<int:campaign_id>/posts/<int:post_id>,PATCH,api_update_prepared_post,sau_backend.py,8940,bearer,campaign_artifacts;campaign_posts;campaigns;prepared_posts,prepared_posts,none,none,none,y,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
-/api/campaigns/<int:campaign_id>/validate,POST,api_campaign_validate,sau_backend.py,8878,bearer,campaign_artifacts;campaign_posts;campaigns;prepared_posts,campaigns;prepared_posts,none,none,none,y,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
+/api/campaigns/<int:campaign_id>/posts,GET,api_campaign_posts,sau_backend.py,8935,bearer,campaign_artifacts;campaign_posts;campaigns;prepared_posts,campaigns;prepared_posts,none,none,none,n,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
+/api/campaigns/<int:campaign_id>/posts/<int:post_id>,PATCH,api_update_prepared_post,sau_backend.py,8946,bearer,campaign_artifacts;campaign_posts;campaigns;prepared_posts,prepared_posts,none,none,none,y,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
+/api/campaigns/<int:campaign_id>/validate,POST,api_campaign_validate,sau_backend.py,8884,bearer,campaign_artifacts;campaign_posts;campaigns;prepared_posts,campaigns;prepared_posts,none,none,none,y,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
 /api/data-deletion-request,POST,api_data_deletion_request,sau_backend.py,628,bearer,,none,n/a-no-data,none,db/data_deletion_requests.jsonl (append),y,strict,public-keep,P1,public form's backend but bearer-gated (broken in protected mode); logs+stores PII unauthenticated-adjacent
-/api/inbox,GET,inbox_list,sau_backend.py,9585,bearer,,,,,,,,,,
-/api/inbox/items/<string:item_id>/approve,POST,inbox_item_approve,sau_backend.py,9635,bearer,,,,,,,,,,
-/api/inbox/items/<string:item_id>/publish,POST,inbox_item_publish,sau_backend.py,9770,bearer,campaign_artifacts;campaign_posts;campaigns,,,,,,,,,
-/api/inbox/items/<string:item_id>/reject,POST,inbox_item_reject,sau_backend.py,9648,bearer,,,,,,,,,,
+/api/inbox,GET,inbox_list,sau_backend.py,9591,bearer,,,,,,,,,,
+/api/inbox/items/<string:item_id>/approve,POST,inbox_item_approve,sau_backend.py,9641,bearer,,,,,,,,,,
+/api/inbox/items/<string:item_id>/publish,POST,inbox_item_publish,sau_backend.py,9776,bearer,campaign_artifacts;campaign_posts;campaigns,,,,,,,,,
+/api/inbox/items/<string:item_id>/reject,POST,inbox_item_reject,sau_backend.py,9654,bearer,,,,,,,,,,
 /api/media-groups/<int:group_id>,PATCH,api_update_media_group,sau_backend.py,8695,bearer,media_groups,media_groups,none,none,none,y,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
 /api/media-groups/<int:group_id>/items/reorder,PATCH,api_reorder_media_group_items,sau_backend.py,8715,bearer,media_group_items,media_group_items,none,none,none,y,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
 /api/media/assets,GET,api_list_media_assets,sau_backend.py,8517,bearer,media_assets,media_assets,none,none,none,n,standard,workspace,P1,global list; table has no ownership column
@@ -52,10 +52,10 @@ path,methods,endpoint,source_file,source_line,auth_class,tables_detected,tables_
 /api/media/assets/<int:asset_id>/process,POST,api_process_media_asset,sau_backend.py,8605,bearer,media_assets;watermark_configs,media_assets;watermark_configs,none,none,videoFile (read/write),y,strict,workspace,P1,runs media pipeline in-process
 /api/media/assets/<int:asset_id>/upload-rclone,POST,api_upload_asset_rclone,sau_backend.py,8674,bearer,media_assets,media_assets,none,none,rclone remote (write),y,strict,workspace,P1,
 /api/media/upload/batch,POST,api_batch_upload,sau_backend.py,8554,bearer,media_assets,media_assets;media_groups;media_group_items,none,none,videoFile (write),y,strict,workspace,P1,
-/api/publish/health,GET,publish_health,sau_backend.py,9932,bearer,,,,,,,,,,
-/api/sheet-exports,GET,api_list_sheet_exports,sau_backend.py,9049,bearer,campaign_artifacts;campaign_posts;campaigns;sheet_exports,sheet_exports,none,none,none,n,standard,workspace,P1,global list
-/api/system/health,GET,system_health,sau_backend.py,9852,bearer,publish_job_targets;publish_jobs,,,,,,,,,
-/api/telegram/available-targets,GET,telegram_available_targets,sau_backend.py,9511,bearer,,,,,,,,,,
+/api/publish/health,GET,publish_health,sau_backend.py,9938,bearer,,,,,,,,,,
+/api/sheet-exports,GET,api_list_sheet_exports,sau_backend.py,9055,bearer,campaign_artifacts;campaign_posts;campaigns;sheet_exports,sheet_exports,none,none,none,n,standard,workspace,P1,global list
+/api/system/health,GET,system_health,sau_backend.py,9858,bearer,publish_job_targets;publish_jobs,,,,,,,,,
+/api/telegram/available-targets,GET,telegram_available_targets,sau_backend.py,9517,bearer,,,,,,,,,,
 /api/watermark-configs,GET,api_list_watermark_configs,sau_backend.py,8449,bearer,watermark_configs,watermark_configs,none,none,none,n,standard,workspace,P1,
 /api/watermark-configs,POST,api_create_watermark_config,sau_backend.py,8458,bearer,watermark_configs,watermark_configs,none,none,none,y,standard,workspace,P1,
 /api/watermark-configs/<int:config_id>,DELETE,api_delete_watermark_config,sau_backend.py,8504,bearer,watermark_configs,watermark_configs,none,none,none,y,standard,workspace,P1,caller-chosen id(s); no owner/tenant validation exists today
