@@ -833,3 +833,77 @@ def test_null_image_hosting_entitlement_never_requests_an_upload_grant(image):
     with pytest.raises(sm.SociamonialsFallbackError):
         publish(session, payload=media_payload(image))
     assert_no_publication(session)
+
+
+def _owned_preview_payload(tmp_path, video, monkeypatch):
+    from myUtils import video_artifacts
+    path = tmp_path / "generated" / "exact-clip.mp4"
+    path.parent.mkdir()
+    path.write_bytes(video.read_bytes())
+    monkeypatch.setattr(video_artifacts, "BASE_DIR", tmp_path)
+    monkeypatch.setenv("SAU_PUBLIC_APP_URL", "https://sau.example.org")
+    url = video_artifacts.served_url(path)
+    return media_payload(path, public_url=url)
+
+
+def test_filename_only_owned_preview_can_use_exact_hosted_media(tmp_path, video, monkeypatch):
+    payload = _owned_preview_payload(tmp_path, video, monkeypatch)
+    before = copy.deepcopy(payload["artifacts"])
+    session = ContractSession()
+    assert publish(session, payload=payload)["ok"]
+    assert payload["artifacts"] == before
+    assert session.last_body["video_url"].startswith("asset://")
+    assert "filename=" not in session.last_body["video_url"]
+    assert sum(call[1] == sm.MEDIA_UPLOADS_URL for call in session.calls_for("POST", "/media/uploads")) == 1
+
+
+@pytest.mark.parametrize("change", [
+    "&token=secret", "&signature=secret", "&filename=other.mp4", "#secret",
+    "wrong-file", "wrong-host", "wrong-route", "userinfo",
+])
+def test_owned_preview_exception_never_accepts_credentials_or_mismatched_provenance(tmp_path, video, monkeypatch, change):
+    payload = _owned_preview_payload(tmp_path, video, monkeypatch)
+    artifact = payload["artifacts"][0]
+    url = artifact["public_url"]
+    if change == "wrong-file":
+        url = url.replace("exact-clip.mp4", "other.mp4")
+    elif change == "wrong-host":
+        url = url.replace("sau.example.org", "other.example.org")
+    elif change == "wrong-route":
+        url = url.replace("/getFile?", "/elsewhere?")
+    elif change == "userinfo":
+        url = url.replace("https://", "https://user:secret@")
+    else:
+        url += change
+    artifact["public_url"] = url
+    session = ContractSession()
+    with pytest.raises(sm.SociamonialsFallbackError, match="locator"):
+        publish(session, payload=payload)
+    assert_no_publication(session)
+
+
+def test_preview_is_not_an_external_stable_media_reference(tmp_path, video, monkeypatch):
+    payload = _owned_preview_payload(tmp_path, video, monkeypatch)
+    item = sm._checked_media(sm.collect_media(payload), "tw")[0]
+    assert sm._is_owned_preview_locator(item)
+    with pytest.raises(sm.SociamonialsFallbackError):
+        sm._external_reference(item, ContractSession(), timeout=10)
+
+
+def test_preview_exception_keeps_exact_byte_verification(tmp_path, video, monkeypatch):
+    payload = _owned_preview_payload(tmp_path, video, monkeypatch)
+    path = Path(payload["artifacts"][0]["local_path"])
+    path.write_bytes(b"changed-after-preparation")
+    session = ContractSession()
+    with pytest.raises(sm.SociamonialsFallbackError):
+        publish(session, payload=payload)
+    assert_no_publication(session)
+
+
+def test_owned_preview_does_not_accept_different_route_path_parameters(tmp_path, video, monkeypatch):
+    payload = _owned_preview_payload(tmp_path, video, monkeypatch)
+    payload["artifacts"][0]["public_url"] = payload["artifacts"][0]["public_url"].replace("/getFile?", "/getFile;extra?")
+    session = ContractSession()
+    with pytest.raises(sm.SociamonialsFallbackError, match="locator"):
+        publish(session, payload=payload)
+    assert_no_publication(session)

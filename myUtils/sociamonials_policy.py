@@ -219,7 +219,7 @@ def _option_sources(payload: Mapping[str, Any], config: Mapping[str, Any], netwo
 
 def map_intent(payload: Mapping[str, Any], *, network: str, message: str,
                account_config: Mapping[str, Any] | None = None, media_kind: str | None = None,
-               media_count: int = 0) -> dict[str, Any]:
+               media_count: int = 0, youtube_allowed_links: list[str] | None = None) -> dict[str, Any]:
     """Map original per-post/account intent, or reject unsupported intent.
 
     Returns message, network_options and top-level post fields. Per-post values
@@ -412,11 +412,24 @@ def map_intent(payload: Mapping[str, Any], *, network: str, message: str,
             _fail("title", "is missing; do not invent a title")
         values["title"] = validate_text(title, "yt", field="title")
         values["description"] = validate_text(values.get("description", message), "yt", field="description")
+        from myUtils import youtube_links
+        try:
+            allowed_links = youtube_allowed_links if youtube_allowed_links is not None else config.get(youtube_links.SETTING)
+            youtube_links.validate_text(message, field="message", allowed_links=allowed_links)
+            youtube_links.validate_text(values["title"], field="title", allowed_links=allowed_links)
+            youtube_links.validate_text(values["description"], field="description", allowed_links=allowed_links)
+            youtube_links.validate_text(str(payload.get("link") or ""), field="link", allowed_links=allowed_links)
+        except youtube_links.YouTubeLinkPolicyError:
+            _fail("external_links", "violates the YouTube Patreon/Instagram/Facebook/Threads-only link policy")
         if "tags" not in values and draft.get("hashtags"):
             values["tags"] = [str(tag).lstrip("#") for tag in draft["hashtags"]]
         if "tags" in values:
             try:
                 text_limits.validate_youtube_tags(values["tags"])
+                for tag in values["tags"]:
+                    youtube_links.validate_text(tag, field="tags", allowed_links=allowed_links)
+            except youtube_links.YouTubeLinkPolicyError:
+                _fail("external_links", "violates the YouTube Patreon/Instagram/Facebook/Threads-only link policy")
             except ValueError:
                 _fail("tags", "exceed the YouTube aggregate tag limit")
     if network == "pi" and not (values.get("board_name") or values.get("board_id")):

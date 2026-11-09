@@ -21,7 +21,7 @@ from urllib.parse import parse_qsl, quote, quote_plus, unquote, urlencode, urlpa
 logger = logging.getLogger(__name__)
 
 from myUtils import media_pipeline
-from myUtils import platform_limits, text_limits, image_compliance, media_compliance
+from myUtils import platform_limits, text_limits, image_compliance, media_compliance, youtube_links
 from myUtils import tiktok_auth, tiktok_delivery
 from myUtils import delivery, generic_delivery
 
@@ -2880,12 +2880,22 @@ def _maybe_refresh_twitter_token(
             failed_config["_lastMaintenanceError"] = "X OAuth 2.0 refresh token was rejected; reconnect required"
             failed_config["_lastMaintenanceAttemptAt"] = _utc_now().replace(microsecond=0).isoformat()
             on_refresh(failed_config)
-        message = (
-            "X OAuth 2.0 refresh token was rejected; reconnect this account"
-            if reconnect_required
-            else "X OAuth 2.0 token refresh failed temporarily; retry later"
-        )
-        raise PreparedPublishError(message, retryable=not reconnect_required) from exc
+        code = str(getattr(exc, "error_code", "") or "").strip().lower()
+        status = getattr(exc, "status_code", None)
+        request_rejected = code in {"invalid_client", "unauthorized_client", "invalid_request", "unsupported_grant_type", "configuration_missing"}
+        request_rejected = request_rejected or (isinstance(status, int) and 400 <= status < 500 and status not in {408, 429})
+        if reconnect_required:
+            message = "X OAuth 2.0 refresh token was rejected; reconnect this account"
+        elif request_rejected:
+            message = "X OAuth 2.0 refresh request was rejected; review account/application configuration"
+        else:
+            message = "X OAuth 2.0 token refresh failed temporarily; retry later"
+        safe_codes = {"invalid_grant", "invalid_token", "refresh_token_revoked", "invalid_client", "unauthorized_client",
+                      "invalid_request", "unsupported_grant_type", "configuration_missing"}
+        details = {"stage": "oauth_refresh", "status": status if isinstance(status, int) else None,
+                   "code": code if code in safe_codes else "", "reconnectRequired": reconnect_required,
+                   "classification": "credential_rejected" if reconnect_required else "request_rejected" if request_rejected else "transient"}
+        raise PreparedPublishError(message, details=details, retryable=not (reconnect_required or request_rejected)) from exc
 
 
 def _raise_x_publish_error(exc: Exception, *, stage: str) -> PreparedPublishError:
@@ -3826,6 +3836,12 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
         return _finish_youtube_upload(http, payload, config, operations, access_token,
                                       {"id": prior["id"]})
 
+    # Check all text before media/credentials or the first upload side effect.
+    try:
+        allowed_links = youtube_links.links_for_account(account, db_path=payload.get("_db_path"))
+    except youtube_links.YouTubeLinkPolicyError as exc:
+        raise PreparedPublishError(str(exc), details=exc.details, retryable=False) from exc
+    fields = youtube_text_fields(payload, allowed_links=allowed_links)
     _validate_immutable_media(payload, "youtube", config)
     media = _extract_media(payload)
     if not media["videos"]:
@@ -3851,9 +3867,6 @@ def publish_youtube_sync(account, payload: dict, *, session=None) -> dict:
     access_token = _google_access_token(config, session=http)
     headers = {"Authorization": f"Bearer {access_token}"}
 
-    # Field materialization measures UTF-8 bytes, title characters and the
-    # aggregate tag comma/quote allowance without editing approved recovery.
-    fields = youtube_text_fields(payload)
     title, description, tags = fields["title"], fields["description"], fields["tags"]
 
     # Build snippet
@@ -3976,11 +3989,17 @@ def _finish_youtube_upload(http, payload, config, operations, access_token, resu
     return result
 
 
-def youtube_text_fields(payload: dict) -> dict:
+def youtube_text_fields(payload: dict, *, allowed_links: list[str] | None = None) -> dict:
     """Read-only native text mapping; strict recovery preserves approved fields."""
     draft = payload.get("draft") or {}
     strict = text_limits.preserves_approved_text(payload)
     raw_message = _payload_message(payload)
+    try:
+        youtube_links.validate_draft(draft, allowed_links=allowed_links)
+        youtube_links.validate_text(raw_message, field="message", allowed_links=allowed_links)
+        youtube_links.validate_text(str(payload.get("link") or ""), field="link", allowed_links=allowed_links)
+    except youtube_links.YouTubeLinkPolicyError as exc:
+        raise PreparedPublishError(str(exc), details=exc.details, retryable=False) from exc
     raw_title = draft.get("title") or ""
     if not strict:
         raw_title = str(raw_title).strip()
@@ -3999,6 +4018,7 @@ def youtube_text_fields(payload: dict) -> dict:
         if strict:
             raise PreparedPublishError("Approved YouTube first comment cannot be moved into the description; review required", retryable=False)
         description = f"{description}\n\n{str(first_comment).strip()}" if description else str(first_comment).strip()
+    untruncated_description = description
     description = _enforce_message_limit(description, "youtube", payload=payload, field="description")
     tags = (draft.get("tags", draft.get("hashtags", [])) if strict else
             draft.get("tags") or draft.get("hashtags") or [])
@@ -4015,7 +4035,14 @@ def youtube_text_fields(payload: dict) -> dict:
         text_limits.validate_youtube_tags(tags)
     except ValueError as exc:
         raise PreparedPublishError(str(exc), details=getattr(exc, "details", {}), retryable=False) from exc
-    return {"title": title, "description": description, "tags": tags}
+    fields = {"title": title, "description": description, "tags": tags}
+    try:
+        # A shortened URL must not become another profile's direct link.
+        final_allowlist = allowed_links if allowed_links is not None else youtube_links.links_in_text(raw_title + "\n" + untruncated_description + "\n" + "\n".join(tags))
+        youtube_links.validate_draft(fields, allowed_links=final_allowlist)
+    except youtube_links.YouTubeLinkPolicyError as exc:
+        raise PreparedPublishError(str(exc), details=exc.details, retryable=False) from exc
+    return fields
 
 
 def _find_thumbnail(media: dict, video_path: Path) -> Path | None:

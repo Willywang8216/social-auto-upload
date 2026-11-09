@@ -8815,6 +8815,9 @@ def api_campaign_generate(campaign_id):
             "subreddit": acc.config.get("subreddits", [""])[0] if acc.platform == "reddit" else "",
             "language": _account_audience_language(acc, profile),
         }
+        if acc.platform == "youtube":
+            from myUtils import youtube_links
+            context["_youtubeAllowedLinks"] = youtube_links.links_for_account(acc, profile=profile)
 
         system_prompt, user_prompt = content_generator.build_generation_context(
             profile_dict, media_info, acc.platform, context
@@ -8830,6 +8833,9 @@ def api_campaign_generate(campaign_id):
             )
             raw_content = result.content
             parsed = content_generator.parse_llm_response(raw_content, acc.platform)
+            if acc.platform == "youtube":
+                from myUtils import youtube_links
+                parsed = youtube_links.sanitize_draft(parsed, allowed_links=context["_youtubeAllowedLinks"], add_footer=True)
             errors = content_generator.validate_post(acc.platform, parsed)
             # Advisory copy-vs-media review: hold the post for a human only when
             # the copy plainly contradicts the media, so matching items (the
@@ -8853,7 +8859,7 @@ def api_campaign_generate(campaign_id):
                 description=parsed.get("description", ""),
                 first_comment=parsed.get("first_comment", ""),
                 hashtags=json.dumps(parsed.get("hashtags", [])),
-                link=profile_dict.get("default_link", ""),
+                link=(context["_youtubeAllowedLinks"][0] if context["_youtubeAllowedLinks"] else "") if acc.platform == "youtube" else profile_dict.get("default_link", ""),
                 image_urls=",".join(parsed.get("image_urls", [])),
                 video_url=parsed.get("video_url", ""),
                 alt_text=parsed.get("alt_text", ""),

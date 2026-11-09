@@ -418,7 +418,11 @@ def prepare_campaign_media_artifacts(
 ) -> dict:
     request_data = dict(request_data)
     watermark_spec = _derive_watermark_spec(profile, request_data)
+    request_data["_appliedWatermarkSpec"] = watermark_spec
     selected_platforms = set(selected_platforms or set())
+    if "youtube" in selected_platforms:
+        from myUtils import youtube_links
+        request_data["_youtubeAllowedLinks"] = youtube_links.links_for_profile(profile)
     generation = uuid.uuid4().hex
     backup_platforms = platform_limits.backup_compatible_platforms(request_data) & selected_platforms
     accounts = []
@@ -437,7 +441,8 @@ def prepare_campaign_media_artifacts(
         request_data, _backup_contexts = configure_request(accounts, selected_platforms, request_data,
                                                          settings=profile.settings, has_video=has_video)
         backup_platforms = platform_limits.backup_compatible_platforms(request_data) & selected_platforms
-    tiktok_only = selected_platforms == {profile_registry.PLATFORM_TIKTOK}
+    unwatermarked_only = (selected_platforms == {profile_registry.PLATFORM_TIKTOK}
+                          or selected_platforms <= {"tiktok", "youtube"} and video_artifacts.youtube_requires_link_free_media(request_data))
     # Remote-host media only when a URL-fetch platform is targeted (TikTok/
     # Meta/Threads pull media by URL). An explicit uploadToRemote overrides;
     # otherwise enable automatically when such a platform is present and a
@@ -609,7 +614,7 @@ def prepare_campaign_media_artifacts(
             except Exception as exc:
                 raise media_compliance.MediaPreparationError("Selected intro/outro concatenation failed; content was not dropped") from exc
 
-        if watermark_spec and not tiktok_only and _is_image_file(source_path):
+        if watermark_spec and not unwatermarked_only and _is_image_file(source_path):
             artifact_kind = "watermarked_image"
             # Watermarking strips EXIF: orient/color-convert BEFORE that transform.
             watermark_source = source_path
@@ -634,7 +639,7 @@ def prepare_campaign_media_artifacts(
                 angle=float(watermark_spec.get("angle", -30)),
                 color=watermark_spec.get("color", "white"),
             )
-        elif watermark_spec and not tiktok_only and _is_video_file(source_path):
+        elif watermark_spec and not unwatermarked_only and _is_video_file(source_path):
             artifact_kind = "watermarked_video"
             publish_path = media_pipeline.prepare_campaign_artifact_path(
                 campaign_id,
@@ -666,10 +671,11 @@ def prepare_campaign_media_artifacts(
                 raise media_compliance.MediaPreparationError("Final watermark changed the complete source duration")
 
         if screenshots_enabled and _is_video_file(publish_path):
+            screenshot_source = (source_path if "youtube" in selected_platforms and video_artifacts.youtube_requires_link_free_media(request_data) else publish_path)
             try:
                 shots_dir = media_pipeline.build_campaign_workspace(campaign_id) / generation / "screenshots"
                 shots = media_pipeline.extract_video_screenshots(
-                    publish_path,
+                    screenshot_source,
                     shots_dir,
                     count=screenshots_count if not screenshots_timestamps else None,
                     timestamps=screenshots_timestamps,
@@ -697,7 +703,7 @@ def prepare_campaign_media_artifacts(
                     image_compliance.probe_image(shot_path)
                     pending_rows.append({"source_file_record_id": media_file["file_record_id"],
                         "artifact_kind": "screenshot", "local_path": str(shot_path), "public_url": public_shot_url,
-                        "metadata": {"role": "cover", "source_video": str(publish_path),
+                        "metadata": {"role": "cover", "source_video": str(screenshot_source),
                                      "sha256": media_compliance.sha256_file(shot_path),
                                      "size_bytes": shot_path.stat().st_size}})
             except Exception as exc:  # noqa: BLE001

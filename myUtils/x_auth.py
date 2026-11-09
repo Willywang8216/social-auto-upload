@@ -175,7 +175,7 @@ def _safe_refresh_error(response) -> TwitterOAuthError:
         pass
     # Provider descriptions can echo submitted values. Keep only a constrained
     # code and a generic status in persisted events; never store raw body or URL.
-    allowed_codes = {"invalid_grant", "invalid_client", "invalid_request", "unauthorized_client", "unsupported_grant_type"}
+    allowed_codes = {"invalid_grant", "invalid_token", "refresh_token_revoked", "invalid_client", "invalid_request", "unauthorized_client", "unsupported_grant_type"}
     safe_code = code.lower() if code.lower() in allowed_codes else ""
     suffix = f" ({safe_code})" if safe_code else ""
     safe_status = status if isinstance(status, int) else "unknown"
@@ -194,7 +194,10 @@ def refresh_access_token(
     session=None,
 ) -> dict[str, Any]:
     http = _get_session(session)
-    client_id = _required_env(client_id_env)
+    try:
+        client_id = _required_env(client_id_env)
+    except TwitterOAuthError as exc:
+        raise TwitterOAuthError("X OAuth refresh requires a configured client ID", error_code="configuration_missing") from exc
     client_secret = os.environ.get(client_secret_env or "", "") if client_secret_env else ""
 
     data = {
@@ -223,7 +226,7 @@ def refresh_access_token(
         raise TwitterOAuthError("X OAuth refresh returned an unreadable response") from exc
     if payload.get("error"):
         code = str(payload.get("error") or "").lower()
-        safe_code = code if code in {"invalid_grant", "invalid_client", "invalid_request", "unauthorized_client", "unsupported_grant_type"} else ""
+        safe_code = code if code in {"invalid_grant", "invalid_token", "refresh_token_revoked", "invalid_client", "invalid_request", "unauthorized_client", "unsupported_grant_type"} else ""
         raise TwitterOAuthError(
             f"X OAuth refresh failed{f' ({safe_code})' if safe_code else ''}",
             status_code=getattr(response, "status_code", None),

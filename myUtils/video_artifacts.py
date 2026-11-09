@@ -66,9 +66,9 @@ def prepare_and_register_video(*, campaign_id: int, media_file: dict, source_pat
     plans = {}
     specs = {}
     for platform in sorted(selected_platforms):
-        # TikTok uses the SAME selected content variant without our watermark;
-        # other routes use the final watermarked bytes, never the raw source.
-        source = source_path if platform == "tiktok" else publish_path
+        # Preserve selected content/intro/outro; omit disallowed URL overlays
+        # only for YouTube. X and other routes retain their branded variant.
+        source = source_path if platform == "tiktok" or (platform == "youtube" and youtube_requires_link_free_media(request_data)) else publish_path
         config = (request_data.get("_preparationAccountConfigs") or {}).get(platform) or {}
         limits = media_compliance.effective_limits(platform, account_config=config,
             limits=(request_data.get("_preparationLimits") or {}).get(platform), backup_compatible=platform in backup)
@@ -119,7 +119,7 @@ def prepare_and_register_images(*, campaign_id: int, images: list[dict], selecte
     for platform in sorted(selected_platforms):
         if platform == "youtube" and not video_present:
             raise media_compliance.MediaPreparationRequired("YouTube images can only be a cover for a selected video")
-        sources = [item["source_path"] if platform == "tiktok" else item["publish_path"] for item in images]
+        sources = [item["source_path"] if platform == "tiktok" or (platform == "youtube" and youtube_requires_link_free_media(request_data)) else item["publish_path"] for item in images]
         # A thumbnail is not an extra backup image/post contract.
         backup_image = platform in backup and platform != "youtube"
         limits = image_compliance.effective_limits(platform,
@@ -133,7 +133,7 @@ def prepare_and_register_images(*, campaign_id: int, images: list[dict], selecte
     for platform, parts, backup_image in prepared:
         for item, part in zip(images, parts):
             metadata = {**part.metadata, "role": "cover" if platform == "youtube" else "image",
-                        "unwatermarked": platform == "tiktok" or item["publish_path"] == item["source_path"],
+                        "unwatermarked": platform == "tiktok" or (platform == "youtube" and youtube_requires_link_free_media(request_data)) or item["publish_path"] == item["source_path"],
                         "backup_compatible": backup_image}
             rows.append(_artifact_row(part, campaign_id=campaign_id, media_file=item["media_file"],
                 metadata=metadata, image=True, upload_to_remote=upload_to_remote, db_path=db_path,
@@ -141,3 +141,13 @@ def prepare_and_register_images(*, campaign_id: int, images: list[dict], selecte
     if register:
         campaigns.add_campaign_artifact_set(campaign_id, rows, db_path=db_path)
     return _result(rows, selected_platforms)
+
+
+def youtube_requires_link_free_media(request_data: dict) -> bool:
+    """Do not automatically burn forbidden external URLs into YouTube media."""
+    from myUtils import youtube_links
+    spec = request_data.get("_appliedWatermarkSpec", request_data.get("watermark")) or {}
+    text = spec if isinstance(spec, str) else spec.get("text", "") if isinstance(spec, dict) else ""
+    config = (request_data.get("_preparationAccountConfigs") or {}).get("youtube") or {}
+    allowed = config.get(youtube_links.SETTING, request_data.get("_youtubeAllowedLinks"))
+    return any(not youtube_links.is_allowed_link(link, allowed_links=allowed) for link in youtube_links.links_in_text(text))

@@ -29,7 +29,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import quote, unquote, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, unquote, urlparse, urlunparse
 
 from myUtils import delivery as delivery_state
 from myUtils import media_pipeline, platform_limits
@@ -1603,8 +1603,9 @@ def publish_via_sociamonials(*, platform: str, account: Any, payload: Mapping[st
     media = collect_media(payload)
     for item in media:
         locator = urlparse(str(item.get("public_url") or ""))
-        if locator.username is not None or locator.password is not None or locator.query or locator.fragment:
-            raise SociamonialsFallbackError("Declared media has a credential/expiring locator; supply a credential-free stable URL before checkpointing")
+        if (locator.username is not None or locator.password is not None or locator.fragment
+                or locator.query and not _is_owned_preview_locator(item)):
+            raise SociamonialsFallbackError("Declared media locator contains credentials, a fragment, or an unsupported query; supply a stable URL or the exact local SAU preview before checkpointing")
     main, thumbnails = [item for item in media if item["kind"] != "thumbnail"], [item for item in media if item["kind"] == "thumbnail"]
     kinds = {item["kind"] for item in main}
     if len(kinds) > 1 or len([item for item in main if item["kind"] == "video"]) > 1:
@@ -1621,7 +1622,8 @@ def publish_via_sociamonials(*, platform: str, account: Any, payload: Mapping[st
     config = _account_value(account, "config", {}) or {}
     try:
         intent = policy.map_intent(payload, network=network, message=compose_message(payload, network=network),
-                                   account_config=config, media_kind=media_kind, media_count=len(main))
+                                   account_config=config, media_kind=media_kind, media_count=len(main),
+                                   youtube_allowed_links=_youtube_account_links(account, payload) if network == "yt" else None)
     except policy.SociamonialsPolicyError as exc:
         raise SociamonialsFallbackError(str(exc), details=exc.details) from None
     if not intent["message"] and not main:
@@ -1786,3 +1788,38 @@ def publish_via_sociamonials(*, platform: str, account: Any, payload: Mapping[st
         receipt["platform_post_id"] = view["platform_post_id"]
     delivery_state.checkpoint(payload, provider_receipt=receipt)
     return _result(receipt, view)
+
+
+def _is_owned_preview_locator(item: Mapping[str, Any]) -> bool:
+    """A filename-only SAU URL is ancillary provenance, NOT an external asset.
+
+    Match the real serving helper and exact local path. Hosted/reused media
+    still requires _checked_media's hash/size verification; _external_reference
+    deliberately continues to reject ALL queries, including this preview URL.
+    """
+    from myUtils.video_artifacts import served_url
+
+    local_path = str(item.get("local_path") or "")
+    if not local_path:
+        return False
+    expected = served_url(Path(local_path))
+    if not expected:
+        return False
+    locator, preview = urlparse(str(item.get("public_url") or "")), urlparse(expected)
+    try:
+        query = parse_qsl(locator.query, keep_blank_values=True, strict_parsing=True)
+        return (locator.scheme == preview.scheme == "https" and locator.netloc == preview.netloc
+                and locator.path == preview.path and locator.params == preview.params and not locator.fragment
+                and locator.username is None and locator.password is None
+                and len(query) == 1 and query[0][0] == "filename"
+                and query == parse_qsl(preview.query, keep_blank_values=True, strict_parsing=True))
+    except ValueError:
+        return False
+
+
+def _youtube_account_links(account, payload: Mapping) -> list[str] | None:
+    from myUtils import youtube_links
+    try:
+        return youtube_links.links_for_account(account, db_path=payload.get("_db_path"))
+    except youtube_links.YouTubeLinkPolicyError as exc:
+        raise SociamonialsFallbackError(str(exc), details=exc.details) from exc

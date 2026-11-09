@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 
 from myUtils import campaign_media_prep
-from myUtils import content_generator, content_rules, humanize, llm_client
+from myUtils import content_generator, content_rules, humanize, llm_client, youtube_links
 from myUtils import jobs as job_runtime
 from myUtils import media_groups as media_group_store
 from myUtils import ops_alerts, platform_limits, media_compliance, image_compliance, publish_media_guard
@@ -348,6 +348,12 @@ def _build_generation_prompt(
     request_data: dict,
     media_context: dict,
 ) -> tuple[str, str]:
+    if platform == "youtube":
+        links = youtube_links.links_for_generation(profile, request_data)
+        request_data = {key: youtube_links.sanitize_text(value, allowed_links=links) if isinstance(value, str) else value
+                        for key, value in request_data.items()}
+        request_data["contactDetails"] = youtube_links.creator_footer(links)
+        request_data["cta"] = "Support me on Patreon, or follow me on Instagram, Facebook, and Threads." if links else ""
     rule = content_rules.get_platform_rule(platform)
     system_prompt = str((profile.settings or {}).get("systemPrompt", "") or "").strip()
     if not system_prompt:
@@ -430,6 +436,11 @@ def _build_generation_prompt(
             "reasoning and concrete detail from the persona's life; do not repeat "
             "the title as the body.",
         ))
+    if platform == "youtube":
+        links = youtube_links.links_for_generation(profile, request_data)
+        system_prompt = youtube_links.sanitize_text(system_prompt, allowed_links=links)
+        user_lines = [youtube_links.sanitize_text(line, allowed_links=links) for line in user_lines]
+        user_lines.extend(("", youtube_links.generation_instruction(links)))
     user_lines.append(
         "Return JSON with keys: message, title, summary, description, altText, "
         "hashtags, firstComment, contactDetails, cta. Every text field must follow "
@@ -509,6 +520,7 @@ def _generate_platform_draft(
         contact_details=str(request_data.get("contactDetails", "") or "").strip(),
         cta=str(request_data.get("cta", "") or "").strip(),
         default_hashtags=request_data.get("hashtags") or [],
+        youtube_allowed_links=youtube_links.links_for_generation(profile, request_data) if platform == "youtube" else None,
     )
     message = str(prepared.get("message") or "")
     if not content_rules.is_usable_copy(message):
@@ -528,6 +540,8 @@ def _generate_platform_draft(
             f"Generated copy does not match the account language "
             f"'{account_language}'; refusing to queue it"
         )
+    if platform == "youtube":
+        prepared = youtube_links.sanitize_draft(prepared, allowed_links=youtube_links.links_for_generation(profile, request_data), add_footer=True)
     return prepared
 
 
@@ -578,6 +592,8 @@ def _generate_account_draft(
     ]
     extended_data["_accountContext"] = "\n".join(account_context_lines) + nonce_suffix
     extended_data["_accountLanguage"] = _account_audience_language(account, profile)
+    if account.platform == "youtube":
+        extended_data["_youtubeAllowedLinks"] = youtube_links.links_for_account(account, profile=profile)
     draft = _generate_platform_draft(
         account.platform,
         profile,
@@ -597,6 +613,8 @@ def _generate_account_draft(
         logging.getLogger(__name__).warning(
             "humanize pass failed for account %s", getattr(account, "id", "?"), exc_info=True
         )
+    if account.platform == "youtube":
+        draft = youtube_links.sanitize_draft(draft, allowed_links=youtube_links.links_for_account(account, profile=profile), add_footer=True)
     return draft
 
 

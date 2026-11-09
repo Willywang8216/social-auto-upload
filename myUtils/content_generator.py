@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Iterator
 
 from utils.conf_defaults import BASE_DIR, default_db_path
-from myUtils import platform_limits
+from myUtils import platform_limits, youtube_links
 
 DB_PATH = default_db_path()
 
@@ -651,6 +651,15 @@ Notes: {(context or {}).get('user_notes', '')}
 
 Return ONLY a JSON object with "message" field."""
     else:
+        if platform == "youtube":
+            links = youtube_links.links_for_generation(profile, context or {})
+            profile = dict(profile)
+            profile["contact_details"] = youtube_links.creator_footer(links)
+            profile["default_link"] = links[0] if links else ""
+            profile["default_cta"] = "Support me on Patreon, or follow me on Instagram, Facebook, and Threads." if links else ""
+            for field in ("writing_style_prompt", "default_cta"):
+                profile[field] = youtube_links.sanitize_text(profile.get(field) or "", allowed_links=links)
+            system_prompt = youtube_links.sanitize_text(system_prompt, allowed_links=links)
         user_prompt = builder(profile, media_info, context or {})
 
     # Per-account language override (bilingual routing). When an account sets
@@ -681,6 +690,10 @@ Return ONLY a JSON object with "message" field."""
                 f"For short fields such as title and description, include every language "
                 f"separated by ' ｜ '."
             )
+    if platform == "youtube":
+        links = youtube_links.links_for_generation(profile, context or {})
+        user_prompt = youtube_links.sanitize_text(user_prompt, allowed_links=links)
+        user_prompt += "\n\n" + youtube_links.generation_instruction(links)
 
     return system_prompt, user_prompt
 
@@ -711,12 +724,19 @@ def parse_llm_response(raw_content: str, platform: str) -> dict:
     if "hashtags" in parsed and isinstance(parsed["hashtags"], str):
         parsed["hashtags"] = [h.strip() for h in parsed["hashtags"].split(",") if h.strip()]
 
+    if platform == "youtube":
+        parsed = youtube_links.sanitize_draft(parsed)
     return parsed
 
 
 def validate_post(platform: str, post_data: dict) -> list[str]:
     """Validate a generated post against platform constraints. Returns list of errors."""
     errors = []
+    if platform == "youtube":
+        try:
+            youtube_links.validate_draft(post_data)
+        except youtube_links.YouTubeLinkPolicyError as exc:
+            errors.append(str(exc))
     limit = PLATFORM_CHAR_LIMITS.get(platform)
     message = post_data.get("message", "")
 

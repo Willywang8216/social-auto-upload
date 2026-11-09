@@ -8,7 +8,7 @@ import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
-from myUtils import platform_limits, text_limits
+from myUtils import platform_limits, text_limits, youtube_links
 
 
 # The LLM is asked for a single ``message`` string, but it sometimes answers
@@ -369,12 +369,15 @@ def prepare_platform_draft(
     cta: str | None = None,
     default_hashtags: list[str] | None = None,
     preserve_approved: bool = False,
+    youtube_allowed_links: list[str] | None = None,
 ) -> dict:
     rule = get_platform_rule(platform)
     if preserve_approved:
         # Recovery must not normalize labels, append hashtags/CTA, or shorten
         # already-approved fields. Return the exact draft or fail for review.
         prepared = dict(draft)
+        if platform == "youtube":
+            youtube_links.validate_draft(prepared, allowed_links=youtube_allowed_links)
         text_limits.validate_message(prepared.get("message", ""), platform)
         if platform == "youtube":
             if prepared.get("title") is not None:
@@ -386,6 +389,10 @@ def prepare_platform_draft(
         prepared["charCount"] = text_limits.message_length(prepared.get("message", ""), platform)
         return prepared
     prepared = normalize_draft_fields(dict(draft))
+    if platform == "youtube":
+        prepared = youtube_links.sanitize_draft(prepared, allowed_links=youtube_allowed_links)
+        contact_details = youtube_links.sanitize_text(contact_details or "", allowed_links=youtube_allowed_links)
+        cta = youtube_links.sanitize_text(cta or "", allowed_links=youtube_allowed_links)
     message = str(prepared.get("message", "") or "").strip()
     hashtags = normalize_hashtags(
         prepared.get("hashtags") or default_hashtags,
