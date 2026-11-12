@@ -454,7 +454,10 @@ class PreparedPublisherTests(unittest.TestCase):
         error = HTTPError("opaque provider exception", response=response)
         wrapped = prepared_publishers._raise_x_publish_error(error, stage="media upload (OAuth 1.0a)")
         self.assertFalse(wrapped.retryable)
-        self.assertEqual(wrapped.details, {"stage": "media upload (OAuth 1.0a)", "status": 401, "code": "89"})
+        self.assertEqual(wrapped.details, {
+            "stage": "media upload (OAuth 1.0a)", "status": 401, "code": "89",
+            "httpStatus": 401, "definitiveNonDelivery": True,
+        })
         self.assertNotIn("access_token", str(wrapped).lower())
 
     def test_x_stringified_401_is_classified_as_permanent(self):
