@@ -330,3 +330,189 @@ def test_real_adapter_accepts_worker_scoped_rejection_and_confirms_exact_destina
     assert len(session.calls_for("POST", "/posts", create=True)) == 1
     assert target(fixture).checkpoint["provider_receipt"]["network"] == "blsk"
     assert target(fixture).checkpoint["provider_receipt"]["profile_refs"] == ["fixture"]
+
+
+def _use_x_fixture(fixture, monkeypatch, *, blocked=False):
+    import json
+    path, account, job = fixture
+    config = {"twitterAuthType": "api", "accessToken": "fixture-access", "refreshToken": "fixture-refresh",
+              "accessTokenExpiresAt": "2020-01-01T00:00:00+00:00",
+              "sociamonials": {"network": "tw", "profile_refs": ["fixture"]}}
+    if blocked:
+        config["_nativeCredentialError"] = {"kind": "unknown", "code": "invalid_request", "httpStatus": 400}
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("UPDATE accounts SET platform='twitter',config_json=? WHERE id=?", (json.dumps(config), account.id))
+        conn.execute("UPDATE publish_jobs SET platform='twitter' WHERE id=?", (job.id,))
+    monkeypatch.setattr(worker_module, "_x_direct_publish_enabled", lambda: True)
+    return path, account, job
+
+
+def test_known_configuration_warning_bypasses_native_only_for_existing_backup(fixture, monkeypatch):
+    path, _, _ = _use_x_fixture(fixture, monkeypatch, blocked=True)
+    native = Mock()
+    result = {**delivered(), "network": "tw"}
+    backup = Mock(return_value=result)
+    monkeypatch.setattr(sm, "publish_via_sociamonials", backup)
+    run(path, native)
+    assert target(fixture).status == "succeeded"
+    native.assert_not_called()
+    backup.assert_called_once()
+    assert target(fixture).checkpoint["publish_routes"]["native"]["outcome"] == "credential_unavailable"
+
+
+def test_unsupported_original_intent_is_blocked_before_provider_creation(fixture, monkeypatch):
+    path, _, _ = fixture
+    native = Mock(side_effect=PreparedPublishError("HTTP 401 invalid credentials", retryable=False))
+    backup = Mock(side_effect=sm.SociamonialsFallbackError("Original alt text cannot be preserved",
+                  details={"intentReviewRequired": True, "field": "alt_text"}))
+    monkeypatch.setattr(sm, "publish_via_sociamonials", backup)
+    run(path, native)
+    row = target(fixture)
+    assert row.status == "blocked" and not row.checkpoint.get("provider_receipt")
+    assert row.checkpoint["publish_routes"]["sociamonials"]["outcome"] == "blocked_intent"
+    assert native.call_count == 1 and backup.call_count == 1
+
+
+def _rejected_native_media_fixture(fixture, monkeypatch, tmp_path, *, override=None):
+    import hashlib
+    import json
+    from PIL import Image
+    from myUtils import generic_delivery, prepared_publishers
+    from tests.test_publish_route_safety import Response
+    from tests.test_sociamonials_fallback import ContractSession, profile
+    path, _, job = _use_x_fixture(fixture, monkeypatch)
+    image = tmp_path / "approved-image.jpg"
+    Image.new("RGB", (64, 64), (30, 60, 90)).save(image)
+    payload = {"message": "Original approved caption", "artifacts": [{"artifact_kind": "prepared_image",
+               "local_path": str(image), "metadata": {"sha256": hashlib.sha256(image.read_bytes()).hexdigest(), "role": "image"}}]}
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("UPDATE publish_jobs SET payload_json=? WHERE id=?", (json.dumps(payload), job.id))
+    session = ContractSession(profiles=[profile(network="tw", ref="fixture")], override=override)
+    monkeypatch.setattr(sm, "_RATE_WINDOWS", {})
+    monkeypatch.setattr(sm, "_get_session", lambda supplied=None: session)
+    def fixture_public_host(host):
+        assert host in {"cdn.example", "upload.example"}
+    monkeypatch.setattr(sm, "_resolve_public_host", fixture_public_host)
+    async def native(_platform, working, _target):
+        operations = generic_delivery.Operations(working, "twitter")
+        operations.plan(["media:0", "tweet"])
+        operations.begin("media:0:initialize")
+        operations.record("media:0:initialize", "native-media-id", provider_receipt=False)
+        try:
+            operations.request("media:0:finalize", lambda: Response(402))
+        except PreparedPublishError as exc:
+            raise prepared_publishers._raise_x_publish_error(exc, stage="media upload (OAuth 2.0)") from exc
+    execute = Mock(side_effect=native)
+    return path, payload, session, execute
+
+
+def test_real_adapter_handoffs_rejected_media_only_journal_without_dropping_image(fixture, monkeypatch, tmp_path):
+    path, payload, session, execute = _rejected_native_media_fixture(fixture, monkeypatch, tmp_path)
+    run(path, execute)
+    row = target(fixture)
+    assert row.status == "succeeded" and execute.call_count == 1
+    assert row.checkpoint["provider_receipt"]["network"] == "tw"
+    assert row.checkpoint["provider_receipt"]["profile_refs"] == ["fixture"]
+    assert row.checkpoint["provider_operations"]["twitter"]["items"]["media:0:initialize"]["id"] == "native-media-id"
+    assert len(session.calls_for("POST", "/posts", create=True)) == 1
+    assert session.last_body["message"] == payload["message"]
+    assert session.last_body["image_urls"]
+
+
+def test_backup_create_429_retries_remaining_budget_without_repeating_native_media(fixture, monkeypatch, tmp_path):
+    from tests.test_sociamonials_fallback import Response
+    refused = []
+    def override(method, url, kwargs):
+        if method == "POST" and url.endswith("/posts") and not kwargs["json"].get("validate_only") and not refused:
+            refused.append(True)
+            return Response({"error": {"code": "rate_limit"}}, status=429)
+    path, payload, session, execute = _rejected_native_media_fixture(fixture, monkeypatch, tmp_path, override=override)
+    run(path, execute)
+    row = target(fixture)
+    assert row.status == "succeeded" and execute.call_count == 1
+    assert row.checkpoint["publish_routes"]["native"]["attempts"] == 1
+    assert row.checkpoint["publish_routes"]["sociamonials"]["attempts"] == 2
+    creates = session.calls_for("POST", "/posts", create=True)
+    assert len(creates) == 2 and creates[0][2]["json"] == creates[1][2]["json"]
+    assert creates[1][2]["json"]["message"] == payload["message"]
+    assert len([call for call in session.calls_for("POST", "/media/uploads") if call[1].endswith("/media/uploads")]) == 1
+    assert row.checkpoint["provider_operations"]["twitter"]["items"]["media:0:initialize"]["id"] == "native-media-id"
+    assert row.checkpoint["provider_receipt"]["profile_refs"] == ["fixture"]
+
+
+def test_local_backup_create_rate_refusal_keeps_safe_remaining_budget(fixture, monkeypatch, tmp_path):
+    path, _, session, execute = _rejected_native_media_fixture(fixture, monkeypatch, tmp_path)
+    take_rate, refused = sm._take_rate, []
+    def local_refusal(key, bucket, limit):
+        last_body = session.calls[-1][2].get("json", {}) if session.calls else {}
+        if (bucket == "write" and last_body.get("validate_only") is True
+                and str(last_body.get("image_urls", [""])[0]).startswith("asset://") and not refused):
+            refused.append(True)
+            raise sm.SociamonialsFallbackError("Local rate refusal", retryable=True,
+                details={"httpStatus": 429, "retrySafe": True})
+        take_rate(key, bucket, limit)
+    monkeypatch.setattr(sm, "_take_rate", local_refusal)
+    run(path, execute)
+    row = target(fixture)
+    assert refused and row.status == "succeeded" and execute.call_count == 1
+    assert row.checkpoint["publish_routes"]["sociamonials"]["attempts"] == 2
+    assert len(session.calls_for("POST", "/posts", create=True)) == 1
+    assert len([call for call in session.calls_for("POST", "/media/uploads") if call[1].endswith("/media/uploads")]) == 1
+
+
+@pytest.mark.parametrize("unknown", ["transport", "missing_receipt", "rejected_then_transport"])
+def test_unknown_backup_create_is_not_retried_despite_reconciled_native_media(fixture, monkeypatch, tmp_path, unknown):
+    from myUtils import generic_delivery
+    from tests.test_sociamonials_fallback import Response
+    creates = []
+    def override(method, url, kwargs):
+        if method == "POST" and url.endswith("/posts") and not kwargs["json"].get("validate_only"):
+            creates.append(True)
+            if unknown == "rejected_then_transport" and len(creates) == 1:
+                return Response({"error": {"code": "rate_limit"}}, status=429)
+            if unknown in {"transport", "rejected_then_transport"}:
+                raise TimeoutError("Lost backup create response")
+            return Response({"status": "scheduled"})
+    path, _, session, execute = _rejected_native_media_fixture(fixture, monkeypatch, tmp_path, override=override)
+    run(path, execute)
+    row = target(fixture)
+    assert row.status == "needs_review" and execute.call_count == 1
+    expected_attempts = 2 if unknown == "rejected_then_transport" else 1
+    assert row.checkpoint["publish_routes"]["sociamonials"]["attempts"] == expected_attempts
+    assert generic_delivery.media_only_reconciled(row.checkpoint, target_id=row.id)
+    assert delivery.has_unresolved_submission({"_delivery": row.checkpoint})
+    assert not row.checkpoint.get("provider_receipt")
+    assert len(session.calls_for("POST", "/posts", create=True)) == expected_attempts
+
+
+def _move_mapping_to_profile(fixture):
+    import json
+    path, account, job = fixture
+    current = profiles.get_account(account.id, db_path=path)
+    config = dict(current.config)
+    mapping = config.pop("sociamonials")
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("UPDATE accounts SET config_json=? WHERE id=?", (json.dumps(config), account.id))
+    profiles.update_profile(job.profile_id, settings={"sociamonials": {str(account.id): mapping}}, db_path=path)
+
+
+def test_profile_only_verified_mapping_bypasses_native_configuration_hold(fixture, monkeypatch):
+    from tests.test_sociamonials_fallback import ContractSession, profile
+    path, _, _ = _use_x_fixture(fixture, monkeypatch, blocked=True)
+    _move_mapping_to_profile(fixture)
+    session = ContractSession(profiles=[profile(network="tw", ref="fixture")])
+    monkeypatch.setattr(sm, "_RATE_WINDOWS", {})
+    monkeypatch.setattr(sm, "_get_session", lambda supplied=None: session)
+    native = Mock()
+    run(path, native)
+    row = target(fixture)
+    assert row.status == "succeeded"
+    native.assert_not_called()
+    assert row.checkpoint["publish_routes"]["native"]["outcome"] == "credential_unavailable"
+    assert row.checkpoint["provider_receipt"]["network"] == "tw"
+    assert row.checkpoint["provider_receipt"]["profile_refs"] == ["fixture"]
+
+
+def test_profile_only_mapping_retains_native_reset_delay(fixture, monkeypatch):
+    _move_mapping_to_profile(fixture)
+    test_exhausted_native_429_pins_backup_but_retains_reset(fixture, monkeypatch)

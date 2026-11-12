@@ -125,6 +125,42 @@ receipt-bearing and irreparable targets remain unchanged. `--resolved-target-id`
 requires evidence of an actual repair, not an assumption that a fresh web login
 fixed an API credential. Unsupported backup copy/settings stay exceptions.
 
+## Opt-in repair of unstarted pending targets
+
+The default preprocessing selection remains **failed-only**. A separately frozen
+pending audit may opt in with `--include-unstarted-pending`, together with explicit
+`--target-id` values or a private `--selection-file`. Pending application must
+repeat that opt-in and the same selection; the plain failed-recovery utility
+cannot requeue or repair pending targets.
+
+```bash
+# Inspect only the frozen pending selection; already-valid media is a no-op.
+python scripts/preprocess_failed_targets.py --include-unstarted-pending \
+  --selection-file /private/pending-selection.json
+
+# Prepare persistent, worker-visible media; keep the saved plan private.
+python scripts/preprocess_failed_targets.py --include-unstarted-pending \
+  --selection-file /private/pending-selection.json --prepare \
+  --out-dir /app/generated/PRIVATE_TASK_ID \
+  --plan-file /private/pending-prepared-plan.json
+
+python scripts/preprocess_failed_targets.py --include-unstarted-pending \
+  --selection-file /private/pending-selection.json --apply \
+  --plan-file /private/pending-prepared-plan.json
+```
+
+These paths are placeholders. A Docker worker must see the final media through a
+persistent runtime mount; `/app/backups` is not a media mount. Never put private
+plans, credentials or row snapshots in watched inbox/media directories.
+
+Eligibility requires status `pending`, zero attempts, no start/finish timestamps,
+lease, retry history, checkpoint, receipt, delivery or earlier recovery history,
+and an unchanged frozen intent. Already-valid targets keep their generation and
+schedule. Invalid targets require every ordered part to validate before one atomic
+installation; a compatible future schedule is retained. Fresh identity, route,
+duplicate, reservation and slot checks still apply. Changed or uncertain targets
+remain unchanged rather than being forced through a failed-to-pending reset.
+
 ## Dry-run and guarded application
 
 The recovery utility defaults to a dry run. Explicit IDs cover the selected

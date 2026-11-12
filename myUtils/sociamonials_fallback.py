@@ -1750,12 +1750,16 @@ def publish_via_sociamonials(*, platform: str, account: Any, payload: Mapping[st
         response = http.post(POSTS_URL, json=body, headers=headers, timeout=request_timeout, context="create post")
     except SociamonialsFallbackError as exc:
         if exc.details.get("retrySafe") is True:
-            # Local rate/budget rejection happens before HTTP; it must not leave
-            # a false ambiguous-submission flag that prevents safe resumption.
+            # Queue persistence keeps submission history sticky. Retain a proof
+            # for THIS backup fence as well as its in-memory no-submit flag.
+            delivery_state.record_non_delivery(payload, provider="sociamonials",
+                reason="Backup create was refused before HTTP; no publication")
             delivery_state.checkpoint(payload, submission_started=False)
         raise
     status = int(getattr(response, "status_code", 0) or 0)
     if 400 <= status < 500 and status not in {408, 409}:
+        delivery_state.record_non_delivery(payload, provider="sociamonials",
+            reason=f"Backup create was definitively rejected (HTTP {status})")
         delivery_state.checkpoint(payload, submission_started=False)
     _raise_for_status(response, context="create post")
     result = _data(_json_body(response))

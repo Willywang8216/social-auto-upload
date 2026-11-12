@@ -281,10 +281,13 @@ def backup_eligible(exc: BaseException, *, checkpoint: dict | None = None) -> bo
     details = getattr(exc, "details", None) or {}
     if not isinstance(state, dict) or state.get("checkpoint_invalid"):
         return False
-    if (state.get("provider_receipt") or state.get("telegramCompletedByDelivery")
-            or state.get("completed_operations") or state.get("provider_operations")):
-        return False
+    from myUtils.generic_delivery import media_only_reconciled
     from myUtils import delivery
+    if (state.get("provider_receipt") or state.get("telegramCompletedByDelivery")
+            or state.get("completed_operations")
+            or state.get("provider_operations") and (not media_only_reconciled(state)
+                or delivery.has_unresolved_submission({"_delivery": state}))):
+        return False
     if isinstance(exc, delivery.RouteExhausted) and isinstance(details, dict) and details.get("provider") == "native":
         routes = state.get("publish_routes") or {}
         if not isinstance(routes, dict) or not isinstance(routes.get("native", {}), dict):
@@ -307,9 +310,14 @@ def backup_eligible(exc: BaseException, *, checkpoint: dict | None = None) -> bo
     credential_failure = (_matches_any(text, _CREDENTIAL_DEAD_PATTERNS)
                           or bool(re.search(r"token.{0,100}expired|reconnect (?:required|the account)|"
                                             r"requires? reconnection|media\.write|scope.not.authorized", text, re.I)))
+    credential_failure = credential_failure or (isinstance(details, dict)
+        and details.get("stage") == "oauth_refresh"
+        and details.get("classification") in {"request_rejected", "credential_rejected"})
     definite = proven_non_delivery(exc)
     response = getattr(exc, "response", None)
     status_code = getattr(response, "status_code", None)
+    if status_code is None and isinstance(details, dict) and details.get("definitiveNonDelivery") is True:
+        status_code = details.get("httpStatus")
     provider_budget_failure = (status_code == 402 or bool(re.search(
         r"HTTP 402|CreditsDepleted|insufficient (?:provider )?credits|credit balance exhausted", text, re.I)))
     rejected_auth = credential_failure and status_code in {401, 403}

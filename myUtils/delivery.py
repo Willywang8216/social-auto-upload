@@ -115,14 +115,26 @@ def has_unresolved_submission(payload: dict) -> bool:
     current = payload.get("_delivery", {})
     if not isinstance(current, dict) or current.get("checkpoint_invalid"):
         return True
-    if (current.get("provider_receipt") or current.get("completed_operations")
-            or current.get("provider_operations") or current.get("telegramCompletedByDelivery")):
+    if (current.get("provider_receipt") or current.get("native_provider_receipt")
+            or current.get("completed_operations") or current.get("telegramCompletedByDelivery")):
         return True
+    media_reconciled = False
+    if current.get("provider_operations"):
+        from myUtils.generic_delivery import media_only_reconciled
+        media_reconciled = media_only_reconciled(current)
+        if not media_reconciled:
+            return True
     started = current.get("submission_started")
     if started is None or started is False:
         return False
     if started is not True:
         return True
+    # The native journal's proof does not resolve a later backup create fence.
+    # A backup rejection sets submission_started=False or records its own proof;
+    # an unknown backup request stays protected even with reconciled native media.
+    if (media_reconciled and current.get("operation") == ""
+            and current.get("operation_generation") == current["media_only_rejection"]["operation_generation"]):
+        return False
     proof = current.get("definitive_non_delivery")
     generation = current.get("operation_generation")
     return not (isinstance(proof, dict) and isinstance(generation, str) and generation

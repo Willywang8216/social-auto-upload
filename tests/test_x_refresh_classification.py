@@ -63,3 +63,12 @@ def test_missing_client_id_is_actionable_and_makes_no_http_request(monkeypatch):
         x_auth.refresh_access_token(refresh_token="fixture-refresh", session=session)
     assert raised.value.error_code == "configuration_missing"
     assert not session.mock_calls
+
+
+def test_refresh_configuration_classification_is_shared_with_persisted_state():
+    from myUtils import token_state
+    error = x_auth.TwitterOAuthError("Safe OAuth rejection", status_code=400, error_code="invalid_request")
+    assert error.classification == "request_rejected"
+    verdict = token_state.classify_failure(error)
+    assert verdict["kind"] == "configuration" and verdict["terminal"] is False
+    assert verdict["code"] == "invalid_request" and verdict["httpStatus"] == 400

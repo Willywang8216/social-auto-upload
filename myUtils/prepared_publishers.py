@@ -2882,8 +2882,8 @@ def _maybe_refresh_twitter_token(
             on_refresh(failed_config)
         code = str(getattr(exc, "error_code", "") or "").strip().lower()
         status = getattr(exc, "status_code", None)
-        request_rejected = code in {"invalid_client", "unauthorized_client", "invalid_request", "unsupported_grant_type", "configuration_missing"}
-        request_rejected = request_rejected or (isinstance(status, int) and 400 <= status < 500 and status not in {408, 429})
+        from myUtils.x_auth import refresh_error_classification
+        request_rejected = refresh_error_classification(exc) == "request_rejected"
         if reconnect_required:
             message = "X OAuth 2.0 refresh token was rejected; reconnect this account"
         elif request_rejected:
@@ -2899,41 +2899,51 @@ def _maybe_refresh_twitter_token(
 
 
 def _raise_x_publish_error(exc: Exception, *, stage: str) -> PreparedPublishError:
-    """Attach a safe X request-stage label without retaining request secrets."""
-    status = getattr(exc, "status_code", None)
+    """Preserve safe HTTP rejection facts, not a token-bearing response/URL."""
+    original = getattr(exc, "details", None)
+    original = original if isinstance(original, dict) else {}
     response = getattr(exc, "response", None)
-    if status is None and response is not None:
-        status = getattr(response, "status_code", None)
+    received_status = getattr(response, "status_code", None)
+    if type(received_status) is not int and original.get("definitiveNonDelivery") is True:
+        received_status = original.get("httpStatus")
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = received_status if type(received_status) is int else original.get("httpStatus")
     error_text = str(exc)
     if status is None:
-        status_match = re.search(r"\bHTTP\s+(\d{3})\b", error_text, re.IGNORECASE)
-        if status_match:
-            status = int(status_match.group(1))
-    code = str(getattr(exc, "error_code", "") or "").strip()
+        match = re.search(r"\bHTTP\s+(\d{3})\b", error_text, re.IGNORECASE)
+        if match:
+            status = int(match.group(1))  # display only; not a rejection witness
+    code = str(getattr(exc, "error_code", "") or original.get("providerErrorCode") or "").strip()
     if not code and response is not None:
         try:
             body = response.json()
             errors = body.get("errors") if isinstance(body, dict) else None
             if isinstance(errors, list) and errors and isinstance(errors[0], dict):
-                candidate = str(errors[0].get("code") or "").strip()
-                code = candidate if candidate.isdigit() else ""
-        except Exception:  # noqa: BLE001
+                code = str(errors[0].get("code") or "").strip()
+        except Exception:
             pass
     if not code:
-        code_match = re.search(r"['\\\"]code['\\\"]\s*:\s*['\\\"]?(\d{1,6})", error_text)
-        if code_match:
-            code = code_match.group(1)
+        match = re.search(r"['\\\"]code['\\\"]\s*:\s*['\\\"]?(\d{1,6})", error_text)
+        if match:
+            code = match.group(1)
+    if not re.fullmatch(r"\d{1,6}|CreditsDepleted|invalid_client|invalid_token|invalid_request", code):
+        code = ""
     message = f"X {stage} request failed"
-    if isinstance(status, int):
+    if type(status) is int:
         message += f" (HTTP {status})"
     if code:
         message += f" code={code}"
     retryable = getattr(exc, "retryable", True) and not (
-        _twitter_refresh_requires_reconnect(exc) or str(status) == "401")
+        _twitter_refresh_requires_reconnect(exc) or str(status) in {"401", "402"})
     details = {"stage": stage, "status": status, "code": code}
-    retry_after = (getattr(exc, "details", None) or {}).get("retryAfter")
-    if retry_after:
-        details["retryAfter"] = retry_after
+    if type(received_status) is int and received_status in {401, 402, 429}:
+        details.update(httpStatus=received_status, definitiveNonDelivery=True)
+        generation = original.get("operationGeneration")
+        if isinstance(generation, str) and re.fullmatch(r"[0-9a-f]{32}", generation):
+            details["operationGeneration"] = generation
+    if original.get("retryAfter"):
+        details["retryAfter"] = original["retryAfter"]
     return PreparedPublishError(message, details=details, retryable=retryable)
 
 
@@ -2973,6 +2983,18 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
         # Keep the original structured rejection. A stale failure is ignored by
         # the credential CAS and must never be routed through commit_success.
         token_state.commit_failure(account, exc, db_path=db_path)
+
+    def _persist_publish_budget(exc: PreparedPublishError) -> None:
+        from myUtils import profiles as profile_registry, token_state
+        if (getattr(account, "id", None) is None or exc.details.get("httpStatus") != 402
+                or exc.details.get("definitiveNonDelivery") is not True):
+            return
+        raw_db_path = payload.get("_db_path")
+        db_path = Path(raw_db_path) if raw_db_path else profile_registry.DB_PATH
+        saved = token_state.commit_publishing_failure(
+            account, token_state.provider_error({}, status_code=402), db_path=db_path)
+        if saved is not None:
+            account.config = dict(saved.config or {})
 
     config = _maybe_refresh_twitter_token(
         config,
@@ -3067,7 +3089,9 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
             except (delivery.LeaseLost, delivery.DeliveryUnknown, delivery.DeliveryPending):
                 raise
             except Exception as exc:
-                raise _raise_x_publish_error(exc, stage="media upload (OAuth 2.0)") from exc
+                error = _raise_x_publish_error(exc, stage="media upload (OAuth 2.0)")
+                _persist_publish_budget(error)
+                raise error from exc
             if not mid:
                 raise PreparedPublishError("X media upload returned no media ID")
             operations.record(operation, mid, provider_receipt=False)
@@ -3092,11 +3116,18 @@ def publish_twitter_sync(account, payload: dict, *, session=None) -> dict[str, A
     except (delivery.LeaseLost, delivery.DeliveryUnknown, delivery.DeliveryPending):
         raise
     except Exception as exc:
-        raise _raise_x_publish_error(exc, stage="tweet creation (OAuth 2.0)") from exc
+        error = _raise_x_publish_error(exc, stage="tweet creation (OAuth 2.0)")
+        _persist_publish_budget(error)
+        raise error from exc
     body = _response_payload(resp) or {}
     tweet = body.get("data") if isinstance(body, dict) else None
     operations.record("tweet", tweet.get("id") if isinstance(tweet, dict) else None)
     operations.finish()
+    if getattr(account, "id", None) is not None:
+        from myUtils import profiles as profile_registry, token_state
+        raw_db_path = payload.get("_db_path")
+        token_state.commit_publication_success(
+            account, db_path=Path(raw_db_path) if raw_db_path else profile_registry.DB_PATH)
     return {"results": [body], "updated_config": config}
 
 

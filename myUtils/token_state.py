@@ -92,13 +92,21 @@ def provider_error(error, *, status_code=None, invalid=False) -> CredentialError
     transient = data.get("is_transient") is True or status_code == 429 or (
         isinstance(status_code, int) and status_code >= 500
     ) or code_text in {"1", "2", "4", "17", "32", "341", "613"}
-    terminal = not transient and (invalid or code_text in {
+    configuration = code_text in {
+        "invalid_client", "invalid_request", "unauthorized_client",
+        "unsupported_grant_type", "configuration_missing",
+    }
+    terminal = not transient and not configuration and (invalid or code_text in {
         "190", "102", "10", "200", "294", "299", "invalid_grant", "invalid_token",
         "refresh_token_revoked", "access_denied",
     })
-    kind = "transient" if transient else ("permission" if code_text in {"10", "200", "294", "299", "access_denied"}
-                                         else "credential" if terminal else "unknown")
+    kind = ("transient" if transient else "budget" if status_code == 402 else
+            "configuration" if configuration else
+            "permission" if code_text in {"10", "200", "294", "299", "access_denied"} else
+            "credential" if terminal else "unknown")
     reason = {"transient": "Provider temporarily unavailable or rate limited; retry scheduled",
+              "budget": "Provider publishing budget is unavailable; resolve billing or use a verified managed route",
+              "configuration": "Provider rejected request/application configuration; repair it or use a verified managed route",
               "permission": "Provider rejected the required permissions; reconnect required",
               "credential": "Provider rejected the credential; reconnect required",
               "unknown": "Provider validation failed; credential validity is unknown"}[kind]
@@ -153,6 +161,11 @@ def classify_failure(exc: Exception) -> dict:
         if status is None and response is not None:
             status = getattr(response, "status_code", None)
         verdict = provider_error(error, status_code=status)
+        if (getattr(exc, "classification", None) == "request_rejected"
+                and verdict.kind not in {"transient", "configuration", "budget"}):
+            verdict = CredentialError(
+                "Provider rejected request/application configuration; repair it or use a verified managed route",
+                code=verdict.error_code, status_code=status, kind="configuration")
         if not error and status is None:
             # Unknown exceptions and transport errors are NOT credential verdicts.
             verdict = CredentialError("Credential check could not complete; retry scheduled", kind="transient")
@@ -191,7 +204,8 @@ def clear_failure_markers(config: dict) -> None:
 
 def _merge_locked(conn, *, account_id: int, expected: str, changes: dict | None = None,
                   success=False, failure: dict | None = None, self_check=False,
-                  backoff_base=1800, backoff_cap=21600, alert_state=None, advance_generation=True):
+                  backoff_base=1800, backoff_cap=21600, alert_state=None, advance_generation=True,
+                  publishing_failure=None, publication_success=False):
     from myUtils import profiles
     row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
     if row is None:
@@ -217,6 +231,8 @@ def _merge_locked(conn, *, account_id: int, expected: str, changes: dict | None 
     elif failure is not None:
         should_alert = bool(failure['terminal'] and not cfg.get('_reconnectAlertedAt'))
         previous_error = cfg.get('_nativeCredentialError')
+        keep_configuration = (failure["kind"] in {"transient", "unknown"}
+            and bool(native_route_block_reason({"_nativeCredentialError": previous_error})))
         failures = min(_count(cfg.get("_maintenanceFailures")) + 1, 1000000)
         delay = min(backoff_base * (2 ** min(failures - 1, 16)), backoff_cap)
         cfg.update({
@@ -225,7 +241,7 @@ def _merge_locked(conn, *, account_id: int, expected: str, changes: dict | None 
             "_nextMaintenanceAttemptAt": (utc_now() + timedelta(seconds=delay)).replace(tzinfo=None).isoformat(timespec="seconds"),
             "_nativeCredentialError": failure, "_nativeCredentialCheckedAt": now,
         })
-        if cfg.get('_needsReconnect') and not failure['terminal'] and previous_error:
+        if previous_error and not failure['terminal'] and (cfg.get('_needsReconnect') or keep_configuration):
             cfg['_nativeCredentialError'] = previous_error
         if alert_state is not None:
             alert_state['needed'] = should_alert
@@ -237,9 +253,14 @@ def _merge_locked(conn, *, account_id: int, expected: str, changes: dict | None 
             cfg["_nativeCredentialState"] = "reconnect_required"
             cfg.setdefault("_reconnectAlertedAt", now)
         elif not cfg.get("_needsReconnect"):
-            cfg["_nativeCredentialState"] = "warning"
-        # Never fabricate an expiry. A transient failure also cannot erase an
-        # earlier terminal verdict; only a verified success can do that.
+            cfg["_nativeCredentialState"] = "configuration_required" if keep_configuration or failure["kind"] == "configuration" else "warning"
+        # A failed check cannot repair an earlier credential/configuration hold.
+        # Preserve the latest transport diagnostics separately; success clears it.
+    if publishing_failure is not None:
+        # A user-info/token check cannot prove that publishing credits exist.
+        cfg["_nativePublishingError"] = {**publishing_failure, "checkedAt": now}
+    if publication_success:
+        cfg.pop("_nativePublishingError", None)
     serialized = json.dumps(config_crypto.encrypt_config_secrets(cfg), ensure_ascii=False)
     # Read + compare + merge + write are all inside one SQLite write transaction.
     conn.execute(
@@ -290,6 +311,54 @@ def require_saved(account):
     return account
 
 
+def commit_publishing_failure(account, exc: Exception, *, db_path):
+    """Keep a provider budget verdict separate from credential validity."""
+    from myUtils import profiles
+    failure = classify_failure(exc)
+    if failure["kind"] != "budget":
+        return None
+    with profiles._connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        updated = _merge_locked(conn, account_id=account.id, expected=fingerprint(account),
+                                publishing_failure=failure, advance_generation=False)
+        conn.commit()
+    return updated
+
+
+def commit_publication_success(account, *, db_path):
+    """Only confirmed native publication may clear a publishing-budget hold."""
+    from myUtils import profiles
+    if not (account.config or {}).get("_nativePublishingError"):
+        return account
+    with profiles._connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        updated = _merge_locked(conn, account_id=account.id, expected=fingerprint(account),
+                                publication_success=True, advance_generation=False)
+        conn.commit()
+    return updated
+
+
+def native_route_block_reason(config: dict) -> str:
+    """Cheap route verdict, including old persisted OAuth request warnings."""
+    publishing = config.get("_nativePublishingError")
+    if isinstance(publishing, dict) and publishing.get("kind") == "budget":
+        return publishing.get("reason") or "Native publishing budget requires operator action"
+    error = config.get("_nativeCredentialError")
+    if not isinstance(error, dict):
+        return ""
+    if error.get("kind") == "budget":
+        return error.get("reason") or "Native OAuth provider budget requires operator action"
+    status = error.get("httpStatus")
+    if error.get("kind") == "transient" or status == 429 or type(status) is int and status >= 500:
+        return ""
+    code = str(error.get("code") or "").lower()
+    if (error.get("kind") == "configuration" or code in {
+            "invalid_client", "invalid_request", "unauthorized_client",
+            "unsupported_grant_type", "configuration_missing"}):
+        return "Native OAuth request/application configuration is unavailable; repair it or use a verified managed route"
+    return ""
+
+
 def native_state(account) -> dict:
     """Read-only facts; a future expiry/configuration alone is not validation."""
     cfg = account.config or {}
@@ -324,6 +393,8 @@ def native_state(account) -> dict:
     last_checked = cfg.get("_nativeCredentialCheckedAt") or cfg.get("_lastTokenSelfCheckAt") or ""
     if cfg.get("_needsReconnect"):
         state, reason = "reconnect_required", error.get("reason") or "Native credentials require reconnect"
+    elif error.get("kind") == "configuration" or cfg.get("_nativeCredentialState") == "configuration_required":
+        state, reason = "configuration_required", error.get("reason") or "Native OAuth configuration requires operator action"
     elif deadlines and min(deadlines) <= now:
         state, reason = "expired", "A native token or data-access deadline has passed"
     elif not present:
@@ -358,7 +429,10 @@ def publishing_route(account, native: dict) -> dict:
     elif provider != "direct":
         configured = False
         reason = "Unsupported publishing provider configuration"
+    blocked = native_route_block_reason(cfg) if provider == "direct" else ""
+    if blocked:
+        reason = blocked
     return {"provider": provider, "configured": configured, "enabled": bool(account.enabled),
-            "state": "disabled" if not account.enabled else "configured" if configured else "missing",
+            "state": "disabled" if not account.enabled else "blocked" if blocked else "configured" if configured else "missing",
             "validation": "not_checked" if provider != "direct" else native["state"],
-            "availability": "unknown", "reason": reason}
+            "availability": "blocked" if blocked else "unknown", "reason": reason}

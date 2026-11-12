@@ -838,3 +838,34 @@ def test_recovery_cannot_interleave_with_a_finalizer_reservation(db_path, monkey
         assert _dump(db_path) == before
         assert jobs.get_target(target_id, db_path=db_path).status == "failed"
     assert recovery.apply_recovery(plan, db_path=db_path)["applied"] == 1
+
+
+def _clean_pending(path):
+    target = _target(path, status="pending")
+    _update(path, "publish_job_targets", target, attempts=0, started_at=None, finished_at=None,
+            last_error=None, error_category=None, checkpoint_json="{}", delivery_state=None)
+    return target
+
+
+def test_failed_only_defaults_refuse_even_truly_unstarted_pending(db_path):
+    target = _clean_pending(db_path)
+    before = _dump(db_path)
+    assert _plan(db_path) == []
+    assert not _entries(_plan(db_path, target_ids=[target]))
+    assert not _entries(_plan(db_path, resolved_target_ids=[target]))
+    assert _dump(db_path) == before
+
+
+def test_pending_planning_extension_requires_explicit_selection_and_cannot_plain_apply(db_path):
+    target = _clean_pending(db_path)
+    before = _dump(db_path)
+    for selection in ({}, {"target_ids": []}, {"resolved_target_ids": [target]},
+                      {"target_ids": [target], "resolved_target_ids": [target]}):
+        with pytest.raises(ValueError, match="frozen explicit"):
+            _plan(db_path, unstarted_pending_target_ids=[target], **selection)
+    plan = _plan(db_path, target_ids=[target], unstarted_pending_target_ids=[target])
+    assert plan[0]["include_unstarted_pending"] is True and plan[0]["original_status"] == "pending"
+    assert len(plan[0]["original_state_identity"]) == 64
+    with pytest.raises(ValueError, match="complete preprocessing"):
+        recovery.apply_recovery(plan, db_path=db_path)
+    assert _dump(db_path) == before

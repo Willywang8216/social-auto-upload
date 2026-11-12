@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from itertools import pairwise
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -313,3 +314,68 @@ def test_prepared_recovery_shares_the_finalizer_reservation(database, source, tm
         with closing(connect(path)) as conn:
             assert conn.execute("SELECT COUNT(*) FROM publish_job_targets").fetchone()[0] == 1
     assert prep.apply_plan(plan, db_path=path)["queued_parts"] == 3
+
+
+@pytest.mark.parametrize("restore", [False, True])
+def test_pending_repair_keeps_exact_variant_interval_framing_cover_and_all_parts(database, source, tmp_path, monkeypatch, restore):
+    from PIL import Image
+
+    from myUtils import worker
+    path, profile, account = database
+    selected = tmp_path / "exact_selected_part_sfw.mkv" if restore else source
+    raw = tmp_path / "unavailable_raw_original.mp4"
+    cover = tmp_path / "approved_cover_sfw.jpg"
+    Image.new("RGB", (640, 360), "blue").save(cover)
+    source_sha, cover_sha = media_compliance.sha256_file(source), media_compliance.sha256_file(cover)
+    payload = {"message": "Approved pending caption 原稿", "draft": {"privacy": "keep"}, "artifacts": [
+        {"local_path": str(selected), "artifact_kind": "prepared_video", "metadata": {
+            "sha256": source_sha, "preparation_policy_version": "older-policy",
+            "preparation_group": "older-selected-variant", "part_index": 2, "part_count": 2,
+            "prepared_for": ["threads"], "source_sha256": "b" * 64, "source_path": str(raw),
+            "source_start_seconds": 30.0, "source_end_seconds": 36.1,
+            "variant": "approved-watermarked-sfw", "unwatermarked": False}},
+        {"local_path": str(cover), "artifact_kind": "thumbnail", "metadata": {"role": "thumbnail", "sha256": cover_sha}}]}
+    slot = (NOW + timedelta(hours=2)).isoformat()
+    job = jobs.enqueue_job(jobs.JobSpec(platform="threads", profile_id=profile.id, payload=payload,
+        targets=[(f"account:{account.id}", str(selected), slot)]), db_path=path)
+    target = jobs.list_targets(job.id, db_path=path)[0]
+    if restore:
+        def restore_exact(working, *, db_path):
+            # Restore happens with no main-DB write transaction or provider call.
+            with closing(sqlite3.connect(db_path, timeout=0)) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.rollback()
+            shutil.copyfile(source, working["artifacts"][0]["local_path"])
+        monkeypatch.setattr(worker, "_ensure_artifact_paths_local", Mock(side_effect=restore_exact))
+    plan = prep.prepare_plan(db_path=path, target_ids=[target.id], include_unstarted_pending=True,
+                             out_dir=tmp_path / "pending-parts", now=NOW)
+    assert len(plan[0]["prepared_payloads"]) == 3 and plan[0]["slot"] == slot
+    assert jobs.get_target(target.id, db_path=path).checkpoint == {}
+    metadata = []
+    for part in plan[0]["prepared_payloads"]:
+        assert part["message"] == payload["message"] and part["draft"] == payload["draft"]
+        video = next(a for a in part["artifacts"] if a["artifact_kind"] == "prepared_video")
+        meta = video["metadata"]
+        assert meta["variant"] == "approved-watermarked-sfw" and meta["unwatermarked"] is False
+        assert meta["reprepared_from"]["sha256"] == source_sha
+        assert meta["reprepared_from"]["part_index"] == 2
+        assert meta["source_interval_start_seconds"] == 30.0 and meta["source_interval_end_seconds"] == 36.1
+        assert meta["width"] / meta["height"] == pytest.approx(640 / 360)
+        metadata.append(meta)
+        kept_cover = next(a for a in part["artifacts"] if a["artifact_kind"] == "thumbnail")
+        assert kept_cover["local_path"] == str(cover) and kept_cover["metadata"]["sha256"] == cover_sha
+    assert metadata[0]["source_start_seconds"] == 30.0 and metadata[-1]["source_end_seconds"] == 36.1
+    assert all(left["source_end_seconds"] == right["source_start_seconds"] for left, right in pairwise(metadata))
+    result = prep.apply_plan(json.loads(json.dumps(plan)), db_path=path,
+                             include_unstarted_pending=True, target_ids=[target.id])
+    assert result == {"applied": 1, "queued_parts": 3, "errors": []}
+    assert jobs.get_job(job.id, db_path=path).payload == payload
+    assert media_compliance.sha256_file(selected) == source_sha and media_compliance.sha256_file(cover) == cover_sha
+    assert not raw.exists()
+    with closing(sqlite3.connect(path)) as conn:
+        rows = conn.execute("SELECT status,attempts,account_ref,schedule_at,checkpoint_json FROM publish_job_targets ORDER BY id").fetchall()
+    assert len(rows) == 3 and all(row[0:2] == ("pending", 0) for row in rows)
+    assert len({row[2] for row in rows}) == 1 and rows[0][3] == slot
+    assert all(json.loads(row[4])["recovery_generation"] == plan[0]["expected_fingerprint"] for row in rows)
+    moments = [jobs._utc_datetime(row[3]) for row in rows]
+    assert all(right - left >= timedelta(minutes=30) for left, right in pairwise(moments))

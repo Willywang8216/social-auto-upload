@@ -46,6 +46,13 @@ def run_pre_flight(*, account_ref: str, job_id: int, platform: str,
         if validate_credentials:
             if config.get("_needsReconnect"):
                 return PreFlightResult.failed(f"Account flagged for reconnect: {account_ref}", {**checks, "needs_reconnect": False})
+            from myUtils import token_state
+            route_reason = token_state.native_route_block_reason(config)
+            if route_reason:
+                return PreFlightResult.failed(
+                    f"Native route unavailable for {account_ref}: {route_reason}",
+                    {**checks, "native_route_available": False})
+            checks["native_route_available"] = True
             token_ok, reason = _check_token_validity(account, platform, config)
             checks["token_valid"] = token_ok
             if not token_ok:

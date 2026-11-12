@@ -41,6 +41,24 @@ class TwitterOAuthError(RuntimeError):
         self.status_code = status_code
         self.error_code = error_code
 
+    @property
+    def classification(self) -> str:
+        return refresh_error_classification(self)
+
+
+def refresh_error_classification(exc: Exception) -> str:
+    """Classify safe OAuth facts, never a free-form provider description."""
+    code = str(getattr(exc, "error_code", "") or "").strip().lower()
+    status = getattr(exc, "status_code", None)
+    if code in {"invalid_grant", "invalid_token", "refresh_token_revoked"}:
+        return "credential_rejected"
+    if code in {"invalid_client", "unauthorized_client", "invalid_request",
+                "unsupported_grant_type", "configuration_missing"}:
+        return "request_rejected"
+    if type(status) is int and 400 <= status < 500 and status not in {408, 429}:
+        return "request_rejected"
+    return "transient"
+
 
 def _get_session(session=None):
     if session is not None:

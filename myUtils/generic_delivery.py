@@ -6,6 +6,10 @@ bodies or upload URLs. The worker supplies delivery.checkpoint's fenced writer.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+import re
+from uuid import uuid4
 
 from myUtils import delivery
 
@@ -48,13 +52,23 @@ class Operations:
         if name in self.items:
             raise delivery.DeliveryUnknown(f"{self.provider} operation already has a receipt; do not recreate")
         now = delivery.utc_now()
+        generation = uuid4().hex
+        self.progress.pop("last_rejection", None)
         self.items[name] = {"status": "started", "submitted_at": now}
-        self._save(submission_started=True, operation=f"{self.provider}:{name}", operation_started_at=now)
+        self._save(submission_started=True, operation=f"{self.provider}:{name}",
+                   operation_started_at=now, operation_generation=generation)
 
-    def reject(self, name: str) -> None:
+    def reject(self, name: str, *, status: int | None = None) -> None:
         """A definite rejection clears only this request, not earlier effects."""
         if (self.items.get(name) or {}).get("status") == "started":
             del self.items[name]
+        if status in {401, 402, 429}:
+            self.progress["last_rejection"] = {
+                "name": name, "httpStatus": status, "no_publication": True,
+                "operation_generation": delivery.state(self.payload).get("operation_generation"),
+            }
+        else:
+            self.progress.pop("last_rejection", None)
         self._save(submission_started=bool(self.items) or bool(delivery.receipt_for(self.payload, self.provider)),
                    operation="")
 
@@ -83,17 +97,24 @@ class Operations:
                 ) from None
         status = getattr(response, "status_code", 0)
         if isinstance(status, int) and 400 <= status < 500 and status != 408:
-            self.reject(name)
+            self.reject(name, status=status)
             if status in allow_statuses:
                 return response
             try:
                 publishers._raise_for_status(response)
             except publishers.PreparedPublishError as exc:
+                exc.details["httpStatus"] = status
+                if status in {401, 402, 429}:
+                    exc.details["definitiveNonDelivery"] = True
+                    exc.details["operationGeneration"] = self.progress["last_rejection"]["operation_generation"]
                 retry_after = (getattr(response, "headers", None) or {}).get("Retry-After")
                 if retry_after:
                     exc.details["retryAfter"] = str(retry_after)
                 raise
-            raise publishers.PreparedPublishError(f"HTTP {status}: {self.provider} rejected {name}")
+            raise publishers.PreparedPublishError(
+                f"HTTP {status}: {self.provider} rejected {name}", retryable=status == 429,
+                details={"httpStatus": status, "definitiveNonDelivery": status in {401, 402, 429},
+                         "operationGeneration": delivery.state(self.payload).get("operation_generation")})
         if not isinstance(status, int) or not 200 <= status < 300:
             raise delivery.DeliveryUnknown(f"{self.provider} {name} acceptance is unknown (HTTP {status})")
         try:
@@ -110,7 +131,8 @@ class Operations:
             raise delivery.DeliveryUnknown(f"{self.provider} {name} returned no receipt ID")
         previous = self.items.get(name) or {}
         item = {"id": str(receipt_id), "status": status,
-                "submitted_at": previous.get("submitted_at") or delivery.utc_now(), **metadata}
+                "submitted_at": previous.get("submitted_at") or delivery.utc_now(), **metadata,
+                "effect": "publication" if provider_receipt else "media_only"}
         self.items[name] = item
         changes = {"submission_started": True, "operation": ""}
         if provider_receipt:
@@ -127,6 +149,92 @@ class Operations:
             raise delivery.DeliveryUnknown(f"{self.provider} has incomplete operations")
         delivery.confirmed(self.payload, provider=self.provider,
                            receipt_id=receipt_id or self.items[plan[-1]]["id"])
+
+
+def _media_only_evidence(current: dict) -> dict | None:
+    """Only explicit new X journals can prove that no tweet was created."""
+    if (not isinstance(current, dict) or current.get("checkpoint_invalid")
+            or current.get("provider_receipt") or current.get("native_provider_receipt")
+            or current.get("completed_operations") or current.get("telegramCompletedByDelivery")):
+        return None
+    journals = current.get("provider_operations")
+    if not isinstance(journals, dict) or set(journals) != {"twitter"}:
+        return None
+    journal = journals["twitter"]
+    if not isinstance(journal, dict):
+        return None
+    plan, items, rejection = journal.get("plan"), journal.get("items"), journal.get("last_rejection")
+    if (not isinstance(plan, list) or not 1 <= len(plan) <= 5 or plan[-1] != "tweet"
+            or any(not isinstance(name, str) or not re.fullmatch(r"media:[0-3]", name) for name in plan[:-1])
+            or len(set(plan)) != len(plan) or not isinstance(items, dict)
+            or not isinstance(rejection, dict) or rejection.get("no_publication") is not True
+            or type(rejection.get("httpStatus")) is not int or rejection["httpStatus"] not in {401, 402, 429}):
+        return None
+    # The retained native rejection owns this fence. Backup requests may safely
+    # change the shared fence without changing any native journaled effect.
+    generation = rejection.get("operation_generation")
+    if not isinstance(generation, str) or not re.fullmatch(r"[0-9a-f]{32}", generation):
+        return None
+    media_names = set(plan[:-1])
+    def media_operation(name):
+        return (isinstance(name, str) and re.fullmatch(r"media:[0-3](?::initialize|:segment:\d+|:finalize)?", name)
+                and ":".join(name.split(":")[:2]) in media_names)
+    if rejection.get("name") != "tweet" and not media_operation(rejection.get("name")):
+        return None
+    for name, item in items.items():
+        if (not media_operation(name) or not isinstance(item, dict)
+                or item.get("status") != "complete" or item.get("effect") != "media_only"
+                or isinstance(item.get("id"), bool) or not isinstance(item.get("id"), (str, int))
+                or not str(item["id"]).strip()):
+            return None
+    try:
+        digest = hashlib.sha256(json.dumps(journal, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    except (TypeError, ValueError):
+        return None
+    return {"provider": "twitter", "httpStatus": rejection["httpStatus"],
+            "operation_generation": generation, "journal_sha256": digest,
+            "operation_receipts": {"twitter": {name: {"id": item["id"], "no_publication": True,
+                                                       "definitive_rejection": True} for name, item in items.items()}}}
+
+
+def media_only_reconciled(current: dict, *, target_id: int | None = None) -> bool:
+    """A saved authorization must still match every retained native effect."""
+    evidence = _media_only_evidence(current)
+    proof = current.get("media_only_rejection") if isinstance(current, dict) else None
+    authorization = current.get("backup_authorization") if isinstance(current, dict) else None
+    if (evidence is None or not isinstance(proof, dict) or not isinstance(authorization, dict)
+            or type(proof.get("target_id")) is not int or proof["target_id"] <= 0
+            or target_id is not None and proof["target_id"] != target_id):
+        return False
+    return (all(proof.get(key) == evidence[key] for key in
+                ("provider", "httpStatus", "operation_generation", "journal_sha256"))
+            and authorization.get("target_id") == proof["target_id"]
+            and authorization.get("provider") == "twitter"
+            and authorization.get("no_publication") is True
+            and authorization.get("definitive_rejection") is True
+            and authorization.get("operation_receipts") == evidence["operation_receipts"])
+
+
+def authorize_media_only_handoff(payload: dict, exc: Exception, *, target_id: int) -> bool:
+    """Persist an exact-target proof only for a matching real HTTP rejection."""
+    current = delivery.state(payload)
+    evidence = _media_only_evidence(current)
+    details = getattr(exc, "details", None)
+    if (evidence is None or type(target_id) is not int or target_id <= 0
+            or str(payload.get("_telegramDeliveryKey")) != str(target_id)
+            or not isinstance(details, dict) or details.get("definitiveNonDelivery") is not True
+            or details.get("httpStatus") != evidence["httpStatus"]
+            or details.get("operationGeneration") != evidence["operation_generation"]
+            or type(current.get("submission_started")) is not bool or current.get("operation") != ""
+            or current.get("operation_generation") != evidence["operation_generation"]):
+        return False
+    proof = {key: evidence[key] for key in
+             ("provider", "httpStatus", "operation_generation", "journal_sha256")}
+    proof.update(target_id=target_id, confirmed_at=delivery.utc_now())
+    authorization = {"target_id": target_id, "provider": "twitter", "no_publication": True,
+                     "definitive_rejection": True, "operation_receipts": evidence["operation_receipts"]}
+    delivery.checkpoint(payload, media_only_rejection=proof, backup_authorization=authorization)
+    return True
 
 
 def _poll_json(http, url, payload, *, provider: str, **kwargs) -> dict:

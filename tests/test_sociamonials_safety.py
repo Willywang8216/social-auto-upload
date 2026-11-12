@@ -907,3 +907,24 @@ def test_owned_preview_does_not_accept_different_route_path_parameters(tmp_path,
     with pytest.raises(sm.SociamonialsFallbackError, match="locator"):
         publish(session, payload=payload)
     assert_no_publication(session)
+
+
+def test_scoped_media_only_rejection_keeps_every_native_receipt():
+    from myUtils import generic_delivery
+    from tests.test_publish_route_safety import rejected_media
+    payload, _, error = rejected_media()
+    original = copy.deepcopy(delivery.state(payload)["provider_operations"])
+    assert generic_delivery.authorize_media_only_handoff(payload, error, target_id=17)
+    sm._check_native_receipt(payload, None, 17)
+    assert delivery.state(payload)["provider_operations"] == original
+    assert generic_delivery.media_only_reconciled(delivery.state(payload), target_id=17)
+
+
+def test_media_only_authorization_cannot_move_to_another_target():
+    from myUtils import generic_delivery
+    from tests.test_publish_route_safety import rejected_media
+    payload, _, error = rejected_media()
+    assert generic_delivery.authorize_media_only_handoff(payload, error, target_id=17)
+    with pytest.raises(delivery.DeliveryUnknown):
+        sm._check_native_receipt(payload, None, 18)
+    assert not delivery.state(payload).get("provider_receipt")

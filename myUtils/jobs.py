@@ -1377,6 +1377,54 @@ def _recovery_has_submission_evidence(text: str, delivery_state: str | None = No
         return True
 
 
+def _assert_unstarted_pending(row, payload: str) -> None:
+    """Stricter than failed recovery: not even pre-submission progress may exist."""
+    if row["status"] != TARGET_PENDING:
+        raise ValueError("Pending preprocessing target is no longer pending")
+    if type(row["attempts"]) is not int or row["attempts"] != 0:
+        raise ValueError("Pending preprocessing requires zero attempts")
+    if any(row[key] is not None for key in ("started_at", "finished_at")):
+        raise ValueError("Pending preprocessing target has already started or finished")
+    if any(row[key] is not None for key in ("lease_owner", "lease_token", "lease_expires_at")):
+        raise ValueError("Pending preprocessing target still has a lease")
+    if (_recovery_json_object(row["checkpoint_json"]) != {}
+            or row["delivery_state"] not in {None, ""}
+            or row["next_attempt_at"] is not None
+            or any(row[key] not in {None, ""} for key in ("last_error", "error_category"))):
+        raise ValueError("Pending preprocessing target has checkpoint or retry history")
+    history_fields = {
+        "delivery", "checkpoint", "checkpointjson", "checkpointinvalid", "savecheckpoint",
+        "providerreceipt", "provideroperations", "completedoperations", "publishroutes",
+        "definitivenondelivery", "telegramcompletedbydelivery", "submissionstarted",
+        "operation", "operationstartedat", "operationgeneration", "deliverystate",
+        "receipt", "receipts", "receiptid", "previousfailure", "originalpending",
+    }
+
+    def has_history(value):
+        if isinstance(value, list):
+            return any(has_history(item) for item in value)
+        if not isinstance(value, dict):
+            return False
+        for key, item in value.items():
+            name = re.sub(r"[^a-z0-9]", "", key.lower())
+            if (name in history_fields or name.startswith("recovery")
+                    or name.endswith("history") or has_history(item)):
+                return True
+        return False
+
+    if _recovery_has_submission_evidence(payload) or has_history(_recovery_json_object(payload)):
+        raise ValueError("Pending preprocessing payload has delivery or recovery history")
+
+
+def _unstarted_pending_identity(row, payload: str) -> str:
+    """Opaque identity of the exact original target and approved payload, not its slot alone."""
+    target = dict(row)
+    target.pop("job_status", None)
+    blob = json.dumps({"target": target, "payload_json": payload}, sort_keys=True,
+                      ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 def reschedule_failed_target(
     target_id: int, schedule_at: str, *, expected_fingerprint: str,
     revalidate: Callable[[sqlite3.Connection], str],
@@ -1441,6 +1489,78 @@ def reschedule_failed_target(
         return _row_to_target(conn.execute(
             "SELECT * FROM publish_job_targets WHERE id=?", (target_id,),
         ).fetchone())
+
+
+def repair_unstarted_pending_target(
+    target_id: int, schedule_at: str, *, include_unstarted_pending: bool,
+    original_state_identity: str, expected_fingerprint: str,
+    revalidate: Callable[[sqlite3.Connection], str], prepared_payloads: list[dict],
+    part_schedule_ats: list[str], workspace_id: str | None = None, db_path: Path | None = None,
+) -> Target:
+    """Install one COMPLETE immutable generation; never reset started pending work.
+
+    Only the preprocessing opt-in may call this API. The callback rechecks the
+    frozen selection, full account/intent fingerprint, duplicates and pacing under
+    this same write transaction. The failed-only recovery API is not broadened.
+    """
+    if include_unstarted_pending is not True:
+        raise ValueError("Pending preprocessing requires explicit opt-in")
+    if type(target_id) is not int or not 0 < target_id <= 2**63 - 1:
+        raise ValueError("target_id must be a positive SQLite integer")
+    if (not callable(revalidate) or any(not isinstance(value, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in (expected_fingerprint, original_state_identity))):
+        raise ValueError("Pending preprocessing requires original identity and a read-only fingerprint validator")
+    candidate = _utc_datetime(schedule_at)
+    from myUtils.prepared_recovery import install_parts, validate_parts
+
+    with _transaction(db_path, must_exist=True) as conn:
+        row = _target_context(conn, target_id, workspace_id=workspace_id)
+        if row["job_status"] not in {
+            JOB_PENDING, JOB_RUNNING, JOB_BLOCKED, JOB_AWAITING_DELIVERY, JOB_NEEDS_REVIEW,
+        }:
+            raise ValueError("Pending preprocessing parent intent is terminal or invalid")
+        payload = conn.execute("SELECT payload_json FROM publish_jobs WHERE id=?", (row["job_id"],)).fetchone()[0]
+        _assert_unstarted_pending(row, payload)
+        if not secrets.compare_digest(_unstarted_pending_identity(row, payload), original_state_identity):
+            raise ValueError("Original pending state changed; regenerate the frozen plan")
+        if candidate <= _utc_datetime(_now_iso()):
+            raise ValueError("Every prepared part must be scheduled in the future")
+        before = conn.total_changes
+        observed = revalidate(conn)
+        if conn.total_changes != before:
+            raise ValueError("Pending preprocessing validator must be read-only")
+        if not isinstance(observed, str) or not secrets.compare_digest(observed, expected_fingerprint):
+            raise ValueError("Stale pending preprocessing plan; regenerate it")
+        validate_parts(conn, row, prepared_payloads, part_schedule_ats)
+        if _utc_datetime(part_schedule_ats[0]) != candidate:
+            raise ValueError("First prepared slot does not match the guarded pending slot")
+        if any(_utc_datetime(slot) <= _utc_datetime(_now_iso()) for slot in part_schedule_ats):
+            raise ValueError("Every prepared part must be scheduled in the future")
+        # Retain even the stored timestamp representation when its slot is compatible.
+        schedule = row["schedule_at"] if (row["schedule_at"]
+            and _utc_datetime(row["schedule_at"]) == candidate) else candidate.isoformat()
+        changed = conn.execute(
+            "UPDATE publish_job_targets SET schedule_at=? WHERE id=? AND status='pending' "
+            "AND attempts=0 AND started_at IS NULL AND finished_at IS NULL "
+            "AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL "
+            "AND checkpoint_json IS ? AND schedule_at IS ? AND next_attempt_at IS NULL",
+            (schedule, target_id, row["checkpoint_json"], row["schedule_at"]))
+        if changed.rowcount != 1:
+            raise ValueError("Original pending reservation changed; regenerate the frozen plan")
+        install_parts(conn, row, prepared_payloads, part_schedule_ats, expected_fingerprint)
+        checkpoint = _recovery_json_object(conn.execute(
+            "SELECT checkpoint_json FROM publish_job_targets WHERE id=?", (target_id,)).fetchone()[0])
+        checkpoint["original_pending"] = {**checkpoint.pop("previous_failure"),
+            "status": TARGET_PENDING, "state_identity": original_state_identity}
+        checkpoint["include_unstarted_pending"] = True
+        text = json.dumps(checkpoint, ensure_ascii=False, allow_nan=False)
+        if len(text.encode("utf-8")) > CHECKPOINT_MAX_BYTES:
+            raise ValueError("Prepared pending checkpoint exceeds its byte budget")
+        conn.execute("UPDATE publish_job_targets SET checkpoint_json=? WHERE id=?", (text, target_id))
+        _recount_job(conn, row["job_id"])
+        return _row_to_target(conn.execute(
+            "SELECT * FROM publish_job_targets WHERE id=?", (target_id,)).fetchone())
 
 
 def reschedule_target(

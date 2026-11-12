@@ -1046,11 +1046,13 @@ class PublishWorker:
                 account_ref=target.account_ref, job_id=job.id, platform=job.platform,
                 payload=payload, db_path=self._db_path, validate_credentials=not fallback_only)
             credential_only = (check.checks.get("needs_reconnect") is False
-                               or check.checks.get("token_valid") is False)
+                               or check.checks.get("token_valid") is False
+                               or check.checks.get("native_route_available") is False)
             if not check.ok and credential_only and not receipt and sociamonials_fallback.is_enabled():
                 route_account = pre_flight._resolve_account(target.account_ref, self._db_path)
+                settings = profile_registry.get_profile(job.profile_id, db_path=self._db_path).settings if job.profile_id else None
                 mapping = sociamonials_fallback.resolve_mapping(
-                    getattr(route_account, "id", None), account=route_account, platform=job.platform)
+                    getattr(route_account, "id", None), account=route_account, platform=job.platform, settings=settings)
                 if mapping and mapping.get("network") == sociamonials_fallback._platform_network(job.platform):
                     # Skip ONLY native credentials, then repeat every campaign,
                     # destination, ownership, language and content-policy guard.
@@ -1169,6 +1171,13 @@ class PublishWorker:
             if self._transition(target, jobs.mark_target_needs_review, message):
                 self._alert_publish_failure(target, message)
             return
+        if (isinstance(error_details, dict) and error_details.get("intentReviewRequired") is True
+                and not delivery.has_unresolved_submission({"_delivery": checkpoint})):
+            delivery.route_outcome(payload, route, "blocked_intent", message)
+            if self._transition(target, jobs.mark_target_blocked, message):
+                log.warning("Original intent needs review; no provider post was created")
+                self._alert_publish_failure(target, message)
+            return
         if (isinstance(exc, sociamonials_fallback.SociamonialsNotConfigured)
                 and not delivery.has_unresolved_submission({"_delivery": checkpoint})):
             delivery.route_outcome(payload, "sociamonials", "unavailable", message)
@@ -1195,8 +1204,16 @@ class PublishWorker:
                 self._alert_publish_failure(target, message)
             return
         definite = _fc.proven_non_delivery(exc)
+        from myUtils import generic_delivery
+        if route == "native" and definite and payload:
+            job = jobs.get_job(target.job_id, db_path=self._db_path)
+            if job.platform == "twitter":
+                generic_delivery.authorize_media_only_handoff(payload, exc, target_id=target.id)
+                checkpoint = delivery.state(payload)
+        media_reconciled = generic_delivery.media_only_reconciled(checkpoint, target_id=target.id)
         recorded_receipt = (checkpoint.get("provider_receipt") or checkpoint.get("completed_operations")
-                            or checkpoint.get("provider_operations") or checkpoint.get("telegramCompletedByDelivery"))
+                            or checkpoint.get("provider_operations") and not media_reconciled
+                            or checkpoint.get("telegramCompletedByDelivery"))
         if recorded_receipt or (delivery.has_unresolved_submission({"_delivery": checkpoint}) and not definite):
             try:
                 delivery.pending_or_unknown({"_delivery": checkpoint}, message)
@@ -1234,8 +1251,9 @@ class PublishWorker:
             if reset_delay > 0 and sociamonials_fallback.is_enabled():
                 job = jobs.get_job(target.job_id, db_path=self._db_path)
                 route_account = pre_flight._resolve_account(target.account_ref, self._db_path)
+                settings = profile_registry.get_profile(job.profile_id, db_path=self._db_path).settings if job.profile_id else None
                 mapping = sociamonials_fallback.resolve_mapping(
-                    getattr(route_account, "id", None), account=route_account, platform=job.platform)
+                    getattr(route_account, "id", None), account=route_account, platform=job.platform, settings=settings)
                 if mapping and mapping.get("network") == sociamonials_fallback._platform_network(job.platform):
                     delivery.select_backup(payload)
                     delivery.route_outcome(payload, "sociamonials", "waiting_for_reset", message)

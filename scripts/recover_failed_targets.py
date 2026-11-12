@@ -27,7 +27,7 @@ import re
 import sqlite3
 import sys
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -148,11 +148,48 @@ def _identity_for_ref(aliases: dict[str, list[str]], account_ref: str) -> str:
 
 def _booked_slots(
     conn, aliases: dict[str, list[str]], *, now: datetime | str | None = None,
+    replaced_unstarted_target_ids: Iterable[int] | None = None,
 ) -> dict[str, list[str]]:
     try:
-        return destination_pacing.booked_slots(conn, aliases, now=now if now is not None else job_runtime._now_iso())
+        current = job_runtime._utc_datetime(now if now is not None else job_runtime._now_iso())
+        booked = destination_pacing.booked_slots(conn, aliases, now=current)
+        for target_id in sorted(_ids(replaced_unstarted_target_ids, "replaced_unstarted_target_ids")):
+            state = _snapshot(conn, target_id, resolved=False, aliases=aliases, unstarted_pending=True)
+            _release_unstarted_reservation(booked, state, current)
+        return booked
     except destination_pacing.PacingRefused as exc:
         raise RecoveryRefused(str(exc)) from None
+
+
+def _release_unstarted_reservation(booked: dict[str, list[str]], state: dict, now) -> None:
+    """Subtract ONE exact, verified unstarted row, not other equal-time bookings."""
+    target = state["target"]
+    try:
+        job_runtime._assert_unstarted_pending(target, state["job"]["payload_json"])
+        current = job_runtime._utc_datetime(now)
+        moment = max(job_runtime._utc_datetime(target["schedule_at"] or current), current)
+        # The shared calendar gives this receipt-free row its own ('target', id)
+        # entry. Removing one occurrence leaves every other reservation intact.
+        booked[state["identity"]].remove(moment.isoformat())
+    except (KeyError, ValueError):
+        raise RecoveryRefused("original unstarted reservation is no longer replaceable") from None
+
+
+def _reserve_pending_slot(taken: list[str], candidate: datetime, per_day_cap: int) -> bool:
+    """Same destination cap/gap rules, without rounding a compatible existing slot."""
+    cap = min(effective_daily_cap(per_day_cap) or 3, 3)
+    try:
+        minutes = destination_pacing.effective_gap_minutes(publish_orchestrator.MIN_GAP_MINUTES, 30)
+        moments = [destination_pacing.utc_datetime(value) for value in taken]
+    except destination_pacing.PacingRefused as exc:
+        raise RecoveryRefused(str(exc)) from None
+    zone = publish_orchestrator._operator_timezone()
+    day = candidate.replace(tzinfo=UTC).astimezone(zone).date()
+    if (sum(moment.replace(tzinfo=UTC).astimezone(zone).date() == day for moment in moments) >= cap
+            or any(abs(moment - candidate) < timedelta(minutes=minutes) for moment in moments)):
+        return False
+    taken.append(candidate.isoformat())
+    return True
 
 
 def effective_daily_cap(requested: int | None = None) -> int:
@@ -266,18 +303,24 @@ def _check_duplicates(conn, target, keys, identity, aliases):
                 raise RecoveryRefused(reason)
 
 
-def _snapshot(conn, target_id: int, *, resolved: bool, aliases=None) -> dict:
+def _snapshot(conn, target_id: int, *, resolved: bool, aliases=None, unstarted_pending: bool = False) -> dict:
     target = conn.execute("SELECT * FROM publish_job_targets WHERE id=?", (target_id,)).fetchone()
-    if target is None or target["status"] != "failed":
-        raise RecoveryRefused("target is missing or no longer failed")
+    expected_status = "pending" if unstarted_pending else "failed"
+    if target is None or target["status"] != expected_status:
+        raise RecoveryRefused(f"target is missing or no longer {expected_status}")
     job = conn.execute("SELECT * FROM publish_jobs WHERE id=?", (target["job_id"],)).fetchone()
-    if job is None or job["status"] not in _LIVE_JOBS:
+    if job is None or job["status"] not in _LIVE_JOBS or (unstarted_pending and job["status"] == "failed"):
         raise RecoveryRefused("terminal or missing parent intent")
     if any(target[key] is not None for key in ("lease_owner", "lease_token", "lease_expires_at")):
         raise RecoveryRefused("target still has a lease")
     if job_runtime._recovery_has_submission_evidence(target["checkpoint_json"], target["delivery_state"]):
         raise RecoveryRefused("submission evidence requires separate reconciliation")
     payload = _object(job["payload_json"], "job payload")
+    if unstarted_pending:
+        try:
+            job_runtime._assert_unstarted_pending(target, job["payload_json"])
+        except ValueError as exc:
+            raise RecoveryRefused(str(exc)) from None
     if job_runtime._recovery_has_submission_evidence(job["payload_json"]):
         raise RecoveryRefused("persisted delivery evidence requires separate reconciliation")
     if payload.get("platform") is not None and _platform(payload["platform"]) != _platform(job["platform"]):
@@ -305,7 +348,7 @@ def _snapshot(conn, target_id: int, *, resolved: bool, aliases=None) -> dict:
     if config.get("_needsReconnect") and policy["provider"] != "sociamonials":
         raise RecoveryRefused("account requires reconnect")
     campaign = _campaign_context(conn, target, job, payload)
-    if _classify(target["last_error"]) == "permanent" and not resolved:
+    if not unstarted_pending and _classify(target["last_error"]) == "permanent" and not resolved:
         raise RecoveryRefused("permanent failure")
     aliases = aliases if aliases is not None else _account_refs(conn)
     identity = _identity_for_ref(aliases, target["account_ref"])
@@ -339,11 +382,15 @@ def plan_recovery(
     *, db_path: Path = DB_PATH, lookback_days: int = 2, platform: str | None = None,
     limit: int | None = None, per_day_cap: int | None = None, now: datetime | None = None,
     target_ids: Iterable[int] | None = None, resolved_target_ids: Iterable[int] | None = None,
+    unstarted_pending_target_ids: Iterable[int] | None = None,
 ) -> list[dict]:
     """Read-only plan. Explicit/resolved IDs are a union, independent of lookback.
 
     Legacy all-NULL workspaces are compatible; mixed NULL/concrete ownership and
     missing job profiles are not. No identity is guessed from a media basename.
+
+    ``unstarted_pending_target_ids`` is a planning-only preprocessing opt-in,
+    restricted to a subset of explicitly supplied IDs. Plain apply remains failed-only.
     """
     _integer(lookback_days, "lookback_days")
     if limit is not None:
@@ -351,6 +398,9 @@ def plan_recovery(
     per_day_cap = effective_daily_cap(per_day_cap)
     selected = _ids(target_ids, "target_ids")
     resolved = _ids(resolved_target_ids, "resolved_target_ids")
+    pending = _ids(unstarted_pending_target_ids, "unstarted_pending_target_ids")
+    if pending and (target_ids is None or not selected or pending - selected or pending & resolved):
+        raise ValueError("Pending preprocessing requires a frozen explicit target selection, separate from resolved failures")
     explicit = target_ids is not None or resolved_target_ids is not None
     selected |= resolved
     if platform is not None:
@@ -393,25 +443,41 @@ def plan_recovery(
             if platform is not None and _platform(row["platform"]) != platform:
                 continue
             try:
-                state = _snapshot(conn, row["id"], resolved=row["id"] in resolved, aliases=aliases)
+                unstarted = row["id"] in pending
+                state = _snapshot(conn, row["id"], resolved=row["id"] in resolved, aliases=aliases,
+                                  unstarted_pending=unstarted)
                 target, job = state["target"], state["job"]
                 identity = state["identity"]
                 keys = _media_keys(conn, target, _object(job["payload_json"], "job payload"))
                 if keys & reserved.get(identity, set()):
                     raise RecoveryRefused("duplicate within recovery plan")
                 account_id = state["account"]["id"]
-                slot = publish_orchestrator._next_free_slot(
-                    account_id, base_time, len(plan),
-                    {account_id: booked.setdefault(identity, [])}, max_per_day=per_day_cap,
-                ).isoformat(timespec="seconds")
+                target_cap = min(per_day_cap or 3, 3) if unstarted else per_day_cap
+                taken = booked.setdefault(identity, [])
+                slot = None
+                if unstarted:
+                    taken = list(taken)
+                    _release_unstarted_reservation({identity: taken}, state, now)
+                    original = job_runtime._utc_datetime(target["schedule_at"]) if target["schedule_at"] else None
+                    if original is not None and original > now and _reserve_pending_slot(taken, original, target_cap):
+                        slot = target["schedule_at"]
+                if slot is None:
+                    slot = publish_orchestrator._next_free_slot(
+                        account_id, base_time, len(plan), {account_id: taken}, max_per_day=target_cap,
+                        min_gap_minutes=30 if unstarted else None,
+                    ).isoformat(timespec="seconds")
+                booked[identity] = taken
                 reserved.setdefault(identity, set()).update(keys)
                 plan.append({
                     "target_id": target["id"], "job_id": target["job_id"],
                     "account_ref": target["account_ref"], "platform": _platform(job["platform"]),
-                    "slot": slot, "error": _classify(target["last_error"]) + " failure",
-                    "resolved_permanent": state["resolved"], "per_day_cap": per_day_cap,
-                    "expected_fingerprint": _fingerprint(state, slot, per_day_cap),
+                    "slot": slot, "error": "invalid unstarted pending media" if unstarted else _classify(target["last_error"]) + " failure",
+                    "resolved_permanent": state["resolved"], "per_day_cap": target_cap,
+                    "expected_fingerprint": _fingerprint(state, slot, target_cap),
                 })
+                if unstarted:
+                    plan[-1].update(include_unstarted_pending=True, original_status="pending",
+                        original_state_identity=job_runtime._unstarted_pending_identity(target, job["payload_json"]))
             except RecoveryRefused as exc:
                 skipped[str(exc)] += 1
             if limit is not None and len(plan) >= limit:
@@ -485,6 +551,8 @@ def apply_recovery(plan: list[dict], *, db_path: Path = DB_PATH) -> dict:
     Reapplying a plan refuses changed targets; it never resets pending work again.
     """
     _validate_plan(plan)
+    if any(item.get("original_status") == "pending" or item.get("include_unstarted_pending") is True for item in plan):
+        raise ValueError("Pending targets require complete preprocessing; use preprocess_failed_targets")
     applied, errors = 0, []
     for item in plan:
         if "_skipped" in item:
