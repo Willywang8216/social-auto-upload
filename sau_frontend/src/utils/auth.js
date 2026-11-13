@@ -1,3 +1,5 @@
+import { ref } from 'vue'
+
 // Auth-token plumbing for the frontend.
 //
 // The backend accepts a bearer token via the `Authorization` header. The
@@ -13,7 +15,24 @@ const TOKEN_KEY = 'sau-auth-token'
 // bootstrap, so it never needs to outlive a session.
 const CSRF_KEY = 'sau-csrf-token'
 
+const authRevision = ref(0)
+
+export function getAuthRevision() {
+  return authRevision.value
+}
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('storage', (event) => {
+    if (event.key === TOKEN_KEY || event.key === CSRF_KEY || event.key === null) {
+      authRevision.value += 1
+    }
+  })
+}
+
 export function getToken() {
+  // Track localStorage changes in computed auth state without copying secrets
+  // into a second store. Storage remains the source of truth.
+  getAuthRevision()
   try {
     return window.localStorage.getItem(TOKEN_KEY) || ''
   } catch {
@@ -27,6 +46,8 @@ export function setToken(token) {
     window.localStorage.setItem(TOKEN_KEY, token || '')
   } catch {
     // ignore
+  } finally {
+    authRevision.value += 1
   }
 }
 
@@ -35,6 +56,8 @@ export function clearToken() {
     window.localStorage.removeItem(TOKEN_KEY)
   } catch {
     // ignore
+  } finally {
+    authRevision.value += 1
   }
 }
 
@@ -55,6 +78,8 @@ export function setCsrfToken(token) {
     }
   } catch {
     // ignore
+  } finally {
+    authRevision.value += 1
   }
 }
 
@@ -63,6 +88,8 @@ export function clearCsrfToken() {
     window.sessionStorage.removeItem(CSRF_KEY)
   } catch {
     // ignore
+  } finally {
+    authRevision.value += 1
   }
 }
 

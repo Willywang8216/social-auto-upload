@@ -10,12 +10,15 @@ vi.mock('axios', () => ({
 }))
 
 import { useAuthStore } from '@/stores/auth'
+import { clearToken, clearCsrfToken, setToken } from '@/utils/auth'
 
 describe('auth store (Google session)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     mockGet.mockReset()
     mockPost.mockReset()
+    clearToken()
+    clearCsrfToken()
   })
 
   it('marks the session authenticated when /api/v1/session confirms it', async () => {
@@ -69,6 +72,33 @@ describe('auth store (Google session)', () => {
 
     store.clearSession()
     expect(store.isSessionAuthenticated).toBe(false)
+    expect(store.isAuthenticated).toBe(false)
+  })
+  it('rechecks bearer auth after a signed-out guard has already read it', () => {
+    const store = useAuthStore()
+    expect(store.isAuthenticated).toBe(false)
+
+    setToken('verified-operator-token')
+    expect(store.isAuthenticated).toBe(true)
+    expect(store.isSessionAuthenticated).toBe(false)
+  })
+
+  it('drops bearer auth immediately when the token is cleared', () => {
+    setToken('verified-operator-token')
+    const store = useAuthStore()
+    expect(store.isAuthenticated).toBe(true)
+
+    clearToken()
+    expect(store.isAuthenticated).toBe(false)
+  })
+
+  it('rechecks bearer auth when another tab signs out', () => {
+    setToken('verified-operator-token')
+    const store = useAuthStore()
+    expect(store.isAuthenticated).toBe(true)
+
+    window.localStorage.removeItem('sau-auth-token')
+    window.dispatchEvent(new StorageEvent('storage', { key: 'sau-auth-token', newValue: null }))
     expect(store.isAuthenticated).toBe(false)
   })
 })

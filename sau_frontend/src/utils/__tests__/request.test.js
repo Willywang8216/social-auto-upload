@@ -4,6 +4,7 @@ import { AxiosError } from 'axios'
 const mocks = vi.hoisted(() => ({
   toast: vi.fn(), clearToken: vi.fn(), clearCsrfToken: vi.fn(), clearSession: vi.fn(),
   getToken: vi.fn(() => 'test-bearer'), getCsrfToken: vi.fn(() => 'test-csrf'),
+  getAuthRevision: vi.fn(() => 0),
 }))
 vi.mock('element-plus', () => ({ ElMessage: { error: mocks.toast } }))
 vi.mock('@/utils/auth', () => mocks)
@@ -13,6 +14,9 @@ let request, http, showRequestError
 beforeEach(async () => {
   vi.resetModules()
   vi.clearAllMocks()
+  mocks.getToken.mockReturnValue('test-bearer')
+  mocks.getCsrfToken.mockReturnValue('test-csrf')
+  mocks.getAuthRevision.mockReturnValue(0)
   vi.useFakeTimers()
   vi.stubGlobal('window', { location: { hash: '#/jobs' } })
   ;({ default: request, http, showRequestError } = await import('../request'))
@@ -59,6 +63,32 @@ describe('request rejection contract (in-memory Axios adapters only)', () => {
     expect(mocks.clearSession).toHaveBeenCalledOnce()
     expect(window.location.hash).toBe('#/login')
     expect(mocks.toast).toHaveBeenCalledOnce()
+  })
+
+  it.each(['bearer', 'session'])('a late 401 from an earlier %s login cannot clear current auth', async (mode) => {
+    let rejectOldRequest
+    let dispatched
+    const ready = new Promise((resolve) => { dispatched = resolve })
+    const pending = request.get('/test', { adapter: (config) => new Promise((resolve, reject) => {
+      rejectOldRequest = () => reject(new AxiosError('old unauthorized request', 'ERR_BAD_REQUEST', config, {}, {
+        status: 401, data: { msg: 'unauthorized' }, config,
+      }))
+      dispatched()
+    }) })
+    await ready
+
+    if (mode === 'bearer') mocks.getToken.mockReturnValue('newly-verified-bearer')
+    else mocks.getCsrfToken.mockReturnValue('newly-verified-csrf')
+    mocks.getAuthRevision.mockReturnValue(1)
+    rejectOldRequest()
+    await expect(pending).rejects.toMatchObject({ response: { status: 401 } })
+    await vi.dynamicImportSettled()
+
+    expect(mocks.clearToken).not.toHaveBeenCalled()
+    expect(mocks.clearCsrfToken).not.toHaveBeenCalled()
+    expect(mocks.clearSession).not.toHaveBeenCalled()
+    expect(window.location.hash).toBe('#/jobs')
+    expect(mocks.toast).not.toHaveBeenCalled()
   })
 
   it('403 rejects but retains bearer/CSRF credentials, session and route', async () => {

@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
-import { clearToken, getToken, getCsrfToken, clearCsrfToken } from '@/utils/auth'
+import { clearToken, getToken, getCsrfToken, clearCsrfToken, getAuthRevision } from '@/utils/auth'
 import { getApiBaseUrl } from '@/utils/api-url'
 
 // Guard to prevent duplicate 401 handling on concurrent requests
@@ -31,6 +31,7 @@ request.interceptors.request.use(
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
     }
+    config._sauAuthRevision = getAuthRevision()
     return config
   },
   (error) => {
@@ -59,14 +60,20 @@ function rejectResponse(error) {
     return Promise.reject(error)
   }
   if (status === 401) {
+    // A request issued before a new sign-in/credential change cannot log out
+    // the current user. Reject it, but leave current auth and navigation intact.
+    if (error.config?._sauAuthRevision !== getAuthRevision()) return Promise.reject(error)
     if (!isRedirectingToLogin) {
       isRedirectingToLogin = true
       notify('未授權，請重新登入')
       clearToken()
       clearCsrfToken()
+      const clearedRevision = getAuthRevision()
       // Lazy import avoids a module-load cycle.
       import('@/stores/auth')
-        .then(({ useAuthStore }) => useAuthStore().clearSession())
+        .then(({ useAuthStore }) => {
+          if (getAuthRevision() === clearedRevision) useAuthStore().clearSession()
+        })
         .catch(() => {})
       if (typeof window !== 'undefined' && window.location && !window.location.hash.includes('#/login')) {
         window.location.hash = '#/login'
