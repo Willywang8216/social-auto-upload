@@ -18,7 +18,7 @@ import pytest
 
 from db.createTable import bootstrap
 from myUtils import delivery, generic_delivery, jobs, media_compliance, media_integrity, media_restore
-from myUtils import profiles, publish_admission, publish_media_guard as guard, publish_readiness, worker
+from myUtils import profiles, publish_admission, publish_media_guard as guard, publish_orchestrator, publish_readiness, worker
 
 MP4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 120
 
@@ -166,8 +166,11 @@ def test_final_hash_does_not_treat_input_or_original_source_hash_as_final(tmp_pa
         "sha256": digest, "size_bytes": len(MP4)}
 
 
+@pytest.mark.parametrize("tz_offset_hours", [-7, 0, 8], ids=["utc-minus-7", "utc", "utc-plus-8"])
 @pytest.mark.parametrize("future", [False, True])
-def test_prospective_raw_prepares_every_part_atomically_and_never_marks_success(fixture, monkeypatch, future):
+def test_prospective_raw_prepares_every_part_atomically_and_never_marks_success(fixture, monkeypatch, future, tz_offset_hours):
+    operator_tz = timezone(timedelta(hours=tz_offset_hours))
+    monkeypatch.setattr(publish_orchestrator, "_operator_timezone", lambda: operator_tz)
     now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
     requested = (now + timedelta(minutes=20 if future else -5)).isoformat()
     job, target = enqueue(fixture, schedule=requested)
@@ -195,7 +198,9 @@ def test_prospective_raw_prepares_every_part_atomically_and_never_marks_success(
     assert all(p["message"] == job.payload["message"] for p in parts)
     slots = [jobs._utc_datetime(t["schedule_at"]) for t in all_targets]
     assert all(b - a >= timedelta(minutes=30) for a, b in zip(slots, slots[1:]))
-    assert max(sum(s.date() == d for s in slots) for d in {s.date() for s in slots}) <= 3
+    # The daily cap is operator-local; four slots may share one UTC date.
+    local_days = [s.replace(tzinfo=timezone.utc).astimezone(operator_tz).date() for s in slots]
+    assert max(local_days.count(day) for day in set(local_days)) <= 3
     assert slots[0] == jobs._utc_datetime(requested) if future else slots[0] >= now + timedelta(minutes=30)
     assert jobs.get_job(job.id, db_path=fixture["path"]).completed_targets == 0
     native.assert_not_called(); managed.assert_not_called()
