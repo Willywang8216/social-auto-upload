@@ -355,20 +355,35 @@ class PublishCenterSubmitTests(unittest.TestCase):
         ))
         self.notify = self.patches.enter_context(patch.object(publish_services, "_notify_tg_review"))
         self.drain = self.patches.enter_context(patch.object(sau_backend, "_start_worker_drain_thread"))
+        from myUtils import media_compliance
+        from tests.test_atomic_publication_groups import synthetic_video_probe
+        self.patches.enter_context(patch.object(media_compliance, "_source_metadata", side_effect=synthetic_video_probe))
+        self.patches.enter_context(patch.object(media_compliance, "decode_video", return_value=None))
 
     def _create_profile_and_account(self, platform="telegram"):
+        from myUtils import publish_readiness
         profile = profile_registry.create_profile("Test Brand", db_path=self.db_path)
-        account = profile_registry.add_account(
-            profile_id=profile.id, platform=platform, account_name=f"test-{platform}",
-            auth_type="manual", config={"chatId": "@test", "botToken": "fake-token"},
-            db_path=self.db_path,
-        )
+        configs = {
+            "telegram": {"chatId": "@test", "botToken": "fake-token"},
+            "tiktok": {"openId": "offline-tiktok", "accessToken": "fake-token"},
+            "instagram": {"igUserId": "offline-ig", "pageId": "offline-page", "accessToken": "fake-token"},
+            "youtube": {"channelId": "offline-channel", "accessToken": "fake-token"},
+        }
+        account = profile_registry.add_account(profile.id, platform, f"test-{platform}",
+            auth_type="manual", config=configs[platform], db_path=self.db_path)
+        context = publish_readiness._context(account, profile.settings)
+        capabilities = ["video", "image", "carousel"] + ([] if platform in {"tiktok", "youtube"} else ["text"])
+        publish_readiness.record_destination_readiness(account, profile.settings, provider="direct", db_path=self.db_path,
+            proof={"verified": True, "live_check": True, "source": "provider_verification", "requires_approval": False,
+                "config_fingerprint": context["fingerprint"], "identity": context["identity"],
+                "permissions": {"posts.create": True}, "capabilities": capabilities,
+                "verified_at": datetime.now(timezone.utc).isoformat()})
         return profile, account
 
     def _write_media(self, filename):
         path = self.base_dir / "videoFile" / filename
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"synthetic media; the prep callback is mocked")
+        path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 120 + filename.encode())
         return path
 
     def _snapshot(self):
@@ -411,11 +426,13 @@ class PublishCenterSubmitTests(unittest.TestCase):
                 path = campaign_media_prep._resolve_video_file_path_safely(media["file_path"])
                 self.assertTrue(path.is_file())
                 self.assertGreater(path.stat().st_size, 0)
-                campaign_store.add_campaign_artifact(
-                    campaign_id, artifact_kind="local",
-                    source_file_record_id=media["file_record_id"], local_path=str(path),
-                    metadata={"role": media["role"]}, db_path=self.db_path,
-                )
+                from tests.test_atomic_publication_groups import prepared_video_metadata
+                for platform in kwargs["selected_platforms"]:
+                    metadata = prepared_video_metadata(path, path, platform,
+                        generation=f"offline-http-{media['file_record_id']}-{platform}")
+                    campaign_store.add_campaign_artifact(campaign_id, artifact_kind="prepared_video",
+                        source_file_record_id=media["file_record_id"], local_path=str(path),
+                        metadata=metadata, db_path=self.db_path)
             return {"transcriptText": "A quiet walk beside the river."}
 
         result = {"jobs": [], "skipped": []}
@@ -478,8 +495,8 @@ class PublishCenterSubmitTests(unittest.TestCase):
         self.assertEqual(posts[0].draft, job.payload["draft"])
         self.assertEqual(posts[0].status, campaign_store.CAMPAIGN_POST_QUEUED)
 
-    def test_submit_overrides_are_normalized_before_queuing(self):
-        """Stringified client overrides must be normalized at prep consumption."""
+    def test_submit_preserves_approved_override_before_queuing(self):
+        """Explicit approved strings are not parsed or rewritten at preparation."""
         profile, account = self._create_profile_and_account()
         resp = self._submit(profile, account, ["SFW test-video.mp4"], accountDrafts={
             str(account.id): {
@@ -492,9 +509,8 @@ class PublishCenterSubmitTests(unittest.TestCase):
         self.assertEqual(len(prepared["jobs"]), 1)
         job = job_runtime.get_job(prepared["jobs"][0]["id"], db_path=self.db_path)
         message = str(job.payload["draft"].get("message") or "")
-        self.assertNotIn("{'title'", message, "stringified draft leaked to the platform")
-        self.assertNotIn('"title"', message)
-        self.assertIn("Real body text", message)
+        self.assertEqual(message, "{'title': 'A title', 'description': 'Real body text'}")
+        self.assertEqual(job.payload["message"], message)
 
     def test_youtube_is_skipped_for_image_only_media_with_account_name(self):
         profile, account = self._create_profile_and_account(platform="youtube")
@@ -853,20 +869,16 @@ class DuplicateQueueGuardTests(unittest.TestCase):
 
 
 class DuplicateQueueGuardWiringTests(unittest.TestCase):
-    """The guard must actually run in submit_publish, not just exist.
-
-    The other tests exercise the helper directly; this pins the call site so
-    removing it from the account loop fails here.
-    """
+    """The atomic installer, shared by finalizers, must run the duplicate guard."""
 
     def test_account_loop_consults_the_duplicate_guard(self):
         import inspect
 
-        source = inspect.getsource(publish_orchestrator.submit_publish)
-        self.assertIn("_already_queued_for_media(", source)
-        # And it must be a real guard, not commented out or short-circuited.
-        self.assertNotIn("if False and _already_queued_for_media(", source)
-        self.assertIn("already queued for this account", source)
+        from myUtils import publication_groups
+        source = inspect.getsource(publication_groups.install_group)
+        self.assertIn("_duplicates(conn, group, keys)", source)
+        self.assertNotIn("if False and _duplicates(", source)
+        self.assertIn("already queued for this account", inspect.getsource(publication_groups._duplicates))
 
 
 class DuplicateGuardSameFileDifferentGroupTests(unittest.TestCase):

@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 import db.createTable as create_table
 from myUtils import jobs
 from myUtils import schedule_shift as ss
+from tests.legacy_queue import enqueue_legacy_job
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 flask_available = importlib.util.find_spec("flask") is not None
@@ -52,7 +53,7 @@ class ScheduleShiftTestCase(unittest.TestCase):
         profile_id: int | None = None,
         status: str | None = None,
     ) -> int:
-        job = jobs.enqueue_job(
+        job = enqueue_legacy_job(
             jobs.JobSpec(
                 platform=platform,
                 payload={"draft": {"message": "A genuine caption for the queue."}},
@@ -323,7 +324,7 @@ class ShiftApiTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _seed(self) -> int:
-        job = jobs.enqueue_job(
+        job = enqueue_legacy_job(
             jobs.JobSpec(
                 platform="twitter",
                 payload={"draft": {"message": "A genuine caption for the queue."}},
@@ -335,7 +336,7 @@ class ShiftApiTests(unittest.TestCase):
         return jobs.list_targets(job.id, db_path=self.db_path)[0].id
 
     def _schedule(self, target_id: int) -> str | None:
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with contextlib.closing(sqlite3.connect(str(self.db_path))) as conn:
             return conn.execute(
                 "SELECT schedule_at FROM publish_job_targets WHERE id = ?",
                 (target_id,),

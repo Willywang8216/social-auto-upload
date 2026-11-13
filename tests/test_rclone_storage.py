@@ -140,15 +140,14 @@ class RcloneDownloadTests(unittest.TestCase):
             # The parent has to exist before rclone writes into it.
             self.assertTrue(destination.parent.is_dir())
 
-        self.assertEqual(
-            calls[0],
-            [
-                "rclone",
-                "copyto",
-                "GDrive-willywang8216:sau/videoFile/_batch/clip.mp4",
-                str(destination),
-            ],
-        )
+        self.assertEqual(calls[0][:3], ["rclone", "copyto", "GDrive-willywang8216:sau/videoFile/_batch/clip.mp4"])
+        temporary = Path(calls[0][3])
+        self.assertEqual(temporary.parent, destination.parent)
+        self.assertTrue(temporary.name.startswith(".clip.mp4."))
+        self.assertTrue(temporary.name.endswith(".part"))
+        self.assertIn("--contimeout", calls[0])
+        self.assertIn("--timeout", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--retries") + 1], "1")
 
     def test_download_artifact_checks_nonempty_destination(self) -> None:
         def fake_runner(command, **kwargs):

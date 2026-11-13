@@ -265,7 +265,7 @@
         </div>
         <div class="acct-body">
           <div class="acct-stat">
-            <div class="n" style="font-size:13px" :title="acct.publishingRoute?.reason">{{ publishingRouteLabel(acct) }}</div>
+            <div class="n" style="font-size:13px" :title="acct.readiness?.reason || acct.publishingRoute?.reason">{{ publishingRouteLabel(acct) }}</div>
             <div class="l">{{ acct.publishingRoute ? 'Publishing route' : 'Status' }}</div>
           </div>
           <div class="acct-stat">
@@ -281,7 +281,12 @@
           <div>Native: {{ cookieStatusLabel(acct) }} · {{ acct.nativeCredentials.reason }}</div>
           <div>{{ nativeExpiryDetails(acct) }}</div>
           <div>Last checked: {{ acct.nativeCredentials.lastCheckedAt || 'not checked' }}</div>
-          <div v-if="acct.publishingRoute?.provider === 'sociamonials'">Managed connection / availability: not validated by this configuration</div>
+          <div v-if="acct.publishingRoute?.provider === 'sociamonials'">Managed primary and native OAuth are verified separately.</div>
+        </div>
+        <div class="acct-handle" style="padding:0 14px 10px">
+          <div>{{ acct.readiness?.reason || 'Fresh exact destination authorization has not been verified.' }}</div>
+          <div>Verified: {{ acct.readiness?.checkedAt || 'not checked' }} · expires: {{ acct.readiness?.expiresAt || 'unknown' }}</div>
+          <div v-if="acct.readiness?.nextAttemptAt">Next retry / reset: {{ acct.readiness.nextAttemptAt }}</div>
         </div>
         <div class="acct-actions" @click.stop>
           <button class="mini-btn" :class="{ accent: cookieStatusClass(acct) !== 'ck-valid' }" @click="onReauth(acct)">
@@ -905,7 +910,7 @@ const cookieStatusClass = (acct) => {
   }
   if (acct.isOverdue || acct.reconnectRequired || acct.connectionLabel === 'Missing' || acct.connectionLabel === 'Token expired') return 'ck-exp'
   if (acct.isExpiringWithin24h || acct.isExpiringWithin7d) return 'ck-soon'
-  return 'ck-valid'
+  return acct.readiness?.ready === true && acct.readiness?.evidenceFresh === true ? 'ck-valid' : 'ck-soon'
 }
 const cookieStatusLabel = (acct) => {
   if (acct.nativeCredentials) return nativeStateLabel(acct.nativeCredentials.state)
@@ -913,8 +918,8 @@ const cookieStatusLabel = (acct) => {
   const cls = cookieStatusClass(acct)
   const isOAuth = acct.authType === 'oauth'
   if (cls === 'ck-exp') return isOAuth ? 'Token expired' : 'Expired'
-  if (cls === 'ck-soon') return isOAuth ? 'Token expiring' : 'Expiring'
-  return isOAuth ? 'Connected' : 'Valid'
+  if (cls === 'ck-soon') return acct.isExpiringWithin24h || acct.isExpiringWithin7d ? (isOAuth ? 'Token expiring' : 'Expiring') : 'Not validated'
+  return acct.readiness?.ready === true && acct.readiness?.evidenceFresh === true ? 'Verified destination' : 'Not validated'
 }
 const expiryLabel = (acct) => {
   if (acct.nativeCredentials) return tokenExpiryLabel(acct.nativeCredentials.token)
@@ -946,10 +951,11 @@ const nativeExpiryDetails = (acct) => {
 }
 const publishingRouteLabel = (acct) => {
   const route = acct.publishingRoute
-  if (!route) return acct.connectionLabel
-  if (!route.enabled) return 'Disabled'
-  const label = route.provider === 'sociamonials' ? 'Managed' : 'Native'
-  return `${label} ${route.configured ? 'configured' : 'not configured'}`
+  const proof = acct.readiness
+  if (acct.enabled === false || route?.enabled === false) return 'Disabled'
+  const label = (proof?.provider || route?.provider) === 'sociamonials' ? 'Managed' : 'Native'
+  if (proof?.ready === true && proof?.evidenceFresh === true) return `${label} verified ready`
+  return `${label} ${proof?.phase || proof?.status || 'configured_unverified'}`
 }
 
 /* Actions */
@@ -1263,8 +1269,8 @@ const loadAccounts = async () => {
     const list = res?.data || res || []
     // Map to the shape the component expects (merge with PLATFORM_META)
     accounts.value = list.map(a => {
-      const isOAuth = a.authType === 'oauth'
       const native = a.nativeCredentials || null
+      const readiness = a.publishReadiness || a.destinationReadiness || a.readiness || null
       const isExpired = native ? native.state === 'expired' : a.cookieStatus === 'expired'
       const isSoon = native ? native.state === 'expiring' : a.cookieStatus === 'soon'
       return {
@@ -1276,8 +1282,8 @@ const loadAccounts = async () => {
         accountGroup: a.accountGroup || '',
         platform: PLATFORM_META[a.platform]?.label || a.platform,
         authType: a.authType || 'cookie',
-        // For OAuth accounts, show "Token expired" instead of "Missing"
-        connectionLabel: native ? nativeStateLabel(native.state) : isExpired ? (isOAuth ? 'Token expired' : 'Missing') : 'Ready',
+        // Publishing readiness is separate from native token expiry/health.
+        connectionLabel: readiness?.ready === true && readiness?.evidenceFresh === true ? 'Ready' : 'Not validated',
         connectionDetail: a.handle || '',
         // Profile metadata — id is the join key, name/slug come straight from
         // the profiles table so the UI can show "Profile: NW" instead of the
@@ -1295,6 +1301,7 @@ const loadAccounts = async () => {
         expiresAt: a.expiresAt,
         nativeCredentials: native,
         publishingRoute: a.publishingRoute || null,
+        readiness,
         enabled: a.enabled !== false,
       }
     })

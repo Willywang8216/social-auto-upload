@@ -14,12 +14,38 @@ from myUtils import sociamonials_fallback as adapter, sociamonials_policy as pol
 
 
 def resolve_constraints(*, platform: str, account, payload: dict | None = None,
-                        settings=None) -> dict:
-    """Fresh exact-destination verification, returning tightening-only policy."""
-    verified = adapter.verify_destination(platform=platform, account=account,
-                                          settings=settings, payload=payload)
-    return constraints_from_verification(verified, platform=platform,
+                        settings=None, db_path=None, session=None, admit_backup=False) -> dict:
+    """Fresh exact-destination verification, returning tightening-only policy.
+
+    With db_path, primary managed routes also record proof at this actual-read
+    boundary. _verify_route has checked /me posts.read/create/profiles.read
+    before returning, and exact profile connected/agent_can_publish_to; its
+    API-key role grant is NOT an OAuth scope. Never normalize arbitrary JSON.
+    """
+    from myUtils import publish_readiness
+    before = publish_readiness._context(account, settings) if db_path is not None else None
+    kwargs = {"platform": platform, "account": account, "settings": settings, "payload": payload}
+    if session is not None:
+        kwargs["session"] = session
+    verified = adapter.verify_destination(**kwargs)
+    context = constraints_from_verification(verified, platform=platform,
                                          account_config=getattr(account, "config", None))
+    if before is not None and (before["provider"] == "sociamonials" or admit_backup):
+        # This is immediately after the actual verifier call, not a public
+        # normalizer accepting caller-ready flags or readable profile lists.
+        if verified.get("verified") is not True or (verified.get("permissions") or {}).get("posts.publish_direct") is not True:
+            raise media_compliance.MediaPreparationError("Exact managed direct grant was not verified")
+        proof = {**verified, "live_check": True, "source": "provider_verification",
+                 "config_fingerprint": before["fingerprint"],
+                 "permissions": {**verified["permissions"], "posts.read": True,
+                                 "posts.create": True, "profiles.read": True}}
+        if before["provider"] == "sociamonials":
+            publish_readiness.record_destination_readiness(account, settings, proof=proof,
+                provider="sociamonials", db_path=db_path)
+        else:
+            from myUtils.publish_admission import _issue_backup_verification
+            context["admission_verification"] = _issue_backup_verification(account, settings, verified, before)
+    return context
 
 
 def constraints_from_verification(verified: Mapping, *, platform: str,

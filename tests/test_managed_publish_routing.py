@@ -53,11 +53,18 @@ def database(tmp_path):
     (None, True, True, "managed"),
     ("sociamonials", False, True, "managed"),
     ("threads", True, False, "direct"),
-    ("threads", True, True, "blocked"),
+    ("threads", True, True, "direct"),  # Existing receipts are polled, never recreated or switched.
 ])
 def test_receipt_provider_wins_without_direct_token_blocking_managed_route(
     database, monkeypatch, receipt_provider, prefer, needs_reconnect, expected,
 ):
+    from tests.legacy_queue import enqueue_legacy_job
+    monkeypatch.setenv("SAU_SOCIAMONIALS_FALLBACK", "1")
+    monkeypatch.setenv("SOCIAMONIALS_API_KEY", "fixture-only")
+    from tests.test_sociamonials_fallback import ContractSession, profile as managed_profile
+    session = ContractSession(profiles=[managed_profile(network="thrd", ref="fixture-only")])
+    monkeypatch.setattr(sm, "_RATE_WINDOWS", {})
+    monkeypatch.setattr(sm, "_get_session", lambda supplied=None: session)
     config = managed_config(_needsReconnect=needs_reconnect) if prefer else {"_needsReconnect": needs_reconnect}
     conn = sqlite3.connect(database)
     try:
@@ -65,9 +72,15 @@ def test_receipt_provider_wins_without_direct_token_blocking_managed_route(
         conn.commit()
     finally:
         conn.close()
-    job = jobs.enqueue_job(jobs.JobSpec(platform="threads", profile_id=900, payload={"message": "fixture"},
-                           targets=[("account:900", "/fixture.mp4", None)]), db_path=database)
-    target = jobs.claim_next_targets(db_path=database)[0]
+    if not receipt_provider:
+        from myUtils import backup_preparation, profiles
+        account = profiles.get_account(900, db_path=database)
+        backup_preparation.resolve_constraints(platform="threads", account=account,
+            settings=profiles.get_profile(900, db_path=database).settings, db_path=database, session=session)
+    enqueue = enqueue_legacy_job if receipt_provider else jobs.enqueue_job
+    job = enqueue(jobs.JobSpec(platform="threads", profile_id=900, payload={"message": "fixture"},
+                  targets=[("account:900", "text-only", None)]), db_path=database)
+    target = jobs.claim_next_targets(db_path=database, owner="routing-fixture")[0]
     if receipt_provider:
         checkpoint = {"submission_started": True, "provider_receipt": {
             "provider": receipt_provider, "id": "receipt-fixture", "submitted_at": delivery.utc_now(),
@@ -195,16 +208,21 @@ def test_declared_media_is_never_silently_replaced_by_text(monkeypatch, artifact
 
 
 @pytest.mark.parametrize("reason,receipt", [("disabled", False), ("disabled", True), ("no-key", False), ("no-key", True)])
-def test_real_managed_helper_blocks_unavailable_configuration(database, monkeypatch, reason, receipt):
+def test_real_managed_helper_holds_unavailable_configuration_without_create_or_receipt_loss(database, monkeypatch, reason, receipt):
+    from tests.test_sociamonials_fallback import ContractSession, profile as managed_profile
+    monkeypatch.delenv("SOCIAMONIALS_API_KEY", raising=False)
+    session = ContractSession(profiles=[managed_profile(network="thrd", ref="fixture-only")])
+    monkeypatch.setattr(sm, "_get_session", lambda supplied=None: session)
     conn = sqlite3.connect(database)
     try:
         conn.execute("UPDATE accounts SET config_json=? WHERE id=900", (json.dumps(managed_config()),))
         conn.commit()
     finally:
         conn.close()
-    jobs.enqueue_job(jobs.JobSpec(platform="threads", profile_id=900, payload={"message": "fixture"},
+    from tests.legacy_queue import enqueue_legacy_job
+    enqueue_legacy_job(jobs.JobSpec(platform="threads", profile_id=900, payload={"message": "fixture"},
                      targets=[("account:900", "campaign_post:900", None)]), db_path=database)
-    target = jobs.claim_next_targets(db_path=database)[0]
+    target = jobs.claim_next_targets(db_path=database, owner="routing-fixture")[0]
     saved = None
     if receipt:
         saved = {"provider": "sociamonials", "id": "keep-this", "submitted_at": delivery.utc_now(),
@@ -222,7 +240,14 @@ def test_real_managed_helper_blocks_unavailable_configuration(database, monkeypa
     monkeypatch.setattr(sm, "publish_via_sociamonials", publish)
     asyncio.run(instance._run_target_inline(target))
     current = jobs.get_target(target.id, db_path=database)
-    assert current.status == ("awaiting_delivery" if receipt else "blocked")
+    expected = "needs_review" if receipt and reason == "disabled" else "awaiting_delivery" if receipt else "retrying" if reason == "no-key" else "blocked"
+    assert current.status == expected
+    if reason == "no-key" and not receipt:
+        assert current.checkpoint["prerequisites"]["category"] == "configuration"
+        assert current.checkpoint["prerequisites"]["max_attempts"] == jobs.PREREQUISITE_MAX_ATTEMPTS
+        assert (jobs._utc_datetime(current.next_attempt_at) - jobs._utc_datetime(current.started_at)).total_seconds() >= 299
+        assert not session.calls
+        publish.assert_not_called()
     if receipt:
         assert current.checkpoint["provider_receipt"] == saved
     if reason == "disabled":

@@ -13,6 +13,7 @@ import pytest
 from db import createTable
 from myUtils import jobs
 from scripts import recover_failed_targets as recovery
+from tests.legacy_queue import enqueue_legacy_job
 
 NOW = datetime(2035, 1, 2, 12)
 SECRET = "synthetic-token-never-print-this"
@@ -87,7 +88,7 @@ def _job(path, *, file_ref="/media/original.mp4", account_ref="account:101", pla
     with closing(sqlite3.connect(path)) as conn:
         sequence = conn.execute("SELECT COUNT(*) FROM publish_jobs").fetchone()[0]
     target_specs = targets or [(account_ref, file_ref, "2034-12-01T08:00:00")]
-    job = jobs.enqueue_job(jobs.JobSpec(
+    job = enqueue_legacy_job(jobs.JobSpec(
         platform=platform, profile_id=profile_id, idempotency_key=f"fixture-{sequence}",
         payload=payload if payload is not None else {"message": "Synthetic post"}, targets=target_specs,
     ), workspace_id=workspace, db_path=path)
@@ -180,7 +181,7 @@ def test_planning_is_read_only_deterministic_and_never_emits_secrets(db_path, mo
             conn.execute("UPDATE accounts SET enabled=0")
 
 
-def test_eligible_recovery_only_resets_selected_failed_target_and_recounts(db_path):
+def test_eligible_recovery_preserves_history_and_recounts_only_selected_target(db_path):
     job_id, ids = _job(db_path, targets=[
         ("account:101", "/a.mp4", None), ("account:101", "/b.mp4", "2036-01-01T00:00:00"),
         ("account:101", "/c.mp4", None),
@@ -195,8 +196,11 @@ def test_eligible_recovery_only_resets_selected_failed_target_and_recounts(db_pa
     plan = _plan(db_path, target_ids=[ids[0]])
     assert recovery.apply_recovery(plan, db_path=db_path) == {"applied": 1, "errors": []}
     target = jobs.get_target(ids[0], db_path=db_path)
-    assert (target.status, target.attempts, target.last_error) == ("pending", 0, None)
-    assert target.checkpoint == {"recovery_generation": plan[0]["expected_fingerprint"]}
+    assert (target.status, target.attempts, target.last_error) == ("pending", 3, None)
+    assert target.checkpoint["recovery_generation"] == plan[0]["expected_fingerprint"]
+    assert target.checkpoint["previous_failure"]["attempts"] == 3
+    assert target.checkpoint["previous_failure"]["status"] == "failed"
+    assert target.checkpoint["previous_failure"]["last_error"] == "HTTP 503 temporary outage"
     assert target.schedule_at == plan[0]["slot"]
     assert target.started_at is None and target.finished_at is None and target.next_attempt_at is None
     assert [_row(db_path, "publish_job_targets", row_id) for row_id in ids[1:]] == siblings
@@ -656,14 +660,16 @@ def test_cli_reports_invalid_selection_without_traceback(db_path, capsys):
 
 
 @pytest.mark.parametrize("action", ["reschedule", "resubmit"])
-def test_existing_explicit_retry_semantics_are_unchanged(db_path, action):
+def test_explicit_retry_never_erases_uncertain_provider_receipts(db_path, action):
     target = _target(db_path)
     _update(db_path, "publish_job_targets", target, checkpoint_json='{"provider_receipt":{"id":"explicit-intent"}}')
-    if action == "reschedule":
-        result = jobs.reschedule_target(target, "2035-02-01T00:00:00", db_path=db_path)
-    else:
-        result = jobs.resubmit_target(target, db_path=db_path)
-    assert result.status == "pending" and result.checkpoint == {}
+    before = _dump(db_path)
+    with pytest.raises(ValueError, match="Submission evidence"):
+        if action == "reschedule":
+            jobs.reschedule_target(target, "2035-02-01T00:00:00", db_path=db_path)
+        else:
+            jobs.resubmit_target(target, db_path=db_path)
+    assert _dump(db_path) == before
 
 
 @pytest.mark.parametrize("payload", [

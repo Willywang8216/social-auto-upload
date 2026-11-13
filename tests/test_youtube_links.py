@@ -163,11 +163,15 @@ def test_backup_overrides_cannot_bypass_youtube_link_policy():
     assert result["network_options"]["description"] == clean["draft"]["description"]
 
 
-def test_legacy_response_parser_and_validator_filter_only_youtube():
+def test_prospective_parser_filters_but_approved_validator_is_read_only():
     raw = json.dumps({"message": "Original", "description": "https://onlyfans.com/creator"})
     assert "onlyfans.com" not in content_generator.parse_llm_response(raw, "youtube")["description"]
     assert "onlyfans.com" in content_generator.parse_llm_response(raw, "facebook")["description"]
-    assert content_generator.validate_post("youtube", json.loads(raw))
+    approved = json.loads(raw)
+    before = copy.deepcopy(approved)
+    with pytest.raises(prepared_publishers.PreparedPublishError, match="YouTube"):
+        content_generator.validate_post("youtube", approved)
+    assert approved == before
 
 
 def test_account_override_and_profile_fallback_are_shared_by_generation_and_publish(monkeypatch):

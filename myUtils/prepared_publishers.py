@@ -195,9 +195,13 @@ class PreparedPublishError(RuntimeError):
 
 
 def _first_comment_text(payload: dict) -> str:
-    """Return the trimmed first-comment text, or empty string."""
-    draft = payload.get("draft") or {}
-    value = draft.get("firstComment") or payload.get("firstComment") or ""
+    """Resolve all approved aliases; never drop a conflicting comment."""
+    from myUtils.publish_admission import approved_first_comment
+    try:
+        value = approved_first_comment(payload)
+    except ValueError as exc:
+        raise PreparedPublishError(str(exc), retryable=False) from exc
+    value = "" if value is None else value
     if text_limits.preserves_approved_text(payload):
         if not isinstance(value, str):
             raise PreparedPublishError("Approved first comment must be a string", retryable=False)
@@ -690,6 +694,12 @@ def _normalize_public_url(url: str) -> str:
 def _extract_media(payload: dict) -> dict[str, list[dict]]:
     """Preserve exact identity, alt text and cover metadata; exclude TXT/WAV."""
     from myUtils.publish_media_guard import is_context_artifact, is_support_artifact, media_kind
+    from myUtils.publish_admission import approved_alt_text, _validate_approved_aliases
+    try:
+        _validate_approved_aliases(payload, [a for a in payload.get("artifacts") or []
+            if not is_context_artifact(a) and not is_support_artifact(a)])
+    except ValueError as exc:
+        raise PreparedPublishError(str(exc), retryable=False) from exc
     items_by_key = {}
     for artifact in payload.get("artifacts", []) or []:
         if not isinstance(artifact, dict) or is_context_artifact(artifact):
@@ -701,8 +711,7 @@ def _extract_media(payload: dict) -> dict[str, list[dict]]:
             continue
         metadata = artifact.get("metadata") or {}
         item = {**artifact, "local_path": local_path, "public_url": public_url,
-                "metadata": metadata, "alt_text": artifact.get("alt_text", artifact.get("altText",
-                    metadata.get("alt_text", metadata.get("altText", (payload.get("draft") or {}).get("alt_text", "")))))}
+                "metadata": metadata, "alt_text": approved_alt_text(payload, artifact) or ""}
         prior = items_by_key.get(key)
         if prior is None:
             items_by_key[key] = item

@@ -9,11 +9,13 @@ is never filtered, so an unclassified destination is not silently dropped.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import ExitStack, closing
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -93,40 +95,50 @@ class LanguageRoutingIntegrationTests(unittest.TestCase):
     """The filter must actually run inside the prep/finalize path."""
 
     def setUp(self) -> None:
+        from datetime import datetime, timezone
+        import hashlib
+        from myUtils import media_compliance, publish_readiness
+        from tests.test_atomic_publication_groups import synthetic_video_probe
         self._tmp = tempfile.TemporaryDirectory()
+        self._patches = ExitStack()
         self.db_path = Path(self._tmp.name) / "route.db"
         create_table.bootstrap(self.db_path)
         self.profile = profiles.create_profile("Brand", db_path=self.db_path)
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
-                "INSERT INTO file_records (filename, filesize, file_path) VALUES (?, ?, ?)",
-                ("clip.mp4", 1.0, "/tmp/clip.mp4"),
-            )
-            file_id = int(cursor.lastrowid)
-            conn.commit()
-        self.media_group = media_groups.create_media_group(
-            "Launch", primary_video_file_id=file_id, db_path=self.db_path
-        )
-        media_groups.add_media_group_item(
-            self.media_group.id, file_id, role=media_groups.ROLE_VIDEO, db_path=self.db_path
-        )
-        self.en = profiles.add_account(
-            self.profile.id, profiles.PLATFORM_DOUYIN, "en",
-            config={"audience_language": "en"}, db_path=self.db_path,
-        )
-        self.zh = profiles.add_account(
-            self.profile.id, profiles.PLATFORM_DOUYIN, "zh",
-            config={"audience_language": "zh-Hant"}, db_path=self.db_path,
-        )
-        self.bi = profiles.add_account(
-            self.profile.id, profiles.PLATFORM_DOUYIN, "bi",
-            config={"audience_language": "en,zh-Hant"}, db_path=self.db_path,
-        )
+        self.source = Path(self._tmp.name) / "SFW clip.mp4"
+        self.source.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 120)
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            size = self.source.stat().st_size
+            self.file_id = conn.execute("INSERT INTO file_records (filename,filesize,file_path,sha256,size_bytes) VALUES (?,?,?,?,?)",
+                (self.source.name, size, str(self.source), hashlib.sha256(self.source.read_bytes()).hexdigest(), size)).lastrowid
+        self.media_group = media_groups.create_media_group("Launch", primary_video_file_id=self.file_id, db_path=self.db_path)
+        media_groups.add_media_group_item(self.media_group.id, self.file_id, role=media_groups.ROLE_VIDEO, db_path=self.db_path)
+        self._patches.enter_context(patch.object(media_compliance, "_source_metadata", side_effect=synthetic_video_probe))
+        self._patches.enter_context(patch.object(media_compliance, "decode_video", return_value=None))
+        accounts = []
+        for name, language in (("en", "en"), ("zh", "zh-Hant"), ("bi", "en,zh-Hant")):
+            account = profiles.add_account(self.profile.id, "telegram", name,
+                config={"audience_language": language, "botToken": "fixture-only", "chatId": f"@lang-{name}"}, db_path=self.db_path)
+            context = publish_readiness._context(account, self.profile.settings)
+            publish_readiness.record_destination_readiness(account, self.profile.settings, provider="direct", db_path=self.db_path,
+                proof={"verified": True, "live_check": True, "source": "provider_verification", "requires_approval": False,
+                    "config_fingerprint": context["fingerprint"], "identity": context["identity"],
+                    "permissions": {"posts.create": True}, "capabilities": ["video"],
+                    "verified_at": datetime.now(timezone.utc).isoformat()})
+            accounts.append(account)
+        self.en, self.zh, self.bi = accounts
 
     def tearDown(self) -> None:
+        self._patches.close()
         self._tmp.cleanup()
 
     def _run(self, language: str, *, include_zh: bool = False):
+        def prepare(campaign_id, *_args, **_kwargs):
+            from tests.test_atomic_publication_groups import prepared_video_metadata
+            campaigns.add_campaign_artifact(campaign_id, artifact_kind="prepared_video",
+                source_file_record_id=self.file_id, local_path=str(self.source),
+                metadata=prepared_video_metadata(self.source, self.source, "telegram", generation=f"language-{campaign_id}"),
+                db_path=self.db_path)
+            return {"videoLocalPath": str(self.source), "language": language}
         campaign = campaigns.create_campaign(
             self.profile.id,
             self.media_group.id,
@@ -144,16 +156,13 @@ class LanguageRoutingIntegrationTests(unittest.TestCase):
         return campaign_prep.run_campaign_prep(
             campaign,
             db_path=self.db_path,
-            prepare_artifacts=lambda *_a, **_k: {
-                "videoLocalPath": "/tmp/out.mp4",
-                "language": language,
-            },
+            prepare_artifacts=prepare,
             generate_account_draft=lambda *_a, **_k: {
                 "message": "hello",
                 "hashtags": [],
                 "firstComment": "",
             },
-            artifact_payloads_for_platform=lambda *_a, **_k: [{"local_path": "/tmp/out.mp4"}],
+            artifact_payloads_for_platform=lambda artifacts, _platform: artifacts,
             artifact_part_groups_for_platform=None,
             job_to_payload=lambda job: {"id": job.id},
         )

@@ -106,7 +106,8 @@ def test_excluded_alias_cookie_fallback_and_platform_are_canonical(db_path):
     a = _account(db_path, 101, cookie=r"C:\cookies\same.json")
     b = _account(db_path, 102, cookie="c:/cookies/same.json", profile_id=101)
     c = _account(db_path, 103, cookie="c:/cookies/same.json", platform="instagram")
-    _enqueue(db_path, (a, b, c))
+    _enqueue(db_path, (a, b), platform="facebook")
+    _enqueue(db_path, (c,), platform="instagram")
     assert [target.account_ref for target in _claim(db_path, limit=10, excluded_accounts=[b])] == [c]
     with closing(sqlite3.connect(db_path)) as conn:
         assert canonical_account_key(conn, a) == canonical_account_key(conn, b)
@@ -117,7 +118,7 @@ def test_excluded_alias_cookie_fallback_and_platform_are_canonical(db_path):
 def test_two_actual_processes_cannot_claim_same_provider_account(db_path):
     a = _account(db_path, 101, config={"pageId": "one-page"})
     b = _account(db_path, 102, config={"pageId": "one-page"}, profile_id=101)
-    _enqueue(db_path, (a, b))
+    _enqueue(db_path, (a, b), platform="facebook")
     code = ("import sys; from pathlib import Path; from myUtils.jobs import claim_next_targets; "
             "print(len(claim_next_targets(owner=sys.argv[2], limit=5, db_path=Path(sys.argv[1]))))")
     processes = [subprocess.Popen([sys.executable, "-c", code, str(db_path), f"worker-{i}"],
@@ -304,9 +305,12 @@ def test_cancel_intent_and_counts_survive_late_writes_and_recounts(db_path):
     assert cancelled.status == "cancelled" and cancelled.failed_targets == 1
     assert not jobs.mark_target_success(second.id, lease_token=second.lease_token, db_path=db_path)
     assert jobs.recount_job(job.id, db_path=db_path).status == "cancelled"
-    jobs.resubmit_target(second.id, db_path=db_path)  # existing explicit retry semantics
-    assert jobs.get_job(job.id, db_path=db_path).status == "pending"
-    assert jobs.get_job(job.id, db_path=db_path).finished_at is None
+    before = jobs.get_target(second.id, db_path=db_path)
+    with pytest.raises(ValueError, match="validated prepared recovery plan"):
+        jobs.resubmit_target(second.id, db_path=db_path)
+    assert jobs.get_target(second.id, db_path=db_path) == before
+    assert jobs.get_job(job.id, db_path=db_path).status == "cancelled"
+    assert jobs.get_job(job.id, db_path=db_path).finished_at is not None
 
 
 def test_recount_uses_actual_rows_and_empty_job_needs_review(db_path):
@@ -346,7 +350,7 @@ def test_reschedule_normalizes_offsets_and_invalid_resubmit_is_rejected(db_path)
     assert jobs.get_target(target.id, db_path=db_path).schedule_at == "garbage"
 
 
-@pytest.mark.parametrize("operation", ["cancel", "reschedule", "resubmit", "success", "retry", "cancel_job"])
+@pytest.mark.parametrize("operation", ["cancel", "success", "retry", "cancel_job"])
 def test_mutation_and_recount_roll_back_as_one_transaction(db_path, operation):
     job = _enqueue(db_path)
     target = jobs.list_targets(job.id, db_path=db_path)[0]
@@ -368,6 +372,24 @@ def test_mutation_and_recount_roll_back_as_one_transaction(db_path, operation):
         calls[operation]()
     assert jobs.get_target(target.id, db_path=db_path) == target
     assert jobs.get_job(job.id, db_path=db_path) == before
+
+
+def test_schedule_only_does_not_recount_or_reset_and_sql_failure_rolls_back(db_path):
+    job = _enqueue(db_path)
+    original = jobs.list_targets(job.id, db_path=db_path)[0]
+    before_job = jobs.get_job(job.id, db_path=db_path)
+    with patch.object(jobs, "_recount_job", side_effect=AssertionError("calendar must not reopen the intent")):
+        changed = jobs.reschedule_target(original.id, "2100-01-01T00:00:00Z", db_path=db_path)
+    assert changed.status == original.status and changed.attempts == original.attempts
+    assert changed.checkpoint == original.checkpoint
+    assert jobs.get_job(job.id, db_path=db_path) == before_job
+    with closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.execute("CREATE TRIGGER injected_calendar BEFORE UPDATE OF schedule_at ON publish_job_targets "
+                     "BEGIN SELECT RAISE(ABORT, 'injected calendar write'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="injected calendar"):
+        jobs.reschedule_target(original.id, "2100-01-02T00:00:00Z", db_path=db_path)
+    assert jobs.get_target(original.id, db_path=db_path) == changed
+    assert jobs.get_job(job.id, db_path=db_path) == before_job
 
 
 def test_enqueue_race_and_immutable_explicit_intent(db_path):

@@ -98,7 +98,8 @@ class PublishEntitiesApiTests(unittest.TestCase):
         return response.get_json()["data"]["id"]
 
     def _seed_campaign_entity(self, *, account_id: int, profile_id: int) -> dict:
-        """A media group + campaign + post + job, as Publish Center produces."""
+        """A legacy media group/post/job history used by read/edit projections."""
+        from tests.legacy_queue import enqueue_legacy_job
         campaign_store = self.sau_backend.campaign_store
         media_group_store = self.sau_backend.media_group_store
         job_runtime = self.sau_backend.job_runtime
@@ -145,7 +146,7 @@ class PublishEntitiesApiTests(unittest.TestCase):
             db_path=self.db_path,
         )
 
-        job = job_runtime.enqueue_job(
+        job = enqueue_legacy_job(
             job_runtime.JobSpec(
                 platform="twitter",
                 payload={

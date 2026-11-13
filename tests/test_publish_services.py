@@ -260,7 +260,8 @@ def test_review_cards_resolve_names_from_each_supplied_db_and_notify_async(tmp_p
         campaign = campaigns.create_campaign(profile.id, group.id, db_path=path)
         payload = {"campaignId": campaign.id, "campaignPostId": 7, "draft": {"message": "Actual saved copy"},
                    "artifacts": [{"local_path": "/media/clip_pub.mp4", "public_url": "https://cdn.example/clip.mp4"}]}
-        job = jobs.enqueue_job(jobs.JobSpec(platform="telegram", payload=payload, profile_id=profile.id,
+        from tests.legacy_queue import enqueue_legacy_job
+        job = enqueue_legacy_job(jobs.JobSpec(platform="telegram", payload=payload, profile_id=profile.id,
                                             targets=[(f"account:{account.id}", "campaign_post:7", "2030-01-01T00:00:00")]), db_path=path)
         cards = services._tg_review_cards(jobs=[{}, {"id": -1}, {"id": job.id, "payload": {"message": "stale"}}], db_path=path)
         assert len(cards) == 1

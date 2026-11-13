@@ -737,14 +737,14 @@ def validate_post(platform: str, post_data: dict) -> list[str]:
             youtube_links.validate_draft(post_data)
         except youtube_links.YouTubeLinkPolicyError as exc:
             errors.append(str(exc))
-    limit = PLATFORM_CHAR_LIMITS.get(platform)
+    from myUtils import text_limits
     message = post_data.get("message", "")
-
-    if not message.strip():
-        errors.append("Message is empty")
-
-    if limit is not None and len(message) > limit:
-        errors.append(f"Message exceeds {platform} limit of {limit} chars (got {len(message)})")
+    if not isinstance(message, str) or not message.strip():
+        errors.append("Message is empty or not text")
+    try:
+        text_limits.validate_post_text({"draft": post_data}, platform)
+    except ValueError as exc:
+        errors.append(str(exc))
 
     if platform == "twitter":
         hashtags = post_data.get("hashtags", [])
@@ -768,3 +768,24 @@ def validate_post(platform: str, post_data: dict) -> list[str]:
             errors.append("Twitter post should start with an emoji")
 
     return errors
+
+
+def prospective_draft_options(draft: dict, *, platform: str, media_kind,
+                              effective_provider: str) -> dict:
+    """Generate only representable options BEFORE approval.
+
+    This function is for generator output, never reviewed/user overrides. Call
+    admission for those overrides; it rejects rather than strips their fields.
+    Valid image alt text is retained. The generator currently emits global alt
+    and first-comment suggestions even on routes which cannot carry them.
+    """
+    import copy
+    from myUtils.publish_admission import supports_alt_text, supports_first_comment
+    result = copy.deepcopy(draft)
+    if not supports_alt_text(platform, media_kind, effective_provider):
+        for key in ("altText", "alt_text"):
+            result.pop(key, None)
+    if not supports_first_comment(platform, effective_provider):
+        for key in ("firstComment", "first_comment"):
+            result.pop(key, None)
+    return result

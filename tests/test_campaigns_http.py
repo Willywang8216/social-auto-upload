@@ -85,7 +85,7 @@ class CampaignApiTests(unittest.TestCase):
                 INSERT INTO file_records (filename, filesize, file_path)
                 VALUES (?, ?, ?)
                 """,
-                (filename, 1.0, file_path),
+                (filename, float(Path(file_path).stat().st_size) if Path(file_path).is_file() else 1.0, file_path),
             )
             conn.commit()
             return int(cursor.lastrowid)
@@ -94,6 +94,11 @@ class CampaignApiTests(unittest.TestCase):
         source_file = self.base_dir / "source.jpg"
         Image.new("RGB", (64, 64), "steelblue").save(source_file, format="JPEG")
         file_record_id = self._insert_file_record("source.jpg", str(source_file))
+        # Explicit read-only provider proof mock; real ownership/media checks remain enabled.
+        proof = patch("myUtils.publish_readiness._project", return_value={"ready": True, "reasonCode": "ready",
+            "evidence": {"capabilities": ["text", "image", "carousel", "video"]}})
+        proof.start()
+        self.addCleanup(proof.stop)
 
         profile_response = self.client.post(
             "/profiles",
@@ -171,6 +176,10 @@ class CampaignApiTests(unittest.TestCase):
         source_file = self.base_dir / "source.jpg"
         Image.new("RGB", (64, 64), "steelblue").save(source_file, format="JPEG")
         file_record_id = self._insert_file_record("source.jpg", str(source_file))
+        proof = patch("myUtils.publish_readiness._project", return_value={"ready": True, "reasonCode": "ready",
+            "evidence": {"capabilities": ["text", "image", "carousel", "video"]}})
+        proof.start()
+        self.addCleanup(proof.stop)
         profile_id = self.client.post(
             "/profiles", json={"name": "Regression brand"}
         ).get_json()["data"]["id"]

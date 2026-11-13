@@ -37,6 +37,7 @@ def safe_text(value, max_len: int = 160) -> str:
         r"(?i)\b(?:token|secret|authorization|proxy-authorization|sessionid|lease[_-]?token)"
         r"[\"']?\s*[:=]\s*[\"']?[^\s&,;\"')\]}]+", "[redacted credential]", text,
     )
+    text = re.sub(r"(?i)(?:[A-Z]:[\\/]|/(?:home|tmp|var|app|media|mnt|opt)/)[^\s<>\"']+", "[redacted-path]", text)
     return text if len(text) <= max_len else text[:max(0, max_len - 1)] + "…"
 
 
@@ -147,6 +148,7 @@ class HealthSnapshot:
     worker_health: dict = field(default_factory=dict)
     action_targets: list[dict] = field(default_factory=list)
     account_config_issues: list[dict] = field(default_factory=list)
+    readiness: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -158,6 +160,7 @@ class HealthSnapshot:
             "totals": self.totals, "queue": self.queue, "recent": self.recent,
             "workerHealth": self.worker_health, "actionTargets": self.action_targets,
             "accountConfigIssues": self.account_config_issues,
+            "readiness": self.readiness,
             "detailLimit": _DETAIL_LIMIT, "statisticsScope": "lifetime",
         }
 
@@ -173,6 +176,11 @@ WITH targets AS (
            t.error_category, t.delivery_state, t.lease_expires_at,
            j.platform, j.status AS parent_status, j.created_at,
            a.nickname, a.account_name, c.status AS campaign_status,
+           CASE WHEN json_valid(COALESCE(t.checkpoint_json, '{}')) THEN
+                CASE WHEN json_type(COALESCE(t.checkpoint_json, '{}'), '$.readiness') IS NOT NULL
+                     THEN json_extract(t.checkpoint_json, '$.readiness')
+                     ELSE CASE WHEN json_valid(j.payload_json) THEN json_extract(j.payload_json, '$.publishReadiness') END END
+                ELSE NULL END AS readiness_json,
            (t.lease_token IS NOT NULL AND t.lease_token != '') AS has_lease,
            (t.lease_owner IS NOT NULL AND t.lease_owner != '') AS has_owner,
            (t.lease_owner IS NOT NULL AND t.lease_owner != '' AND
@@ -188,11 +196,24 @@ WITH targets AS (
     LEFT JOIN campaigns c ON c.id = cp.campaign_id
     LEFT JOIN worker_heartbeats h ON h.worker_id = t.lease_owner
     WHERE (:workspace IS NULL OR j.workspace_id = :workspace)
+), stages AS (
+    SELECT *,
+        CASE WHEN json_valid(readiness_json) THEN json_extract(readiness_json, '$.phase') END AS readiness_phase,
+        CASE WHEN json_valid(readiness_json) THEN json_extract(readiness_json, '$.provider') END AS effective_provider,
+        CASE WHEN json_valid(readiness_json) THEN json_extract(readiness_json, '$.verifiedAt') END AS verified_at,
+        CASE WHEN json_valid(readiness_json) THEN json_extract(readiness_json, '$.artifactFingerprint') END AS artifact_fingerprint,
+        CASE WHEN json_valid(readiness_json) THEN json_extract(readiness_json, '$.destinationFingerprint') END AS destination_fingerprint
+    FROM targets
 ), timing AS (
     SELECT *,
         status IN ('pending', 'retrying') AS submission,
         parent_status IN ('pending', 'running', 'awaiting_delivery') AS parent_ready,
-        (campaign_status IS NULL OR campaign_status NOT IN ('preparing', 'needs_review', 'draft')) AS media_ready,
+        (campaign_status IS NULL OR campaign_status NOT IN ('preparing', 'needs_review', 'draft')) AS campaign_dispatchable,
+        COALESCE((readiness_phase = 'ready' AND
+            julianday(verified_at) BETWEEN julianday(:now) - 900.0/86400 AND julianday(:now) AND
+            typeof(artifact_fingerprint) = 'text' AND length(artifact_fingerprint) >= 16 AND
+            typeof(destination_fingerprint) = 'text' AND length(destination_fingerprint) >= 16 AND
+            typeof(effective_provider) = 'text' AND length(effective_provider) > 0), 0) AS media_ready,
         (schedule_at IS NULL OR schedule_at = '' OR julianday(schedule_at) <= julianday(:now)) AS schedule_due,
         (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday(:now)) AS retry_due,
         MAX(COALESCE(julianday(created_at), 0), COALESCE(julianday(schedule_at), 0),
@@ -205,16 +226,17 @@ WITH targets AS (
             (lease_expires_at IS NULL AND (has_lease OR has_owner)))) AS orphaned,
         (status = 'running' AND lease_expires_at IS NULL AND
             (julianday(started_at) IS NULL OR julianday(started_at) < julianday(:stale_cutoff))) AS legacy_stale
-    FROM targets
+    FROM stages
 ), flags AS (
     SELECT *,
-        (submission AND parent_ready AND media_ready AND schedule_due AND retry_due) AS due,
+        (submission AND parent_ready AND campaign_dispatchable AND schedule_due AND retry_due
+            AND (readiness_phase IS NULL OR media_ready)) AS due,
         (status = 'awaiting_delivery' AND parent_ready AND retry_due) AS poll_due,
         (submission AND julianday(schedule_at) > julianday(:now)) AS scheduled,
         (submission AND julianday(next_attempt_at) > julianday(:now)) AS retry_delayed,
         (status = 'awaiting_delivery' AND julianday(next_attempt_at) > julianday(:now)) AS poll_delayed,
         (status IN ('pending', 'retrying', 'awaiting_delivery') AND NOT parent_ready) AS held_by_parent,
-        (submission AND NOT media_ready) AS waiting_for_preparation,
+        (submission AND (NOT campaign_dispatchable OR readiness_phase = 'waiting_media')) AS waiting_for_preparation,
         (status IN ('pending', 'retrying', 'awaiting_delivery') AND (
             (next_attempt_at IS NOT NULL AND julianday(next_attempt_at) IS NULL) OR
             (submission AND schedule_at IS NOT NULL AND schedule_at != '' AND julianday(schedule_at) IS NULL))) AS invalid_schedule,
@@ -235,6 +257,11 @@ _METRICS = {
     "held_by_parent": "held_by_parent", "waiting_for_preparation": "waiting_for_preparation",
     "invalid_schedule": "invalid_schedule", "expired": "expired", "orphaned": "orphaned",
     "stale_running": "stale_running",
+    "verified_media_ready": "submission AND media_ready",
+    "readiness_unverified": "submission AND NOT media_ready AND (readiness_phase IS NULL OR readiness_phase NOT IN ('waiting_media','waiting_dependency','waiting_capacity','blocked_intent'))",
+    "waiting_dependency": "submission AND readiness_phase = 'waiting_dependency'",
+    "waiting_capacity": "submission AND readiness_phase = 'waiting_capacity'",
+    "blocked_intent": "submission AND readiness_phase = 'blocked_intent'",
     "overdue": "due AND due_jd <= julianday(:stale_cutoff)",
     "overdue_polls": "poll_due AND poll_jd <= julianday(:stale_cutoff)",
     "action_required": "status IN ('blocked', 'needs_review') OR invalid_schedule OR stale_running",
@@ -279,6 +306,8 @@ def _queue(row, now) -> dict:
         "invalidSchedule": "invalid_schedule", "expiredLeases": "expired", "orphanedLeases": "orphaned",
         "staleRunning": "stale_running", "overdue": "overdue", "overdueDeliveryPolls": "overdue_polls",
         "actionRequired": "action_required",
+        "verifiedMediaReady": "verified_media_ready", "readinessUnverified": "readiness_unverified",
+        "waitingDependency": "waiting_dependency", "waitingCapacity": "waiting_capacity", "blockedIntent": "blocked_intent",
     }
     return {**{key: int(row.get(column) or 0) for key, column in mapping.items()},
             "oldestDueAt": stamp, "oldestDueAgeSeconds": age,
@@ -369,6 +398,53 @@ def _account_health(conn, workspace_id):
     return reconnect, issues
 
 
+def _readiness_snapshot(conn, params):
+    """Project persisted stages in set-based SQL, never inspect backlog files.
+
+    Legacy due/queue counts are dispatch statistics, not verified readiness.
+    Receipt polls retain their independent eligibility even if media is gone.
+    """
+    groups = [dict(row) for row in conn.execute(_TARGET_CTE + """
+        SELECT platform, effective_provider AS provider,
+               CASE WHEN media_ready THEN 'ready'
+                    WHEN readiness_phase IN ('waiting_media','waiting_dependency','waiting_capacity','blocked_intent')
+                    THEN readiness_phase ELSE 'configured_unverified' END AS phase,
+               COUNT(*) AS count FROM flags WHERE submission
+        GROUP BY platform, provider, phase ORDER BY platform, provider, phase
+    """, params)]
+    details = []
+    for row in conn.execute(_TARGET_CTE + "SELECT * FROM flags WHERE submission "
+                            "ORDER BY CASE WHEN readiness_phase IN ('waiting_dependency','waiting_capacity','blocked_intent') THEN 0 ELSE 1 END, id LIMIT :limit", params):
+        try:
+            stage = json.loads(row['readiness_json'] or '{}')
+            if not isinstance(stage, dict):
+                stage = {}
+        except (ValueError, TypeError):
+            stage = {}
+        phase = row['readiness_phase']
+        if phase not in ('waiting_media', 'waiting_dependency', 'waiting_capacity', 'blocked_intent'):
+            phase = 'ready' if row['media_ready'] else 'configured_unverified'
+        details.append({
+            'targetId': int(row['id']), 'jobId': int(row['job_id']),
+            'accountRef': _account_ref(row['account_ref']), 'platform': safe_text(row['platform'], 80),
+            'provider': safe_text(row['effective_provider'], 40) or 'unverified', 'phase': phase,
+            'evidenceFresh': bool(row['media_ready']), 'verifiedAt': _stamp(row['verified_at']),
+            'reasonCode': safe_text(stage.get('reasonCode'), 80) or ('readiness_unverified' if not row['media_ready'] else 'ready'),
+            'reason': safe_text(stage.get('reason'), 160),
+            'nextAttemptAt': _stamp(stage.get('nextAttemptAt')) or _stamp(row['next_attempt_at']),
+            'nextSlot': _stamp(row['schedule_at']),
+            'partProgress': {key: value for key, value in (stage.get('partProgress') or {}).items()
+                             if key in ('completeParts', 'totalParts', 'deliveredParts') and type(value) is int and value >= 0}
+                            if isinstance(stage.get('partProgress'), dict) else None,
+        })
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('publish_destination_readiness','publish_dependency_states')")}
+    return {'scope': 'destination', 'evidenceSource': 'stored_verification',
+            'storageAvailable': len(tables) == 2,
+            'providers': [{**row, 'platform': safe_text(row['platform'], 80),
+                           'provider': safe_text(row['provider'], 40) or 'unverified'} for row in groups],
+            'targets': details}
+
+
 def _worker_snapshot(db_path, max_age_seconds) -> dict:
     try:
         health = jobs.worker_health(db_path=db_path, max_age_seconds=max_age_seconds)
@@ -438,6 +514,7 @@ def publish_health_snapshot(
         snapshot.recent_failures = _recent_failures(conn, params)
         snapshot.stale_targets = _stale_targets(conn, params, now)
         snapshot.action_targets = _action_targets(conn, params)
+        snapshot.readiness = _readiness_snapshot(conn, params)
         reconnect, issues = _account_health(conn, workspace_id)
         snapshot.accounts_needing_reconnect, snapshot.account_config_issues = reconnect[:_DETAIL_LIMIT], issues[:_DETAIL_LIMIT]
         snapshot.totals.update(accountsNeedingReconnect=len(reconnect), accountConfigIssues=len(issues))

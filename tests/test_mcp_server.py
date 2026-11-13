@@ -511,7 +511,7 @@ class CalendarMcpToolTests(_McpTestCase):
         items = self._call(tool="jobs_calendar", db_path=str(self.db_path))
         self.assertEqual(len(items), 0)
 
-    def test_target_reschedule_cancel_resubmit_roundtrip(self) -> None:
+    def test_target_reschedule_cancel_refuses_unverified_resubmit(self) -> None:
         from myUtils import jobs as job_runtime
         from datetime import datetime, timedelta, timezone
         future = (datetime.now(tz=timezone.utc).replace(tzinfo=None)
@@ -537,10 +537,12 @@ class CalendarMcpToolTests(_McpTestCase):
                                target_id=target_id, db_path=str(self.db_path))
         self.assertEqual(cancelled["status"], job_runtime.TARGET_CANCELLED)
 
-        # Resubmit via MCP (cancelled -> pending).
+        # A missing destination/source must not become dispatch permission.
+        before = job_runtime.get_target(target_id, db_path=self.db_path)
         resub = self._call(tool="jobs_target_resubmit",
                            target_id=target_id, db_path=str(self.db_path))
-        self.assertEqual(resub["status"], job_runtime.TARGET_PENDING)
+        self.assertEqual(resub["error"], "invalid_input")
+        self.assertEqual(job_runtime.get_target(target_id, db_path=self.db_path), before)
 
     def test_target_mutation_missing_returns_not_found(self) -> None:
         out = self._call(tool="jobs_target_cancel", target_id=999,

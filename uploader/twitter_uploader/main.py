@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
+import re
 import json
 import subprocess
 import tempfile
@@ -8,6 +11,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Iterator, Sequence
+from urllib.parse import parse_qs, urlsplit
+
+from myUtils import delivery
 
 from patchright.async_api import BrowserContext
 from patchright.async_api import Page
@@ -575,28 +581,195 @@ async def wait_for_ready_post_button(
     raise RuntimeError("Twitter publish button did not become ready in time")
 
 
-async def click_post_button(page: Page, button) -> None:
-    """Press Post in a way that survives X's overlay layers.
+async def click_post_button(page: Page, button, *, before_action=None) -> None:
+    """Choose one action up front; a failed action is never a retry permit.
 
-    Once a draft is long enough X grows the composer until the button sits
-    under a fixed layer, and Playwright's hit test refuses the click even
-    though the button is visible and enabled. Dispatching the event skips
-    that test and still runs the button's own handler; Ctrl+Enter is the
-    composer's native shortcut and is the last resort.
+    Dispatch is overlay-proof, but falling back *after* a click timed out can
+    duplicate an accepted post. No keyboard fallback after an ambiguous action.
     """
-    try:
+    topmost = await is_topmost_at_center(button)
+    if before_action is not None:
+        before_action()  # No intervening browser await before the selected action.
+    if topmost:
         await button.click(timeout=TWITTER_POST_CLICK_TIMEOUT_MS)
-        return
-    except Exception as exc:  # noqa: BLE001
-        twitter_logger.warning(f"⚠️ X 發文按鈕被遮住，改用事件派送: {exc}")
-
-    try:
+    else:
         await button.dispatch_event("click")
-        return
-    except Exception as exc:  # noqa: BLE001
-        twitter_logger.warning(f"⚠️ X 事件派送失敗，改用 Ctrl+Enter: {exc}")
 
-    await page.keyboard.press("Control+Enter")
+
+def _browser_post_id(body) -> str | None:
+    # Do not mistake a viewer/account ID or an error's ID for a created tweet.
+    branch = _find_create_tweet_payload(body)
+    if not isinstance(body, dict) or body.get("errors") or not isinstance(branch, dict):
+        return None
+    results = branch.get("tweet_results")
+    result = results.get("result") if isinstance(results, dict) else None
+    if not isinstance(result, dict):
+        return None
+    candidate = result.get("rest_id") or (result.get("legacy") or {}).get("id_str")
+    return candidate if isinstance(candidate, str) and re.fullmatch(r"[0-9]+", candidate) else None
+
+
+def browser_segment_identity(segment: PreparedTwitterSegment, text: str) -> dict:
+    media = []
+    for path in segment.upload_paths:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        media.append({"sha256": digest.hexdigest(), "bytes": path.stat().st_size})
+    entry = {"index": segment.post_index, "source_index": segment.source_index,
+             "segment_index": segment.segment_index, "start_seconds": segment.start_seconds,
+             "duration_seconds": segment.duration_seconds, "media": media,
+             "text_sha256": hashlib.sha256(text.encode()).hexdigest()}
+    entry["identity"] = hashlib.sha256(json.dumps(entry, sort_keys=True,
+                                                 separators=(",", ":")).encode()).hexdigest()
+    return entry
+
+
+class _XBrowserSession:
+    """Intercept writes before the network, including alternate UI shortcuts.
+
+    route.fetch makes exactly one upstream request (no retries/redirects), then
+    saves selected receipt/rejection evidence before exposing it to the page.
+    Unknown mutation endpoints are blocked, not optimistically uninstrumented.
+    Service workers MUST be blocked by the context that installs this route.
+    """
+    def __init__(self, observer):
+        self.observer = observer
+        self.part = None
+        self.action = None
+        self.create_seen = False
+        self.error = None
+        self.post_id = None
+        self.media_ids = set()
+        self.approved = None
+        self.reply_to = None
+
+    def notify(self, event, **values):
+        result = self.observer({"event": event, "part": self.part, **values})
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError("X delivery_observer must be synchronous and fenced")
+        return result
+
+    def check(self):
+        if self.error is not None:
+            raise self.error
+
+    async def route(self, route):
+        request = route.request
+        part = self.part  # Capture before awaiting: later UI parts cannot steal this response.
+        url = urlsplit(request.url)
+        host = (url.hostname or "").lower()
+        owned_host = host == "x.com" or host.endswith(".x.com") or host == "twitter.com" or host.endswith(".twitter.com")
+        if request.method in {"GET", "HEAD", "OPTIONS"} or not owned_host:
+            await route.fallback()
+            return
+        create = request.method == "POST" and bool(re.fullmatch(r"/i/api/graphql/[^/]+/CreateTweet", url.path))
+        media = request.method == "POST" and url.path in {"/i/media/upload.json", "/1.1/media/upload.json"}
+        if not create and not media:
+            # Deny unknown writes (scheduled posts, legacy statuses/update,
+            # drafts, etc.). Read-only browser resources keep existing routing.
+            await route.abort()
+            return
+        name = None
+        try:
+            self.check()
+            if self.part is None or (create and (self.action is None or self.create_seen)):
+                raise delivery.DeliveryUnknown("Blocked an unowned/duplicate X post request")
+            if create:
+                self.create_seen = True
+                name = self.action
+                request_body = request.post_data_json
+                variables = request_body.get("variables") if isinstance(request_body, dict) else None
+                if not isinstance(variables, dict) or self.approved is None:
+                    raise delivery.DeliveryUnknown("Blocked X create with no exact request identity")
+                text = variables.get("tweet_text")
+                entities = (variables.get("media") or {}).get("media_entities")
+                ids = [entity.get("media_id") for entity in entities] if isinstance(entities, list) else []
+                reply = (variables.get("reply") or {}).get("in_reply_to_tweet_id")
+                if (not isinstance(text, str) or hashlib.sha256(text.encode()).hexdigest() != self.approved["text_sha256"]
+                        or len(ids) != len(self.approved["media"]) or len(set(ids)) != len(ids)
+                        or any(media_id not in self.media_ids for media_id in ids)
+                        or (reply or None) != self.reply_to):
+                    raise delivery.DeliveryUnknown("Blocked X create whose text/media/reply differs from owned part")
+                self.notify("create_request", part=part, name=name)
+            else:
+                if self.action is not None:
+                    raise delivery.DeliveryUnknown("Blocked media write after the owned Post action")
+                name = self.notify("media_request", part=part)
+            try:
+                response = await route.fetch(timeout=TWITTER_ATTACHMENT_READY_TIMEOUT_MS if media
+                                             else TWITTER_POST_BUTTON_READY_TIMEOUT_MS,
+                                             max_redirects=0, max_retries=0)
+            except delivery.LeaseLost:
+                raise
+            except Exception:
+                self.notify("unknown", part=part, name=name)
+                raise delivery.DeliveryUnknown("X write transport response was lost") from None
+            status = response.status
+            if type(status) is int and 400 <= status < 500 and status != 408:
+                try:
+                    rejected_body = await response.json()
+                except Exception:
+                    rejected_body = {}
+                errors = rejected_body.get("errors", []) if isinstance(rejected_body, dict) else []
+                codes = [error["code"] for error in errors if isinstance(error, dict)
+                         and type(error.get("code")) is int][:8] if isinstance(errors, list) else []
+                try:
+                    self.notify("rejection", part=part, name=name, httpStatus=status, provider_codes=codes)
+                except Exception as exc:
+                    self.error = exc
+                await route.fulfill(response=response)
+                return
+            elif type(status) is not int or not 200 <= status < 300:
+                self.notify("unknown", part=part, name=name, httpStatus=status)
+            else:
+                try:
+                    body = await response.json()
+                except Exception:
+                    body = None
+                receipt_id = _browser_post_id(body) if create else (
+                    body.get("media_id_string") or str(body.get("media_id") or "")
+                    if isinstance(body, dict) else None)
+                if isinstance(body, dict) and (body.get("errors") or body.get("error")):
+                    receipt_id = None
+                # APPEND's documented 204 acknowledges bytes for a media ID
+                # already supplied by an earlier INIT response, not a tweet.
+                linked = None
+                if media and status == 204:
+                    values = parse_qs(url.query)
+                    try:
+                        values.update(parse_qs(request.post_data or ""))
+                    except (UnicodeError, ValueError):
+                        pass
+                    # Multipart APPEND carries the same selected fields. Never
+                    # persist its binary body, filenames, headers, or URL.
+                    raw = getattr(request, "post_data_buffer", None) or b""
+                    if isinstance(raw, bytes):
+                        for field, value in re.findall(
+                            rb'name="(command|media_id)"\r\n\r\n([A-Za-z0-9_]+)\r\n', raw):
+                            values.setdefault(field.decode("ascii"), [value.decode("ascii")])
+                    if (values.get("command") or [""])[0] == "APPEND":
+                        linked = (values.get("media_id") or [""])[0]
+                    if linked in self.media_ids:
+                        receipt_id = linked
+                if not isinstance(receipt_id, str) or not re.fullmatch(r"[0-9]+", receipt_id):
+                    self.notify("unknown", part=part, name=name, httpStatus=status)
+                self.notify("receipt", part=part, name=name, httpStatus=status, id=receipt_id,
+                            evidence_source="retained_media_ack" if linked else "provider_response")
+                if create:
+                    self.post_id = receipt_id
+                else:
+                    self.media_ids.add(receipt_id)
+            await route.fulfill(response=response)
+        except Exception as exc:
+            # Propagate to the owning coroutine, never log-and-continue a lease
+            # failure. Aborting here cannot prove an already fetched write absent.
+            if self.error is None:
+                self.error = exc
+            await route.abort()
 
 
 class TwitterThreadVideo(BaseVideoUploader):
@@ -610,6 +783,7 @@ class TwitterThreadVideo(BaseVideoUploader):
         *,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        delivery_observer: Callable[[dict], object] | None = None,
     ) -> None:
         if not file_paths:
             raise ValueError("Twitter thread upload requires at least one file")
@@ -623,6 +797,9 @@ class TwitterThreadVideo(BaseVideoUploader):
         self.publish_date = self.validate_publish_date(publish_date)
         self.debug = debug
         self.headless = headless
+        self.delivery_observer = delivery_observer
+        self._browser_evidence = None
+        self._browser_parts = {}
 
     @classmethod
     def _validate_media_file(cls, file_path: str | Path) -> Path:
@@ -710,7 +887,11 @@ class TwitterThreadVideo(BaseVideoUploader):
         await self._wait_for_attachments(page, expected=len(media_paths))
 
     async def _submit_composer(self, page: Page, button) -> None:
-        await click_post_button(page, button)
+        evidence = getattr(self, "_browser_evidence", None)
+        def before_action():
+            evidence.check()
+            evidence.action = evidence.notify("create_action", reply_to=evidence.reply_to)
+        await click_post_button(page, button, before_action=before_action if evidence else None)
 
     async def _publish_segment(
         self,
@@ -720,43 +901,70 @@ class TwitterThreadVideo(BaseVideoUploader):
         *,
         total_segments: int,
     ) -> str:
-        if previous_post_id is None:
-            await page.goto(TWITTER_COMPOSE_URL)
-        else:
-            await self._open_reply_composer(page, previous_post_id)
-
-        await self._fill_composer(
-            page,
-            segment=segment,
-            text=self._build_post_text(
-                segment,
-                total_segments=total_segments,
-                is_root=previous_post_id is None,
-            ),
-        )
-
-        button = await wait_for_ready_post_button(page)
-        async with page.expect_response(
-            lambda response: (
-                response.request.method == "POST"
-                and TWITTER_CREATE_TWEET_RESPONSE_TOKEN in response.url
-                and response.ok
-            ),
-            timeout=TWITTER_POST_BUTTON_READY_TIMEOUT_MS,
-        ) as response_info:
-            await self._submit_composer(page, button)
-
-        response = await response_info.value
-        payload = await response.json()
-        post_id = extract_created_post_id(payload)
-        if not post_id:
-            raise RuntimeError("Twitter publish succeeded but no post id was found")
-        return post_id
+        evidence = getattr(self, "_browser_evidence", None)
+        if getattr(self, "delivery_observer", None) is not None and evidence is None:
+            raise delivery.DeliveryUnknown("X observer supplied without fail-closed network instrumentation")
+        if evidence:
+            evidence.check()
+            evidence.approved = self._browser_parts[segment.post_index]
+            evidence.reply_to = previous_post_id
+            evidence.media_ids = set()
+            evidence.part = self._browser_parts[segment.post_index]["identity"]
+            evidence.action = None
+            evidence.create_seen = False
+            evidence.post_id = None
+            evidence.notify("preparing")
+        try:
+            if previous_post_id is None:
+                await page.goto(TWITTER_COMPOSE_URL)
+            else:
+                await self._open_reply_composer(page, previous_post_id)
+            await self._fill_composer(
+                page, segment=segment, text=self._build_post_text(
+                    segment, total_segments=total_segments, is_root=previous_post_id is None))
+            button = await wait_for_ready_post_button(page)
+            if evidence:
+                evidence.check()
+            async with page.expect_response(
+                lambda response: response.request.method == "POST"
+                and TWITTER_CREATE_TWEET_RESPONSE_TOKEN in response.url,
+                timeout=TWITTER_POST_BUTTON_READY_TIMEOUT_MS,
+            ) as response_info:
+                await self._submit_composer(page, button)
+            response = await response_info.value
+            if evidence:
+                evidence.check()
+                if not evidence.post_id:
+                    evidence.notify("unknown", name=evidence.action, httpStatus=response.status)
+                return evidence.post_id
+            # Default callers still require the worker's conservative outer
+            # fence. Capture all statuses; absence of a receipt is never success.
+            if not response.ok:
+                raise delivery.DeliveryUnknown(f"X browser returned HTTP {response.status}; no owned evidence callback")
+            payload = await response.json()
+            post_id = _browser_post_id(payload)
+            if not post_id:
+                raise delivery.DeliveryUnknown("X CreateTweet returned no verified tweet receipt")
+            return post_id
+        except Exception:
+            if evidence:
+                evidence.check()
+                if evidence.action is not None and evidence.post_id is None:
+                    evidence.notify("unknown", name=evidence.action)
+            raise
 
     async def _publish_prepared_segments(
         self,
         prepared_segments: Sequence[PreparedTwitterSegment],
     ) -> list[str]:
+        observer = getattr(self, "delivery_observer", None)
+        if observer is not None:
+            self._browser_evidence = _XBrowserSession(observer)
+            parts = [browser_segment_identity(segment, self._build_post_text(
+                segment, total_segments=len(prepared_segments), is_root=i == 0))
+                for i, segment in enumerate(prepared_segments)]
+            self._browser_parts = {part["index"]: part for part in parts}
+            self._browser_evidence.notify("plan", parts=parts)
         browser_options = get_browser_options()
         browser_options["headless"] = self.headless
 
@@ -764,9 +972,12 @@ class TwitterThreadVideo(BaseVideoUploader):
             browser = await playwright.chromium.launch(**browser_options)
             context = None
             try:
-                context = await browser.new_context(storage_state=self.account_file)
+                context = await browser.new_context(storage_state=self.account_file,
+                    **({"service_workers": "block"} if observer is not None else {}))
                 context = await set_init_script(context)
                 context = await _block_heavy_media(context)
+                if getattr(self, "_browser_evidence", None) is not None:
+                    await context.route("**/*", self._browser_evidence.route)
                 page = await context.new_page()
 
                 async def publish_step(
@@ -780,7 +991,11 @@ class TwitterThreadVideo(BaseVideoUploader):
                         total_segments=len(prepared_segments),
                     )
 
-                return await publish_thread_segments(prepared_segments, publish_step)
+                result = await publish_thread_segments(prepared_segments, publish_step)
+                if getattr(self, "_browser_evidence", None) is not None:
+                    self._browser_evidence.check()
+                    self._browser_evidence.notify("complete")
+                return result
             finally:
                 if context is not None:
                     # Refreshing the stored session is a cache update, not part

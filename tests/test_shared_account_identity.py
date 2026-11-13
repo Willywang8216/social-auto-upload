@@ -12,6 +12,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from myUtils import campaign_prep, campaigns, jobs, profiles, publish_orchestrator as po
+from myUtils import media_compliance, publish_admission, publish_readiness
+from tests.test_atomic_publication_groups import prepared_video_metadata, prospective_draft_fixture, synthetic_video_probe
 
 
 class _Account:
@@ -142,6 +144,17 @@ class SharedTikTokFinalizerTests(unittest.TestCase):
         self.content_language = "en"
         self.enterContext(patch.object(po, "MIN_GAP_MINUTES", 30))
         self.enterContext(patch.object(po, "MAX_POSTS_PER_ACCOUNT_PER_DAY", 3))
+        self._durations = {}
+        self.enterContext(patch.dict(os.environ, {
+            "SOCIAMONIALS_API_KEY": "offline-fixture-key", "SOCIAMONIALS_TEACHING_API_KEY": "offline-teaching-key",
+        }))
+        self.enterContext(patch.object(media_compliance, "_source_metadata",
+                                      side_effect=lambda path: synthetic_video_probe(path, self._durations)))
+        self.enterContext(patch.object(publish_readiness, "_project", return_value={
+            "ready": True, "reasonCode": "ready", "evidence": {"capabilities": ["video", "image", "carousel"]},
+        }))
+        self.enterContext(patch.object(publish_admission, "prospective_draft_options",
+                                      side_effect=prospective_draft_fixture, create=True))
 
     def _record(self, path, *, db_path):
         with closing(sqlite3.connect(db_path)) as conn, conn:
@@ -153,11 +166,16 @@ class SharedTikTokFinalizerTests(unittest.TestCase):
 
     def _prepare(self, campaign_id, profile, media_files, request_data, **kwargs):
         for media in media_files:
+            source = Path(media["file_path"])
+            self._durations[str(source)] = float(self.parts_per_file * 10)
             for index in range(1, self.parts_per_file + 1):
+                path = self.base / f"prepared-{campaign_id}-{media['file_record_id']}-{index}.mp4"
+                path.write_bytes(f"offline prepared {campaign_id}/{media['file_record_id']}/{index}".encode())
+                metadata = prepared_video_metadata(path, source, "tiktok", index=index,
+                    count=self.parts_per_file, generation=f"offline-{campaign_id}-{media['file_record_id']}")
                 campaigns.add_campaign_artifact(
                     campaign_id, artifact_kind="prepared_video", source_file_record_id=media["file_record_id"],
-                    local_path=media["file_path"], metadata={"role": "video", "part_index": index,
-                                                          "part_count": self.parts_per_file}, db_path=self.db_path,
+                    local_path=str(path), metadata=metadata, db_path=self.db_path,
                 )
         return {"language": self.content_language, "languageSource": "supplied",
                 "transcriptText": "An offline walk beside the river."}
@@ -191,8 +209,7 @@ class SharedTikTokFinalizerTests(unittest.TestCase):
                          artifact_part_groups_for_platform=self._parts,
                          generate_account_draft=lambda *_args: {"message": "An offline walk beside the river."},
                          job_to_payload=lambda job: job.to_dict())
-        with patch.object(preparation_context, "configure_request", side_effect=self._configure), \
-                patch.object(po, "_prepared_post_groups", side_effect=self._groups):
+        with patch.object(preparation_context, "configure_request", side_effect=self._configure):
             if not asynchronous:
                 return po.submit_publish(**common, **callbacks)
             admitted = campaign_prep.submit_publish_async(**common)
@@ -294,8 +311,9 @@ class SharedTikTokFinalizerTests(unittest.TestCase):
 
     def _assert_midnight_parts_stay_ordered(self, asynchronous):
         self.parts_per_file = 2
+        from tests.legacy_queue import enqueue_legacy_job
         for index in range(3):
-            jobs.enqueue_job(jobs.JobSpec(platform="tiktok", profile_id=self.first.id,
+            enqueue_legacy_job(jobs.JobSpec(platform="tiktok", profile_id=self.first.id,
                 payload={"message": "A different previously booked publication."},
                 targets=[(f"account:{self.nw.id}", f"/unrelated-{index}.mp4", (NOW + timedelta(minutes=30 * index)).isoformat())]),
                 db_path=self.db_path)

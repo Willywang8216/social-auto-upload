@@ -297,3 +297,246 @@ def poll_youtube_video(http, payload, access_token: str, video_id: str, *, priva
         raise publishers.PreparedPublishError(
             f"YouTube uploaded {video_id} as '{actual}' but '{requested}' was requested "
             "(check API project visibility restrictions)", retryable=False)
+
+
+def _x_digest(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                    allow_nan=False).encode()).hexdigest()
+
+
+def x_browser_has_effects(current: dict) -> bool:
+    """Fail closed on new browser effects, independently of legacy API journals.
+
+    Preparation alone is not a publishing fence. Only a generation-bound real
+    rejection can resolve retained, fully identified media-only effects.
+    """
+    journal = current.get("x_browser_operations")
+    if journal is None:
+        return False
+    if (not isinstance(journal, dict) or type(journal.get("version")) is not int or journal["version"] != 1
+            or type(journal.get("target_id")) is not int or journal["target_id"] <= 0
+            or not isinstance(journal.get("account_key"), str) or not journal["account_key"]
+            or not isinstance(journal.get("plan"), list) or not journal["plan"]
+            or not isinstance(journal.get("budgets"), dict)):
+        return True
+    items = journal.get("items")
+    if not isinstance(items, dict):
+        return True
+    if not items:
+        return False
+    proof = current.get("x_browser_non_delivery")
+    try:
+        return not (isinstance(proof, dict)
+            and proof.get("journal_sha256") == _x_digest(journal)
+            and proof.get("target_id") == journal.get("target_id")
+            and proof.get("account_key") == journal.get("account_key")
+            and proof.get("operation_generation") == current.get("operation_generation")
+            and proof.get("operation") == current.get("operation")
+            and proof.get("httpStatus") in {401, 402, 429}
+            and isinstance(proof.get("operation_generation"), str)
+            and re.fullmatch(r"[0-9a-f]{32}", proof["operation_generation"])
+            and isinstance(proof.get("operation"), str) and proof["operation"].startswith("browser-publish:twitter:")
+            and all(isinstance(item, dict) and (
+                item.get("effect") == "media_only" and item.get("status") == "complete" and item.get("id")
+                or item.get("effect") == "publication" and item.get("status") == "rejected"
+                   and item.get("httpStatus") in {401, 402, 429}) for item in items.values()))
+    except (TypeError, ValueError):
+        return True
+
+
+class XBrowserObserver:
+    """Synchronous event callback; every save uses the worker's lease/CAS writer.
+
+    Kept separate from legacy ``provider_operations.twitter``: neither previews
+    nor this prospective format can authorize historical media-only proofs.
+    """
+    def __init__(self, payload: dict, *, target_id: int, account_key: str,
+                 max_create_attempts: int = 3, max_media_requests: int = 256):
+        if (type(target_id) is not int or target_id <= 0 or not isinstance(account_key, str) or not account_key
+                or str(payload.get("_telegramDeliveryKey")) != str(target_id)
+                or not callable(payload.get("_save_checkpoint"))):
+            raise ValueError("X browser evidence requires an exact target/account and fenced checkpoint writer")
+        if any(type(n) is not int or n < 1 for n in (max_create_attempts, max_media_requests)):
+            raise ValueError("X browser budgets must be positive finite integers")
+        if delivery.has_unresolved_submission(payload):
+            raise delivery.DeliveryUnknown("Retained delivery evidence forbids a new X browser attempt")
+        self.payload = payload
+        self.journal = copy.deepcopy(delivery.state(payload).get("x_browser_operations") or {
+            "version": 1, "target_id": target_id, "account_key": account_key,
+            "items": {}, "budgets": {}, "plan": None})
+        if self.journal.get("target_id") != target_id or self.journal.get("account_key") != account_key:
+            raise delivery.DeliveryUnknown("X browser evidence belongs to another target/account")
+        self.max_create_attempts = max_create_attempts
+        self.max_media_requests = max_media_requests
+        self.active_create = None
+
+    def _save(self, **changes):
+        if str(self.payload.get("_telegramDeliveryKey")) != str(self.journal["target_id"]):
+            raise delivery.LeaseLost("X browser callback target binding changed")
+        return delivery.checkpoint(self.payload, x_browser_operations=self.journal, **changes)
+
+    def _budget(self, part: str, kind: str, maximum: int):
+        key = f"{part}:{kind}"
+        previous = self.journal["budgets"].get(key, {"attempts": 0, "max_attempts": maximum})
+        count, limit = previous.get("attempts"), previous.get("max_attempts")
+        if type(count) is not int or count < 0 or type(limit) is not int or limit < 1:
+            raise delivery.DeliveryUnknown("Invalid X browser request budget")
+        limit = min(limit, maximum)
+        if count >= limit:
+            error = delivery.RouteExhausted("native")
+            if delivery.has_unresolved_submission(self.payload):
+                error.details["retrySafe"] = False
+            raise error
+        self.journal["budgets"][key] = {"attempts": count + 1, "max_attempts": limit}
+        return count + 1
+
+    def __call__(self, event: dict):
+        kind = event["event"]
+        if kind == "plan":
+            plan = event["parts"]
+            if (not isinstance(plan, list) or not plan
+                    or any(not isinstance(part, dict) or part.get("index") != i
+                           or not isinstance(part.get("identity"), str)
+                           or not re.fullmatch(r"[0-9a-f]{64}", part["identity"])
+                           for i, part in enumerate(plan))
+                    or len({part["identity"] for part in plan}) != len(plan)):
+                raise delivery.DeliveryUnknown("Invalid ordered X browser plan")
+            if self.journal["plan"] is not None and self.journal["plan"] != plan:
+                raise delivery.DeliveryUnknown("X browser ordered media/text identity changed")
+            self.journal["plan"] = copy.deepcopy(plan)
+            self._save(stage="browser_preparing")
+            return
+        if kind == "complete":
+            plan = self.journal["plan"] or []
+            receipts = [item for item in self.journal["items"].values()
+                        if item.get("effect") == "publication" and item.get("status") == "complete"]
+            if (not plan or len(receipts) != len(plan)
+                    or {item["part"] for item in receipts} != {part["identity"] for part in plan}
+                    or any(item.get("status") in {"started", "unknown"} for item in self.journal["items"].values())):
+                raise delivery.DeliveryUnknown("X browser thread lacks all exact-part receipts")
+            receipts.sort(key=lambda item: item["part_index"])
+            self._save(stage="browser_delivered")
+            delivery.confirmed(self.payload, provider="twitter", receipt_id=receipts[-1]["id"])
+            return
+        part = event["part"]
+        plan = self.journal["plan"] or []
+        index = next((i for i, entry in enumerate(plan) if entry["identity"] == part), None)
+        if index is None:
+            raise delivery.DeliveryUnknown("X browser operation is not in the approved ordered plan")
+        if kind == "preparing":
+            self._save(stage="browser_preparing", browser_part_index=index)
+            return
+        if kind in {"create_action", "media_request"}:
+            create = kind == "create_action"
+            if create and self.active_create:
+                raise delivery.DeliveryUnknown("X browser already owns a post action")
+            if create:
+                if any(item.get("status") in {"started", "unknown"}
+                       for item in self.journal["items"].values()):
+                    raise delivery.DeliveryUnknown("X browser has unresolved media/create effects before Post")
+                receipts = [item for item in self.journal["items"].values()
+                            if item.get("effect") == "publication" and item.get("status") == "complete"]
+                if (len(receipts) != index or {item["part_index"] for item in receipts} != set(range(index))
+                        or (receipts and event.get("reply_to") != next(
+                            item["id"] for item in receipts if item["part_index"] == index - 1))):
+                    raise delivery.DeliveryUnknown("X browser must not replay or skip a retained thread prefix")
+            elif self.active_create:
+                raise delivery.DeliveryUnknown("X media write arrived after the post action fence")
+            sequence = self._budget(part, "create" if create else "media",
+                                    self.max_create_attempts if create else self.max_media_requests)
+            name = f"{'create' if create else 'media'}:{index}:{sequence}"
+            generation = uuid4().hex
+            self.journal["items"][name] = {"status": "started", "part": part, "part_index": index,
+                "effect": "publication" if create else "media_only", "operation_generation": generation,
+                "target_id": self.journal["target_id"], "account_key": self.journal["account_key"],
+                "submitted_at": delivery.utc_now()}
+            if create:
+                self.active_create = name
+                self._save(submission_started=True, operation=f"browser-publish:twitter:{name}",
+                           operation_generation=generation, operation_started_at=delivery.utc_now(),
+                           stage="browser_creating")
+            else:
+                self._save(stage="browser_media_upload")
+            return name
+        name = event.get("name") or self.active_create
+        item = self.journal["items"].get(name)
+        statuses = {"started", "unknown"} if kind in {"receipt", "rejection"} else {"started"}
+        if not isinstance(item, dict) or item["part"] != part or item["status"] not in statuses:
+            raise delivery.DeliveryUnknown("X browser response does not match an owned operation")
+        if (item["effect"] == "publication" and
+                item["operation_generation"] != delivery.state(self.payload).get("operation_generation")):
+            raise delivery.DeliveryUnknown("X browser response belongs to a stale operation generation")
+        if kind == "create_request":
+            if item["effect"] != "publication":
+                raise delivery.DeliveryUnknown("Invalid X browser create fence")
+            self._save(submission_started=True)  # Revalidate lease immediately before upstream POST.
+            return
+        status = event.get("httpStatus")
+        if type(status) is int:
+            item["httpStatus"] = status
+        if kind == "unknown":
+            item["status"] = "unknown"
+            self._save()
+            error = delivery.DeliveryUnknown(f"X browser {item['effect']} response is unknown")
+            error.details = {"retrySafe": False, "effect": item["effect"],
+                             "operationGeneration": item["operation_generation"]}
+            raise error
+        if kind == "receipt":
+            receipt_id = event.get("id")
+            if not isinstance(receipt_id, str) or not re.fullmatch(r"[0-9]+", receipt_id):
+                raise delivery.DeliveryUnknown("X browser returned no usable provider receipt")
+            item.update(status="complete", id=receipt_id,
+                        evidence_source=event.get("evidence_source", "provider_response"))
+            if item["effect"] == "publication":
+                self.active_create = None
+                self._save(submission_started=True, stage="browser_part_confirmed")
+                delivery.accepted(self.payload, provider="twitter", receipt_id=receipt_id,
+                                  operation_generation=item["operation_generation"],
+                                  target_id=item["target_id"], account_key=item["account_key"],
+                                  part=part, part_index=index, part_count=len(plan))
+            else:
+                self._save()
+            return
+        if kind == "rejection":
+            # Native HTTP guard's documented safe subset; a 4xx label alone is
+            # not permission to resolve every earlier effect (408/5xx unknown).
+            safe = status in {401, 402, 429}
+            item["status"] = "rejected"
+            item["providerErrorCodes"] = [code for code in event.get("provider_codes", [])
+                                          if type(code) is int][:8]
+            self._save()
+            all_safe = (safe and item["effect"] == "publication" and all(
+                prior["effect"] == "media_only" and prior["status"] == "complete" and prior.get("id")
+                or prior["effect"] == "publication" and prior["status"] == "rejected"
+                   and prior.get("httpStatus") in {401, 402, 429}
+                for prior in self.journal["items"].values()))
+            details = {"httpStatus": status, "definitiveNonDelivery": safe,
+                       "operationGeneration": item["operation_generation"], "retrySafe": bool(all_safe)}
+            details["providerErrorCodes"] = item["providerErrorCodes"]
+            if all_safe:
+                self._save(x_browser_non_delivery={"target_id": item["target_id"],
+                    "account_key": item["account_key"], "httpStatus": status,
+                    "operation": delivery.state(self.payload).get("operation"),
+                    "operation_generation": item["operation_generation"],
+                    "journal_sha256": _x_digest(self.journal)})
+                delivery.record_non_delivery(self.payload, provider="native", reason=f"X CreateTweet HTTP {status}")
+            if not all_safe:
+                error = delivery.DeliveryUnknown("X rejection retained; other effects need reconciliation")
+                error.details = details
+                raise error
+            from myUtils.prepared_publishers import PreparedPublishError
+            raise PreparedPublishError(f"HTTP {status}: X CreateTweet rejected", retryable=status == 429,
+                                       details=details)
+        raise delivery.DeliveryUnknown("Unsupported X browser evidence event")
+
+
+def make_x_browser_observer(payload: dict, *, target_id: int, account_key: str,
+                            max_create_attempts: int = 3, max_media_requests: int = 256):
+    """Parent must pass canonical target.account_ref, not a cookie filename.
+
+    Remove ONLY the X outer starting() fence when this callback is passed all
+    the way into TwitterThreadVideo. No callback => retain the worker guard.
+    Budgets here are per exact part and do not replace/refund route budgets.
+    """
+    return XBrowserObserver(payload, target_id=target_id, account_key=account_key,
+                            max_create_attempts=max_create_attempts, max_media_requests=max_media_requests)

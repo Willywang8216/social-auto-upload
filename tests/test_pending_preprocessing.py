@@ -81,8 +81,12 @@ def pending_job(database, tmp_path, *, name="selected", schedule=SLOT, payload_p
     payload = {"message": f"Approved {name} 原稿", "draft": {"privacy": "keep"},
                "artifacts": [{"local_path": str(source), "metadata": {"alt_text": "Keep"}}]}
     payload.update(payload_patch or {})
-    job = jobs.enqueue_job(jobs.JobSpec(platform="threads", profile_id=profile.id, payload=payload,
-        targets=[(f"account:{account.id}", str(source), schedule)], idempotency_key=f"pending-fixture:{name}"), db_path=path)
+    # Genuine pre-admission history: no new readiness checkpoint or retry budget.
+    job_id = sql(path, "INSERT INTO publish_jobs(idempotency_key,profile_id,platform,payload_json,status,total_targets) "
+                 "VALUES(?,?,'threads',?,'pending',1)", (f"pending-fixture:{name}", profile.id, json.dumps(payload)))
+    sql(path, "INSERT INTO publish_job_targets(job_id,account_ref,file_ref,schedule_at,status) VALUES(?,?,?,?,'pending')",
+        (job_id, f"account:{account.id}", str(source), schedule))
+    job = jobs.get_job(job_id, db_path=path)
     return job, jobs.list_targets(job.id, db_path=path)[0]
 
 
@@ -101,7 +105,7 @@ def invalid_pipeline(tmp_path, monkeypatch):
             part = copy.deepcopy(payload)
             part.update(_preserveApprovedText=True, preparedPost={"index": index, "count": 3})
             part["artifacts"] = [{"local_path": str(path), "artifact_kind": "prepared_image",
-                "metadata": {"sha256": media_compliance.sha256_file(path), "alt_text": f"Ordered {index}"}}]
+                "metadata": {"sha256": media_compliance.sha256_file(path), "alt_text": "Keep", "test_order": index}}]
             parts.append(part)
         return parts
     encoder = Mock(side_effect=prepare)
@@ -331,10 +335,12 @@ def test_new_delivered_or_inflight_duplicate_is_rechecked(database, tmp_path, in
     plan = prepare(database, target, tmp_path)
     alias = profiles.add_account(profile.id, platform="threads", account_name="alias", auth_type="oauth",
                                  config=account.config, db_path=path)
-    other = jobs.enqueue_job(jobs.JobSpec(platform="threads", profile_id=profile.id,
-        payload=jobs.get_job(job.id, db_path=path).payload, idempotency_key="new-duplicate",
-        targets=[(f"account:{alias.id}", target.file_ref, SLOT)]), db_path=path)
-    other_target = jobs.list_targets(other.id, db_path=path)[0]
+    # This competing row is also legacy history, not a newly admitted publish.
+    other_id = sql(path, "INSERT INTO publish_jobs(idempotency_key,profile_id,platform,payload_json,status,total_targets) "
+                   "VALUES('new-duplicate',?,'threads',?,'pending',1)", (profile.id, json.dumps(job.payload)))
+    sql(path, "INSERT INTO publish_job_targets(job_id,account_ref,file_ref,schedule_at,status) VALUES(?,?,?,?,'pending')",
+        (other_id, f"account:{alias.id}", target.file_ref, SLOT))
+    other_target = jobs.list_targets(other_id, db_path=path)[0]
     update(path, "publish_job_targets", other_target.id, status=other_status, checkpoint_json=json.dumps(checkpoint))
     with pytest.raises(prep.recovery.RecoveryRefused, match="duplicate"):
         prepare(database, target, tmp_path)

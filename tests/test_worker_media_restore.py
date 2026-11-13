@@ -10,6 +10,7 @@ from unittest.mock import patch
 import db.createTable as create_table
 from myUtils import worker
 from myUtils.sqlite_utils import Connection as ClosingConnection
+from tests.media_restore_fixtures import setup_restore_transport, register_public_file
 
 # A valid ISO-BMFF header (size + b"ftyp") so the restore media-integrity
 # guard accepts the fixture bytes the mocked downloads write.
@@ -22,6 +23,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.db_path = self.root / "restore.db"
         create_table.bootstrap(self.db_path)
+        setup_restore_transport(self, _MP4_FIXTURE)
         with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO file_records (filename, filesize, file_path, storage_key) VALUES (?, ?, ?, ?)",
@@ -41,7 +43,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
                          "VALUES ('x.mp4',132,'uploads/x.mp4','x.mp4',?)", (backend_id,))
         with patch.object(worker, "BASE_DIR", self.root), patch.object(
             worker.media_remote_storage, "download_from_backend",
-            side_effect=lambda _backend, _key, destination: Path(destination).write_bytes(_MP4_FIXTURE),
+            side_effect=lambda _backend, _key, destination, **_kwargs: Path(destination).write_bytes(_MP4_FIXTURE),
         ) as download:
             result = worker._resolve_file_path("/app/uploads/x.mp4", db_path=self.db_path)
         self.assertEqual(result, self.root / "uploads" / "x.mp4")
@@ -75,14 +77,14 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             conn.execute("UPDATE file_records SET storage_backend_id=?", (backend_id,))
         destination = self.root / "videoFile" / "clip.mp4"
 
-        def partial_then_fail(_backend, _key, temporary_path):
+        def partial_then_fail(_backend, _key, temporary_path, **_kwargs):
             Path(temporary_path).write_bytes(b"partial")
             raise OSError("connection dropped")
 
         with patch.object(worker, "BASE_DIR", self.root), patch.object(
             worker.media_remote_storage, "download_from_backend", side_effect=partial_then_fail
         ):
-            with self.assertRaisesRegex(worker.MediaRestoreError, "connection dropped"):
+            with self.assertRaisesRegex(worker.MediaRestoreError, "unavailable"):
                 worker._resolve_file_path("clip.mp4", db_path=self.db_path)
 
         self.assertFalse(destination.exists())
@@ -109,7 +111,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             conn.execute("UPDATE file_records SET storage_backend_id=? WHERE file_path='videoFile/prefixed.mp4'", (backend_id,))
         destination = self.root / "videoFile" / "prefixed.mp4"
 
-        def write_media(_backend, _key, temporary_path):
+        def write_media(_backend, _key, temporary_path, **_kwargs):
             Path(temporary_path).write_bytes(_MP4_FIXTURE)
 
         with patch.object(worker, "BASE_DIR", self.root), patch.object(
@@ -146,7 +148,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
 
         payload = {"artifacts": [{"local_path": str(self.root / "videoFile" / "_batch1" / "x.mp4")}]}
 
-        def write_media(_backend, _key, temporary_path):
+        def write_media(_backend, _key, temporary_path, **_kwargs):
             Path(temporary_path).write_bytes(_MP4_FIXTURE)
 
         with patch.object(worker, "BASE_DIR", self.root), patch.object(
@@ -173,8 +175,9 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             "public_url": "https://cdn.example/clip_pub.mp4",
             "source_file_record_id": 1,
         }]}
+        register_public_file(self, payload["artifacts"][0], _MP4_FIXTURE)
 
-        def write_source(_backend, _key, _temporary_path):
+        def write_source(_backend, _key, _temporary_path, **_kwargs):
             raise OSError("backend object unavailable; use safe public URL fallback")
 
         class Response:
@@ -185,7 +188,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             def __exit__(self, *_args): return None
             def raise_for_status(self): return None
             def iter_content(self, chunk_size):
-                assert chunk_size == 1024 * 1024
+                assert 0 < chunk_size <= 1024 * 1024
                 yield _MP4_FIXTURE
 
         with patch.object(worker, "BASE_DIR", self.root), patch.object(
@@ -196,10 +199,16 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
         self.assertEqual(generated_path.read_bytes(), _MP4_FIXTURE)
-        get.assert_called_once_with(
-            "https://cdn.example/clip_pub.mp4", timeout=(10, 120),
-            stream=True, allow_redirects=False,
-        )
+        get.assert_called_once()
+        self.assertEqual(get.call_args.args[0], "https://cdn.example/clip_pub.mp4")
+        self.assertIs(get.call_args.kwargs["allow_redirects"], False)
+        self.assertIs(get.call_args.kwargs["stream"], True)
+        timeout = get.call_args.kwargs["timeout"]
+        if isinstance(timeout, tuple):
+            connect_timeout, read_timeout = timeout
+            self.assertTrue(0 < connect_timeout <= 10 and 0 < read_timeout <= 120)
+        else:
+            self.assertTrue(0 < timeout <= 120)
 
     def test_generated_artifact_never_falls_back_to_source_record(self) -> None:
         with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
@@ -227,10 +236,10 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             worker.media_remote_storage, "download_from_backend",
             side_effect=AssertionError("unregistered generated record must not use source bytes"),
         ):
-            with self.assertRaisesRegex(worker.MediaRestoreError, "safe public HTTPS"):
+            with self.assertRaisesRegex(worker.MediaRestoreError, "unavailable"):
                 worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
-    def test_legacy_generated_artifact_uses_exact_registered_object_key(self) -> None:
+    def test_remote_object_key_never_guesses_a_different_registered_local_path(self) -> None:
         with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO storage_backends (slug,label,provider,bucket,region,endpoint,access_key,secret_key) VALUES (?,?,?,?,?,?,?,?)",
@@ -252,11 +261,13 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
         ), patch.object(
             worker.media_remote_storage, "download_from_backend",
-            side_effect=lambda _backend, _key, destination: Path(destination).write_bytes(_MP4_FIXTURE),
+            side_effect=lambda _backend, _key, destination, **_kwargs: Path(destination).write_bytes(_MP4_FIXTURE),
         ) as download:
-            worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
-        self.assertEqual(generated_path.read_bytes(), _MP4_FIXTURE)
-        self.assertEqual(download.call_args.args[1], "campaigns/campaign-2236/clip_pub.mp4")
+            with self.assertRaises(worker.MediaRestoreError) as failure:
+                worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
+        self.assertEqual(failure.exception.details["dependencyCategory"], "identity")
+        self.assertFalse(generated_path.exists())
+        download.assert_not_called()
 
     def test_legacy_generated_object_key_is_refused_across_ambiguous_roots(self) -> None:
         with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
@@ -302,7 +313,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
         ), patch.object(
             worker.media_remote_storage, "download_from_backend",
-            side_effect=lambda _backend, _key, destination: Path(destination).write_bytes(_MP4_FIXTURE),
+            side_effect=lambda _backend, _key, destination, **_kwargs: Path(destination).write_bytes(_MP4_FIXTURE),
         ) as download, patch(
             "requests.get", side_effect=AssertionError("Drive mapping should be preferred")
         ):
@@ -410,7 +421,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             "local_path": "/home/will/social-auto-upload/videoFile/_inbox_cache/demo.mp4",
         }]}
 
-        def write_media(_backend, _key, temporary_path):
+        def write_media(_backend, _key, temporary_path, **_kwargs):
             Path(temporary_path).write_bytes(_MP4_FIXTURE)
 
         with patch.object(worker, "BASE_DIR", container_root), patch.object(
@@ -449,7 +460,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         payload = {"artifacts": [{"local_path": "/app/videoFile/_inbox_cache/demo2.mp4"}]}
         destination = self.root / "videoFile" / "_inbox_cache" / "demo2.mp4"
 
-        def write_media(_backend, _key, temporary_path):
+        def write_media(_backend, _key, temporary_path, **_kwargs):
             Path(temporary_path).write_bytes(_MP4_FIXTURE)
 
         with patch.object(worker, "BASE_DIR", self.root), patch.object(
@@ -495,7 +506,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         ), patch.object(
             worker.media_remote_storage,
             "download_from_backend",
-            side_effect=lambda _backend, _key, dest: Path(dest).write_bytes(_MP4_FIXTURE),
+            side_effect=lambda _backend, _key, dest, **_kwargs: Path(dest).write_bytes(_MP4_FIXTURE),
         ) as download:
             worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
@@ -507,7 +518,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             "local_path": "/home/will/social-auto-upload/videoFile/_inbox_cache/gone.mp4",
         }]}
         with patch.object(worker, "BASE_DIR", self.root / "app"):
-            with self.assertRaisesRegex(worker.MediaRestoreError, "no file record"):
+            with self.assertRaisesRegex(worker.MediaRestoreError, "unavailable"):
                 worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
     def test_permission_error_on_missing_path_is_reported_as_path_problem(self) -> None:
@@ -532,7 +543,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         with patch.object(worker, "BASE_DIR", self.root / "app"), patch(
             "pathlib.Path.mkdir", deny_mkdir
         ):
-            with self.assertRaisesRegex(worker.MediaRestoreError, "after normalisation"):
+            with self.assertRaisesRegex(worker.MediaRestoreError, "unavailable"):
                 worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
     def test_generated_artifact_rejects_private_redirect_target(self) -> None:
@@ -561,7 +572,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
         with patch.object(worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root), patch(
             "requests.get", side_effect=AssertionError("unsafe localhost URL must not be fetched")
         ):
-            with self.assertRaisesRegex(worker.MediaRestoreError, "safe public HTTPS"):
+            with self.assertRaisesRegex(worker.MediaRestoreError, "unavailable"):
                 worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
     def test_cdn_empty_response_is_rejected_and_tempfile_removed(self) -> None:
@@ -583,7 +594,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
 
         payload = {"artifacts": [{"local_path": str(destination), "source_file_record_id": 1}]}
         with patch("requests.get", return_value=Response()):
-            with self.assertRaisesRegex(worker.MediaRestoreError, "empty"):
+            with self.assertRaisesRegex(worker.MediaRestoreError, "unavailable"):
                 worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
         self.assertFalse(destination.exists())
@@ -634,9 +645,9 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
         ), patch.object(
             worker.media_remote_storage, "download_from_backend",
-            side_effect=lambda _backend, _key, dest: Path(dest).write_bytes(b"x"),
+            side_effect=lambda _backend, _key, dest, **_kwargs: Path(dest).write_bytes(b"x"),
         ):
-            with self.assertRaisesRegex(worker.MediaRestoreError, "not the media"):
+            with self.assertRaisesRegex(worker.MediaRestoreError, "unavailable"):
                 worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
         self.assertFalse(generated_path.exists())
         self.assertEqual(list(generated_path.parent.glob("*.part")), [])
@@ -659,6 +670,7 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             "local_path": str(generated_path),
             "public_url": "https://cdn.example/clip_pub.mp4",
         }]}
+        register_public_file(self, payload["artifacts"][0], _MP4_FIXTURE)
 
         class Response:
             headers = {}
@@ -668,14 +680,14 @@ class WorkerMediaRestoreTests(unittest.TestCase):
             def __exit__(self, *_args): return None
             def raise_for_status(self): return None
             def iter_content(self, chunk_size):
-                assert chunk_size == 1024 * 1024
+                assert 0 < chunk_size <= 1024 * 1024
                 yield _MP4_FIXTURE
 
         with patch.object(worker, "BASE_DIR", self.root), patch.object(
             worker.media_pipeline, "GENERATED_MEDIA_ROOT", generated_root
         ), patch.object(
             worker.media_remote_storage, "download_from_backend",
-            side_effect=lambda _backend, _key, dest: Path(dest).write_bytes(b"x"),
+            side_effect=lambda _backend, _key, dest, **_kwargs: Path(dest).write_bytes(b"x"),
         ), patch("requests.get", return_value=Response()):
             worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
         self.assertEqual(generated_path.read_bytes(), _MP4_FIXTURE)
@@ -704,6 +716,7 @@ class GeneratedArtifactNeverSubstitutesSourceTests(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.db_path = self.root / "derived.db"
         create_table.bootstrap(self.db_path)
+        setup_restore_transport(self, _MP4_FIXTURE)
         with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             # The RAW source, which must never be substituted.
             conn.execute(
@@ -763,6 +776,7 @@ class ArtifactRestoreFromBackendTests(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.db_path = self.root / "restore.db"
         create_table.bootstrap(self.db_path)
+        setup_restore_transport(self, _MP4_FIXTURE)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -793,7 +807,7 @@ class ArtifactRestoreFromBackendTests(unittest.TestCase):
         local_path = self.root / "generated" / "campaigns" / "campaign-2514" / "watermarked_video.mp4"
         payload = {"artifacts": [{"local_path": str(local_path)}]}
 
-        def write_media(backend, storage_key, temporary_path):
+        def write_media(backend, storage_key, temporary_path, **_kwargs):
             # Verify the storage_key is correct (endpoint is the actual URL, not the path prefix)
             assert storage_key == "campaigns/campaign-2514/watermarked_video.mp4"
             Path(temporary_path).write_bytes(_MP4_FIXTURE)
@@ -817,6 +831,8 @@ class ArtifactRestoreFromBackendTests(unittest.TestCase):
         public_url set, but no file_records row, so the restore must fall back
         to the campaign_artifacts.public_url path.
         """
+        import hashlib, json
+        metadata_json = json.dumps({"sha256": hashlib.sha256(_MP4_FIXTURE).hexdigest(), "size_bytes": len(_MP4_FIXTURE)})
         with sqlite3.connect(self.db_path, factory=ClosingConnection) as conn:
             conn.execute(
                 "INSERT INTO campaigns (name, profile_id, media_group_id) VALUES (?, ?, ?)",
@@ -825,13 +841,13 @@ class ArtifactRestoreFromBackendTests(unittest.TestCase):
             campaign_id = conn.execute("SELECT id FROM campaigns").fetchone()[0]
             local_path = self.root / "generated" / "campaigns" / f"campaign-{campaign_id}" / "clip.mp4"
             conn.execute(
-                "INSERT INTO campaign_artifacts (campaign_id, artifact_kind, local_path, public_url, remote_path)"
-                " VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO campaign_artifacts (campaign_id, artifact_kind, local_path, public_url, remote_path, metadata_json)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
                 (campaign_id, "watermarked_video", str(local_path),
-                 "https://cdn.example/clip.mp4", None),
+                 "https://cdn.example/clip.mp4", None, metadata_json),
             )
 
-        payload = {"artifacts": [{"local_path": str(local_path)}]}
+        payload = {"campaignId": campaign_id, "artifacts": [{"local_path": str(local_path), "artifact_kind": "watermarked_video"}]}
 
         class Response:
             headers = {}
@@ -878,7 +894,7 @@ class ArtifactRestoreFromBackendTests(unittest.TestCase):
             "source_file_record_id": 999,  # Should NOT be used
         }]}
 
-        def write_media(backend, storage_key, temporary_path):
+        def write_media(backend, storage_key, temporary_path, **_kwargs):
             assert storage_key == "campaigns/campaign-100/watermarked_video.mp4"
             Path(temporary_path).write_bytes(_MP4_FIXTURE)
 
@@ -908,6 +924,7 @@ class MediaRestoreErrorRetryableTests(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.db_path = self.root / "restore.db"
         create_table.bootstrap(self.db_path)
+        setup_restore_transport(self, _MP4_FIXTURE)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -926,7 +943,7 @@ class MediaRestoreErrorRetryableTests(unittest.TestCase):
                 worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
         self.assertFalse(cm.exception.retryable)
-        self.assertIn("no file record", str(cm.exception))
+        self.assertEqual(cm.exception.details["dependencyCategory"], "identity")
 
     def test_backend_download_failure_is_retryable(self) -> None:
         """An artifact with a file_records row but a failed backend download
@@ -952,7 +969,7 @@ class MediaRestoreErrorRetryableTests(unittest.TestCase):
         local_path = self.root / "videoFile" / "clip.mp4"
         payload = {"artifacts": [{"local_path": str(local_path)}]}
 
-        def fail_download(backend, storage_key, temporary_path):
+        def fail_download(backend, storage_key, temporary_path, **_kwargs):
             raise OSError("connection timeout")
 
         with patch.object(worker, "BASE_DIR", self.root), patch.object(
@@ -962,7 +979,7 @@ class MediaRestoreErrorRetryableTests(unittest.TestCase):
                 worker._ensure_artifact_paths_local(payload, db_path=self.db_path)
 
         self.assertTrue(cm.exception.retryable)
-        self.assertIn("connection timeout", str(cm.exception))
+        self.assertEqual(cm.exception.details["dependencyCategory"], "transport")
 
     def test_successful_restore_does_not_raise(self) -> None:
         """A successful restore must not raise and must place the file."""
@@ -982,7 +999,7 @@ class MediaRestoreErrorRetryableTests(unittest.TestCase):
         local_path = self.root / "videoFile" / "clip.mp4"
         payload = {"artifacts": [{"local_path": str(local_path)}]}
 
-        def write_media(backend, storage_key, temporary_path):
+        def write_media(backend, storage_key, temporary_path, **_kwargs):
             Path(temporary_path).write_bytes(_MP4_FIXTURE)
 
         with patch.object(worker, "BASE_DIR", self.root), patch.object(

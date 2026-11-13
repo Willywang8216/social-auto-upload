@@ -90,6 +90,12 @@ def youtube_tags_length(tags: Iterable[str] | str) -> int:
 def field_limit(platform: str, field: str = "message") -> tuple[int | None, str]:
     platform = str(platform or "").strip().lower()
     field = str(field or "message").strip().lower()
+    if platform in pl.UNVERIFIED_BROWSER_ROUTES:
+        if field not in {"message", "description", "caption", "title", "first_comment"}:
+            raise ValueError(f"No verified text policy for {platform} field: {field}")
+        # Preserve typed legacy preparation/storage, not a fabricated numeric
+        # provider limit. These routes cannot acquire a publish-ready proof.
+        return None, "characters"
     if platform not in pl.MESSAGE_MAX_CHARS:
         raise ValueError(f"No verified text limit policy for platform: {platform}")
     if platform == "youtube":
@@ -145,6 +151,70 @@ def validate_youtube_tags(tags: Iterable[str]) -> list[str]:
     if length > pl.YOUTUBE_TAGS_MAX_CHARS:
         raise TextLimitError("youtube", "tags", length, pl.YOUTUBE_TAGS_MAX_CHARS, "tag_characters")
     return values
+
+
+def composed_message(payload: dict, platform: str) -> str:
+    """Count final caption + missing explicit hashtags, without rewriting input.
+
+    Matches the managed composer; native publishers must consume this composed
+    body (or prove their field-specific mapping) rather than drop approved tags.
+    YouTube tags are a separate field, not description hashtags.
+    """
+    draft = payload.get("draft") or {}
+    if not isinstance(draft, dict):
+        raise ValueError("draft must be an object")
+    fallback = payload.get("description", draft.get("description", "")) if platform == "youtube" else payload.get("title", draft.get("title", ""))
+    message = _text(payload.get("message") if "message" in payload else draft.get("message", fallback))
+    tags = draft.get("hashtags", payload.get("hashtags", payload.get("tags", [])))
+    if isinstance(tags, str):
+        import json
+        try:
+            tags = json.loads(tags)
+        except ValueError:
+            tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
+    if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+        raise ValueError("hashtags must contain strings")
+    for tag in tags:
+        _text(tag)
+    if platform != "youtube":
+        missing = [tag if tag.startswith("#") else "#" + tag for tag in tags
+                   if tag and (tag if tag.startswith("#") else "#" + tag).lower() not in message.lower()]
+        if missing:
+            message += ("\n\n" if message else "") + " ".join(missing)
+    return message
+
+
+def validate_post_text(payload: dict, platform: str, *, media_kind=None) -> None:
+    """Validate composed body and distinct provider fields; never shorten copy."""
+    draft = payload.get("draft") or {}
+    message = composed_message(payload, platform)
+    field = "caption" if platform == "telegram" and media_kind else "message"
+    if platform == "tiktok" and media_kind == "image":
+        field = "photo_description"
+    validate_message(message, platform, field=field)
+    if platform == "youtube":
+        for key in ("title", "description"):
+            if key in draft:
+                validate_message(draft[key], platform, field=key)
+        tags = draft.get("tags", draft.get("hashtags", []))
+        if isinstance(tags, str):
+            tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
+        validate_youtube_tags(tags)
+        from myUtils.prepared_publishers import youtube_text_fields
+        youtube_text_fields({**payload, "_preserveApprovedText": True})
+    if platform == "tiktok":
+        settings = payload.get("tiktokPostSettings") or {}
+        if not isinstance(settings, dict):
+            raise ValueError("tiktokPostSettings must be an object")
+        if "title" in settings:
+            validate_message(settings["title"], platform, field="photo_title" if media_kind == "image" else "caption")
+        if media_kind == "image":
+            from myUtils.prepared_publishers import tiktok_photo_text_fields
+            tiktok_photo_text_fields({**payload, "_preserveApprovedText": True})
+    for source in (payload, draft):
+        for key in ("firstComment", "first_comment"):
+            if key in source:
+                validate_message(source[key], platform, field="first_comment")
 
 
 def truncate_message(message: str, platform: str, *, field: str = "message",

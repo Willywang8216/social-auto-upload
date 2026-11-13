@@ -64,7 +64,7 @@ def account_constraints(account, *, session=None) -> dict:
     return {"video_limits": media_compliance.merge_limits([baseline, fresh]), "capability_check": check}
 
 
-def configure_request(accounts, platforms, request_data: dict, *, settings=None, has_video=True):
+def configure_request(accounts, platforms, request_data: dict, *, settings=None, has_video=True, db_path=None):
     """Resolve viable backups and merge all caps before watermark/encoding."""
     from myUtils.publish_orchestrator import (_preparation_account_configs_for_accounts,
         _preparation_limits_for_accounts, _image_preparation_limits_for_accounts)
@@ -85,7 +85,7 @@ def configure_request(accounts, platforms, request_data: dict, *, settings=None,
             continue
         try:
             contexts[account.id] = backup_preparation.resolve_constraints(platform=account.platform,
-                account=account, settings=settings)
+                account=account, settings=settings, db_path=db_path)
         except Exception as exc:
             if primary:
                 raise media_compliance.MediaPreparationError("Configured primary backup could not be verified") from exc
@@ -113,3 +113,82 @@ def configure_request(accounts, platforms, request_data: dict, *, settings=None,
         request["_preparationLimits"] = video
     request["_backupPreparationWarnings"] = warnings
     return request, contexts
+
+
+def verify_native_destination(account, *, settings=None, db_path, session=None):
+    """Actual read-only identity AND publishing-grant verification, no refresh.
+
+    Unsupported native grant models stay configured_unverified; in particular
+    a successful X users/me read does not repair/prove native OAuth write scope.
+    TikTok's creator-info/query endpoint is documented video.publish-protected;
+    combine it with user/info open_id, never nickname/display-name identity.
+    YouTube tokeninfo proves current token grant, channels mine exact identity.
+    """
+    from myUtils import publish_readiness, token_state
+    before = publish_readiness._context(account, settings)
+    if before["provider"] != "direct" or not before["identity"]:
+        raise ValueError("Native verification needs an exact direct identity")
+    platform = account.platform
+    config = before["config"]
+    token = prepared_publishers._config_value(config, "accessToken")
+    if not token:
+        raise ValueError("Native verification needs selected credentials")
+    http = _BoundedHTTP(prepared_publishers._get_session(session))
+    expected = before["identity"]["id"]
+    capabilities, limits, expiry = [], {}, None
+    if platform == "tiktok":
+        response = http.get("https://open.tiktokapis.com/v2/user/info/",
+            headers={"Authorization": f"Bearer {token}"}, params={"fields": "open_id"})
+        prepared_publishers._raise_for_status(response)
+        prepared_publishers._raise_tiktok_error(response)
+        body = prepared_publishers._response_payload(response)
+        if (body.get("data") or {}).get("user", {}).get("open_id") != expected:
+            raise ValueError("TikTok verified identity does not match exact openId")
+        creator = prepared_publishers.query_tiktok_creator_info(config, access_token=token, session=http)
+        data = creator.get("data") or {}
+        if (not isinstance(data.get("privacy_level_options"), list) or not data["privacy_level_options"]
+                or type(data.get("max_video_post_duration_sec")) is not int or data["max_video_post_duration_sec"] <= 0):
+            raise ValueError("TikTok direct creator capabilities are unverified")
+        capabilities = ["video", "image", "carousel"]
+        limits["video_max_seconds"] = data["max_video_post_duration_sec"]
+    elif platform == "youtube":
+        response = http.get("https://oauth2.googleapis.com/tokeninfo", params={"access_token": token})
+        prepared_publishers._raise_for_status(response)
+        grant = prepared_publishers._response_payload(response)
+        scopes = set(str(grant.get("scope") or "").split())
+        write_scopes = {"https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube",
+                        "https://www.googleapis.com/auth/youtube.force-ssl"}
+        if not scopes & write_scopes or int(grant.get("expires_in") or 0) <= 0:
+            raise ValueError("YouTube current token has no verified publishing grant")
+        client = prepared_publishers._config_value(config, "clientId")
+        if client and grant.get("aud") != client:
+            raise ValueError("YouTube token audience does not match selected client")
+        response = http.get(prepared_publishers.YOUTUBE_CHANNELS_URL,
+            headers={"Authorization": f"Bearer {token}"}, params={"part": "id,status", "mine": "true"})
+        prepared_publishers._raise_for_status(response)
+        items = prepared_publishers._response_payload(response).get("items")
+        if not isinstance(items, list) or len(items) != 1 or items[0].get("id") != expected:
+            raise ValueError("YouTube verified channel does not match exact channelId")
+        capabilities = ["video"]
+        if scopes & (write_scopes - {"https://www.googleapis.com/auth/youtube.upload"}):
+            capabilities.append("first_comment")
+    elif platform in {"facebook", "instagram", "threads"}:
+        from myUtils import native_authorization
+        if platform == "threads":
+            verified = native_authorization.threads_capabilities(config, expected_id=expected, token=token, http=http)
+        else:
+            verified = native_authorization.meta_capabilities(config, platform=platform, expected_id=expected, token=token, http=http)
+        capabilities, expiry = verified["capabilities"], verified["expires_at"]
+    else:
+        raise ValueError("Native exact publishing grant verifier is not implemented; current trusted proof required")
+    # record_destination_readiness performs the existing account/profile/config
+    # CAS. No token refresh or nativeCredentials replacement occurs here.
+    proof = {"verified": True, "live_check": True, "source": "provider_verification",
+             "requires_approval": False, "config_fingerprint": before["fingerprint"],
+             "identity": before["identity"], "permissions": {"posts.create": True},
+             "capabilities": capabilities, "limits": limits,
+             "verified_at": publish_readiness._now().isoformat()}
+    if expiry:
+        proof["expires_at"] = expiry
+    return publish_readiness.record_destination_readiness(account, settings, proof=proof,
+        provider="direct", db_path=db_path)

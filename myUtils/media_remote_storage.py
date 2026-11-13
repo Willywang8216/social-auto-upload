@@ -20,9 +20,12 @@ actionable message instead of silently emitting an unreachable URL.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import mimetypes
 import os
+import tempfile
 from pathlib import Path, PurePosixPath
 
 from myUtils import do_spaces, rclone_storage, share_storage
@@ -151,49 +154,126 @@ def is_backend_configured(name: str) -> bool:
     return False
 
 
-def download_from_backend(backend: dict, storage_key: str, local_path: str | Path) -> Path:
-    """Fetch one stored object back onto local disk.
+def _bounded_s3_client(backend: dict, *, timeout: float):
+    """An isolated read client; never ensure/create a bucket or alter defaults."""
+    from botocore.config import Config
 
-    Backends register themselves differently in ``storage_backends``: an S3
-    client for DO Spaces / R2, an rclone remote for Drive. The publish path
-    only cares that a missing artifact can be recovered, so the dispatch
-    lives here rather than at each call site.
+    configured = do_spaces.client_from_row(backend)
+    return do_spaces.boto3.client(
+        "s3", endpoint_url=configured.endpoint, aws_access_key_id=configured.access_key,
+        aws_secret_access_key=configured.secret_key, region_name=configured.region,
+        config=Config(connect_timeout=min(10.0, timeout), read_timeout=min(30.0, timeout),
+                      retries={"total_max_attempts": 1}, s3={"addressing_style": "virtual"}),
+    )
 
-    For ``rclone`` rows the remote name rides in ``bucket`` and its root in
-    ``endpoint`` — the S3 columns have no meaning for a remote-backed row.
-    """
+
+def stat_from_backend(backend: dict, storage_key: str, *, total_deadline: float = 20.0) -> dict:
+    """Read-only probe of this exact registered key, with fresh provider evidence."""
+    provider = str(backend.get("provider") or "").lower()
+    if total_deadline <= 0:
+        raise TimeoutError("remote stat budget exhausted")
+    if provider == "rclone":
+        return rclone_storage.stat_artifact(
+            storage_key, remote_name=str(backend.get("bucket") or "").strip() or None,
+            remote_root=str(backend.get("endpoint") or "").strip(),
+            total_deadline=total_deadline,
+        )
+    if provider == "share":
+        from myUtils.outbound_http import probe_public_url
+        return probe_public_url(_share_restore_url(backend, storage_key), total_deadline=total_deadline)
+    from myUtils.outbound_http import bounded_receive
+    client = _bounded_s3_client(backend, timeout=total_deadline / 2)
+
+    def read_stat(sink, stopped, register_response):
+        try:
+            result = client.head_object(Bucket=backend["bucket"], Key=storage_key, ChecksumMode="ENABLED")
+            # ETags are opaque without explicit algorithm/part-layout proof.
+            proof = None
+            if result.get("ChecksumType") == "FULL_OBJECT" and result.get("ChecksumSHA256"):
+                value = base64.b64decode(result["ChecksumSHA256"], validate=True)
+                if len(value) != 32:
+                    raise ValueError("invalid full-object SHA256 proof")
+                proof = {"algorithm": "sha256", "value": value.hex()}
+            return {"size_bytes": result.get("ContentLength"), "remote_checksum": proof}
+        finally:
+            client.close()
+
+    return bounded_receive(read_stat, None, total_deadline=total_deadline)
+
+
+def _share_restore_url(backend: dict, storage_key: str) -> str:
+    if storage_key.lower().startswith("https://"):
+        return storage_key
+    url = str(backend.get("cdn_url") or backend.get("endpoint") or "").strip()
+    if not url:
+        raise RemoteStorageError("share backend download needs an exact registered URL")
+    return url
+
+
+def download_from_backend(backend: dict, storage_key: str, local_path: str | Path, *,
+                          total_deadline: float = 120.0, max_bytes: int = 512 * 1024 * 1024,
+                          facts: dict | None = None) -> Path:
+    """Bounded, single-attempt exact registered read; no provider writes."""
     provider = str(backend.get("provider") or "").strip().lower()
     destination = Path(local_path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-
+    if total_deadline <= 0 or max_bytes <= 0:
+        raise TimeoutError("remote download budget exhausted")
     if provider == "rclone":
         return rclone_storage.download_artifact(
-            storage_key,
-            destination,
+            storage_key, destination,
             remote_name=str(backend.get("bucket") or "").strip() or None,
-            remote_root=str(backend.get("endpoint") or "").strip() or None,
+            remote_root=str(backend.get("endpoint") or "").strip(),
+            total_deadline=total_deadline, max_bytes=max_bytes,
         )
-
     if provider == "share":
-        # The share backend uploads through its own API and registers a URL, not
-        # an S3/R2 object, so a share-backed row has no key the do_spaces client
-        # could fetch. Falling through to it silently attempted an S3 download
-        # with a share id and failed. Fetch the stored URL instead.
-        url = str(backend.get("cdn_url") or backend.get("endpoint") or "").strip()
-        if not url and storage_key.lower().startswith(("http://", "https://")):
-            url = storage_key
-        if not url:
-            raise RemoteStorageError(
-                "share backend download needs a URL in the backend row or storage_key"
-            )
-        return download_public_url(url, destination)
+        return download_public_url(_share_restore_url(backend, storage_key), destination,
+                                   total_deadline=total_deadline, max_bytes=max_bytes, facts=facts)
+    from myUtils.outbound_http import bounded_receive
+    client = _bounded_s3_client(backend, timeout=total_deadline / 2)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".part", dir=destination.parent)
+    temporary = Path(name)
 
-    client = do_spaces.client_from_row(backend)
-    client.download_file(storage_key, destination)
-    return destination
+    def read_object(sink, stopped, register_response):
+        body = None
+        try:
+            result = client.get_object(Bucket=backend["bucket"], Key=storage_key)
+            body = result["Body"]
+            register_response(getattr(body, "_raw_stream", body))
+            declared = result.get("ContentLength")
+            if declared is not None and declared > max_bytes:
+                raise RemoteStorageError("remote object exceeds byte limit")
+            received = 0
+            digest = hashlib.sha256()
+            for chunk in body.iter_chunks(chunk_size=256 * 1024):
+                received += len(chunk)
+                if received > max_bytes:
+                    raise RemoteStorageError("remote object exceeds byte limit")
+                sink.write(chunk)
+                digest.update(chunk)
+            if not received or (declared is not None and received != declared):
+                raise RemoteStorageError("remote object was empty or incomplete")
+            return {"size_bytes": received, "sha256": digest.hexdigest(),
+                    "content_type": result.get("ContentType", "")}
+        finally:
+            if body is not None:
+                body.close()
+            client.close()
+
+    try:
+        with os.fdopen(fd, "wb") as sink:
+            received = bounded_receive(read_object, sink, total_deadline=total_deadline)
+            sink.flush()
+            os.fsync(sink.fileno())
+        if facts is not None:
+            facts.update(received)
+        temporary.replace(destination)
+        return destination
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def download_public_url(url: str, destination: Path) -> Path:
+def download_public_url(url: str, destination: Path, **kwargs) -> Path:
     """Fetch a stored object from its public HTTPS URL onto local disk.
 
     Used for backends that register a URL rather than an S3/R2 key (the share
@@ -208,9 +288,9 @@ def download_public_url(url: str, destination: Path) -> Path:
     from myUtils import outbound_http
 
     try:
-        return outbound_http.download_public_file(url, Path(destination))
+        return outbound_http.download_public_file(url, Path(destination), **kwargs)
     except outbound_http.OutboundUrlError as exc:
-        raise RemoteStorageError(f"public URL restore refused: {exc}") from exc
+        raise RemoteStorageError("public URL restore refused") from exc
 
 
 def is_any_backend_configured() -> bool:

@@ -18,6 +18,7 @@ from db import createTable
 from myUtils import jobs, media_compliance, platform_limits, profiles, publish_alert_outbox
 from myUtils import publish_media_guard as guard
 from scripts import preprocess_failed_targets as prep
+from tests.legacy_queue import enqueue_legacy_job
 
 NOW = datetime(2035, 1, 2, 12)
 
@@ -51,7 +52,7 @@ def failed_job(database, source):
     path, profile, account = database
     payload = {"message": "Original caption 原稿", "draft": {"privacy": "keep"},
                "artifacts": [{"local_path": str(source), "artifact_kind": "source_video"}]}
-    job = jobs.enqueue_job(jobs.JobSpec(platform="threads", profile_id=profile.id, payload=payload,
+    job = enqueue_legacy_job(jobs.JobSpec(platform="threads", profile_id=profile.id, payload=payload,
                           targets=[(f"account:{account.id}", str(source), None)]), db_path=path)
     target = jobs.list_targets(job.id, db_path=path)[0]
     with closing(sqlite3.connect(path)) as conn, conn:
@@ -189,7 +190,7 @@ def test_image_batches_are_atomic_and_ordered(database, tmp_path):
         image = tmp_path / f"image-{index}_sfw.png"
         Image.new("RGB", (400, 400), (index * 10, 20, 30)).save(image)
         artifacts.append({"local_path": str(image), "metadata": {"alt_text": f"Keep {index}"}})
-    job = jobs.enqueue_job(jobs.JobSpec(platform="threads", profile_id=profile.id,
+    job = enqueue_legacy_job(jobs.JobSpec(platform="threads", profile_id=profile.id,
         payload={"message": "Original image caption", "artifacts": artifacts},
         targets=[(f"account:{account.id}", "images-fixture", None)]), db_path=path)
     target = jobs.list_targets(job.id, db_path=path)[0]
@@ -336,7 +337,7 @@ def test_pending_repair_keeps_exact_variant_interval_framing_cover_and_all_parts
             "variant": "approved-watermarked-sfw", "unwatermarked": False}},
         {"local_path": str(cover), "artifact_kind": "thumbnail", "metadata": {"role": "thumbnail", "sha256": cover_sha}}]}
     slot = (NOW + timedelta(hours=2)).isoformat()
-    job = jobs.enqueue_job(jobs.JobSpec(platform="threads", profile_id=profile.id, payload=payload,
+    job = enqueue_legacy_job(jobs.JobSpec(platform="threads", profile_id=profile.id, payload=payload,
         targets=[(f"account:{account.id}", str(selected), slot)]), db_path=path)
     target = jobs.list_targets(job.id, db_path=path)[0]
     if restore:

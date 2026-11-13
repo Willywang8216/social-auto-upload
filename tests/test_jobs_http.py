@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import tempfile
+import sqlite3
+from contextlib import closing
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -29,6 +31,9 @@ class JobsHttpTests(unittest.TestCase):
         self._patcher.start()
 
         from sau_backend import app
+        db_getter = patch("sau_backend._current_db_path", return_value=self.db_path)
+        db_getter.start()
+        self.addCleanup(db_getter.stop)
         from myUtils.security import SecurityPolicy
         self._orig_policy = app.config["SECURITY_POLICY"]
         app.config["SECURITY_POLICY"] = SecurityPolicy(tokens=frozenset(), cors_origins=("http://localhost:5173",))
@@ -141,12 +146,11 @@ class JobsHttpTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        mocked.assert_called_once_with(
-            "thread",
-            ["v1.mp4", "v2.mp4"],
-            ["topic"],
-            ["acct.json"],
-        )
+        mocked.assert_not_called()
+        queued = response.get_json()["data"]
+        self.assertEqual(queued["status"], "pending")
+        self.assertFalse(queued["payload"]["publishReadiness"]["ready"])
+        self.assertIn("not confirmed", response.get_json()["msg"])
 
     def test_post_video_batch_accepts_twitter_numeric_code(self) -> None:
         with patch("sau_backend.post_video_twitter") as mocked:
@@ -165,12 +169,11 @@ class JobsHttpTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        mocked.assert_called_once_with(
-            "thread",
-            ["v1.mp4", "v2.mp4"],
-            ["topic"],
-            ["acct.json"],
-        )
+        mocked.assert_not_called()
+        queued = response.get_json()["data"]["jobs"]
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["status"], "pending")
+        self.assertEqual(response.get_json()["data"]["failures"], [])
 
     # --- /jobs?limit edge cases (QA regression) ---
 
@@ -190,6 +193,95 @@ class JobsHttpTests(unittest.TestCase):
     def test_list_oversized_limit_does_not_500(self) -> None:
         response = self.client.get("/jobs?limit=999999")
         self.assertEqual(response.status_code, 200)
+
+
+    def _target(self):
+        created = self._post_job({"type": 3, "title": "exact approved caption",
+            "fileList": ["fixture.mp4"], "accountList": ["fixture.json"]}).get_json()["data"]
+        return self._job_runtime.list_targets(created["id"], db_path=self.db_path)[0]
+
+    def test_x_timer_is_preserved_in_durable_target(self):
+        from datetime import datetime
+        slot = datetime(2100, 1, 1, 4, 0)
+        with patch("sau_backend.generate_schedule_time_next_day", return_value=[slot]):
+            response = self._post_job({"platform": "x", "title": "approved",
+                "fileList": ["fixture.mp4"], "accountList": ["fixture.json"], "enableTimer": True})
+        self.assertEqual(response.status_code, 200)
+        target = self._job_runtime.list_targets(response.get_json()["data"]["id"], db_path=self.db_path)[0]
+        self.assertEqual(target.schedule_at, slot.isoformat())
+
+    def test_x_weighted_legacy_title_is_rejected_before_admission(self):
+        response = self._post_job({"platform": "twitter", "title": "😀" + "漢" * 140,
+            "fileList": ["fixture.mp4"], "accountList": ["fixture.json"]})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("282", response.get_json()["msg"])
+        self.assertEqual(self._job_runtime.list_jobs(db_path=self.db_path), [])
+
+    def test_cancel_accepted_receipt_then_retry_cannot_resubmit(self):
+        target = self._target()
+        receipt = {"provider": "fixture", "id": "accepted-original", "status": "accepted"}
+        checkpoint = {"provider_receipt": receipt, "submission_started": True}
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE publish_job_targets SET status='awaiting_delivery',delivery_state='awaiting_delivery',"
+                         "checkpoint_json=?,attempts=2 WHERE id=?", (json.dumps(checkpoint), target.id))
+        response = self.client.post(f"/jobs/targets/{target.id}/cancel")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["data"]["providerReceipt"], receipt)
+        self.assertFalse(response.get_json()["data"]["retryEligibility"]["allowed"])
+        before = self._job_runtime.get_target(target.id, db_path=self.db_path)
+        retry = self.client.post(f"/jobs/targets/{target.id}/resubmit", json={})
+        self.assertEqual(retry.status_code, 400)
+        self.assertEqual(self._job_runtime.get_target(target.id, db_path=self.db_path), before)
+
+    def test_calendar_preserves_prepared_payload_and_attempt_history(self):
+        target = self._target()
+        checkpoint = {"recovery_generation": "immutable-generation", "payload": {"message": "exact approved caption"}}
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE publish_job_targets SET checkpoint_json=?,attempts=2,last_error='preflight' WHERE id=?",
+                         (json.dumps(checkpoint), target.id))
+        response = self.client.post(f"/jobs/targets/{target.id}/reschedule", json={"scheduleAt": "2100-01-01T00:00:00Z"})
+        self.assertEqual(response.status_code, 200)
+        current = self._job_runtime.get_target(target.id, db_path=self.db_path)
+        self.assertEqual(current.attempts, 2)
+        self.assertEqual(current.last_error, "preflight")
+        self.assertEqual(current.checkpoint, checkpoint)
+        self.assertEqual(current.status, "pending")
+
+    def test_failed_plain_retry_requires_plan_and_preserves_row(self):
+        target = self._target()
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE publish_job_targets SET status='failed',attempts=3,last_error='original cause' WHERE id=?", (target.id,))
+        before = self._job_runtime.get_target(target.id, db_path=self.db_path)
+        response = self.client.post(f"/jobs/targets/{target.id}/resubmit", json={})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("recovery plan", response.get_json()["msg"])
+        self.assertEqual(self._job_runtime.get_target(target.id, db_path=self.db_path), before)
+
+    def test_retry_plan_is_forwarded_to_authoritative_recovery(self):
+        target = self._target()
+        plan = {"target_id": target.id, "original_status": "failed", "expected_fingerprint": "fixture-only"}
+        with patch("sau_backend.job_runtime.resubmit_target", return_value=target) as apply:
+            response = self.client.post(f"/jobs/targets/{target.id}/resubmit", json={"recoveryPlan": plan})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(apply.call_args.kwargs["recovery_plan"], plan)
+        self.assertIn("not yet confirmed", response.get_json()["msg"])
+
+    def test_target_projection_carries_backend_eligibility_and_stage(self):
+        target = self._target()
+        response = self.client.get(f"/jobs/{target.job_id}").get_json()["data"]["targets"][0]
+        self.assertFalse(response["retryEligibility"]["allowed"])
+        self.assertIn("readiness", response)
+        self.assertIn("checkpoint", response)
+
+    def test_batch_invalid_item_never_triggers_provider_upload(self):
+        with patch("sau_backend.post_video_DouYin") as upload:
+            response = self.client.post("/postVideoBatch", json=[
+                {"type": 3, "title": "approved", "fileList": ["fixture.mp4"], "accountList": ["fixture.json"]},
+                {"type": 99, "title": "invalid", "fileList": ["fixture.mp4"], "accountList": ["fixture.json"]}])
+        upload.assert_not_called()
+        self.assertEqual(response.status_code, 207)
+        self.assertEqual(len(response.get_json()["data"]["jobs"]), 1)
+        self.assertEqual(len(response.get_json()["data"]["failures"]), 1)
 
 
 if __name__ == "__main__":

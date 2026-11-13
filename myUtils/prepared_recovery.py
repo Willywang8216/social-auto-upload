@@ -5,7 +5,7 @@ import copy
 import json
 from pathlib import Path
 
-from myUtils import media_compliance
+from myUtils import media_compliance, media_integrity
 
 _MEDIA_FIELDS = {"artifacts", "preparedPart", "preparedPost", "partIndex", "partCount", "preparedImageBatch", "_preserveApprovedText"}
 
@@ -41,33 +41,154 @@ def validate_parts(conn, target, parts: list[dict], schedules: list[str]) -> Non
             if not isinstance(metadata, dict):
                 raise ValueError("Prepared media metadata must be an object")
             path = Path(str(artifact.get("local_path") or ""))
-            if (not path.is_file() or not metadata.get("sha256")
-                    or media_compliance.sha256_file(path) != metadata["sha256"]):
-                raise ValueError("Prepared recovery media changed or is missing")
-            if artifact.get("artifact_kind") == "prepared_video":
+            media_integrity.verify_artifact(path, artifact, required=True)
+            if publish_media_guard.media_kind(artifact) == "video":
                 artifacts.append({**artifact, "id": index})
         if len(parts) > 1:
             label = part.get("preparedPost") or part.get("preparedPart") or {}
             if not isinstance(label, dict) or label.get("index") != index or label.get("count") != len(parts):
                 raise ValueError("Prepared recovery parts are incomplete or unordered")
-    if len(parts) > 1 and artifacts:
+    source_payload = copy.deepcopy(original)
+    if not source_payload.get("artifacts") and not str(target["file_ref"]).startswith("campaign_post:"):
+        source_payload["artifacts"] = [{"local_path": target["file_ref"]}]
+    if artifacts or any(publish_media_guard.media_kind(a) == "video" for a in source_payload.get("artifacts") or []):
         platform = conn.execute("SELECT platform FROM publish_jobs WHERE id=?", (target["job_id"],)).fetchone()[0]
-        groups = {}
-        original_groups = {}
-        for original_artifact in original.get("artifacts") or []:
-            metadata = original_artifact.get("metadata") or {}
-            if metadata.get("preparation_group"):
-                original_groups.setdefault(metadata["preparation_group"], set()).add(metadata.get("part_index"))
-        for artifact in artifacts:
-            metadata = artifact["metadata"]
-            groups.setdefault(metadata.get("preparation_group"), []).append(artifact)
-        for group, members in groups.items():
-            indices = {a["metadata"].get("part_index") for a in members}
-            if group in original_groups and indices == original_groups[group]:
-                continue  # the original intent already selected these immutable parts
-            selected = media_compliance.select_prepared_parts(members, platform)
-            if len(selected) != len(members):
-                raise ValueError("Recovery did not contain the complete video part set")
+        validate_video_provenance(source_payload, artifacts, platform=platform)
+
+
+def _exact_path(value) -> Path:
+    from myUtils.worker import _resolve_media_path
+    return _resolve_media_path(str(value or "")).expanduser().resolve()
+
+
+def _span(metadata: dict, prefix: str = "source") -> tuple[float, float]:
+    start = media_compliance._number(metadata.get(prefix + "_start_seconds"), "original source interval start", positive=False)
+    end = media_compliance._number(metadata.get(prefix + "_end_seconds"), "original source interval end")
+    if end <= start:
+        raise ValueError("Invalid original source interval")
+    return start, end
+
+
+def validate_video_provenance(original: dict, artifacts: list[dict], *, platform: str,
+                              probe_sources: bool = False) -> None:
+    """Bind EVERY output (including one) to exact approved source membership.
+
+    Selected existing parts may remain a subset of their parent's generation.
+    New derivatives must cover each selected input span, not the full raw video.
+    Raw inputs are rehashed; their measured full duration is checked outside
+    transactions with probe_sources=True, then pinned by the plan fingerprint.
+    """
+    from myUtils import publish_media_guard as guard
+    sources = [a for a in original.get("artifacts") or [] if guard.media_kind(a) == "video"]
+    if not sources:
+        raise ValueError("Recovery video has no exact approved source")
+    membership = {index: [] for index in range(len(sources))}
+    previous_source = -1
+    identity_keys = ("source_sha256", "source_path", "content_variant", "unwatermarked",
+                     "origin_source_path", "origin_source_sha256", "source_identity", "source_parent",
+                     "original_source_interval_start_seconds", "original_source_interval_end_seconds")
+    for output in artifacts:
+        media_integrity.verify_artifact(output.get("local_path") or "", output, required=True)
+        metadata = output.get("metadata") or {}
+        parent = metadata.get("reprepared_from") or {}
+        if not isinstance(metadata, dict) or not isinstance(parent, dict):
+            raise ValueError("Invalid recovery provenance")
+        candidates = []
+        for index, source in enumerate(sources):
+            input_path = parent.get("path") or metadata.get("input_path")
+            if source.get("local_path"):
+                path = _exact_path(source["local_path"])
+                unchanged = _exact_path(output.get("local_path")) == path
+                matched = unchanged or (input_path and _exact_path(input_path) == path)
+            else:
+                # A materialised exact registered URL is allowed; never match
+                # a basename or infer a different raw/full source.
+                unchanged = False
+                matched = bool(input_path and source.get("public_url")
+                               and metadata.get("input_public_url") == source["public_url"])
+            if matched:
+                candidates.append((index, unchanged))
+        if len(candidates) != 1:
+            raise ValueError("Recovery output has ambiguous or substituted source identity")
+        index, unchanged = candidates[0]
+        if index < previous_source:
+            raise ValueError("Recovery reordered approved source membership")
+        previous_source = index
+        source, selected = sources[index], sources[index].get("metadata") or {}
+        path = _exact_path(source.get("local_path") or metadata.get("input_path"))
+        facts = media_integrity.verify_artifact(path, source)
+        if source.get("source_file_record_id") != output.get("source_file_record_id"):
+            raise ValueError("Recovery changed the source file record identity")
+        for key in ("content_variant", "unwatermarked", "origin_source_path", "origin_source_sha256"):
+            if source.get(key) != output.get(key):
+                raise ValueError("Recovery changed the approved source variant")
+            # TikTok's existing raw-source preparation explicitly labels the
+            # selected watermark-free output; all other variant facts are exact.
+            if key == "unwatermarked" and platform == "tiktok" and selected.get(key) is None:
+                continue
+            if selected.get(key) != metadata.get(key):
+                raise ValueError("Recovery changed the approved source variant")
+        if unchanged:
+            for key in (*identity_keys, "part_index", "part_count", "preparation_group",
+                        "source_start_seconds", "source_end_seconds",
+                        "source_interval_start_seconds", "source_interval_end_seconds"):
+                if selected.get(key) != metadata.get(key):
+                    raise ValueError("Recovery relabelled an existing selected part")
+            membership[index].append((output, True))
+            continue
+        if metadata.get("input_sha256") != facts["sha256"]:
+            raise ValueError("Recovery source bytes differ from approved input")
+        derived = guard._has_derived_identity(source)
+        if derived:
+            # Absence is not evidence that a legacy segment was the full source.
+            interval = _span(selected)
+            if (not isinstance(parent, dict) or parent.get("sha256") != facts["sha256"]
+                    or any(parent.get(key) != selected.get(key) for key in
+                           ("preparation_group", "part_index", "part_count"))
+                    or _span(parent) != interval):
+                raise ValueError("Recovery lost parent part membership or original source interval")
+            if (metadata.get("source_sha256") != selected.get("source_sha256")
+                    or metadata.get("source_parent") != (selected.get("source_parent") or parent)):
+                raise ValueError("Recovery changed original source hash or parent membership")
+            for key in identity_keys:
+                if selected.get(key) is not None and metadata.get(key) != selected[key]:
+                    raise ValueError("Recovery changed original source provenance or variant")
+            expected_identity = guard._source_identity(source, path, selected.get("source_sha256"))
+            if metadata.get("source_identity") != expected_identity:
+                raise ValueError("Recovery changed exact original source identity")
+            if metadata.get("source_is_complete") is not False:
+                raise ValueError("A selected prepared segment cannot become a full raw source")
+        else:
+            duration = media_compliance._number(metadata.get("source_duration_seconds"), "complete raw duration")
+            interval = (0.0, duration)
+            if (parent or metadata.get("source_is_complete") is not True
+                    or metadata.get("source_sha256") != facts["sha256"]
+                    or metadata.get("source_identity") != guard._source_identity(source, path, facts["sha256"])):
+                raise ValueError("Recovery did not verify the complete exact raw source")
+            if probe_sources:
+                media_compliance.decode_video(path, duration=duration)
+                measured = media_compliance._source_metadata(path)["duration"]
+                if abs(measured - duration) > 0.000001:
+                    raise ValueError("Recovery raw source interval is not complete")
+        if _span(metadata, "source_interval") != interval:
+            raise ValueError("Recovery changed the approved complete source span")
+        membership[index].append((output, False))
+    for members in membership.values():
+        if not members:
+            raise ValueError("Recovery dropped an approved video source or selected part")
+        if any(unchanged for _, unchanged in members):
+            if len(members) != 1:
+                raise ValueError("Recovery duplicated a selected existing part")
+            continue
+        outputs = [a for a, _ in members]
+        groups = {a["metadata"].get("preparation_group") for a in outputs}
+        if len(groups) != 1:
+            raise ValueError("Recovery mixed derivative generations")
+        selected = media_compliance.select_prepared_parts(outputs, platform)
+        if len(selected) != len(outputs):
+            raise ValueError("Recovery did not contain the complete unique video part set")
+        if selected != outputs:
+            raise ValueError("Recovery reordered complete video source intervals")
 
 
 def _checkpoint(jobs, value) -> str:

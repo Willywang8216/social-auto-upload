@@ -322,6 +322,16 @@ def _publishing_problems(snapshot) -> dict[str, list[str]]:
                 f"{platform.platform}: {queue['staleRunning']} stale executions "
                 f"({queue['expiredLeases']} expired, {queue['orphanedLeases']} orphaned leases); "
                 "reconcile before resubmission")
+    # Only explicit current prerequisite holds generate notices. Do not backfill
+    # alerts or automatically retry legacy/unverified backlog records.
+    for target in getattr(snapshot, 'readiness', {}).get('targets', []):
+        if target.get('phase') not in {'waiting_dependency', 'waiting_capacity', 'blocked_intent'}:
+            continue
+        reset = target.get('nextAttemptAt')
+        problems.setdefault('publish-readiness', []).append(safe_text(
+            f"target {target.get('targetId')} / {target.get('provider', 'unverified')}: "
+            f"{target.get('phase')} — {target.get('reasonCode') or 'prerequisite_hold'} "
+            f"{target.get('reason') or ''}" + (f"; next retry/reset {reset}" if reset else ''), 300))
     if not snapshot.worker_health.get("ok"):
         problems["workers"] = [
             "No fresh, non-draining publisher heartbeat within "

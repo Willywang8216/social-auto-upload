@@ -309,12 +309,23 @@ def test_download_from_backend_dispatches_rclone_rows(monkeypatch, tmp_path):
 def test_download_from_backend_defaults_to_the_s3_client(monkeypatch, tmp_path):
     calls = {}
 
-    class _Client:
-        def download_file(self, key, local_path):
-            calls["key"] = key
-            Path(local_path).write_bytes(b"s3")
+    class _Body:
+        def iter_chunks(self, **kwargs):
+            yield b"s3"
 
-    monkeypatch.setattr(media_remote_storage.do_spaces, "client_from_row", lambda row: _Client())
+        def close(self):
+            calls["body_closed"] = True
+
+    class _Client:
+        def get_object(self, **kwargs):
+            calls["key"] = kwargs["Key"]
+            calls["bucket"] = kwargs["Bucket"]
+            return {"Body": _Body(), "ContentLength": 2}
+
+        def close(self):
+            calls["client_closed"] = True
+
+    monkeypatch.setattr(media_remote_storage, "_bounded_s3_client", lambda row, **kwargs: _Client())
 
     destination = tmp_path / "clip.mp4"
     media_remote_storage.download_from_backend(
@@ -325,6 +336,8 @@ def test_download_from_backend_defaults_to_the_s3_client(monkeypatch, tmp_path):
 
     assert destination.read_bytes() == b"s3"
     assert calls["key"] == "campaigns/1/videos/clip.mp4"
+    assert calls["bucket"] == "sau-media"
+    assert calls["body_closed"] and calls["client_closed"]
 
 
 class TestSpacesPublicUrlEncoding:

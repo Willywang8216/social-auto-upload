@@ -1640,79 +1640,8 @@ def login():
 
 @app.route('/postVideo', methods=['POST'])
 def postVideo():
-    # 获取JSON数据
-    data = request.get_json()
-
-    if not data:
-        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
-
-    # 从JSON数据中提取fileList和accountList
-    file_list = data.get('fileList', [])
-    account_list = data.get('accountList', [])
-    type = data.get('type')
-    title = data.get('title')
-    tags = data.get('tags')
-    category = data.get('category')
-    enableTimer = data.get('enableTimer')
-    if category == 0:
-        category = None
-    productLink = data.get('productLink', '')
-    productTitle = data.get('productTitle', '')
-    thumbnail_path = data.get('thumbnail', '')
-    is_draft = data.get('isDraft', False)  # 新增参数：是否保存为草稿
-
-    videos_per_day = data.get('videosPerDay')
-    daily_times = data.get('dailyTimes')
-    start_days = data.get('startDays')
-
-    # 参数校验
-    if not file_list:
-        return jsonify({"code": 400, "msg": "文件列表不能为空", "data": None}), 400
-    if not account_list:
-        return jsonify({"code": 400, "msg": "账号列表不能为空", "data": None}), 400
-    if not type:
-        return jsonify({"code": 400, "msg": "平台类型不能为空", "data": None}), 400
-    if not title:
-        return jsonify({"code": 400, "msg": "标题不能为空", "data": None}), 400
-
-    # 打印获取到的数据（仅作为示例）
-    print("File List:", file_list)
-    print("Account List:", account_list)
-
-    try:
-        platform = _resolve_publish_platform(type)
-        match platform:
-            case "xiaohongshu":
-                post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                               start_days)
-            case "tencent":
-                post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days, is_draft)
-            case "douyin":
-                post_video_DouYin(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                  start_days, thumbnail_path, productLink, productTitle)
-            case "kuaishou":
-                post_video_ks(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                              start_days)
-            case "twitter":
-                post_video_twitter(title, file_list, tags, account_list)
-            case _:
-                return jsonify({"code": 400, "msg": f"不支持的平台类型: {type}", "data": None}), 400
-
-        # 返回响应给客户端
-        return jsonify(
-            {
-                "code": 200,
-                "msg": "发布任务已提交",
-                "data": None
-            }), 200
-    except Exception as e:
-        print(f"发布视频时出错: {str(e)}")
-        return jsonify({
-            "code": 500,
-            "msg": f"发布失败: {str(e)}",
-            "data": None
-        }), 500
+    """Compatibility endpoint: durable admission, never an unjournaled upload."""
+    return jobs_create()
 
 
 @app.route('/updateUserinfo', methods=['POST'])
@@ -1757,66 +1686,25 @@ def updateUserinfo():
 
 @app.route('/postVideoBatch', methods=['POST'])
 def postVideoBatch():
-    data_list = request.get_json()
-
-    if not isinstance(data_list, list):
-        return jsonify({"code": 400, "msg": "Expected a JSON array", "data": None}), 400
-
-    failures = []
+    """Queue each approved batch intent through the same admission boundary."""
+    data_list = request.get_json(silent=True)
+    if not isinstance(data_list, list) or not data_list:
+        return jsonify({"code": 400, "msg": "Expected a non-empty JSON array", "data": None}), 400
+    failures, queued = [], []
     for index, data in enumerate(data_list):
-        file_list = data.get('fileList', [])
-        account_list = data.get('accountList', [])
-        type = data.get('type')
-        title = data.get('title')
-        tags = data.get('tags')
-        category = data.get('category')
-        enableTimer = data.get('enableTimer')
-        if category == 0:
-            category = None
-        productLink = data.get('productLink', '')
-        productTitle = data.get('productTitle', '')
-        thumbnail_path = data.get('thumbnail', '')
-        is_draft = data.get('isDraft', False)
-
-        videos_per_day = data.get('videosPerDay')
-        daily_times = data.get('dailyTimes')
-        start_days = data.get('startDays')
-        print("File List:", file_list)
-        print("Account List:", account_list)
-
         try:
-            platform = _resolve_publish_platform(type)
-            match platform:
-                case "xiaohongshu":
-                    post_video_xhs(title, file_list, tags, account_list, category, enableTimer,
-                                   videos_per_day, daily_times, start_days)
-                case "tencent":
-                    post_video_tencent(title, file_list, tags, account_list, category, enableTimer,
-                                       videos_per_day, daily_times, start_days, is_draft)
-                case "douyin":
-                    # NOTE: keyword args used here on purpose. The earlier positional
-                    # call dropped `thumbnail_path` and silently bound `productLink`
-                    # to the thumbnail parameter.
-                    post_video_DouYin(title, file_list, tags, account_list,
-                                      category=category, enableTimer=enableTimer,
-                                      videos_per_day=videos_per_day, daily_times=daily_times,
-                                      start_days=start_days,
-                                      thumbnail_path=thumbnail_path,
-                                      productLink=productLink, productTitle=productTitle)
-                case "kuaishou":
-                    post_video_ks(title, file_list, tags, account_list, category, enableTimer,
-                                  videos_per_day, daily_times, start_days)
-                case "twitter":
-                    post_video_twitter(title, file_list, tags, account_list)
-                case _:
-                    failures.append({"index": index, "msg": f"unsupported platform type: {type}"})
-        except Exception as exc:
-            print(f"batch publish item {index} failed: {exc}")
-            failures.append({"index": index, "msg": str(exc)})
-
-    if failures:
-        return jsonify({"code": 207, "msg": "partial success", "data": {"failures": failures}}), 207
-    return jsonify({"code": 200, "msg": "ok", "data": None}), 200
+            if not isinstance(data, dict):
+                raise ValueError("Expected a JSON object")
+            platform, payload, targets = _normalise_publish_payload(data)
+            spec = job_runtime.JobSpec(platform=platform, payload=payload, targets=targets,
+                profile_id=data.get("profileId"), idempotency_key=data.get("idempotencyKey"))
+            job = job_runtime.enqueue_job(spec, workspace_id=_workspace_scope())
+            queued.append(_job_to_payload(job))
+        except (ValueError, TypeError) as exc:
+            failures.append({"index": index, "msg": secret_redaction.redact_text(str(exc))})
+    code = 207 if failures else 200
+    return jsonify({"code": code, "msg": "Preparation queued; delivery is not confirmed",
+                    "data": {"jobs": queued, "failures": failures}}), code
 
 # Cookie文件上传API
 @app.route('/uploadCookie', methods=['POST'])
@@ -2135,12 +2023,15 @@ def _normalise_publish_payload(data: dict) -> tuple[str, dict, list[tuple[str, s
 
     file_list = data.get("fileList", [])
     account_list = data.get("accountList", [])
-    if not file_list:
-        raise ValueError("fileList must not be empty")
-    if not account_list:
-        raise ValueError("accountList must not be empty")
-
-    enable_timer = bool(data.get("enableTimer"))
+    if (not isinstance(file_list, list) or not file_list
+            or any(not isinstance(value, str) or not value.strip() for value in file_list)):
+        raise ValueError("fileList must contain exact non-empty file references")
+    if (not isinstance(account_list, list) or not account_list
+            or any(not isinstance(value, str) or not value.strip() for value in account_list)):
+        raise ValueError("accountList must contain exact non-empty account references")
+    if "enableTimer" in data and type(data["enableTimer"]) is not bool:
+        raise ValueError("enableTimer must be a literal boolean")
+    enable_timer = data.get("enableTimer", False)
     if enable_timer:
         schedules = generate_schedule_time_next_day(
             len(file_list),
@@ -2160,6 +2051,19 @@ def _normalise_publish_payload(data: dict) -> tuple[str, dict, list[tuple[str, s
         "productLink": data.get("productLink", "") or "",
         "productTitle": data.get("productTitle", "") or "",
     }
+    options = {"draft", "message", "hashtags", "altText", "alt_text", "firstComment", "first_comment",
+               "networkOptions", "network_options", "tiktokPostSettings", "tiktokDirectPost", "artifacts"}
+    transport = {"platform", "type", "fileList", "accountList", "profileId", "idempotencyKey", "enableTimer",
+                 "videosPerDay", "dailyTimes", "startDays", "title", "tags", "category", "isDraft",
+                 "thumbnail", "productLink", "productTitle"}
+    unknown = set(data) - options - transport
+    if unknown:
+        raise ValueError(f"Unsupported explicit publishing fields require review: {', '.join(sorted(unknown))}")
+    for key in options & set(data):
+        payload[key] = data[key]
+    for key in ("isDraft", "tiktokDirectPost"):
+        if key in data and type(data[key]) is not bool:
+            raise ValueError(f"{key} must be a literal boolean")
     if platform == "twitter":
         payload["threadFileRefs"] = list(file_list)
 
@@ -2167,7 +2071,7 @@ def _normalise_publish_payload(data: dict) -> tuple[str, dict, list[tuple[str, s
     if platform == "twitter":
         root_file_ref = str(file_list[0])
         for account_ref in account_list:
-            targets.append((account_ref, root_file_ref, None))
+            targets.append((account_ref, root_file_ref, schedules[0]))
         return platform, payload, targets
 
     for index, file_ref in enumerate(file_list):
@@ -2220,6 +2124,9 @@ def _account_payload(account: profile_registry.Account) -> dict:
     # ``to_dict`` already returns them as snake_case.
     payload["nickname"] = account.nickname or ""
     payload["accountGroup"] = account.account_group or ""
+    from myUtils.publish_readiness import destination_readiness
+    payload["publishReadiness"] = destination_readiness(account, db_path=_current_db_path())
+    payload["nativeCredentials"] = payload["publishReadiness"].get("nativeCredentials")
     return payload
 
 
@@ -4815,32 +4722,17 @@ def accounts_health_summary():
     refresh_platforms = {profile_registry.PLATFORM_TIKTOK, profile_registry.PLATFORM_REDDIT, profile_registry.PLATFORM_YOUTUBE, profile_registry.PLATFORM_THREADS}
     check_platforms = {profile_registry.PLATFORM_FACEBOOK, profile_registry.PLATFORM_INSTAGRAM, profile_registry.PLATFORM_THREADS, profile_registry.PLATFORM_TELEGRAM, profile_registry.PLATFORM_DISCORD}
 
+    from myUtils.publish_readiness import destination_readiness
+    destination_states = {account.id: destination_readiness(account, db_path=db_path) for account in accounts}
+
     def _derive_state(account):
-        config = dict(account.config or {})
-        detail = ''
-        if account.platform == profile_registry.PLATFORM_FACEBOOK:
-            detail = config.get('facebookPageName', '')
-        elif account.platform == profile_registry.PLATFORM_INSTAGRAM:
-            detail = config.get('instagramUserName', '')
-        elif account.platform == profile_registry.PLATFORM_THREADS:
-            detail = config.get('threadsUserName', '')
-        elif account.platform == profile_registry.PLATFORM_TELEGRAM:
-            detail = config.get('telegramChatTitle', '') or config.get('telegramBotName', '')
-        elif account.platform == profile_registry.PLATFORM_DISCORD:
-            detail = config.get('discordWebhookName', '') or config.get('discordWebhookChannel', '')
-        elif account.platform == profile_registry.PLATFORM_REDDIT:
-            detail = config.get('redditUserName', '')
-        elif account.platform == profile_registry.PLATFORM_YOUTUBE:
-            detail = config.get('channelTitle', '')
-        elif account.platform == profile_registry.PLATFORM_TIKTOK:
-            detail = config.get('displayName', '') or config.get('openId', '')
-        elif account.platform == profile_registry.PLATFORM_TWITTER:
-            twitter_user = config.get('twitterUserName', '')
-            detail = f"@{twitter_user}" if twitter_user else ''
-        has_credential = bool(config.get('accessToken') or config.get('accessTokenEnv') or config.get('botTokenEnv') or config.get('webhookUrlEnv') or account.cookie_path)
-        if detail or config.get('lastConnectionCheckAt') or config.get('lastManualRefreshAt') or config.get('lastAutoRefreshAt') or config.get('connectedAt') or config.get('accessTokenUpdatedAt'):
+        readiness = destination_states[account.id]
+        if readiness.get("ready") is True:
             return 'ready'
-        if has_credential:
+        config = dict(account.config or {})
+        has_credential = bool(config.get('accessToken') or config.get('accessTokenEnv')
+            or config.get('botTokenEnv') or config.get('webhookUrlEnv') or account.cookie_path)
+        if has_credential or readiness.get('reasonCode') != 'configuration_required':
             return 'configured'
         return 'missing'
 
@@ -4860,6 +4752,8 @@ def accounts_health_summary():
             'reconnectRequired': 0,
         },
         'expiringAccounts': [],
+        'destinationReadiness': [dict(destination_states[account.id], accountId=account.id,
+                                     profileId=account.profile_id) for account in accounts],
     }
 
     def _account_expiry_snapshot(account):
@@ -5442,58 +5336,16 @@ def campaigns_publish(campaign_id):
     except LookupError:
         return jsonify({"code": 404, "msg": "Campaign not found", "data": None}), 404
 
-    posts = campaign_store.list_campaign_posts(campaign.id, db_path=db_path)
-    artifacts = [
-        artifact.to_dict()
-        for artifact in campaign_store.list_campaign_artifacts(campaign.id, db_path=db_path)
-    ]
-    queued_jobs: list[dict] = []
-    skipped: list[dict] = []
-    for post in posts:
-        if not profile_registry.platform_supports_direct_publish(post.platform):
-            skipped.append({"platform": post.platform, "reason": "content_only"})
-            continue
-
-        accounts = [
-            profile_registry.get_account(account_id, db_path=db_path)
-            for account_id in post.account_ids
-        ]
-        enabled_accounts = [account for account in accounts if account.enabled]
-        if not enabled_accounts:
-            skipped.append({"platform": post.platform, "reason": "no_enabled_accounts"})
-            continue
-
-        payload = {
-            "campaignId": campaign.id,
-            "campaignPostId": post.id,
-            "platform": post.platform,
-            "draft": post.draft,
-            "message": post.draft.get("message", ""),
-            "sheetRow": post.sheet_row,
-            "artifacts": _artifact_payloads_for_platform(artifacts, post.platform),
-        }
-        targets = [
-            (f"account:{account.id}", f"campaign_post:{post.id}", None)
-            for account in enabled_accounts
-        ]
-        job = job_runtime.enqueue_job(
-            job_runtime.JobSpec(
-                platform=post.platform,
-                payload=payload,
-                targets=targets,
-                profile_id=campaign.profile_id,
-                idempotency_key=f"campaign-{campaign.id}-post-{post.id}",
-            ),
-            workspace_id=workspace_id,
-            db_path=db_path,
-        )
-        queued_jobs.append(_job_to_payload(job))
-        campaign_store.update_campaign_post(
-            post.id,
-            status=campaign_store.CAMPAIGN_POST_QUEUED,
-            last_published_job_id=job.id,
-            db_path=db_path,
-        )
+    from myUtils import publication_groups
+    try:
+        result = publication_groups.publish_saved_campaign(campaign, db_path=db_path,
+            load_media_files=_load_media_group_files,
+            artifact_payloads_for_platform=_artifact_payloads_for_platform, job_to_payload=_job_to_payload)
+    except publication_groups.PublicationGroupConflict as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    except (ValueError, TypeError, LookupError, OSError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": getattr(exc, "details", None)}), 400
+    queued_jobs, skipped = result["jobs"], result["skipped"]
 
     # A publish pass that queues nothing must not un-schedule a campaign that
     # already has queued posts. This is the same rule the prep paths apply:
@@ -5549,11 +5401,13 @@ def jobs_create():
     )
     try:
         job = job_runtime.enqueue_job(spec, workspace_id=_workspace_scope())
+    except (ValueError, TypeError) as exc:
+        return jsonify({"code": 400, "msg": secret_redaction.redact_text(str(exc)), "data": None}), 400
     except Exception as exc:  # noqa: BLE001
         print(f"jobs_create failed: {exc}")
         return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
 
-    return jsonify({"code": 200, "msg": "queued", "data": _job_to_payload(job)}), 200
+    return jsonify({"code": 200, "msg": "Preparation queued; delivery is not confirmed", "data": _job_to_payload(job)}), 200
 
 
 @app.route("/jobs", methods=["GET"])
@@ -5694,6 +5548,11 @@ def _scheduled_target_payload(target: dict, job_meta: dict) -> dict:
         "status": target["status"],
         "attempts": target["attempts"],
         "lastError": target["last_error"],
+        "nextAttemptAt": target.get("next_attempt_at"),
+        "errorCategory": target.get("error_category"),
+        "deliveryState": target.get("delivery_state"),
+        "retryEligibility": target.get("retryEligibility", {"allowed": False}),
+        "readiness": target.get("readiness", {}),
     }
 
 
@@ -5725,11 +5584,11 @@ def jobs_calendar():
 
 @app.route("/jobs/targets/<int:target_id>/reschedule", methods=["POST"])
 def jobs_target_reschedule(target_id):
-    data = request.get_json(silent=True) or {}
-    schedule_at = (data.get("scheduleAt") or "").strip()
-    if not schedule_at:
-        return jsonify({"code": 400, "msg": "scheduleAt is required",
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("scheduleAt"), str) or not data["scheduleAt"].strip():
+        return jsonify({"code": 400, "msg": "scheduleAt must be a non-empty ISO-8601 string",
                         "data": None}), 400
+    schedule_at = data["scheduleAt"].strip()
     try:
         target = job_runtime.reschedule_target(
             target_id, schedule_at,
@@ -5752,21 +5611,27 @@ def jobs_target_cancel(target_id):
         return jsonify({"code": 404, "msg": "Target not found", "data": None}), 404
     except ValueError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
-    return jsonify({"code": 200, "msg": "cancelled",
+    return jsonify({"code": 200, "msg": "Local work cancelled; provider acceptance is unchanged",
                     "data": _target_to_payload(target)}), 200
 
 
 @app.route("/jobs/targets/<int:target_id>/resubmit", methods=["POST"])
 def jobs_target_resubmit(target_id):
+    data = request.get_json(silent=True)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "Expected a JSON object", "data": None}), 400
+    recovery_plan = data.get("recoveryPlan", data.get("recovery_plan"))
     try:
         target = job_runtime.resubmit_target(
             target_id,
-            workspace_id=_workspace_scope(), db_path=_current_db_path())
+            workspace_id=_workspace_scope(), db_path=_current_db_path(), recovery_plan=recovery_plan)
     except LookupError:
         return jsonify({"code": 404, "msg": "Target not found", "data": None}), 404
     except ValueError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
-    return jsonify({"code": 200, "msg": "resubmitted",
+    return jsonify({"code": 200, "msg": "Recovery scheduled; delivery is not yet confirmed",
                     "data": _target_to_payload(target)}), 200
 
 
@@ -5882,6 +5747,7 @@ def jobs_schedule_shift():
 
 def _target_to_payload(target: job_runtime.Target) -> dict:
     display = _account_display_name(target.account_ref)
+    safe = target.to_dict()
     return {
         "id": target.id,
         "jobId": target.job_id,
@@ -5897,6 +5763,10 @@ def _target_to_payload(target: job_runtime.Target) -> dict:
         "lastError": _redact_entity_error(target.last_error),
         "startedAt": target.started_at,
         "finishedAt": target.finished_at,
+        "retryEligibility": safe.get("retryEligibility", {"allowed": False}),
+        "readiness": safe.get("readiness", {}),
+        "checkpoint": safe.get("checkpoint", {}),
+        "providerReceipt": (safe.get("checkpoint") or {}).get("provider_receipt"),
     }
 
 

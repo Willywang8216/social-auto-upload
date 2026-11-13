@@ -1105,6 +1105,47 @@ def list_artifacts_without_mapping(
     return [_row_to_campaign_artifact(row) for row in rows]
 
 
+def add_campaign_post_in_transaction(
+    conn: sqlite3.Connection,
+    campaign_id: int,
+    platform: str,
+    *,
+    account_ids: list[int] | None = None,
+    draft: dict | None = None,
+    sheet_row: dict | None = None,
+    status: str = CAMPAIGN_POST_DRAFT,
+    last_published_job_id: int | None = None,
+    file_record_ids: list[int] | None = None,
+    workspace_id: str | None | object = _UNSET,
+) -> CampaignPost:
+    """Insert one member of an owned transaction; never commit or open a DB.
+
+    Publication groups use this together with jobs.enqueue_job_in_transaction.
+    The post inherits its campaign's workspace, including legacy NULL ownership.
+    """
+    if not conn.in_transaction:
+        raise ValueError("Campaign post installation requires an owned transaction")
+    parent = conn.execute("SELECT workspace_id FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+    if parent is None:
+        raise LookupError(f"Campaign not found: id={campaign_id}")
+    owner = parent[0]
+    if workspace_id is not _UNSET and workspace_id != owner:
+        raise ValueError("Campaign post belongs to a different workspace")
+    file_ids_json = (None if file_record_ids is None else
+                     json.dumps([int(v) for v in file_record_ids], ensure_ascii=False, allow_nan=False))
+    cursor = conn.execute(
+        "INSERT INTO campaign_posts (campaign_id,platform,account_ids_json,draft_json,"
+        "sheet_row_json,status,last_published_job_id,file_record_ids_json,workspace_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (campaign_id, platform, json.dumps(account_ids or [], ensure_ascii=False, allow_nan=False),
+         json.dumps(draft or {}, ensure_ascii=False, allow_nan=False),
+         json.dumps(sheet_row or {}, ensure_ascii=False, allow_nan=False), status,
+         last_published_job_id, file_ids_json, owner),
+    )
+    return _row_to_campaign_post(conn.execute(
+        "SELECT * FROM campaign_posts WHERE id=?", (cursor.lastrowid,)).fetchone())
+
+
 def add_campaign_post(
     campaign_id: int,
     platform: str,
@@ -1117,38 +1158,13 @@ def add_campaign_post(
     file_record_ids: list[int] | None = None,
     db_path: Path | None = None,
 ) -> CampaignPost:
-    file_ids_json: str | None = None
-    if file_record_ids is not None:
-        file_ids_json = json.dumps([int(v) for v in file_record_ids], ensure_ascii=False)
-    with _connect(db_path) as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO campaign_posts (
-                campaign_id,
-                platform,
-                account_ids_json,
-                draft_json,
-                sheet_row_json,
-                status,
-                last_published_job_id,
-                file_record_ids_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                campaign_id,
-                platform,
-                json.dumps(account_ids or [], ensure_ascii=False),
-                json.dumps(draft or {}, ensure_ascii=False),
-                json.dumps(sheet_row or {}, ensure_ascii=False),
-                status,
-                last_published_job_id,
-                file_ids_json,
-            ),
+    with _connect(db_path) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        return add_campaign_post_in_transaction(
+            conn, campaign_id, platform, account_ids=account_ids, draft=draft,
+            sheet_row=sheet_row, status=status, last_published_job_id=last_published_job_id,
+            file_record_ids=file_record_ids,
         )
-        conn.commit()
-        post_id = cursor.lastrowid
-    return get_campaign_post(post_id, db_path=db_path)
 
 
 def get_campaign_post(post_id: int, *, db_path: Path | None = None) -> CampaignPost:

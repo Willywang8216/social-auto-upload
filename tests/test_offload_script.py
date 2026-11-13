@@ -265,24 +265,18 @@ esac
         }
         return _purge_harness(source), env, calls
 
-    def test_hash_lag_falls_back_to_a_size_check_instead_of_failing(self):
-        """Google Drive can serve an object before its MD5 is populated.
-
-        Campaign-2563 on 2026-10-22: uploaded 21:25:54, "remote copy is missing
-        or differs" at 21:27:20, verified clean at 21:37. That one race paged the
-        operator and left 49 MB on the VPS. A size match must be accepted.
-        """
+    def test_size_only_remote_match_never_authorizes_unlink(self):
+        """Provider hash lag defers until actual content can be verified."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             script, env, calls = self._deferral_harness(root, hash_rc=1, size_rc=0)
             result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)  # first deferral
             recorded = calls.read_text().splitlines()
-            self.assertTrue(any("--size-only" in line for line in recorded))
-            removed = [line for line in recorded if line.startswith("rm ")]
-            self.assertEqual(len(removed), 1)
-            self.assertTrue(removed[0].endswith("videoFile/clip.mp4"), removed)
-            self.assertIn("verified by size only", result.stdout)
+            self.assertFalse(any("--size-only" in line for line in recorded))
+            self.assertTrue(any("--download" in line for line in recorded))
+            self.assertFalse(any(line.startswith("rm ") for line in recorded))
+            self.assertTrue((root / "videoFile" / "clip.mp4").is_file())
 
     def test_repeat_offender_pages_after_three_consecutive_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -456,7 +450,7 @@ notify "$1" "$2"
             with sqlite3.connect(db) as conn:
                 conn.execute("CREATE TABLE storage_backends (id INTEGER PRIMARY KEY, provider TEXT, bucket TEXT, endpoint TEXT, enabled INTEGER)")
                 conn.execute("INSERT INTO storage_backends VALUES (7,'rclone','drive','sau/generated',1)")
-                conn.execute("CREATE TABLE file_records (id INTEGER PRIMARY KEY, filename TEXT, file_path TEXT, filesize INTEGER, storage_key TEXT, storage_backend_id INTEGER)")
+                conn.execute("CREATE TABLE file_records (id INTEGER PRIMARY KEY, filename TEXT, file_path TEXT, filesize INTEGER, storage_key TEXT, storage_backend_id INTEGER, sha256 TEXT, size_bytes INTEGER)")
                 conn.execute("INSERT INTO file_records (filename,file_path,filesize) VALUES (?,?,?)", ("clip.mp4", "generated/campaigns/clip.mp4", media.stat().st_size))
             source_text = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
             body = source_text.split("register_verified_source() {", 1)[1].split("\n}", 1)[0]
@@ -465,6 +459,9 @@ notify "$1" "$2"
             self.assertEqual(result.returncode, 0, result.stderr)
             with sqlite3.connect(db) as conn:
                 self.assertEqual(conn.execute("SELECT storage_key,storage_backend_id FROM file_records").fetchone(), ("campaigns/clip.mp4", 7))
+                import hashlib
+                self.assertEqual(conn.execute("SELECT sha256,size_bytes FROM file_records").fetchone(),
+                                 (hashlib.sha256(media.read_bytes()).hexdigest(), media.stat().st_size))
 
     def test_rclone_filter_escape_is_literal_for_glob_characters(self):
         source = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
@@ -490,7 +487,7 @@ notify "$1" "$2"
             with sqlite3.connect(db) as conn:
                 conn.execute("CREATE TABLE storage_backends (id INTEGER PRIMARY KEY, provider TEXT, bucket TEXT, endpoint TEXT, enabled INTEGER)")
                 conn.execute("INSERT INTO storage_backends VALUES (7,'rclone','drive','sau/videoFile',1)")
-                conn.execute("CREATE TABLE file_records (id INTEGER PRIMARY KEY, filename TEXT, file_path TEXT, filesize REAL, storage_key TEXT, storage_backend_id INTEGER)")
+                conn.execute("CREATE TABLE file_records (id INTEGER PRIMARY KEY, filename TEXT, file_path TEXT, filesize REAL, storage_key TEXT, storage_backend_id INTEGER, sha256 TEXT, size_bytes INTEGER)")
                 conn.execute("INSERT INTO file_records (filename,file_path,filesize) VALUES (?,?,?)", ("clip.mp4", "_homealone/clip.mp4", 0.25))
             source_text = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
             body = source_text.split("register_verified_source() {", 1)[1].split("\n}", 1)[0]
@@ -586,7 +583,7 @@ notify "$1" "$2"
             with sqlite3.connect(db) as conn:
                 conn.execute("CREATE TABLE storage_backends (id INTEGER PRIMARY KEY, provider TEXT, bucket TEXT, endpoint TEXT, enabled INTEGER)")
                 conn.execute("INSERT INTO storage_backends VALUES (9,'rclone','drive','sau/inbox/generated',1)")
-                conn.execute("CREATE TABLE file_records (id INTEGER PRIMARY KEY, filename TEXT, file_path TEXT, filesize INTEGER, storage_key TEXT, storage_backend_id INTEGER)")
+                conn.execute("CREATE TABLE file_records (id INTEGER PRIMARY KEY, filename TEXT, file_path TEXT, filesize INTEGER, storage_key TEXT, storage_backend_id INTEGER, sha256 TEXT, size_bytes INTEGER)")
                 conn.execute("INSERT INTO file_records (filename,file_path,filesize) VALUES (?,?,?)", ("clip.mp4", "generated/campaigns/clip.mp4", media.stat().st_size))
             source_text = (Path(__file__).resolve().parents[1] / "offload_to_drive.sh").read_text()
             body = source_text.split("register_verified_source() {", 1)[1].split("\n}", 1)[0]
@@ -664,6 +661,17 @@ notify "$1" "$2"
             self.assertIn("# route_plan", result.stdout)
             self.assertEqual((plan_dir / "videoFile.published").read_text().split(), ["pub.mp4"])
             self.assertEqual((plan_dir / "videoFile.inbox").read_text().split(), ["new.mp4"])
+
+    def test_source_changed_during_registration_is_not_unlinked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script, env, calls = self._deferral_harness(root, hash_rc=0, size_rc=0)
+            script = script.replace('register_verified_source(){ return 0; }',
+                'register_verified_source(){ printf changed > "$TEST_SOURCE/clip.mp4"; return 0; }')
+            result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((root / "videoFile" / "clip.mp4").read_bytes(), b"changed")
+            self.assertFalse(any(line.startswith("rm ") for line in calls.read_text().splitlines()))
 
 
 if __name__ == "__main__":

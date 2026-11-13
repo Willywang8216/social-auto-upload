@@ -105,6 +105,15 @@ def _validate_prepared(parts: list[dict], state: dict, backup: bool, context: di
             raise recovery.RecoveryRefused("Prepared output changed during final validation")
         if context:
             backup_preparation.validate_intent(part, context=context, account_config=cfg)
+    videos = [a for part in parts for a in part.get("artifacts") or []
+              if publish_media_guard.media_kind(a) == "video"]
+    if videos:
+        from myUtils.prepared_recovery import validate_video_provenance
+        original = jobs._recovery_json_object(state["job"]["payload_json"])
+        original.update(jobs._recovery_json_object(state["target"]["checkpoint_json"]).get("payload") or {})
+        if not original.get("artifacts") and not state["target"]["file_ref"].startswith("campaign_post:"):
+            original["artifacts"] = [{"local_path": state["target"]["file_ref"]}]
+        validate_video_provenance(original, videos, platform=state["job"]["platform"], probe_sources=True)
 
 
 def _pending_guard(item: dict) -> dict | None:
@@ -120,10 +129,8 @@ def _pending_media(payload: dict) -> list[dict]:
     result = []
     for artifact in payload.get("artifacts") or []:
         path = publish_media_guard._local_source(artifact)
-        expected = artifact.get("sha256") or (artifact.get("metadata") or {}).get("sha256")
-        if expected is not None:
-            media_compliance.verify_checksum(path, expected)
-        result.append({"local_path": str(path), "sha256": media_compliance.sha256_file(path)})
+        facts = publish_media_guard._verified_source(artifact, path)
+        result.append({"local_path": str(path), "sha256": facts["sha256"]})
     return result
 
 
@@ -247,7 +254,8 @@ def prepare_plan(*, db_path: Path, target_ids: list[int], per_day_cap: int | Non
                         if not path.is_file():
                             raise media_compliance.MediaPreparationError("Exact cover is unavailable")
                         metadata = dict(artifact.get("metadata") or {})
-                        metadata["sha256"] = media_compliance.sha256_file(path)
+                        facts = publish_media_guard._verified_source(artifact, path)
+                        metadata.update(facts)
                         artifact["metadata"] = metadata
             if _preparation_intent(fresh) != intent:
                 raise recovery.RecoveryRefused("Publishing intent changed during preprocessing")

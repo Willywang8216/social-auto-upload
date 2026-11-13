@@ -17,6 +17,20 @@ from myUtils import prepared_publishers as pp
 from db import createTable
 
 
+def _enqueue_receipt_history(spec, *, db_path, receipt_id):
+    """A submitted legacy receipt, not permission for a new TikTok create."""
+    from tests.legacy_queue import enqueue_legacy_job
+    job = enqueue_legacy_job(spec, db_path=db_path)
+    history = {}
+    direct = spec.payload["tiktokDirectPost"] is True
+    delivery.accepted(history, provider="tiktok", receipt_id=receipt_id,
+        publish_mode="direct" if direct else "inbox", privacy_level=tt.PUBLIC if direct else None)
+    with closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.execute("UPDATE publish_job_targets SET checkpoint_json=? WHERE job_id=?",
+                     (json.dumps(delivery.state(history)), job.id))
+    return job
+
+
 @pytest.fixture
 def account():
     return SimpleNamespace(id=901, config={"accessToken": "synthetic-token", "privacyLevel": tt.PUBLIC})
@@ -222,13 +236,12 @@ def test_inbox_review_and_its_actionable_alert_are_durable(tmp_path, monkeypatch
     profile = profiles.create_profile("Inbox fixture", db_path=path)
     account = profiles.add_account(profile.id, "tiktok", "Inbox fixture", auth_type="oauth",
         config={"accessToken": "synthetic-token", "openId": "synthetic-open-id"}, db_path=path)
-    job = jobs.enqueue_job(jobs.JobSpec(platform="tiktok", profile_id=profile.id,
+    job = _enqueue_receipt_history(jobs.JobSpec(platform="tiktok", profile_id=profile.id,
         payload={"message": "The original caption stays available for the creator's final edit.", "tiktokDirectPost": False},
-        targets=[(f"account:{account.id}", "campaign_post:1", None)]), db_path=path)
+        targets=[(f"account:{account.id}", "campaign_post:1", None)]), db_path=path, receipt_id="inbox-receipt")
     monkeypatch.setattr(pp, "_ensure_tiktok_access_token", lambda *_: ("synthetic-token", None))
     monkeypatch.setattr(pp, "fetch_tiktok_publish_status", lambda *a, **k: {"data": {"status": "SEND_TO_USER_INBOX"}})
     async def execute(platform, data, target):
-        delivery.accepted(data, provider="tiktok", receipt_id="inbox-receipt", publish_mode="inbox", privacy_level=None)
         await worker._publish_prepared_tiktok(platform, data, target, account=account, account_file=None)
     instance = worker.PublishWorker(execute, db_path=path,
         config=worker.WorkerConfig(poll_interval=.001, max_concurrent=1))
@@ -272,16 +285,15 @@ def test_provider_confirmed_failure_finalizes_now_without_backup_or_24h_polling(
     profile = profiles.create_profile("Failure fixture", db_path=path)
     account = profiles.add_account(profile.id, "tiktok", "Failure fixture", auth_type="oauth",
         config={"accessToken": "synthetic-token", "openId": "synthetic-open-id"}, db_path=path)
-    job = jobs.enqueue_job(jobs.JobSpec(platform="tiktok", profile_id=profile.id,
+    job = _enqueue_receipt_history(jobs.JobSpec(platform="tiktok", profile_id=profile.id,
         payload={"message": "The original caption remains unchanged after a provider failure.", "tiktokDirectPost": True},
-        targets=[(f"account:{account.id}", "campaign_post:1", None)]), db_path=path)
+        targets=[(f"account:{account.id}", "campaign_post:1", None)]), db_path=path, receipt_id="failed-receipt")
     monkeypatch.setattr(pp, "_ensure_tiktok_access_token", lambda *_: ("synthetic-token", None))
     monkeypatch.setattr(pp, "fetch_tiktok_publish_status", lambda *a, **k: {
         "data": {"status": "FAILED", "fail_reason": "video_format_check_failed"}})
     backup = Mock(side_effect=AssertionError("A failed receipt must not be reposted automatically"))
     monkeypatch.setattr(worker.sociamonials_fallback, "publish_via_sociamonials", backup)
     async def execute(platform, data, target):
-        delivery.accepted(data, provider="tiktok", receipt_id="failed-receipt", publish_mode="direct", privacy_level=tt.PUBLIC)
         await worker._publish_prepared_tiktok(platform, data, target, account=account, account_file=None)
     instance = worker.PublishWorker(execute, db_path=path,
         config=worker.WorkerConfig(poll_interval=.001, max_concurrent=1))

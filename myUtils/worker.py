@@ -260,10 +260,15 @@ class WorkerConfig:
     # restart, and the sweep was still waiting).
     # Override with SAU_PREP_LEASE_MINUTES when a host is slower.
     prep_lease_minutes: int = 45
+    preparation_warm_seconds: float = jobs.PREPARATION_WARM_SECONDS
+    prerequisite_max_attempts: int = jobs.PREREQUISITE_MAX_ATTEMPTS
 
     def __post_init__(self) -> None:
         if self.retry is None:
             self.retry = RetryPolicy()
+        self.preparation_warm_seconds = min(jobs._seconds(self.preparation_warm_seconds), jobs.PREPARATION_WARM_SECONDS)
+        if type(self.prerequisite_max_attempts) is not int or not 1 <= self.prerequisite_max_attempts <= 100:
+            raise ValueError("prerequisite_max_attempts must be a positive bounded integer")
         # Env overrides so an operator can tune prep without a rebuild. Read here
         # rather than as field defaults so an environment value is always
         # honoured. An explicit constructor argument still wins: compare against
@@ -334,6 +339,7 @@ class PublishWorker:
         self._config = config or WorkerConfig()
         self._db_path = db_path or jobs.DB_PATH
         self._concurrency = AccountConcurrency(self._config.max_concurrent)
+        self._preparation_slots = asyncio.Semaphore(max(1, self._config.prep_max_concurrent))
         self._stop = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
         self._prep_tasks: set[asyncio.Task] = set()
@@ -430,7 +436,7 @@ class PublishWorker:
         # Only targets that are due *now* count. A target scheduled for later
         # must not keep drain() spinning; the backend's publish scheduler
         # re-triggers a drain once it becomes claimable.
-        if jobs.has_claimable_targets(db_path=self._db_path):
+        if jobs.has_claimable_targets(db_path=self._db_path, prepare_ahead_seconds=self._config.preparation_warm_seconds):
             return True
         # A campaign waiting for prep is also pending work; without this a
         # --once drain would exit before preparing it. Only *claimable* ones
@@ -829,6 +835,7 @@ class PublishWorker:
             db_path=self._db_path,
             owner=self._prep_owner,
             lease_seconds=180,
+            prepare_ahead_seconds=self._config.preparation_warm_seconds,
         )
         for target in claimed:
             self._claimed[target.id] = target
@@ -878,6 +885,11 @@ class PublishWorker:
     async def _run_campaign_prep(
         self, campaign: "campaign_store.Campaign"
     ) -> None:
+        """Share the small preparation cap with prospective raw target children."""
+        async with self._preparation_slots:
+            await self._run_campaign_prep_inline(campaign)
+
+    async def _run_campaign_prep_inline(self, campaign: "campaign_store.Campaign") -> None:
         """Run one claimed campaign's prep + finalize, then record the outcome."""
         if (os.environ.get("SAU_TARGET_CHILD") != "1" and os.environ.get("SAU_TESTING") != "1"
                 and getattr(self._prep_runner, "__module__", "") == "myUtils.campaign_prep"):
@@ -1005,17 +1017,59 @@ class PublishWorker:
 
     async def _run_target(self, target: jobs.Target) -> None:
         try:
-            if (self._executor is default_executor and os.environ.get("SAU_TARGET_CHILD") != "1"
-                    and os.environ.get("SAU_TESTING") != "1"):
-                from myUtils.target_runner import run_isolated_target
-                await run_isolated_target(self, target, timeout=TARGET_EXECUTION_TIMEOUT_SECONDS)
-            else:
-                await self._run_target_inline(target)
+            prospective = (target.checkpoint.get("admission") or {}).get("mode") == jobs.PROSPECTIVE_ADMISSION_MODE
+            async with (self._preparation_slots if prospective else contextlib.nullcontext()):
+                if (self._executor is default_executor and os.environ.get("SAU_TARGET_CHILD") != "1"
+                        and os.environ.get("SAU_TESTING") != "1"):
+                    from myUtils.target_runner import run_isolated_target
+                    await run_isolated_target(self, target, timeout=TARGET_EXECUTION_TIMEOUT_SECONDS)
+                else:
+                    await self._run_target_inline(target)
         finally:
             self._claimed.pop(target.id, None)
             self._task_by_target.pop(target.id, None)
             self._payloads.pop(target.id, None)
             self._maybe_close_job_sink(target.job_id)
+
+    async def _reconcile_target(self, target, job, payload, log) -> None:
+        """Resume only the receipt's provider; no restoration/readiness/create budget."""
+        receipt = delivery.state(payload).get("provider_receipt") or {}
+        if receipt.get("status") == "failed":
+            raise delivery.ProviderConfirmedFailure(receipt.get("provider"), receipt.get("id"), "Retained provider receipt failed; reconciliation cannot resubmit it")
+        if receipt.get("status") == "delivered":
+            if delivery.state(payload).get("x_browser_operations") and delivery.state(payload).get("stage") != "browser_delivered":
+                raise delivery.DeliveryUnknown("X browser thread still has retained incomplete parts")
+            self._transition(target, jobs.mark_target_success)
+            return
+        async with self._concurrency.slot(target.account_ref):
+            if receipt.get("provider") == "sociamonials":
+                if not await self._try_sociamonials_fallback(target, "Resume original provider receipt", log):
+                    raise delivery.DeliveryUnknown("Original receipt provider is unavailable for reconciliation")
+                return
+            result = self._executor(job.platform, payload, target)
+            outcome = await result if inspect.isawaitable(result) else result
+            if isinstance(outcome, (PreparationCompleted, PreparationDeferred)):
+                raise delivery.DeliveryUnknown("Receipt polling returned preparation instead of delivery proof")
+            if delivery.state(payload).get("provider_receipt", {}).get("status") != "delivered":
+                delivery.pending_or_unknown(payload, "Original provider delivery remains unconfirmed")
+            delivery.route_outcome(payload, "native", "delivered")
+            self._transition(target, jobs.mark_target_success)
+
+    async def _prepare_before_dispatch(self, target, job, payload, *, backup=False):
+        from myUtils import media_restore, publish_admission
+        current = delivery.state(payload)
+        if "provider_budget_baseline" not in current:
+            delivery.checkpoint(payload, provider_budget_baseline=0 if current.get("recovery_generation") or current.get("preparation_generation") else max(0, target.attempts - 1))
+        try:
+            return await asyncio.to_thread(_prepare_target_prerequisites, target, job, payload, db_path=self._db_path, backup=backup)
+        except (delivery.LeaseLost, delivery.DeliveryUnknown, media_restore.PrerequisiteUnavailable, MediaRestoreError):
+            raise
+        except publish_admission.AdmissionError as exc:
+            raise MediaRestoreError(str(exc), retryable=False, category=(exc.details or {}).get("reasonCode", "intent")) from exc
+        except ValueError as exc:
+            raise MediaRestoreError(str(exc), retryable=False, category="explicit_recovery_required") from exc
+        except (OSError, TimeoutError) as exc:
+            raise media_restore.PrerequisiteUnavailable(media_restore.classify_failure(exc)) from None
 
     async def _run_target_inline(self, target: jobs.Target) -> None:
         log = bind_job_logger(job_id=target.job_id, target_id=target.id,
@@ -1033,6 +1087,10 @@ class PublishWorker:
                     self._alert_publish_failure(target, reason)
                 return
             receipt = delivery.state(payload).get("provider_receipt") or {}
+            payload["_publish_max_attempts"] = self._config.retry.max_attempts
+            if receipt:
+                await self._reconcile_target(target, job, payload, log)
+                return
             # Receipts own their provider. A pinned backup without a receipt
             # resumes the SAME key and budget, never native publishing again.
             fallback_only = receipt.get("provider") == "sociamonials"
@@ -1091,11 +1149,11 @@ class PublishWorker:
                     if self._transition(target, jobs.mark_target_failed, reason):
                         self._alert_publish_failure(target, reason)
                     return
-                receipt = delivery.state(payload).get("provider_receipt") or {}
-                if receipt.get("status") == "delivered":
-                    self._transition(target, jobs.mark_target_success)
-                    return
-                if receipt.get("provider") == "sociamonials" or fallback_only:
+                if self._executor is default_executor or delivery.state(payload).get("admission") or payload.get("artifacts") or payload.get("thumbnail"):
+                    preparation = await self._prepare_before_dispatch(target, job, payload, backup=fallback_only)
+                    if isinstance(preparation, (PreparationCompleted, PreparationDeferred)):
+                        return
+                if fallback_only:
                     if await self._try_sociamonials_fallback(target, "Configured Sociamonials route", log):
                         return
                     raise sociamonials_fallback.SociamonialsNotConfigured("Configured Sociamonials route is unavailable")
@@ -1106,12 +1164,11 @@ class PublishWorker:
                     if await self._try_bundle_social_fallback(target, "Configured bundle.social route", log):
                         return
                     raise _fc.ClassifiedFailure("bundle.social route is unavailable", _fc.PERMANENT)
-                if not receipt:
-                    routes = delivery.publish_routes(payload)
-                    if "native" not in routes:
-                        routes["native"] = {"attempts": max(0, target.attempts - 1)}
-                        delivery.checkpoint(payload, publish_routes=routes)
-                    delivery.begin_route_attempt(payload, "native", max_attempts=self._config.retry.max_attempts)
+                cookie_x = job.platform == "twitter" and (profile_registry.effective_auth_type(
+                    (account.config or {}) if account else {}, getattr(account, "auth_type", None), "twitter") or "cookie") == "cookie"
+                payload["_defer_native_create_budget"] = bool(self._executor is default_executor and cookie_x and _x_browser_adapted())
+                if not payload["_defer_native_create_budget"]:
+                    _begin_native_publish_attempt(payload, target)
                 log.info("target claimed; starting execution")
                 result = self._executor(job.platform, payload, target)
                 if inspect.isawaitable(result):
@@ -1119,6 +1176,13 @@ class PublishWorker:
                         result, timeout=TARGET_EXECUTION_TIMEOUT_SECONDS)
                 else:
                     outcome = result
+                if isinstance(outcome, (PreparationCompleted, PreparationDeferred)):
+                    # An owned preparation-only executor has released back to
+                    # PENDING/retrying; a normal return is NOT delivery success.
+                    if isinstance(outcome, PreparationDeferred) and jobs.get_target(target.id, db_path=self._db_path).status == jobs.TARGET_RUNNING:
+                        jobs.defer_target_prerequisite(target.id, outcome.reason, lease_token=target.lease_token,
+                            category=outcome.category, delay_seconds=outcome.retry_after_seconds, db_path=self._db_path)
+                    return
                 delivery.save_payload_progress(payload)
                 if isinstance(outcome, dict) and outcome.get("retryableFailure"):
                     raise prepared_publishers.PreparedPublishError(
@@ -1131,7 +1195,7 @@ class PublishWorker:
             log.warning("Target lease lost; obsolete completion discarded")
         except asyncio.CancelledError:
             current = delivery.state(payload)
-            if current.get("submission_started"):
+            if delivery.has_unresolved_submission(payload):
                 if self._transition(target, jobs.mark_target_needs_review,
                                  "Execution interrupted after submission began; verify delivery before retrying"):
                     self._alert_publish_failure(target, "Execution interrupted; delivery requires review")
@@ -1170,6 +1234,22 @@ class PublishWorker:
             delivery.route_outcome(payload, route, "needs_review", message)
             if self._transition(target, jobs.mark_target_needs_review, message):
                 self._alert_publish_failure(target, message)
+            return
+        safe_prerequisite = isinstance(error_details, dict) and error_details.get("prerequisiteFailure") is True
+        preview_only = (payload.get("_defer_native_create_budget") and not payload.get("_native_route_started")
+                        and _ambiguous_transport_error(exc))
+        if (safe_prerequisite or preview_only) and not delivery.has_unresolved_submission({"_delivery": checkpoint}):
+            category = error_details.get("dependencyCategory", "transport") if safe_prerequisite else "browser_preparing"
+            delay = max(1, getattr(exc, "retry_after_seconds", 120), _retry_after_seconds(exc))
+            attempts = (checkpoint.get("prerequisites") or {}).get("attempts", 0)
+            if type(attempts) is int and attempts >= 0:
+                delay = max(delay, min(1800, 120 * 2 ** min(attempts, 4)))
+            changed = jobs.defer_target_prerequisite(target.id, message, lease_token=target.lease_token,
+                category=category, delay_seconds=delay, retryable=getattr(exc, "retryable", True),
+                max_attempts=self._config.prerequisite_max_attempts, db_path=self._db_path,
+                stage=error_details.get("stage", "waiting_dependency") if safe_prerequisite else "browser_preparing")
+            if changed:
+                log.warning(f"Prerequisite deferred/stopped before provider create: {category}")
             return
         if (isinstance(error_details, dict) and error_details.get("intentReviewRequired") is True
                 and not delivery.has_unresolved_submission({"_delivery": checkpoint})):
@@ -1213,7 +1293,8 @@ class PublishWorker:
         media_reconciled = generic_delivery.media_only_reconciled(checkpoint, target_id=target.id)
         recorded_receipt = (checkpoint.get("provider_receipt") or checkpoint.get("completed_operations")
                             or checkpoint.get("provider_operations") and not media_reconciled
-                            or checkpoint.get("telegramCompletedByDelivery"))
+                            or checkpoint.get("telegramCompletedByDelivery")
+                            or generic_delivery.x_browser_has_effects(checkpoint))
         if recorded_receipt or (delivery.has_unresolved_submission({"_delivery": checkpoint}) and not definite):
             try:
                 delivery.pending_or_unknown({"_delivery": checkpoint}, message)
@@ -1314,15 +1395,11 @@ class PublishWorker:
         delivery.select_backup(payload)
         settings = profile_registry.get_profile(job.profile_id, db_path=self._db_path).settings if job.profile_id else None
         if not receipt:
+            if not payload.get("_prerequisites_checked") or str((account.config or {}).get("publishingProvider") or "direct") != "sociamonials":
+                prepared = await self._prepare_before_dispatch(target, job, payload, backup=True)
+                if isinstance(prepared, (PreparationCompleted, PreparationDeferred)):
+                    return True  # Released for preparation, NOT delivery success.
             delivery.begin_route_attempt(payload, "sociamonials", max_attempts=self._config.retry.max_attempts)
-            # A legacy video target must not become a text-only backup.
-            if not payload.get("artifacts") and Path(target.file_ref).suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".jpg", ".jpeg", ".png"}:
-                path = await asyncio.to_thread(_resolve_file_path, target.file_ref, db_path=self._db_path)
-                payload["artifacts"] = [{"local_path": str(path)}]
-            from myUtils.publish_media_guard import is_context_artifact
-            payload["artifacts"] = [a for a in payload.get("artifacts") or []
-                                    if isinstance(a, dict) and not is_context_artifact(a)]
-            await asyncio.to_thread(_ensure_artifact_paths_local, payload, db_path=self._db_path)
         for artifact in payload.get("artifacts") or []:
             if isinstance(artifact, dict) and artifact.get("public_url"):
                 artifact["public_url"] = _normalise_artifact_url(str(artifact["public_url"]))
@@ -1712,97 +1789,31 @@ class PublishWorker:
 
 
 def _backfill_artifact_public_urls(artifacts: list, db_path) -> None:
-    """Fill in a missing ``public_url`` from a sibling artifact of the same source.
-
-    A payload can reach the worker with no public URL even though the campaign
-    has one: it was built from a snapshot taken before the remote upload
-    finished, so it carries only the watermarked local copy while a separate
-    ``remote_upload`` row for the same source file holds the URL. That is how
-    Threads job #5626 failed - the campaign held
-
-        watermarked_video  public_url: null
-        remote_upload      public_url: https://...
-
-    but the payload was given only the first, so the publisher raised "Threads
-    video publish requires a public_url" for media that was already hosted.
-
-    The campaign artifacts are the authority. For any artifact still missing a
-    URL, look for another artifact of the same ``source_file_record_id`` that
-    has one, preferring the prepared (watermarked) copy's own upload so the
-    published bytes match what was published elsewhere.
-
-    Mutates ``artifacts`` in place; never raises - a lookup failure must not stop
-    a publish that might otherwise succeed.
-    """
-    missing = [
-        artifact
-        for artifact in artifacts
-        if isinstance(artifact, dict)
-        and not str(artifact.get("public_url") or "").strip()
-    ]
-    if not missing:
-        return
-    campaign_ids = {
-        artifact.get("campaign_id")
-        for artifact in artifacts
-        if isinstance(artifact, dict) and artifact.get("campaign_id") is not None
-    }
-    if not campaign_ids:
-        return
-    try:
-        # ``campaigns`` is imported at module scope as ``campaign_store``.
-        from pathlib import Path as _Path
-
-        from myUtils import campaigns as campaign_store
-
-        resolved_db = db_path if isinstance(db_path, _Path) else _Path(str(db_path))
-        for campaign_id in campaign_ids:
-            try:
-                rows = campaign_store.list_campaign_artifacts(
-                    int(campaign_id), db_path=resolved_db
-                )
-            except Exception:  # noqa: BLE001 - best effort
-                continue
-            by_source: dict[object, list] = {}
+    """Refresh ONLY the exact registered path/variant, never same-name/source."""
+    from myUtils import media_integrity
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or artifact.get("public_url") or not artifact.get("campaign_id") or not artifact.get("local_path"):
+            continue
+        try:
+            path = _resolve_media_path(artifact["local_path"]).resolve()
+            expected = media_integrity.expected_sha256(artifact, required=True)
+            with jobs._connect(Path(db_path), must_exist=True) as conn:
+                rows = conn.execute("SELECT * FROM campaign_artifacts WHERE campaign_id=? AND local_path IN (" +
+                    ",".join("?" for _ in _exact_file_refs(path, artifact["local_path"])) + ")",
+                    (artifact["campaign_id"], *_exact_file_refs(path, artifact["local_path"]))).fetchall()
+            matches = []
             for row in rows:
-                data = row.to_dict() if hasattr(row, "to_dict") else dict(row)
-                url = str(data.get("public_url") or "").strip()
-                if not url:
-                    continue
-                by_source.setdefault(data.get("source_file_record_id"), []).append(data)
-            for artifact in missing:
-                if artifact.get("campaign_id") != campaign_id:
-                    continue
-                candidates = by_source.get(artifact.get("source_file_record_id")) or []
-                if not candidates:
-                    continue
-                # Only a sibling for the SAME FILE may supply the URL. Matching
-                # on source_file_record_id alone let a part artifact inherit
-                # the full video's URL, so the publisher fetched the wrong
-                # (404) object instead of the local part.
-                wanted_name = _Path(str(artifact.get("local_path") or "")).name
-                if wanted_name:
-                    candidates = [
-                        c for c in candidates
-                        if _Path(str(c.get("local_path") or "")).name == wanted_name
-                    ]
-                wanted_sha = (artifact.get("metadata") or {}).get("sha256")
-                if wanted_sha:
-                    candidates = [c for c in candidates if (c.get("metadata") or {}).get("sha256") == wanted_sha]
-                if not candidates:
-                    continue
-                # Prefer a sibling whose artifact_kind matches this one (the
-                # watermarked upload for a watermarked payload), else any.
-                kind = artifact.get("artifact_kind")
-                same_kind = [c for c in candidates if c.get("artifact_kind") == kind]
-                chosen = (same_kind or candidates)[0]
-                artifact["public_url"] = _normalise_artifact_url(
-                    str(chosen["public_url"])
-                )
-                if chosen.get("remote_path"):
-                    artifact.setdefault("remote_path", chosen["remote_path"])
-    except Exception:  # noqa: BLE001 - never block a publish on this recovery
-        return
+                metadata = jobs._recovery_json_object(row["metadata_json"] or "{}")
+                if (row["public_url"] and row["source_file_record_id"] == artifact.get("source_file_record_id")
+                        and row["artifact_kind"] == artifact.get("artifact_kind")
+                        and metadata == (artifact.get("metadata") or {})
+                        and media_integrity.expected_sha256({"metadata": metadata}) == expected):
+                    matches.append(row)
+            urls = {row["public_url"] for row in matches}
+            if len(urls) == 1:
+                artifact["public_url"] = _normalise_artifact_url(next(iter(urls)))
+        except (OSError, ValueError, LookupError):
+            continue
 
 
 def _normalise_artifact_url(value: str) -> str:
@@ -2174,23 +2185,13 @@ def _looks_like_media(path: Path, name: str) -> bool:
     return any(head.startswith(signature) for signature in signatures)
 
 
-def _verify_artifact(path: Path, artifact: dict) -> None:
-    """Verify recorded integrity facts on both cached and restored artifacts."""
-    import hashlib
-    metadata = artifact.get("metadata") or {}
-    expected = artifact.get("checksum") or metadata.get("sha256")
-    expected_size = metadata.get("size_bytes")
-    if expected_size is not None and path.stat().st_size != int(expected_size):
-        raise MediaRestoreError("Artifact byte count does not match its registered metadata", retryable=False)
-    if expected and not re.fullmatch(r"[0-9a-fA-F]{64}", str(expected)):
-        raise MediaRestoreError("Artifact checksum metadata is invalid", retryable=False)
-    if expected:
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        if digest.hexdigest() != str(expected).lower():
-            raise MediaRestoreError("Artifact checksum mismatch; refusing substituted media", retryable=False)
+def _verify_artifact(path: Path, artifact: dict, *, required: bool = False) -> dict:
+    """Compatibility facade for the ONE checksum/byte-fact contract."""
+    from myUtils import media_integrity
+    try:
+        return media_integrity.verify_artifact(path, artifact, required=required)
+    except media_integrity.MediaIntegrityError as exc:
+        raise MediaRestoreError(str(exc), retryable=False, category="integrity") from exc
 
 
 def _download_atomically(destination: Path, download: Callable[[Path], Any]) -> None:
@@ -2218,119 +2219,184 @@ def _download_atomically(destination: Path, download: Callable[[Path], Any]) -> 
 
 
 class MediaRestoreError(RuntimeError):
-    """A required publish media file could not be restored locally.
+    """No-post media prerequisite; integrity failures are never retryable."""
 
-    ``retryable`` distinguishes a transient download failure (the mapping
-    exists and the bytes are on the backend, but the fetch failed —
-    network timeout, 503, etc.) from a permanent one (no mapping at all,
-    or the mapping is stale and the object is gone).  The worker's
-    ``_handle_failure`` reads this attribute to decide whether the target
-    should be retried or marked permanently failed.
-    """
-
-    def __init__(self, *args, retryable: bool = True) -> None:
+    def __init__(self, *args, retryable: bool = True, category: str | None = None) -> None:
         super().__init__(*args)
         self.retryable = retryable
+        self.retry_after_seconds = 120
+        self.details = {"prerequisiteFailure": True, "stage": "waiting_dependency",
+                        "dependencyCategory": category or ("transport" if retryable else "missing")}
+
+
+def _media_prerequisite_error(exc):
+    """Keep the legacy facade type without losing scoped prerequisite evidence."""
+    error = MediaRestoreError(str(exc), retryable=exc.retryable, category=exc.details["dependencyCategory"])
+    error.retry_after_seconds = exc.retry_after_seconds
+    error.details = copy.deepcopy(exc.details)
+    return error
+
+def _file_record_local_path(value: str) -> Path:
+    path = _resolve_media_path(value)
+    if not path.is_absolute():
+        root = Path(BASE_DIR)
+        path = root / path if path.parts and path.parts[0] in {"videoFile", "uploads", "generated"} else root / "videoFile" / path
+    return path.resolve()
+
+
+def _exact_file_refs(path: Path, stored: str = "") -> tuple[str, ...]:
+    """Only full path aliases from the maintained root mapping; no basenames."""
+    refs = {str(path), path.as_posix()}
+    if stored:
+        refs.add(stored)
+    try:
+        relative = path.relative_to(Path(BASE_DIR).resolve()).as_posix()
+        refs.add(relative)
+        if relative.startswith("videoFile/"):
+            refs.add(relative.removeprefix("videoFile/"))
+    except ValueError:
+        pass
+    return tuple(sorted(refs))
+
+
+def _registered_restore_sources(artifact: dict, path: Path, *, payload: dict, db_path: Path) -> tuple[dict, list[dict]]:
+    """Resolve exact registered variants only, outside any queue transaction.
+
+    A source_file_record_id is provenance, NOT a substitute for the selected
+    part. It is usable only when its complete registered path is this exact file.
+    All alternate descriptors must have their own exact path/variant and byte
+    proof. Bounded restoration owns deadlines, staging, dependency holds and CAS.
+    """
+    from myUtils import media_integrity, media_restore, publish_media_guard as guard
+    refs = _exact_file_refs(path, str(artifact.get("local_path") or ""))
+    selected = copy.deepcopy(artifact)
+    selected["local_path"] = str(path)
+    campaign_id = artifact.get("campaign_id", payload.get("campaignId"))
+    identifier = artifact.get("id", artifact.get("artifact_id"))
+    records, campaign_rows = [], []
+    with jobs._connect(db_path, must_exist=True) as conn:
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("BEGIN")
+        if campaign_id is not None:
+            if payload.get("campaignId") is not None and payload["campaignId"] != campaign_id:
+                raise media_restore.PrerequisiteUnavailable("identity")
+            if identifier is not None:
+                row = conn.execute("SELECT * FROM campaign_artifacts WHERE id=? AND campaign_id=?", (identifier, campaign_id)).fetchone()
+                if row is None or _resolve_media_path(str(row["local_path"] or "")).resolve() != path:
+                    raise media_restore.PrerequisiteUnavailable("identity")
+                campaign_rows = [dict(row)]
+            else:
+                campaign_rows = [dict(row) for row in conn.execute(
+                    "SELECT * FROM campaign_artifacts WHERE campaign_id=? AND local_path IN (" + ",".join("?" for _ in refs) + ")",
+                    (campaign_id, *refs))]
+                if len(campaign_rows) > 1:
+                    raise media_restore.PrerequisiteUnavailable("identity")
+        file_id = artifact.get("file_record_id")
+        if file_id is not None:
+            row = conn.execute("SELECT * FROM file_records WHERE id=?", (file_id,)).fetchone()
+            if row is None or _file_record_local_path(row["file_path"]) != path:
+                raise media_restore.PrerequisiteUnavailable("identity")
+            records = [dict(row)]
+        else:
+            records = [dict(row) for row in conn.execute(
+                "SELECT * FROM file_records WHERE file_path IN (" + ",".join("?" for _ in refs) + ")", refs)]
+        records = [row for row in records if _file_record_local_path(row["file_path"]) == path]
+        if not records and not campaign_rows and not guard._has_derived_identity(artifact):
+            source_id = artifact.get("source_file_record_id")
+            if source_id is not None:
+                row = conn.execute("SELECT * FROM file_records WHERE id=?", (source_id,)).fetchone()
+                if row is not None and _file_record_local_path(row["file_path"]) == path:
+                    records = [dict(row)]
+        if not records and not campaign_rows:
+            raise media_restore.PrerequisiteUnavailable("identity")
+        sources, expected = [], media_integrity.expected_sha256(selected)
+        known_sizes = [selected.get("size_bytes"), (selected.get("metadata") or {}).get("size_bytes")]
+        for row in campaign_rows:
+            metadata = jobs._recovery_json_object(row["metadata_json"] or "{}")
+            original_metadata = selected.get("metadata") or {}
+            # A later executed digest may fill unknown facts, not change variant,
+            # parent membership, interval, or the approved artifact kind.
+            if (row["artifact_kind"] != selected.get("artifact_kind")
+                    or any(original_metadata.get(k) != metadata.get(k) for k in (set(original_metadata) | set(metadata)) - {"sha256", "size_bytes"})
+                    or row["source_file_record_id"] != selected.get("source_file_record_id")):
+                raise media_restore.PrerequisiteUnavailable("identity")
+            digest = media_integrity.expected_sha256({"metadata": metadata})
+            if expected and digest and expected != digest:
+                raise media_integrity.MediaIntegrityError("Registered artifact checksum conflict")
+            expected = expected or digest
+            known_sizes.append(metadata.get("size_bytes"))
+            selected.update(id=row["id"], campaign_id=campaign_id, metadata=metadata)
+        for row in records:
+            if payload.get("_workspace_id") is not None and row.get("workspace_id") != payload["_workspace_id"]:
+                raise media_restore.PrerequisiteUnavailable("identity")
+            digest = media_integrity.expected_sha256({"sha256": row.get("sha256")})
+            if expected and digest and expected != digest:
+                raise media_integrity.MediaIntegrityError("Registered file checksum conflict")
+            expected = expected or digest
+            known_sizes.append(row.get("size_bytes"))
+        sizes = [size for size in known_sizes if size is not None]
+        if any(type(size) is not int or size <= 0 for size in sizes) or len(set(sizes)) > 1:
+            raise media_integrity.MediaIntegrityError("Registered byte counts conflict")
+        if expected:
+            selected["sha256"] = expected
+        if sizes:
+            selected["size_bytes"] = sizes[0]
+        if records and not campaign_rows:
+            selected["file_record_id"] = records[0]["id"]
+        for row in [*campaign_rows, *records]:
+            key = row.get("remote_path") if "campaign_id" in row else row.get("storage_key")
+            backend_id = row.get("storage_backend_id")
+            scope = {"workspace_id": row.get("workspace_id", payload.get("_workspace_id")),
+                     "account_id": payload.get("_restore_account_id"),
+                     "expected_size_bytes": sizes[0] if sizes else None}
+            metadata = jobs._recovery_json_object(row.get("metadata_json") or "{}")
+            proof = metadata.get("remote_checksum")
+            if backend_id is not None and key:
+                backend = conn.execute("SELECT * FROM storage_backends WHERE id=?", (backend_id,)).fetchone()
+                if backend is not None:
+                    sources.append({**scope, "backend": dict(backend), "storage_key": key, "remote_checksum": proof})
+            url = row.get("public_url") if "campaign_id" in row else row.get("storage_cdn_url")
+            if url:
+                sources.append({**scope, "public_url": _normalise_artifact_url(url), "remote_checksum": proof})
+    # A client URL/remote key is never a restoration registration.
+    if not sources:
+        raise media_restore.PrerequisiteUnavailable("missing")
+    if len(sources) > media_restore.MAX_SOURCES:
+        raise media_restore.PrerequisiteUnavailable("identity")
+    return selected, sources
 
 
 def _resolve_file_path(file_ref: str, *, db_path: Path | None = None) -> Path:
-    # A stored file_ref may carry the host repo prefix (rows written by
-    # host-side tooling). Map it onto this process's BASE_DIR before any
-    # filesystem check or remote restore.
-    resolved = _resolve_media_path(file_ref)
-    text = resolved.as_posix()
-    if resolved.is_absolute() and resolved.is_file():
-        return resolved
-
-    if text.startswith("uploads/"):
-        local_path = Path(BASE_DIR) / text
-        storage_ref = text
-    else:
-        relative = text.removeprefix("videoFile/")
-        local_path = Path(BASE_DIR) / "videoFile" / relative
-        storage_ref = text
-    if local_path.is_file():
-        return local_path
+    path = _file_record_local_path(file_ref)
+    if path.is_file():
+        return path
     if db_path is not None:
-        downloaded = _try_download_from_storage(storage_ref, db_path)
-        if downloaded is not None and downloaded.is_file():
-            return downloaded
-    raise MediaRestoreError(
-        f"Required media is unavailable locally or in storage: {file_ref}",
-        retryable=False,
-    )
+        restored = _try_download_from_storage(file_ref, db_path)
+        if restored is not None:
+            return restored
+    raise MediaRestoreError("Required media is unavailable locally or in exact registered storage", retryable=False)
 
 
 def _try_download_from_storage(file_ref: str, db_path: Path) -> Path | None:
-    """Look up file_ref in file_records. If stored remotely, download to local."""
-    import sqlite3
-    # The ref may be repo-relative ("clip.mp4", "videoFile/x", "uploads/x") or
-    # an absolute container/host path. file_records.file_path is always
-    # repo-relative, so derive the lookup refs from whichever shape arrives.
-    candidate = _resolve_media_path(file_ref)
-    if candidate.anchor:
-        try:
-            candidate = candidate.relative_to(Path(BASE_DIR))
-        except ValueError:
-            return None  # unrelated absolute paths are not this repo's media
-    text = candidate.as_posix()
-    if ".." in candidate.parts:
+    from myUtils import media_restore
+    path = _file_record_local_path(file_ref)
+    # An unrelated absolute path cannot use this project's same-named file.
+    if Path(file_ref).is_absolute() and not path.is_relative_to(Path(BASE_DIR).resolve()):
         return None
-    if text.startswith("uploads/"):
-        lookup_refs = (text,)
-    else:
-        relative = text.removeprefix("videoFile/")
-        lookup_refs = (relative, "videoFile/" + relative)
     try:
-        with _db_connection(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            row = None
-            for lookup_ref in lookup_refs:
-                row = conn.execute(
-                    "SELECT storage_key, storage_backend_id FROM file_records WHERE file_path = ? AND storage_key IS NOT NULL",
-                    (lookup_ref,),
-                ).fetchone()
-                if row:
-                    break
-        if not row:
+        artifact, sources = _registered_restore_sources({"local_path": str(path)}, path, payload={}, db_path=db_path)
+    except media_restore.PrerequisiteUnavailable as exc:
+        if exc.details["dependencyCategory"] == "identity":
             return None
-        with _db_connection(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            backend = conn.execute(
-                "SELECT * FROM storage_backends WHERE id = ?", (row["storage_backend_id"],)
-            ).fetchone()
-        if not backend:
-            return None
-        # Mirror file_records' on-disk layout: paths under uploads/ live in
-        # BASE_DIR/uploads, everything else in BASE_DIR/videoFile — the same
-        # roots offload_to_drive.sh moves and the storage_backends endpoint
-        # points at.
-        if text.startswith("uploads/"):
-            local_path = Path(BASE_DIR) / text
-        else:
-            local_path = Path(BASE_DIR) / "videoFile" / lookup_refs[0]
-        if local_path.is_file():
-            return local_path
-        _download_atomically(
-            local_path,
-            lambda temporary: media_remote_storage.download_from_backend(
-                dict(backend), row["storage_key"], temporary
-            ),
-        )
-        _logger.info(
-            f"restored {file_ref} from {backend['provider']} storage"
-        )
-        return local_path
-    except Exception as exc:
-        # A known remote record that cannot be restored is a publishing failure,
-        # not a missing file that should be delegated to the platform uploader.
-        _logger.warning(
-            f"could not restore {file_ref} from remote storage: {exc!r}"
-        )
-        raise MediaRestoreError(
-            f"Remote restore failed for {file_ref}: {exc}",
-            retryable=True,
-        ) from exc
+        raise _media_prerequisite_error(exc) from exc
+    if path.is_file():
+        _verify_artifact(path, artifact)
+        return path
+    try:
+        media_restore.restore_artifact(path, artifact, sources, db_path=db_path)
+    except media_restore.PrerequisiteUnavailable as exc:
+        raise _media_prerequisite_error(exc) from exc
+    return path
 
 
 def _prepared_artifact_local_paths(payload: dict) -> list[Path]:
@@ -2349,315 +2415,47 @@ def _prepared_artifact_local_paths(payload: dict) -> list[Path]:
 
 
 def _ensure_artifact_paths_local(payload: dict, *, db_path: Path) -> None:
-    """Download missing artifact files from remote storage before publish.
+    """Materialise exact artifacts, with bounded alternatives and durable holds.
 
-    This is the read half of the offload loop: ``offload_to_drive.sh`` moves
-    files the queue no longer needs onto Drive, and this restores them at
-    claim time. Every failure path logs — a silent miss here surfaces only
-    as the uploader's generic "file not found" halfway through a publish.
+    Receipt polling never calls this. Local legacy bytes are validation-only;
+    missing files require exact registrations and executed checksum evidence.
     """
-    import sqlite3
-
-
-    def _record_for(artifact: dict, path: Path, *, stored: str | None = None) -> sqlite3.Row | None:
-        source_id = artifact.get("source_id") or artifact.get("source_file_record_id")
-        # A generated artifact is one that was DERIVED from a source (watermark,
-        # split, shrink), so its own record must win and the raw source must never
-        # be substituted. Detect it by kind as well as by path: a payload whose
-        # path is not under a /generated/ root slipped past the path test and the
-        # source_file_record_id fallback then restored the RAW ORIGINAL for a
-        # prepared artifact (27 live payloads fetched 8.5 MB of unrelated media
-        # this way).
-        _kind = str(artifact.get("artifact_kind") or "").strip().lower()
-        _derived = _kind in {"watermarked_video", "watermarked_image", "generated"}
-        with _db_connection(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            raw = str(path).replace("\\", "/")
-            # Generated artifacts have their own Drive object and mapping; that
-            # exact artifact record must win over the original source record.
-            for marker in ("/generated/", "generated/"):
-                if marker in raw:
-                    rel = raw.split(marker, 1)[1]
-                    # Derive the absolute form from BASE_DIR rather than
-                    # hardcoding the container path, so the lookup works on
-                    # both the host and inside the container.
-                    base_generated = str(Path(BASE_DIR) / "generated") + "/"
-                    generated_refs = ["generated/" + rel]
-                    if base_generated + rel not in generated_refs:
-                        generated_refs.append(base_generated + rel)
-                    for file_ref in generated_refs:
-                        generated_row = conn.execute(
-                            "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path "
-                            "FROM file_records WHERE file_path=?",
-                            (file_ref,),
-                        ).fetchone()
-                        if generated_row:
-                            # The transformed artifact's own Drive row outranks
-                            # the original upload's source_file_record_id.
-                            return generated_row
-                    # The stored row may carry the host prefix while ``path``
-                    # is already normalised onto BASE_DIR, so try both shapes
-                    # for the exact-match lookup.
-                    campaign_refs = [str(path)]
-                    if stored and str(stored) not in campaign_refs:
-                        campaign_refs.append(str(stored))
-                    campaign_row = None
-                    for campaign_ref in campaign_refs:
-                        # This previously required remote_path AND
-                        # storage_backend_id to be non-null, but
-                        # add_campaign_artifact never writes storage_backend_id,
-                        # so the predicate was unsatisfiable (0 of 2509 rows) and
-                        # the branch could never fire. It now selects the columns
-                        # the restore actually uses - the artifact's public_url
-                        # (as the CDN url) and remote_path (as a storage key when
-                        # a backend id is also present, which older rows may set
-                        # through a repair script).
-                        campaign_row = conn.execute(
-                            "SELECT remote_path AS storage_key, storage_backend_id, "
-                            "public_url AS storage_cdn_url, local_path AS file_path "
-                            "FROM campaign_artifacts WHERE local_path=? "
-                            "AND (public_url IS NOT NULL OR remote_path IS NOT NULL)",
-                            (campaign_ref,),
-                        ).fetchone()
-                        if campaign_row:
-                            break
-                    if campaign_row:
-                        return campaign_row
-                    # Older offload rows may use a legacy local path, but the
-                    # full object key inside a declared generated-media root is
-                    # still an exact identity. Never infer it from a basename.
-                    legacy_rows = conn.execute(
-                        "SELECT f.storage_key, f.storage_backend_id, '' AS storage_cdn_url, "
-                        "f.file_path, b.endpoint FROM file_records f "
-                        "JOIN storage_backends b ON b.id=f.storage_backend_id "
-                        "WHERE f.storage_key=? AND b.provider='rclone'", (rel,),
-                    ).fetchall()
-                    legacy_rows = [row for row in legacy_rows
-                                   if str(row["endpoint"] or "").replace("\\", "/").rstrip("/").split("/")[-1] == "generated"]
-                    identities = {(row["storage_backend_id"], row["storage_key"]) for row in legacy_rows}
-                    if len(identities) == 1:
-                        return legacy_rows[0]
-                    # Never substitute original source bytes into a generated target.
-                    return None
-            if source_id and not _derived:
-                row = conn.execute(
-                    "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path FROM file_records WHERE id = ?",
-                    (int(source_id),),
-                ).fetchone()
-                if row:
-                    return row
-            # No usable source id: fall back to the path convention shared
-            # with offload_to_drive.sh — the segment after /videoFile/ or
-            # /uploads/ is file_records.file_path.
-            raw = path.as_posix()
-            for marker in ("/videoFile/", "/uploads/"):
-                if marker in raw:
-                    rel = raw.split(marker, 1)[1]
-                    if marker == "/uploads/":
-                        rel = "uploads/" + rel
-                    select = (
-                        "SELECT storage_key, storage_backend_id, storage_cdn_url, file_path "
-                        "FROM file_records WHERE file_path = ?"
-                    )
-                    row = conn.execute(select, (rel,)).fetchone()
-                    if row is None:
-                        # file_records use two conventions for the same media: a
-                        # bare media-relative path (_library/..., 307 rows) and
-                        # the same path carrying the videoFile/ prefix
-                        # (videoFile/_batch1/..., 88 rows). Only the bare form was
-                        # looked up, so every record stored with the prefix
-                        # answered "no file record" and its targets failed
-                        # permanently with MediaRestoreError even though the bytes
-                        # were sitting on Drive and registered.
-                        row = conn.execute(select, ("videoFile/" + rel,)).fetchone()
-                    return row
-        return None
-
-    for artifact in payload.get("artifacts", []) or []:
-        local_path = str(artifact.get("local_path") or "")
-        if not local_path:
+    from myUtils import media_integrity, media_restore, publish_media_guard as guard
+    artifacts = payload.get("artifacts") or []
+    if not isinstance(artifacts, list) or any(not isinstance(a, dict) for a in artifacts):
+        raise MediaRestoreError("Invalid media artifact set", retryable=False, category="identity")
+    deadline = time.monotonic() + media_restore.OVERALL_DEADLINE_SECONDS
+    for artifact in artifacts:
+        if guard.is_context_artifact(artifact):
             continue
-        # Rows written by host-side tooling carry a host absolute prefix that
-        # does not exist inside the container. Map it onto BASE_DIR before any
-        # filesystem or record lookup: writing to the raw host path (e.g.
-        # ``/home/will``) otherwise fails as EACCES on an ancestor that does
-        # not exist, which reads like a permissions bug rather than a path bug.
-        p = _resolve_media_path(local_path)
-        # A relative stored path (``videoFile/x``) is anchored to BASE_DIR,
-        # not to whatever directory the worker happens to run from. Offload
-        # rows are written relative to the repo root; without this, a worker
-        # started from anywhere else checks and writes the wrong location.
-        if not p.is_absolute():
-            p = Path(BASE_DIR) / p
-        if p.exists():
-            # Rewrite to the resolved path: a publisher in another process
-            # (e.g. the host worker, where ``/app/...`` is not a real path)
-            # must read this file, not fall back to a dead public URL.
-            _verify_artifact(p, artifact)
-            artifact["local_path"] = str(p)
-            continue
-        generated_root = media_pipeline.GENERATED_MEDIA_ROOT.resolve()
-        try:
-            is_generated_artifact = p.resolve().is_relative_to(generated_root)
-        except (OSError, ValueError):
-            is_generated_artifact = False
-        # A generated artifact may also be identified by its artifact_kind, not
-        # only by the path resolving under the generated root. The path test
-        # alone missed a payload whose path was somewhere else entirely (a
-        # /tmp/... test-harness path, or a re-rooted path), and for those
-        # _record_for fell through to the `source_file_record_id` fallback and
-        # restored the RAW SOURCE instead of the prepared file - 27 live payloads
-        # did exactly this, fetching 8.5 MB of unrelated media for a
-        # watermarked artifact. Treating a generated KIND as generated keeps the
-        # "never substitute original source bytes" guard in force regardless of
-        # where the path points.
-        artifact_kind = str(artifact.get("artifact_kind") or "").strip().lower()
-        if not is_generated_artifact and artifact_kind in {
-            "watermarked_video",
-            "watermarked_image",
-            "generated",
-        }:
-            is_generated_artifact = True
-        try:
-            row = _record_for(artifact, p, stored=local_path)
-        except Exception as exc:
-            raise MediaRestoreError(
-                f"Could not find artifact source record for {local_path}: {exc}",
-                retryable=False,
-            ) from exc
-        try:
-            if row is None and is_generated_artifact:
-                row = {"storage_key": None, "storage_backend_id": None, "storage_cdn_url": None, "file_path": str(p)}
-            if row is None:
-                raise MediaRestoreError(
-                    f"Artifact {local_path} is missing locally and has no file record",
-                    retryable=False,
-                )
-
-            p.parent.mkdir(parents=True, exist_ok=True)
-            downloaded = False
-            last_error: Exception | None = None
-
-            # Try 1: Download via the backend that stored it (S3 or rclone)
-            if row["storage_key"] and row["storage_backend_id"]:
-                try:
-                    with _db_connection(db_path) as conn:
-                        conn.row_factory = sqlite3.Row
-                        backend = conn.execute(
-                            "SELECT * FROM storage_backends WHERE id = ?", (row["storage_backend_id"],)
-                        ).fetchone()
-                    if backend:
-                        _download_atomically(
-                            p,
-                            lambda temporary: media_remote_storage.download_from_backend(
-                                dict(backend), row["storage_key"], temporary
-                            ),
-                        )
-                        downloaded = True
-                except Exception as exc:
-                    last_error = exc
-                    _logger.warning(
-                        f"backend restore failed for {local_path}: {exc!r}"
-                    )
-
-            # Try 2: Restore from the artifact's own registered public URL.
-            #
-            # This is NOT gated on ``is_generated_artifact``. A payload artifact
-            # carries the URL the upload path registered for it, and that URL is
-            # valid whatever root the file lives under. Gating it there meant a
-            # non-generated artifact (``videoFile/``, ``uploads/``) whose local
-            # copy the offloader had removed was declared unrestorable even when
-            # its R2 object served 200 with the full byte count - real,
-            # published media discarded while its public copy was alive.
-            if not downloaded:
-                public_url = _normalise_artifact_url(
-                    str(artifact.get("public_url") or "")
-                )
-                if _public_https_url(public_url):
-                    try:
-                        _download_public_artifact(public_url, p)
-                        downloaded = True
-                    except Exception as exc:
-                        last_error = exc
-                        _logger.warning(
-                            f"artifact public URL restore failed for {local_path}: {exc!r}"
-                        )
-            # Try 3: Download via public CDN URL (R2 public bucket)
-            if not downloaded and row["storage_cdn_url"]:
-                try:
-                    _download_public_artifact(row["storage_cdn_url"], p)
-                    downloaded = True
-                except Exception as exc:
-                    last_error = exc
-                    _logger.warning(
-                        f"CDN restore failed for {local_path}: {exc!r}"
-                    )
-
-            # Try 3: Check media_assets table for R2 public_url
-            if not downloaded:
-                try:
-                    with _db_connection(db_path) as conn:
-                        conn.row_factory = sqlite3.Row
-                        field = "local_processed_path" if is_generated_artifact else "local_original_path"
-                        rows = conn.execute(
-                            f"SELECT public_url FROM media_assets WHERE {field} IN (?, ?) AND public_url IS NOT NULL",
-                            (str(p), str(local_path)),
-                        ).fetchall()
-                    urls = {row["public_url"] for row in rows if row["public_url"]}
-                    if len(urls) == 1:
-                        _download_public_artifact(next(iter(urls)), p)
-                        downloaded = True
-                except Exception as exc:
-                    last_error = exc
-
-            if not downloaded:
-                # Prefer the most specific reason available. When a restore was
-                # actually attempted (a CDN URL, a media_assets URL) its error is
-                # more useful than a generic "no recovery URL", so surface that
-                # instead of masking it behind the missing-URL message.
-                if last_error is not None:
-                    raise MediaRestoreError(
-                        f"Artifact restore failed for {local_path}: {last_error}",
-                        retryable=True,
-                    ) from last_error
-                if not _public_https_url(str(artifact.get("public_url") or "")):
-                    raise MediaRestoreError(
-                        f"Artifact is missing and has no safe public HTTPS recovery URL: {local_path}",
-                        retryable=False,
-                    )
-                raise MediaRestoreError(
-                    f"Could not restore artifact {local_path} "
-                    f"(file_record={row['file_path']}): {last_error or 'no usable storage source'}",
-                    retryable=False,
-                )
-            # The bytes are local now; hand the resolved absolute path to the
-            # publisher so it does not re-derive ``/app/...`` in a process
-            # (the host worker) where that path does not exist.
-            _verify_artifact(p, artifact)
-            artifact["local_path"] = str(p)
-
-        except MediaRestoreError:
-            raise
-        except PermissionError as exc:
-            # EACCES on a path that does not exist is a path-resolution
-            # failure, not a permissions problem: the stored path points
-            # somewhere this process cannot use, typically an unmapped host
-            # prefix. Say so instead of leaking the raw errno, which is what
-            # made the host-prefix bug read as "Permission denied: /home/will".
-            _logger.exception(f"artifact restore failed for {local_path}")
-            raise MediaRestoreError(
-                f"Could not restore artifact {local_path!r}: after normalisation "
-                f"it resolves to {p}, which could not be found and could not be "
-                f"created ({exc}). The stored path may use a host prefix that "
-                f"does not map onto BASE_DIR ({BASE_DIR}).",
-                retryable=False,
-            ) from exc
-        except Exception as exc:
-            _logger.exception(f"artifact restore failed for {local_path}")
-            raise MediaRestoreError(
-                f"Artifact restore failed for {local_path}: {exc}",
-                retryable=True,
-            ) from exc
+        local = artifact.get("local_path")
+        if not local:
+            raise MediaRestoreError("Exact local artifact identity is required before publishing", retryable=False, category="identity")
+        path = _resolve_media_path(local)
+        if not path.is_absolute():
+            path = Path(BASE_DIR) / path
+        path = path.resolve()
+        if path.is_file():
+            _verify_artifact(path, artifact)
+        else:
+            try:
+                registered, sources = _registered_restore_sources(artifact, path, payload=payload, db_path=db_path)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise media_restore.PrerequisiteUnavailable("transport")
+                facts = media_restore.restore_artifact(path, registered, sources, db_path=db_path, total_deadline=remaining)
+                artifact.update(sha256=facts["sha256"], size_bytes=facts["size_bytes"])
+                if registered.get("campaign_id") is not None:
+                    artifact.update(id=registered["id"], campaign_id=registered["campaign_id"])
+                    artifact.setdefault("metadata", {}).update(sha256=facts["sha256"], size_bytes=facts["size_bytes"])
+                elif registered.get("file_record_id") is not None:
+                    artifact["file_record_id"] = registered["file_record_id"]
+                _verify_artifact(path, artifact, required=True)
+            except media_integrity.MediaIntegrityError as exc:
+                raise MediaRestoreError(str(exc), retryable=False, category="integrity") from exc
+            except media_restore.PrerequisiteUnavailable as exc:
+                raise _media_prerequisite_error(exc) from exc
+        artifact["local_path"] = str(path)
 
 
 def _now_utc_naive() -> datetime:
@@ -2706,6 +2504,7 @@ async def _run_platform_upload(
     account_file: Path,
     file_path: Path | None = None,
     thread_file_paths: list[Path] | None = None,
+    delivery_observer=None,
 ) -> None:
     """Per-platform dispatch.
 
@@ -2782,6 +2581,7 @@ async def _run_platform_upload(
             tags=tags,
             account_file=str(account_file),
             publish_date=schedule_at,
+            **({"delivery_observer": delivery_observer} if delivery_observer is not None else {}),
         )
         await app.main()
         return
@@ -2845,6 +2645,13 @@ async def _publish_prepared_twitter(
     ) or "cookie"
     artifacts = payload.get("artifacts") or []
     reconciling = twitter_auth_type != "cookie" and bool(delivery.receipt_for(payload, "twitter"))
+    if twitter_auth_type == "cookie" and delivery.receipt_for(payload, "twitter"):
+        # A browser thread prefix is not replayable/pollable via a fresh composer.
+        # Its last receipt alone does not prove all ordered parts completed.
+        current = delivery.state(payload)
+        if current.get("stage") == "browser_delivered":
+            return
+        raise delivery.DeliveryUnknown("Retained X browser receipt/partial thread requires reconciliation, not another create")
     file_paths = _prepared_artifact_local_paths(payload)
     if not reconciling:
         if payload.get("campaignId") and not artifacts:
@@ -2868,7 +2675,10 @@ async def _publish_prepared_twitter(
             return
         from myUtils.browser_helper import local_browser
         with local_browser():
-            delivery.starting(payload, operation="browser-publish:twitter")
+            observer = _make_x_browser_delivery_observer(payload, target)
+            if observer is None:
+                _begin_native_publish_attempt(payload, target)
+                delivery.starting(payload, operation="browser-publish:twitter")
             await _run_platform_upload(
                 "twitter",
                 {
@@ -2879,7 +2689,10 @@ async def _publish_prepared_twitter(
                 target,
                 account_file=account_file,
                 thread_file_paths=file_paths,
+                delivery_observer=observer,
             )
+            if observer is not None and delivery.state(payload).get("stage") != "browser_delivered":
+                raise delivery.DeliveryUnknown("Instrumented X browser did not confirm every exact ordered part")
     else:
         if account is None:
             raise ValueError("Prepared Twitter API publish requires a structured account")
@@ -3317,29 +3130,14 @@ def _public_https_url(value: str) -> bool:
 
 
 def _download_public_artifact(url: str, destination: Path) -> None:
-    import requests
-    from urllib.parse import urljoin
-
-    current = url
-    for redirect_count in range(6):
-        if not _public_https_url(current):
-            raise MediaRestoreError("Artifact URL must use a public HTTPS host")
-        with requests.get(
-            current, timeout=(10, 120), stream=True, allow_redirects=False
-        ) as response:
-            if response.is_redirect or response.is_permanent_redirect:
-                location = response.headers.get("Location")
-                if not location or redirect_count == 5:
-                    raise MediaRestoreError("Artifact URL redirect limit exceeded")
-                current = urljoin(current, location)
-                continue
-            response.raise_for_status()
-            _download_atomically(
-                destination,
-                lambda temporary: _write_response_chunks(response, temporary),
-            )
-            return
-    raise MediaRestoreError("Artifact URL redirect limit exceeded")
+    """Bounded transport facade; publication restoration uses registered proof."""
+    from myUtils import outbound_http, media_restore
+    try:
+        _download_atomically(destination, lambda temporary: outbound_http.download_public_file(
+            url, temporary, total_deadline=media_restore.BACKEND_DEADLINE_SECONDS,
+            max_bytes=media_restore.MAX_RESTORE_BYTES))
+    except outbound_http.OutboundUrlError:
+        raise MediaRestoreError("Unsafe public HTTPS media URL", retryable=False, category="identity") from None
 
 
 def _write_response_chunks(response, destination: Path) -> None:
@@ -3371,6 +3169,216 @@ def _restore_optional_thumbnail(payload: dict, *, db_path: Path) -> None:
             payload["thumbnail"] = str(restored)
             return
 
+@dataclass(frozen=True)
+class PreparationCompleted:
+    target_ids: tuple[int, ...]
+    generation: str
+
+
+@dataclass(frozen=True)
+class PreparationDeferred:
+    reason: str
+    category: str = "transport"
+    retry_after_seconds: float = 120
+
+
+_EXECUTION_PAYLOAD_KEYS = {"_db_path", "_workspace_id", "_restore_account_id", "_telegramDeliveryKey",
+    "_delivery", "_save_checkpoint", "_fallback_attempted", "_publish_max_attempts", "_native_route_started",
+    "_prerequisites_checked", "_defer_native_create_budget"}
+
+
+def _publication_payload(payload: dict) -> dict:
+    return copy.deepcopy({key: value for key, value in payload.items() if key not in _EXECUTION_PAYLOAD_KEYS})
+
+
+def _begin_native_publish_attempt(payload: dict, target: jobs.Target) -> None:
+    if payload.get("_native_route_started"):
+        return
+    current = delivery.state(payload)
+    routes = delivery.publish_routes(payload)
+    if "native" not in routes:
+        baseline = current.get("provider_budget_baseline", 0 if current.get("recovery_generation") or current.get("preparation_generation") else max(0, target.attempts - 1))
+        if type(baseline) is not int or baseline < 0:
+            raise delivery.DeliveryUnknown("Invalid historical provider budget baseline")
+        routes["native"] = {"attempts": baseline}
+        delivery.checkpoint(payload, publish_routes=routes)
+    delivery.begin_route_attempt(payload, "native", max_attempts=payload.get("_publish_max_attempts", 3))
+    payload["_native_route_started"] = True
+
+
+def _x_browser_adapted() -> bool:
+    from uploader.twitter_uploader.main import TwitterThreadVideo
+    return "delivery_observer" in inspect.signature(TwitterThreadVideo).parameters
+
+
+def _make_x_browser_delivery_observer(payload: dict, target: jobs.Target):
+    from myUtils import generic_delivery
+    if (not _x_browser_adapted() or not callable(payload.get("_save_checkpoint"))
+            or str(payload.get("_telegramDeliveryKey")) != str(target.id)):
+        return None  # Uninstrumented legacy caller retains the conservative fence.
+    observer = generic_delivery.make_x_browser_observer(payload, target_id=target.id,
+        account_key=target.account_ref, max_create_attempts=payload.get("_publish_max_attempts", 3), max_media_requests=256)
+    def observe(event):
+        if event.get("event") == "create_action":
+            # The uploader calls this immediately BEFORE the Post-producing
+            # action. Preview/navigation timeouts do not spend native attempts.
+            _begin_native_publish_attempt(payload, target)
+        return observer(event)
+    return observe
+
+
+def _materialise_publish_media(payload: dict, target: jobs.Target, *, db_path: Path) -> None:
+    from myUtils import media_integrity, media_restore, publish_media_guard as guard
+    if not payload.get("artifacts") and not target.file_ref.startswith("campaign_post:") and target.file_ref not in {"text", "text-only"}:
+        refs = payload.get("threadFileRefs") or [target.file_ref]
+        artifacts = []
+        for ref in refs:
+            path = _file_record_local_path(ref)
+            aliases = _exact_file_refs(path, ref)
+            with jobs._connect(db_path, must_exist=True) as conn:
+                rows = conn.execute("SELECT * FROM file_records WHERE file_path IN (" + ",".join("?" for _ in aliases) + ")", aliases).fetchall()
+            rows = [row for row in rows if _file_record_local_path(row["file_path"]) == path]
+            if len(rows) != 1:
+                raise media_restore.PrerequisiteUnavailable("identity")
+            row = rows[0]
+            artifacts.append({"artifact_kind": "source_image" if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"} else "source_video",
+                "local_path": str(path), "file_record_id": row["id"], "source_file_record_id": row["id"],
+                "sha256": row["sha256"], "size_bytes": row["size_bytes"]})
+        payload["artifacts"] = artifacts
+    _ensure_artifact_paths_local(payload, db_path=db_path)
+    for artifact in payload.get("artifacts") or []:
+        if guard.is_context_artifact(artifact):
+            continue
+        path = Path(artifact["local_path"])
+        actual = _verify_artifact(path, artifact)
+        artifact.setdefault("sha256", actual["sha256"])
+        if artifact.get("sha256") is None:
+            artifact["sha256"] = actual["sha256"]
+        artifact.setdefault("size_bytes", actual["size_bytes"])
+        if artifact.get("size_bytes") is None:
+            artifact["size_bytes"] = actual["size_bytes"]
+        # Bind an exact raw file registration, not its source ID or basename.
+        if not artifact.get("campaign_id") and not payload.get("campaignId") and not artifact.get("file_record_id") and not guard._has_derived_identity(artifact):
+            aliases = _exact_file_refs(path, artifact["local_path"])
+            with jobs._connect(db_path, must_exist=True) as conn:
+                rows = conn.execute("SELECT id,file_path FROM file_records WHERE file_path IN (" + ",".join("?" for _ in aliases) + ")", aliases).fetchall()
+            rows = [row for row in rows if _file_record_local_path(row["file_path"]) == path]
+            if len(rows) == 1:
+                artifact["file_record_id"] = rows[0]["id"]
+    # Approved covers are prerequisites, not optional silently dropped fields.
+    if payload.get("thumbnail"):
+        cover = {"local_path": str(_file_record_local_path(payload["thumbnail"])), "artifact_kind": "thumbnail", "metadata": {"role": "cover"}}
+        _ensure_artifact_paths_local({**payload, "artifacts": [cover]}, db_path=db_path)
+        payload["thumbnail"] = cover["local_path"]
+
+
+def _fresh_preparation_context(account, payload: dict, *, db_path: Path, backup: bool = False) -> dict:
+    """Current exact grants/caps with persistent scoped read-only dependency holds."""
+    from myUtils import preparation_context, backup_preparation, publish_readiness, media_restore
+    if account is None:
+        raise media_restore.PrerequisiteUnavailable("configuration")
+    settings = profile_registry.get_profile(account.profile_id, db_path=db_path).settings
+    context = publish_readiness._context(account, settings)
+    projection = publish_readiness.destination_readiness(account, settings, db_path=db_path)
+    scope = publish_readiness.destination_scope_key(account, settings)
+    if backup and context["provider"] != "sociamonials":
+        scope += ":backup"
+        mapping = sociamonials_fallback.resolve_mapping(account.id, account=account, platform=account.platform, settings=settings)
+        if not mapping:
+            raise media_restore.PrerequisiteUnavailable("configuration")
+        fingerprint = jobs._prepared_digest([context["fingerprint"], mapping,
+                          sociamonials_fallback.resolve_credentials(mapping)])
+    else:
+        fingerprint = context["fingerprint"]
+    if projection.get("reasonCode") == "dependency_cooldown" and projection.get("nextAttemptAt"):
+        delay = max(1, (jobs._utc_datetime(projection["nextAttemptAt"]) - _now_utc_naive()).total_seconds())
+        raise media_restore.PrerequisiteUnavailable("transport", retry_after_seconds=delay, scope_key=scope)
+    managed = backup or context["provider"] == "sociamonials"
+    needs_read = managed or not projection["ready"]
+    if needs_read:
+        media_restore._admit(db_path, scope, fingerprint, "destination_verification")
+    try:
+        if managed:
+            result = backup_preparation.resolve_constraints(platform=account.platform, account=account,
+                payload=payload, settings=settings, db_path=db_path, admit_backup=backup and context["provider"] != "sociamonials")
+            backup_preparation.validate_intent(payload, context=result, account_config=account.config, prepared=False)
+            result["backup_compatible"] = True
+        else:
+            if not projection["ready"]:
+                if projection["reasonCode"] in {"disabled", "revoked", "expired", "native_hold", "configuration_required"} or account.platform not in {"tiktok", "youtube", "facebook", "instagram", "threads"}:
+                    raise media_restore.PrerequisiteUnavailable("configuration")
+                projection = preparation_context.verify_native_destination(account, settings=settings, db_path=db_path)
+            if not projection["ready"]:
+                raise media_restore.PrerequisiteUnavailable("configuration")
+            result = preparation_context.account_constraints(account)
+            result["backup_compatible"] = False
+        if needs_read:
+            media_restore._record_state(db_path, scope, fingerprint, None)
+        return result
+    except delivery.LeaseLost:
+        raise
+    except Exception as exc:
+        if isinstance(exc, media_restore.PrerequisiteUnavailable):
+            raise
+        category = "configuration" if isinstance(exc, sociamonials_fallback.SociamonialsNotConfigured) else media_restore.classify_failure(exc)
+        if needs_read:
+            media_restore._record_state(db_path, scope, fingerprint, category)
+        raise media_restore.PrerequisiteUnavailable(category, scope_key=scope) from None
+
+
+def _prepare_target_prerequisites(target: jobs.Target, job: jobs.Job, payload: dict, *, db_path: Path, backup: bool = False):
+    from myUtils import publish_admission as admission, publish_media_guard as guard, media_compliance, media_restore
+    if delivery.state(payload).get("provider_receipt"):
+        return None  # Receipt polls need neither bytes nor create authorization.
+    if delivery.has_unresolved_submission(payload):
+        raise delivery.DeliveryUnknown("Retained provider/media effects require reconciliation before preparation")
+    account = _resolve_structured_account(target.account_ref, db_path=db_path)
+    with jobs._connect(db_path, must_exist=True) as conn:
+        row = conn.execute("SELECT workspace_id FROM publish_jobs WHERE id=?", (job.id,)).fetchone()
+    payload["_workspace_id"] = row["workspace_id"]
+    payload["_restore_account_id"] = getattr(account, "id", None)
+    _materialise_publish_media(payload, target, db_path=db_path)
+    context = _fresh_preparation_context(account, payload, db_path=db_path, backup=backup)
+    verification = context.get("admission_verification")
+    backup_verifications = {target.account_ref: verification} if verification is not None else None
+    working = _publication_payload(payload)
+    working["_preserveApprovedText"] = True
+    mode = (delivery.state(payload).get("admission") or {}).get("mode")
+    prospective = mode == jobs.PROSPECTIVE_ADMISSION_MODE
+    try:
+        if prospective:
+            sizes = sum(Path(a["local_path"]).stat().st_size for a in working.get("artifacts") or [] if not guard.is_context_artifact(a))
+            out_dir = Path(BASE_DIR) / "generated" / "publish-preprocessing" / f"target-{target.id}"
+            media_restore.check_capacity(out_dir / "generation", db_path=db_path, input_bytes=sizes)
+            parts = guard.prepare_payloads(working, platform=job.platform, account_config=account.config,
+                out_dir=out_dir, backup_compatible=context.get("backup_compatible", False), allow_reprepare=False,
+                video_limits=context.get("video_limits"), image_limits=context.get("image_limits"))
+            sealed = jobs.prepare_owned_publication(target.id, lease_token=target.lease_token,
+                source_payload=working, prepared_payloads=parts, db_path=db_path, backup_verifications=backup_verifications)
+            installed = jobs.install_owned_publication(sealed, db_path=db_path)
+            return PreparationCompleted(tuple(t.id for t in installed), sealed.generation)
+        # Scheduled/legacy bytes are immutable: final validation ONLY. Never call
+        # ensure_single_payload (even allow_reprepare=False may encode raw media).
+        guard.validate_payload(working, platform=job.platform, account_config=account.config,
+                               backup_compatible=context.get("backup_compatible", False))
+        if (delivery.state(payload).get("admission") or {}).get("version") == admission.ADMISSION_VERSION:
+            spec = jobs.JobSpec(platform=job.platform, payload=working, profile_id=job.profile_id,
+                               targets=[(target.account_ref, target.file_ref, target.schedule_at)])
+            normalized, snapshot = admission.prepare_job_spec(spec, workspace_id=payload["_workspace_id"], db_path=db_path,
+                backup_verifications=backup_verifications)
+            if not snapshot.ready:
+                raise media_restore.PrerequisiteUnavailable("configuration")
+            with jobs._transaction(db_path, must_exist=True) as conn:
+                if jobs._running_target(conn, target.id, target.lease_token) is None:
+                    raise delivery.LeaseLost("Final readiness validation lost its lease")
+                admission.validate_admission_snapshot(conn, normalized, snapshot)
+        delivery.checkpoint(payload, readiness={"ready": True, "phase": "ready", "stage": "ready", "reasonCode": "ready"})
+        payload["_prerequisites_checked"] = True
+        return None
+    except media_compliance.MediaPreparationError as exc:
+        raise MediaRestoreError("Immutable media needs explicit selected preparation/recovery: " + str(exc), retryable=False, category="explicit_recovery_required") from exc
+
+
 
 async def default_executor(platform: str, payload: dict, target: jobs.Target) -> None:
     """Default platform router used by the Flask publish endpoints.
@@ -3393,10 +3401,14 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
     # payload, so it never lands in the job row. Browser uploaders receive
     # explicit constructor args and never read it.
 
-    # Thumbnails offload like any other asset — restore before the uploader
-    # opens the path, otherwise a scheduled post fails on a missing cover.
-    if db_path is not None:
-        await asyncio.to_thread(_restore_optional_thumbnail, payload, db_path=db_path)
+    receipt = delivery.state(payload).get("provider_receipt") or {}
+    if not receipt and not payload.get("_prerequisites_checked"):
+        if db_path is None:
+            raise MediaRestoreError("Owned prerequisite context is required before provider dispatch", retryable=False, category="identity")
+        job = jobs.get_job(target.job_id, db_path=db_path)
+        outcome = await asyncio.to_thread(_prepare_target_prerequisites, target, job, payload, db_path=db_path)
+        if isinstance(outcome, (PreparationCompleted, PreparationDeferred)):
+            return outcome
 
     structured_account = _resolve_structured_account(target.account_ref, db_path=db_path)
     canonical_account_file = _resolve_account_path(target.account_ref, db_path=db_path)
@@ -3405,12 +3417,9 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
             and (payload.get("preparedPart") or payload.get("preparedPost")
                  or any(isinstance(a, dict) and str(a.get("artifact_kind") or "").startswith("prepared_")
                         for a in payload.get("artifacts") or []))):
-        # Ensure artifact files are available locally
-        if db_path and not delivery.state(payload).get("provider_receipt"):
-            await asyncio.to_thread(_ensure_artifact_paths_local, payload, db_path=db_path)
-        if not delivery.state(payload).get("provider_receipt"):
-            from myUtils.publish_media_guard import ensure_single_payload
-            await asyncio.to_thread(ensure_single_payload, payload, platform=platform,
+        if not receipt:
+            from myUtils.publish_media_guard import validate_payload
+            await asyncio.to_thread(validate_payload, _publication_payload(payload), platform=platform,
                                     account_config=(structured_account.config if structured_account else {}))
         if structured_account is not None and structured_account.cookie_path:
             with decrypted_storage_state(canonical_account_file) as plain_path:
@@ -3432,31 +3441,31 @@ async def default_executor(platform: str, payload: dict, target: jobs.Target) ->
         return
 
     if platform == "twitter":
-        thread_file_refs = payload.get("threadFileRefs") or [target.file_ref]
-        thread_file_paths = [_resolve_file_path(file_ref, db_path=db_path) for file_ref in thread_file_refs]
-        from myUtils.publish_media_guard import ensure_single_payload
-        payload.setdefault("artifacts", [{"local_path": str(path)} for path in thread_file_paths])
-        await asyncio.to_thread(ensure_single_payload, payload, platform=platform,
-                                account_config=(structured_account.config if structured_account else {}))
+        thread_file_paths = _prepared_artifact_local_paths(payload)
+        if not thread_file_paths:
+            raise MediaRestoreError("Twitter dispatch requires a complete validated local media set", retryable=False)
         thread_file_paths = _prepared_artifact_local_paths(payload)
         with decrypted_storage_state(canonical_account_file) as plain_path:
-            delivery.starting(payload, operation=f"browser-publish:{platform}")
+            observer = _make_x_browser_delivery_observer(payload, target)
+            if observer is None:
+                _begin_native_publish_attempt(payload, target)
+                delivery.starting(payload, operation=f"browser-publish:{platform}")
             await _run_platform_upload(
                 platform,
                 payload,
                 target,
                 account_file=plain_path,
                 thread_file_paths=thread_file_paths,
+                delivery_observer=observer,
             )
+            if observer is not None and delivery.state(payload).get("stage") != "browser_delivered":
+                raise delivery.DeliveryUnknown("Instrumented X browser did not confirm the complete thread")
         return
 
-    file_path = _resolve_file_path(target.file_ref, db_path=db_path)
-    if platform in platform_limits.SUPPORTED_PLATFORMS:
-        from myUtils.publish_media_guard import ensure_single_payload
-        payload.setdefault("artifacts", [{"local_path": str(file_path)}])
-        await asyncio.to_thread(ensure_single_payload, payload, platform=platform,
-                                account_config=(structured_account.config if structured_account else {}))
-        file_path = _prepared_artifact_local_paths(payload)[0]
+    file_paths = _prepared_artifact_local_paths(payload)
+    if not file_paths:
+        raise MediaRestoreError("Dispatch requires validated local media", retryable=False)
+    file_path = file_paths[0]
     with decrypted_storage_state(canonical_account_file) as plain_path:
         delivery.starting(payload, operation=f"browser-publish:{platform}")
         await _run_platform_upload(

@@ -14,7 +14,7 @@ from myUtils import jobs
 
 def _spec(*, key: str | None = None, targets=None) -> jobs.JobSpec:
     return jobs.JobSpec(
-        platform="douyin",
+        platform="bluesky",  # Store/lifecycle unit fixture with a maintained text policy.
         payload={"title": "hello", "tags": ["a"]},
         targets=targets or [("acct-1", "file-1", None)],
         idempotency_key=key,
@@ -439,22 +439,24 @@ class TargetMutationTests(unittest.TestCase):
         return jobs.enqueue_job(
             _spec(targets=targets, key=key), db_path=self.db_path)
 
-    def test_reschedule_resets_job_failed_counters(self) -> None:
-        """A failed single-target job rescheduled to pending must read pending
-        with failed_targets=0 (was: stuck-failed forever)."""
+    def test_reschedule_preserves_failed_state_attempts_and_job_counters(self) -> None:
+        """Calendar editing cannot reopen a failed publication or erase history."""
         job = self._enq([("acct-1", "file-a", None)])
         target = jobs.claim_next_targets(limit=1, db_path=self.db_path)[0]
         jobs.mark_target_failed(target.id, "boom", db_path=self.db_path)
         self.assertEqual(jobs.get_job(job.id, db_path=self.db_path).status,
                          jobs.JOB_FAILED)
+        before = jobs.get_target(target.id, db_path=self.db_path)
+        parent_before = jobs.get_job(job.id, db_path=self.db_path)
 
         future = _utc_iso(timedelta(hours=1))
         rescheduled = jobs.reschedule_target(target.id, future, db_path=self.db_path)
-        self.assertEqual(rescheduled.status, jobs.TARGET_PENDING)
-        refreshed = jobs.get_job(job.id, db_path=self.db_path)
-        self.assertEqual(refreshed.status, jobs.JOB_PENDING)
-        self.assertEqual(refreshed.failed_targets, 0)
-        self.assertIsNone(refreshed.finished_at)
+        self.assertEqual(rescheduled.status, jobs.TARGET_FAILED)
+        self.assertEqual(rescheduled.attempts, before.attempts)
+        self.assertEqual(rescheduled.checkpoint, before.checkpoint)
+        self.assertEqual(rescheduled.delivery_state, before.delivery_state)
+        self.assertEqual(rescheduled.last_error, before.last_error)
+        self.assertEqual(jobs.get_job(job.id, db_path=self.db_path), parent_before)
 
     def test_cancel_while_another_target_running_keeps_job_running(self) -> None:
         """Cancelling a pending target must not flip a job to cancelled while
@@ -494,31 +496,18 @@ class TargetMutationTests(unittest.TestCase):
                                 db_path=self.db_path)
         self.assertEqual(ok.status, jobs.TARGET_CANCELLED)
 
-    def test_resubmit_normalises_offset_schedule(self) -> None:
-        """Offset-suffixed future schedule_at is normalised to naive UTC and
-        preserved; a past one is cleared so the worker claims immediately."""
+    def test_plain_resubmit_requires_prepared_plan_and_preserves_offset_history(self) -> None:
+        """Neither a future nor expired offset slot authorizes a blind reset."""
         import sqlite3
-        job = self._enq([("acct-1", "f1", None)], key="k-offset")
-        target = jobs.list_targets(job.id, db_path=self.db_path)[0]
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE publish_job_targets SET status = ?, schedule_at = ?"
-                " WHERE id = ?",
-                (jobs.TARGET_FAILED, "2100-01-01T12:00:00+08:00", target.id),
-            )
-        kept = jobs.resubmit_target(target.id, db_path=self.db_path)
-        self.assertEqual(kept.schedule_at, "2100-01-01T04:00:00")
-
-        job2 = self._enq([("acct-2", "f2", None)], key="k-offset2")
-        target2 = jobs.list_targets(job2.id, db_path=self.db_path)[0]
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE publish_job_targets SET status = ?, schedule_at = ?"
-                " WHERE id = ?",
-                (jobs.TARGET_FAILED, "2020-01-01T12:00:00+08:00", target2.id),
-            )
-        cleared = jobs.resubmit_target(target2.id, db_path=self.db_path)
-        self.assertIsNone(cleared.schedule_at)
+        for index, schedule in enumerate(("2100-01-01T12:00:00+08:00", "2020-01-01T12:00:00+08:00")):
+            job = self._enq([(f"acct-{index}", f"file-{index}", None)], key=f"offset-{index}")
+            target = jobs.list_targets(job.id, db_path=self.db_path)[0]
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("UPDATE publish_job_targets SET status='failed',attempts=3,schedule_at=? WHERE id=?", (schedule, target.id))
+            before = jobs.get_target(target.id, db_path=self.db_path)
+            with self.assertRaisesRegex(ValueError, "prepared recovery plan"):
+                jobs.resubmit_target(target.id, db_path=self.db_path)
+            self.assertEqual(jobs.get_target(target.id, db_path=self.db_path), before)
 
     def test_list_scheduled_targets_tolerates_dict_artifacts(self) -> None:
         """A truthy non-list artifacts payload must not crash title fallback."""

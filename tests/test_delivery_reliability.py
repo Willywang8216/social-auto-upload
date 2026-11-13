@@ -51,13 +51,13 @@ def test_refreshable_expiry_category_and_revoked_refresh():
 
 
 @pytest.mark.parametrize("attempts", [3, 10])
-def test_recoverable_failures_obey_attempt_limit(database, monkeypatch, attempts):
+def test_recoverable_provider_failures_obey_attempt_limit(database, monkeypatch, attempts):
     _, target = claimed(database)
     target = replace(target, attempts=attempts)
     worker = workers.PublishWorker(Mock(), db_path=database)
     monkeypatch.setattr(worker, "_alert_publish_failure", Mock())
     monkeypatch.setattr(workers.sociamonials_fallback, "is_enabled", lambda: False)
-    asyncio.run(worker._handle_failure(target, workers.MediaRestoreError("artifact not materialised"), Mock()))
+    asyncio.run(worker._handle_failure(target, RuntimeError("token expired; refresh required"), Mock()))
     assert jobs.get_target(target.id, db_path=database).status == "failed"
 
 

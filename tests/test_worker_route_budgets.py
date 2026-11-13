@@ -10,9 +10,20 @@ import pytest
 
 from db import createTable
 from myUtils import delivery, failure_classification as fc, jobs, profiles, sociamonials_fallback as sm
-from myUtils import publish_alert_outbox as outbox, worker as worker_module
+from myUtils import publish_alert_outbox as outbox, publish_readiness, worker as worker_module
 from myUtils.prepared_publishers import PreparedPublishError
 from myUtils.worker import PublishWorker, WorkerConfig, RetryPolicy
+
+
+def record_native_proof(path, account):
+    from datetime import datetime, timezone
+    settings = profiles.get_profile(account.profile_id, db_path=path).settings
+    context = publish_readiness._context(account, settings)
+    publish_readiness.record_destination_readiness(account, settings, provider="direct", db_path=path,
+        proof={"verified": True, "live_check": True, "source": "provider_verification", "requires_approval": False,
+               "config_fingerprint": context["fingerprint"], "identity": context["identity"],
+               "permissions": {"posts.create": True}, "capabilities": ["text", "image", "carousel", "video"],
+               "verified_at": datetime.now(timezone.utc).isoformat()})
 
 
 @pytest.fixture
@@ -21,13 +32,19 @@ def fixture(tmp_path, monkeypatch):
     createTable.bootstrap(path)
     profile = profiles.create_profile("Fixture", db_path=path)
     account = profiles.add_account(profile.id, platform="bluesky", account_name="Fixture",
-             auth_type="api", config={"sociamonials": {"network": "blsk", "profile_refs": ["fixture"]}}, db_path=path)
-    job = jobs.enqueue_job(jobs.JobSpec(platform="bluesky", profile_id=profile.id,
-            payload={"message": "Original approved caption"},
-            targets=[(f"account:{account.id}", "campaign_post:1", None)]), db_path=path)
+             auth_type="api", config={"did": "did:plc:offline-fixture", "identifier": "offline-fixture.test", "password": "fixture-only",
+                 "sociamonials": {"network": "blsk", "profile_refs": ["fixture"]}}, db_path=path)
     monkeypatch.setenv("SAU_SOCIAMONIALS_FALLBACK", "1")
     monkeypatch.setenv("SOCIAMONIALS_API_KEY", "fixture-only")
     monkeypatch.delenv("SAU_BLUESKY_ENABLED", raising=False)
+    from tests.test_sociamonials_fallback import ContractSession, profile as managed_profile
+    session = ContractSession(profiles=[managed_profile(network="blsk", ref="fixture"), managed_profile(network="tw", ref="fixture")])
+    monkeypatch.setattr(sm, "_RATE_WINDOWS", {})
+    monkeypatch.setattr(sm, "_get_session", lambda supplied=None: session)
+    record_native_proof(path, account)
+    job = jobs.enqueue_job(jobs.JobSpec(platform="bluesky", profile_id=profile.id,
+            payload={"message": "Original approved caption"},
+            targets=[(f"account:{account.id}", "text-only", None)]), db_path=path)
     monkeypatch.setattr(worker_module, "_ensure_artifact_paths_local", lambda *a, **k: None)
     return path, account, job
 
@@ -336,7 +353,7 @@ def _use_x_fixture(fixture, monkeypatch, *, blocked=False):
     import json
     path, account, job = fixture
     config = {"twitterAuthType": "api", "accessToken": "fixture-access", "refreshToken": "fixture-refresh",
-              "accessTokenExpiresAt": "2020-01-01T00:00:00+00:00",
+              "accessTokenExpiresAt": "2099-01-01T00:00:00+00:00", "twitterUserId": "offline-x-fixture",
               "sociamonials": {"network": "tw", "profile_refs": ["fixture"]}}
     if blocked:
         config["_nativeCredentialError"] = {"kind": "unknown", "code": "invalid_request", "httpStatus": 400}
@@ -344,6 +361,8 @@ def _use_x_fixture(fixture, monkeypatch, *, blocked=False):
         conn.execute("UPDATE accounts SET platform='twitter',config_json=? WHERE id=?", (json.dumps(config), account.id))
         conn.execute("UPDATE publish_jobs SET platform='twitter' WHERE id=?", (job.id,))
     monkeypatch.setattr(worker_module, "_x_direct_publish_enabled", lambda: True)
+    if not blocked:
+        record_native_proof(path, profiles.get_account(account.id, db_path=path))
     return path, account, job
 
 
@@ -383,9 +402,13 @@ def _rejected_native_media_fixture(fixture, monkeypatch, tmp_path, *, override=N
     path, _, job = _use_x_fixture(fixture, monkeypatch)
     image = tmp_path / "approved-image.jpg"
     Image.new("RGB", (64, 64), (30, 60, 90)).save(image)
-    payload = {"message": "Original approved caption", "artifacts": [{"artifact_kind": "prepared_image",
-               "local_path": str(image), "metadata": {"sha256": hashlib.sha256(image.read_bytes()).hexdigest(), "role": "image"}}]}
+    digest, size = hashlib.sha256(image.read_bytes()).hexdigest(), image.stat().st_size
     with closing(sqlite3.connect(path)) as conn, conn:
+        file_id = conn.execute("INSERT INTO file_records(filename,file_path,filesize,sha256,size_bytes) VALUES(?,?,?,?,?)",
+            (image.name, str(image), size, digest, size)).lastrowid
+        payload = {"message": "Original approved caption", "artifacts": [{"artifact_kind": "source_image",
+            "file_record_id": file_id, "source_file_record_id": file_id, "local_path": str(image),
+            "sha256": digest, "size_bytes": size, "metadata": {"sha256": digest, "role": "image"}}]}
         conn.execute("UPDATE publish_jobs SET payload_json=? WHERE id=?", (json.dumps(payload), job.id))
     session = ContractSession(profiles=[profile(network="tw", ref="fixture")], override=override)
     monkeypatch.setattr(sm, "_RATE_WINDOWS", {})
@@ -494,6 +517,9 @@ def _move_mapping_to_profile(fixture):
     with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute("UPDATE accounts SET config_json=? WHERE id=?", (json.dumps(config), account.id))
     profiles.update_profile(job.profile_id, settings={"sociamonials": {str(account.id): mapping}}, db_path=path)
+    current = profiles.get_account(account.id, db_path=path)
+    if not (current.config or {}).get("_nativeCredentialError"):
+        record_native_proof(path, current)
 
 
 def test_profile_only_verified_mapping_bypasses_native_configuration_hold(fixture, monkeypatch):

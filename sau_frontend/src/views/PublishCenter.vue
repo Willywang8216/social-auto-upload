@@ -448,6 +448,7 @@
             <span class="pc-subtle pc-ml-8">{{ job.platform }} — {{ job.totalTargets ?? '—' }} target(s)</span>
             <el-tag :type="publishStatusType(job.status)" size="small" style="margin-left: 8px;">{{ publishStatusLabel(job.status) }}</el-tag>
             <p v-if="publishActionHint(job.status)" class="pc-subtle">{{ publishActionHint(job.status) }}</p>
+            <p v-if="job.payload?.publishReadiness" class="pc-subtle">{{ publishReadinessDetails(job.payload.publishReadiness) }}</p>
             <p v-for="target in (job.targets || []).filter(t => targetReliabilityDetails(t))" :key="target.id" class="pc-subtle">
               #{{ target.id }} · {{ publishStatusLabel(target.status) }} · {{ targetReliabilityDetails(target) }}
             </p>
@@ -549,7 +550,7 @@ import TikTokReviewModal from '@/components/TikTokReviewModal.vue'
 import { useJobsStore } from '@/stores/jobs'
 import { campaignsApi } from '@/api/campaigns'
 import { createPoller, pollingStatusText } from '@/utils/polling'
-import { needsPublishAction, isTerminalJobStatus, publishStatusLabel, publishStatusType, publishActionHint, targetReliabilityDetails } from '@/utils/publish-status'
+import { needsPublishAction, isTerminalJobStatus, publishStatusLabel, publishStatusType, publishActionHint, publishReadinessDetails, targetReliabilityDetails } from '@/utils/publish-status'
 import { createPublishSubmitter, campaignPreparation, lastSubmission, rememberSubmission, submissionPresentation } from '@/utils/publish-submission'
 
 const STAGGER_MINUTES = 5

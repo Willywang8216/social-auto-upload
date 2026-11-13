@@ -27,9 +27,12 @@ from myUtils import publish_orchestrator as po  # noqa: E402
 
 class OperatorTimezoneTests(unittest.TestCase):
     def test_naive_input_is_the_operator_wall_clock(self):
-        result = po._resolve_base_time(
-            {"publishNow": False, "startAt": "2026-06-17T10:00:00"}
-        )
+        import os
+        from datetime import timedelta
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"SAU_OPERATOR_TIMEZONE": "Asia/Shanghai"}), \
+                patch.object(po, "ZoneInfo", return_value=timezone(timedelta(hours=8))):
+            result = po._resolve_base_time({"publishNow": False, "startAt": "2026-06-17T10:00:00"})
         # 10:00 Asia/Shanghai -> 02:00 UTC
         self.assertEqual(result, datetime(2026, 6, 17, 2, 0, 0))
         self.assertIsNone(result.tzinfo)
@@ -165,16 +168,17 @@ class RestoreUsesTheArtifactUrlTests(unittest.TestCase):
     """
 
     def test_public_url_restore_is_not_gated_on_generated(self):
-        source = (
-            REPO_ROOT / "myUtils" / "worker.py"
-        ).read_text(encoding="utf-8")
+        import inspect
+        from myUtils import worker
+        source = inspect.getsource(worker._ensure_artifact_paths_local)
         # The public-URL attempt must not require the generated root.
         self.assertNotIn(
             "if not downloaded and is_generated_artifact:\n"
             "                public_url = _normalise_artifact_url(",
             source,
         )
-        self.assertIn("artifact public URL restore failed", source)
+        self.assertIn("_registered_restore_sources(", source)
+        self.assertIn("media_restore.restore_artifact(", source)
 
     def test_media_remote_storage_handles_the_share_backend(self):
         source = (
@@ -196,12 +200,12 @@ class CampaignArtifactRestoreQueryTests(unittest.TestCase):
     """
 
     def test_the_restore_query_no_longer_requires_an_unwritten_column(self):
-        source = (REPO_ROOT / "myUtils" / "worker.py").read_text(encoding="utf-8")
+        import inspect
+        from myUtils import worker
+        source = inspect.getsource(worker._registered_restore_sources)
         self.assertNotIn(
             "WHERE local_path=? AND remote_path IS NOT NULL AND storage_backend_id IS NOT NULL",
             source,
         )
-        self.assertIn(
-            "AND (public_url IS NOT NULL OR remote_path IS NOT NULL)",
-            source,
-        )
+        self.assertIn("WHERE campaign_id=? AND local_path IN", source)
+        self.assertIn('row.get("public_url")', source)

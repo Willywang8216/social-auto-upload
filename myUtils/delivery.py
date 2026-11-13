@@ -118,6 +118,10 @@ def has_unresolved_submission(payload: dict) -> bool:
     if (current.get("provider_receipt") or current.get("native_provider_receipt")
             or current.get("completed_operations") or current.get("telegramCompletedByDelivery")):
         return True
+    if "x_browser_operations" in current:
+        from myUtils.generic_delivery import x_browser_has_effects
+        if x_browser_has_effects(current):
+            return True
     media_reconciled = False
     if current.get("provider_operations"):
         from myUtils.generic_delivery import media_only_reconciled

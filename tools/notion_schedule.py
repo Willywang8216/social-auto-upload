@@ -4,12 +4,12 @@
 Reads the NW and SW Notion databases for rows whose publish column is
 ``完成未發布``, assigns each one a publish slot that never jams (one post per
 brand per day, staggered, never in the past — see ``myUtils.notion_posting``),
-enqueues a scheduled ``nw_sw_blog`` job, and flips the Notion row to
-``完成已發布`` once it is queued.
+enqueues a scheduled ``nw_sw_blog`` job. Queue admission is not delivery:
+the Notion publish status remains unchanged until confirmed delivery.
 
 Usage:
     python tools/notion_schedule.py --db nw --dry-run     # show the plan
-    python tools/notion_schedule.py --db nw --publish     # enqueue + mark
+    python tools/notion_schedule.py --db nw --publish     # enqueue only
     python tools/notion_schedule.py --both --publish      # both databases
     python tools/notion_schedule.py --density-check       # next free slots
 
@@ -38,41 +38,48 @@ DBS = {"nw": notion_posting.NW_DB_ID, "sw": notion_posting.SW_DB_ID}
 
 
 def _booked_by_account(db_path: Path | None) -> dict[int, list[str]]:
-    """Existing scheduled/queued blog targets, so new slots never collide."""
-    import sqlite3
-    from myUtils import jobs as job_runtime
+    """Shared alias-aware bookings, including confirmed/unknown history.
+
+    Invalid/missing history is a refusal, never an empty calendar.
+    """
+    from contextlib import closing
+    from myUtils import destination_pacing, jobs as job_runtime
 
     path = Path(db_path) if db_path else Path(job_runtime.DB_PATH)
-    if not path.exists():
-        return {}
-    booked: dict[int, list[str]] = {}
-    try:
-        with sqlite3.connect(str(path)) as conn:
-            rows = conn.execute(
-                """
-                SELECT t.account_ref, t.schedule_at
-                FROM publish_job_targets t
-                JOIN publish_jobs j ON j.id = t.job_id
-                WHERE j.platform = ?
-                  AND t.schedule_at IS NOT NULL AND t.schedule_at != ''
-                  AND t.status IN ('pending', 'running', 'retrying')
-                """,
-                (notion_posting.BLOG_PLATFORM,),
-            ).fetchall()
-    except sqlite3.Error:
-        return {}
-    for account_ref, schedule_at in rows:
-        try:
-            account_id = int(str(account_ref).split(":", 1)[1])
-        except (IndexError, ValueError):
-            continue
-        booked.setdefault(account_id, []).append(str(schedule_at))
-    return booked
+    with closing(destination_pacing.connect_readonly(path)) as conn:
+        conn.execute("BEGIN")
+        aliases = destination_pacing.account_refs(conn)
+        booked = destination_pacing.booked_slots(conn, aliases)
+        return {identifier: booked.get(destination_pacing.identity_for_ref(aliases, f"account:{identifier}"), [])
+                for identifier in notion_posting.BLOG_ACCOUNTS.values()}
+
+
+def _existing_page_job(row: dict, db_path: Path | None):
+    """Preserve every existing page submission, including failures/uncertainty."""
+    from myUtils import jobs as job_runtime, profiles
+
+    db_path = Path(db_path) if db_path else Path(job_runtime.DB_PATH)
+    page = str(row.get("page_id") or "")
+    if not page:
+        raise ValueError("Notion row has no exact page identity")
+    job = job_runtime.get_job_by_idempotency_key(f"notion-{page}", db_path=db_path)
+    if job is None:
+        return None
+    account_id = notion_posting.resolve_account(row)
+    account = profiles.get_account(account_id, db_path=db_path)
+    targets = job_runtime.list_targets(job.id, db_path=db_path)
+    if (job.platform != notion_posting.BLOG_PLATFORM or job.profile_id != account.profile_id
+            or job.payload.get("notionPageId") != page or job.payload.get("message") != (row.get("content") or "")
+            or job.payload.get("title") != (row.get("title") or "") or len(targets) != 1
+            or targets[0].account_ref != f"account:{account_id}" or targets[0].file_ref != f"notion:{page}"):
+        raise ValueError("Existing Notion page publication conflicts with approved content/destination; review required")
+    return job
 
 
 def _enqueue(slot: notion_posting.Slot, body: str, db_path: Path | None) -> dict:
-    from myUtils import jobs as job_runtime
+    from myUtils import jobs as job_runtime, profiles
 
+    db_path = Path(db_path) if db_path else Path(job_runtime.DB_PATH)
     kwargs = notion_posting.build_job_spec(slot, body)
     spec = job_runtime.JobSpec(
         platform=kwargs["platform"],
@@ -81,8 +88,11 @@ def _enqueue(slot: notion_posting.Slot, body: str, db_path: Path | None) -> dict
         profile_id=kwargs["profile_id"],
         idempotency_key=kwargs["idempotency_key"],
     )
-    job = job_runtime.enqueue_job(
-        spec, db_path=Path(db_path) if db_path else None)
+    account = profiles.get_account(slot.account_id, db_path=db_path)
+    if account.profile_id != slot.profile_id or account.platform != notion_posting.BLOG_PLATFORM:
+        raise ValueError("Notion destination/profile no longer matches the approved row")
+    job = job_runtime.enqueue_job(spec, workspace_id=account.workspace_id,
+                                  db_path=db_path)
     return {"jobId": job.id, "targets": job.total_targets}
 
 
@@ -101,6 +111,14 @@ def run(db_keys: list[str], *, publish: bool, dry_run: bool, db_path: Path | Non
         print(f"[{key}] {len(rows)} row(s) with publish={notion_posting.STATUS_FINISHED_UNPUBLISHED}")
         if not rows:
             continue
+        new_rows = []
+        for row in rows:
+            existing = _existing_page_job(row, db_path)
+            if existing is None:
+                new_rows.append(row)
+            else:
+                print(f"   page already owns job {existing.id} ({existing.status}); no new submission")
+        rows = new_rows
         booked = _booked_by_account(db_path)
         slots = notion_posting.select_rows_to_schedule(
             rows, booked, now=datetime.now(timezone.utc).replace(tzinfo=None))
@@ -111,11 +129,7 @@ def run(db_keys: list[str], *, publish: bool, dry_run: bool, db_path: Path | Non
                 continue
             result = _enqueue(slot, row.get("content") or "", db_path)
             print(f"      -> job {result['jobId']} queued")
-            try:
-                accessor.mark_published(slot.page_id, db_id)
-                print("      -> notion marked 完成已發布")
-            except NotionError as exc:
-                print(f"      !! enqueued but Notion update failed: {exc}", file=sys.stderr)
+            print("      -> queued; Notion publish status unchanged pending confirmed delivery")
     if total == 0:
         print("nothing to schedule")
         return 2
@@ -127,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--db", choices=sorted(DBS), help="single database")
     ap.add_argument("--both", action="store_true", help="both NW and SW")
     ap.add_argument("--publish", action="store_true",
-                    help="enqueue the jobs and flip Notion to 完成已發布")
+                    help="enqueue jobs; do not mark queued work as published")
     ap.add_argument("--dry-run", action="store_true", help="plan only (default)")
     ap.add_argument("--density-check", action="store_true",
                     help="print the next free slot per brand and exit")

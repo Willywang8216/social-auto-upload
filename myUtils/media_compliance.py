@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from myUtils import media_prep, platform_limits
+from myUtils import media_prep, platform_limits, media_integrity
+from myUtils.media_integrity import sha256_file
 
 BYTE_HEADROOM = 0.94
 MIN_VIDEO_BITRATE = 256_000  # operational quality floor, not a provider minimum
@@ -49,12 +50,6 @@ class PreparedVideoPart:
     metadata: dict[str, Any]
 
 
-def sha256_file(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _number(value: Any, label: str, *, positive: bool = True) -> float:
@@ -212,15 +207,10 @@ def validate_video(path: str | Path, *, platform: str, account_config: dict | No
 
 
 def verify_checksum(path: str | Path, expected_sha256: str) -> None:
-    if (not isinstance(expected_sha256, str) or len(expected_sha256) != 64
-            or any(char not in "0123456789abcdefABCDEF" for char in expected_sha256)):
-        raise MediaPreparationError("Prepared media has no valid checksum")
     try:
-        actual = sha256_file(path)
-    except OSError as exc:
-        raise MediaPreparationError("Prepared media is missing or unreadable") from exc
-    if actual != expected_sha256.lower():
-        raise MediaPreparationError("Prepared media checksum changed")
+        media_integrity.verify_artifact(path, {"sha256": expected_sha256}, required=True)
+    except media_integrity.MediaIntegrityError as exc:
+        raise MediaPreparationError(str(exc)) from exc
 
 
 def _even(value: float) -> int:
@@ -329,7 +319,7 @@ def decode_video(path: str | Path, *, duration: float) -> None:
         raise MediaPreparationError("Video decode check failed: " + result.stderr.strip()[-1600:])
 
 
-def _part(path: Path, meta: dict, *, source_sha: str, group: str, platform: str,
+def _part(path: Path, meta: dict, *, source_sha: str | None, group: str, platform: str,
           limits: dict, start: float, end: float, index: int, count: int,
           input_path: Path, input_sha: str, interval: tuple[float, float],
           provenance: dict | None = None) -> PreparedVideoPart:
@@ -339,12 +329,26 @@ def _part(path: Path, meta: dict, *, source_sha: str, group: str, platform: str,
         "decoded": True,
         "source_path": (provenance or {}).get("source_path", str(input_path)),
         "input_path": str(input_path), "input_sha256": input_sha,
+        "input_public_url": (provenance or {}).get("input_public_url"),
         "source_interval_start_seconds": interval[0], "source_interval_end_seconds": interval[1],
-        **({"reprepared_from": {"path": str(input_path), "sha256": input_sha,
+        "source_identity": (provenance or {}).get("source_identity"),
+        "source_is_complete": (provenance or {}).get("source_is_complete", provenance is None),
+        "source_duration_seconds": (provenance or {}).get("source_duration_seconds", interval[1] - interval[0]),
+        "original_source_interval_start_seconds": (provenance or {}).get("original_source_interval_start_seconds", interval[0]),
+        "original_source_interval_end_seconds": (provenance or {}).get("original_source_interval_end_seconds", interval[1]),
+        **({"source_parent": provenance.get("source_parent") or {
+            "path": str(input_path), "sha256": input_sha,
+            "public_url": provenance.get("input_public_url"),
             "preparation_group": provenance.get("preparation_group"),
             "part_index": provenance.get("part_index"), "part_count": provenance.get("part_count"),
             "source_start_seconds": interval[0], "source_end_seconds": interval[1]}}
-           if provenance else {}),
+           if provenance and not provenance.get("source_is_complete") else {}),
+        **({"reprepared_from": {"path": str(input_path), "sha256": input_sha,
+            "preparation_group": provenance.get("preparation_group"),
+            "public_url": provenance.get("input_public_url"),
+            "part_index": provenance.get("part_index"), "part_count": provenance.get("part_count"),
+            "source_start_seconds": interval[0], "source_end_seconds": interval[1]}}
+           if provenance and not provenance.get("source_is_complete") else {}),
         "sha256": sha256_file(path), "size_bytes": path.stat().st_size,
         "max_media_mb": path.stat().st_size / 1_000_000,
         "max_duration_seconds": float(meta["duration"]),
@@ -374,10 +378,18 @@ def prepare_video(src: str | Path, out_dir: str | Path, *, platform: str,
     if provenance:
         # Recovery encodes EXACT verified older prepared bytes, not the raw source
         # (which may have a different watermark/content variant).
-        verify_checksum(source, provenance.get("sha256"))
+        try:
+            media_integrity.verify_artifact(source, provenance, required=True)
+        except media_integrity.MediaIntegrityError as exc:
+            raise MediaPreparationError(str(exc)) from exc
         source_hash = provenance.get("source_sha256")
-        if not isinstance(source_hash, str) or len(source_hash) != 64:
-            raise MediaPreparationError("Prepared source has no origin checksum")
+        if source_hash is not None:
+            try:
+                source_hash = media_integrity.expected_sha256({"sha256": source_hash}, required=True)
+            except media_integrity.MediaIntegrityError as exc:
+                raise MediaPreparationError("Prepared source has no valid origin checksum") from exc
+        elif not provenance.get("source_identity"):
+            raise MediaPreparationError("Prepared source has no exact origin identity")
         start = _number(provenance.get("source_start_seconds"), "source interval start", positive=False)
         end = _number(provenance.get("source_end_seconds"), "source interval end")
         if end <= start:
@@ -481,21 +493,35 @@ def select_prepared_parts(artifacts: list[dict], platform: str) -> list[dict]:
         raise MediaPreparationError("Invalid prepared video part count")
     selected: dict[int, dict] = {}
     source_hash = group[0]["metadata"].get("source_sha256")
+    try:
+        media_integrity.expected_sha256({"sha256": source_hash}, required=source_hash is not None)
+    except media_integrity.MediaIntegrityError as exc:
+        raise MediaPreparationError("Invalid prepared video origin checksum") from exc
+    if source_hash is None and not isinstance(group[0]["metadata"].get("source_identity"), dict):
+        raise MediaPreparationError("Prepared video has no exact origin identity")
     for artifact in group:
         metadata = artifact["metadata"]
         start = _number(metadata.get("source_start_seconds"), "part source start", positive=False)
         end = _number(metadata.get("source_end_seconds"), "part source end")
         if end <= start:
             raise MediaPreparationError("Invalid prepared video source interval")
-        if not isinstance(metadata.get("sha256"), str) or len(metadata["sha256"]) != 64:
-            raise MediaPreparationError("Prepared video has no checksum")
+        try:
+            media_integrity.expected_sha256(artifact, required=True)
+        except media_integrity.MediaIntegrityError as exc:
+            raise MediaPreparationError(str(exc)) from exc
         index = metadata.get("part_index")
         if (metadata.get("part_count") != count or type(index) is not int or not 1 <= index <= count
                 or metadata.get("source_sha256") != source_hash
                 or (platform == "tiktok" and metadata.get("unwatermarked") is not True)):
             raise MediaPreparationError("Inconsistent prepared video part set")
+        for key in ("source_identity", "source_parent", "source_path", "content_variant", "unwatermarked",
+                    "source_is_complete", "source_duration_seconds", "reprepared_from",
+                    "source_interval_start_seconds", "source_interval_end_seconds",
+                    "original_source_interval_start_seconds", "original_source_interval_end_seconds"):
+            if metadata.get(key) != group[0]["metadata"].get(key):
+                raise MediaPreparationError("Inconsistent prepared video provenance")
         current = selected.get(index)
-        if current is not None and current["metadata"].get("sha256") != metadata.get("sha256"):
+        if current is not None and media_integrity.expected_sha256(current) != media_integrity.expected_sha256(artifact):
             raise MediaPreparationError("Prepared video index refers to different bytes")
         if current is None or artifact.get("public_url"):
             selected[index] = artifact
@@ -503,10 +529,12 @@ def select_prepared_parts(artifacts: list[dict], platform: str) -> list[dict]:
         raise MediaPreparationError("Incomplete prepared video part set; publication stopped")
     ordered = [selected[index] for index in range(1, count + 1)]
     for previous, following in zip(ordered, ordered[1:]):
-        if abs(previous["metadata"]["source_end_seconds"] - following["metadata"]["source_start_seconds"]) > 0.000001:
+        if abs(float(previous["metadata"]["source_end_seconds"]) - float(following["metadata"]["source_start_seconds"])) > 0.000001:
             raise MediaPreparationError("Prepared video source intervals are not contiguous")
     first, last = ordered[0]["metadata"], ordered[-1]["metadata"]
-    if (abs(first["source_start_seconds"] - first.get("source_interval_start_seconds", first["source_start_seconds"])) > 0.000001
-            or abs(last["source_end_seconds"] - last.get("source_interval_end_seconds", last["source_end_seconds"])) > 0.000001):
+    interval_start = _number(first.get("source_interval_start_seconds"), "complete source interval start", positive=False)
+    interval_end = _number(first.get("source_interval_end_seconds"), "complete source interval end")
+    if (abs(float(first["source_start_seconds"]) - interval_start) > 0.000001
+            or abs(float(last["source_end_seconds"]) - interval_end) > 0.000001):
         raise MediaPreparationError("Prepared video set does not cover its complete source interval")
     return ordered

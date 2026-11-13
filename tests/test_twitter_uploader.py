@@ -415,11 +415,15 @@ class TwitterTopmostHelperTests(unittest.TestCase):
 
 
 class _ClickRecordingButton:
-    def __init__(self, *, click_fails: bool = False, dispatch_fails: bool = False) -> None:
+    def __init__(self, *, click_fails: bool = False, dispatch_fails: bool = False, topmost: bool = True) -> None:
         self.click_fails = click_fails
         self.dispatch_fails = dispatch_fails
+        self.topmost = topmost
         self.clicked = 0
         self.dispatched = 0
+
+    async def evaluate(self, _script) -> bool:
+        return self.topmost
 
     async def click(self, **_kwargs) -> None:
         self.clicked += 1
@@ -462,20 +466,22 @@ class TwitterSubmitComposerTests(unittest.TestCase):
 
         self.assertEqual((button.clicked, button.dispatched, page.keys), (1, 0, []))
 
-    def test_falls_back_to_dispatching_when_the_click_is_blocked(self) -> None:
+    def test_selects_dispatch_before_click_when_covered(self) -> None:
+        button, page = _ClickRecordingButton(topmost=False), _KeyRecordingPage()
+        self._click(button, page)
+        self.assertEqual((button.clicked, button.dispatched, page.keys), (0, 1, []))
+
+    def test_unknown_click_does_not_dispatch_or_press_shortcut(self) -> None:
         button, page = _ClickRecordingButton(click_fails=True), _KeyRecordingPage()
+        with self.assertRaises(RuntimeError):
+            self._click(button, page)
+        self.assertEqual((button.clicked, button.dispatched, page.keys), (1, 0, []))
 
-        self._click(button, page)
-
-        self.assertEqual((button.clicked, button.dispatched, page.keys), (1, 1, []))
-
-    def test_falls_back_to_the_keyboard_shortcut_when_both_fail(self) -> None:
-        button = _ClickRecordingButton(click_fails=True, dispatch_fails=True)
-        page = _KeyRecordingPage()
-
-        self._click(button, page)
-
-        self.assertEqual(page.keys, ["Control+Enter"])
+    def test_unknown_dispatch_does_not_press_shortcut(self) -> None:
+        button, page = _ClickRecordingButton(topmost=False, dispatch_fails=True), _KeyRecordingPage()
+        with self.assertRaises(RuntimeError):
+            self._click(button, page)
+        self.assertEqual((button.clicked, button.dispatched, page.keys), (0, 1, []))
 
 
 if __name__ == "__main__":

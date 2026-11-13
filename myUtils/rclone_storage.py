@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
+import tempfile
+import time
 from typing import Sequence
 
 from myUtils import rclone_config
@@ -144,40 +147,77 @@ def ensure_public_link(
     return public_url
 
 
-def download_artifact(
-    remote_path: str,
-    local_path: str | Path,
-    *,
-    remote_name: str | None = None,
-    remote_root: str | None = None,
-    runner=run_subprocess,
-) -> Path:
-    """Fetch an object back off the rclone remote.
+def _read_command(command: list[str], *, runner, connect_timeout: float,
+                  operation_timeout: float, total_deadline: float):
+    """Single read attempt, including a subprocess wall-clock deadline."""
+    if min(connect_timeout, operation_timeout, total_deadline) <= 0:
+        raise TimeoutError("remote read budget exhausted")
+    command = command + [
+        "--contimeout", f"{min(connect_timeout, total_deadline):g}s",
+        "--timeout", f"{min(operation_timeout, total_deadline):g}s",
+        "--retries", "1", "--low-level-retries", "1",
+    ]
+    return runner(command, capture_output=True, text=True, timeout=total_deadline)
 
-    Counterpart to :func:`upload_artifact`, used to pull media back when the
-    worker finds an artifact missing locally. The byte-moving copy of the
-    cache lives in ``offload_to_drive.sh``; this is the read side the publish
-    path needs so an offloaded file is recoverable rather than simply gone.
-    """
-    resolved_remote_name = _resolve_remote_name(remote_name)
+
+def stat_artifact(remote_path: str, *, remote_name: str | None = None,
+                  remote_root: str | None = None, runner=run_subprocess,
+                  connect_timeout: float = 10.0, operation_timeout: float = 15.0,
+                  total_deadline: float = 20.0) -> dict:
+    """Fresh exact-object read-only stat; never list/search by basename."""
+    remote = _resolve_remote_name(remote_name)
     root = _resolve_remote_root(remote_root)
-    spec_path = str(PurePosixPath(root, remote_path)) if root else remote_path
+    key = str(PurePosixPath(root, remote_path)) if root else remote_path
+    result = _read_command([RCLONE_COMMAND, "lsjson", f"{remote}:{key}", "--stat", "--hash"],
+                           runner=runner, connect_timeout=connect_timeout,
+                           operation_timeout=operation_timeout, total_deadline=total_deadline)
+    data = json.loads(result.stdout or "null")
+    if not isinstance(data, dict) or data.get("IsDir") or not isinstance(data.get("Size"), int):
+        raise ValueError("remote stat did not describe a file")
+    proofs = []
+    for name, value in (data.get("Hashes") or {}).items():
+        algorithm = str(name).lower().replace("-", "")
+        if algorithm in {"sha256", "md5", "sha1"} and value:
+            proofs.append({"algorithm": algorithm, "value": value})
+    proofs.sort(key=lambda proof: {"sha256": 0, "sha1": 1, "md5": 2}[proof["algorithm"]])
+    return {"size_bytes": data["Size"], "remote_checksum": proofs[0] if proofs else None,
+            "checksums": proofs}
 
+
+def download_artifact(remote_path: str, local_path: str | Path, *,
+                      remote_name: str | None = None, remote_root: str | None = None,
+                      runner=run_subprocess, connect_timeout: float = 10.0,
+                      operation_timeout: float = 30.0, total_deadline: float = 120.0,
+                      max_bytes: int = 512 * 1024 * 1024) -> Path:
+    """Bounded exact read, installing only a complete nonempty sibling file.
+
+    Integrity-aware callers pass their own staging destination and verify it
+    before final exposure; this low-level function does not invent checksums.
+    """
+    started = time.monotonic()
+    remote = _resolve_remote_name(remote_name)
+    root = _resolve_remote_root(remote_root)
+    key = str(PurePosixPath(root, remote_path)) if root else remote_path
     destination = Path(local_path).expanduser()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    runner(
-        [
-            RCLONE_COMMAND,
-            "copyto",
-            f"{resolved_remote_name}:{spec_path}",
-            str(destination),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if not destination.is_file() or destination.stat().st_size == 0:
-        destination.unlink(missing_ok=True)
-        raise RuntimeError(f"rclone restore produced a missing or empty file: {destination.name}")
+    fd, name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".part", dir=destination.parent)
+    os.close(fd)
+    temporary = Path(name)
+    try:
+        _read_command([RCLONE_COMMAND, "copyto", f"{remote}:{key}", str(temporary),
+                       "--max-transfer", str(max_bytes), "--cutoff-mode", "CAUTIOUS"],
+                      runner=runner, connect_timeout=connect_timeout,
+                      operation_timeout=operation_timeout,
+                      total_deadline=total_deadline - (time.monotonic() - started))
+        if time.monotonic() - started > total_deadline:
+            raise TimeoutError("remote read budget exhausted")
+        if not temporary.is_file() or temporary.stat().st_size == 0:
+            raise RuntimeError("rclone restore produced a missing or empty file")
+        if temporary.stat().st_size > max_bytes:
+            raise ValueError("remote object exceeded byte limit")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
     return destination
 
 

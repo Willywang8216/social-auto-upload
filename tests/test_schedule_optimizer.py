@@ -13,6 +13,7 @@ import db.createTable as create_table
 from myUtils import jobs, profiles
 
 from scripts import optimize_schedule as opt
+from tests.legacy_queue import enqueue_legacy_job
 
 
 class OptimizeScheduleTests(unittest.TestCase):
@@ -25,7 +26,7 @@ class OptimizeScheduleTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _target(self, *, account="account:1", platform="twitter", when=None, key="k1"):
-        jobs.enqueue_job(
+        enqueue_legacy_job(
             jobs.JobSpec(
                 platform=platform,
                 payload={"draft": {"message": "A real caption for the queue."}},
@@ -108,7 +109,7 @@ class ScheduleOptimizerIdentityTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _queue(self, account_id: int, when: str, key: str) -> None:
-        jobs.enqueue_job(
+        enqueue_legacy_job(
             jobs.JobSpec(
                 platform="facebook",
                 payload={"draft": {"message": "A real caption for the queue."}},

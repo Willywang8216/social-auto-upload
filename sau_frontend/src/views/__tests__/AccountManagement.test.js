@@ -161,11 +161,12 @@ describe('AccountManagement bounded OAuth', () => {
     expect(card.reconnectRequired).toBe(true)
     expect(card.isOverdue).toBe(false)
     expect(state.cookieStatusLabel(card)).toBe('Reconnect required')
-    expect(state.publishingRouteLabel(card)).toBe('Managed configured')
+    expect(state.publishingRouteLabel(card)).toBe('Managed configured_unverified')
     expect(state.expiryLabel(card)).toBe('No scheduled expiry')
     const text = textContent(view.root)
     expect(text).toContain('Native: Reconnect required')
-    expect(text).toContain('Managed connection / availability: not validated')
+    expect(text).toContain('Managed primary and native OAuth are verified separately.')
+    expect(text).toContain('Fresh exact destination authorization has not been verified.')
     expect(text).toContain('User data access: 2030-02-01')
     expect(text).not.toContain('Validated at last check')
     expect(text).not.toContain('Token expired')
@@ -174,6 +175,8 @@ describe('AccountManagement bounded OAuth', () => {
     expect(state.cookieStatusLabel(card)).toBe('Not validated')
     expect(state.expiryLabel(card)).toBe('Unknown')
     card.publishingRoute.enabled = false
+    expect(state.publishingRouteLabel(card)).toBe('Disabled')
+    card.readiness = { provider: 'sociamonials', ready: true, evidenceFresh: true }
     expect(state.publishingRouteLabel(card)).toBe('Disabled')
   })
 })

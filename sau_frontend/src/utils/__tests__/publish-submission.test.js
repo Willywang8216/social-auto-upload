@@ -135,7 +135,8 @@ describe('submission validation and visible lifecycle states', () => {
     expect(targetReliabilityDetails(snake)).toContain(camel.nextAttemptAt)
     expect(targetReliabilityDetails(snake)).not.toContain('test-secret')
     expect(canRetryTarget({ status: 'failed', delivery_state: 'unknown' })).toBe(false)
-    expect(canRetryTarget({ status: 'failed', delivery_state: 'not_sent' })).toBe(true)
+    expect(canRetryTarget({ status: 'failed', delivery_state: 'not_sent' })).toBe(false)
+    expect(canRetryTarget({ status: 'failed', retryEligibility: { allowed: true } })).toBe(true)
   })
 
   it('derives real preparation counts and job references from the campaign read API', () => {

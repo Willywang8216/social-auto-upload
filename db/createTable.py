@@ -66,7 +66,9 @@ CREATE TABLE IF NOT EXISTS file_records (
     filename TEXT NOT NULL,
     filesize REAL,
     upload_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-    file_path TEXT
+    file_path TEXT,
+    sha256 TEXT,
+    size_bytes INTEGER
 )
 """
 
@@ -97,6 +99,35 @@ CREATE TABLE IF NOT EXISTS accounts (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(profile_id, platform, account_name),
     FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+)
+"""
+
+# Additive fixture parity with 0027. RAW_SCHEMA_REVISION remains the baseline;
+# Alembic still applies every newer revision idempotently after bootstrap.
+PUBLISH_DEPENDENCY_STATES = """
+CREATE TABLE IF NOT EXISTS publish_dependency_states (
+    scope_key TEXT PRIMARY KEY,
+    config_fingerprint TEXT NOT NULL,
+    kind TEXT,
+    status TEXT,
+    reason TEXT,
+    blocked_until TEXT,
+    last_checked_at TEXT,
+    updated_at TEXT
+)
+"""
+
+PUBLISH_DESTINATION_READINESS = """
+CREATE TABLE IF NOT EXISTS publish_destination_readiness (
+    account_id INTEGER PRIMARY KEY REFERENCES accounts(id),
+    workspace_id TEXT,
+    provider TEXT,
+    config_fingerprint TEXT,
+    status TEXT,
+    reason TEXT,
+    evidence_json TEXT,
+    checked_at TEXT,
+    expires_at TEXT
 )
 """
 
@@ -679,6 +710,8 @@ REQUIRED_COLUMNS = {
         "storage_key": "storage_key TEXT",
         "storage_cdn_url": "storage_cdn_url TEXT",
         "local_cleaned_at": "local_cleaned_at DATETIME",
+        "sha256": "sha256 TEXT",
+        "size_bytes": "size_bytes INTEGER",
     },
     "campaign_artifacts": {
         "storage_backend_id": "storage_backend_id INTEGER REFERENCES storage_backends(id) ON DELETE SET NULL",
@@ -798,6 +831,8 @@ def bootstrap(db_path: Path = DB_PATH) -> None:
         cursor.execute(FILE_RECORDS)
         cursor.execute(PROFILES)
         cursor.execute(ACCOUNTS)
+        cursor.execute(PUBLISH_DEPENDENCY_STATES)
+        cursor.execute(PUBLISH_DESTINATION_READINESS)
         cursor.execute(PUBLISH_JOBS)
         cursor.execute(PUBLISH_JOB_TARGETS)
         cursor.execute(MEDIA_GROUPS)

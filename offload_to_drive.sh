@@ -21,9 +21,9 @@
 #     myUtils.worker can download it back at claim time
 #     (worker._resolve_file_path / worker._ensure_artifact_paths_local)
 #   * the verified purge IS the delete: rclone copies the bytes up, then each
-#     source is unlinked ONLY after `rclone check --size-only --one-way` agrees
-#     the remote holds it, so "gone locally + present remotely" is the safe
-#     signal we register on. A file whose copy can't be verified stays put.
+#     source is unlinked ONLY after a content-download rclone check agrees,
+#     stable local SHA256/byte counts and its exact restore mapping commit.
+#     A size match alone is never integrity evidence; failures stay local.
 #   * after a target succeeds its file falls out of the exclusion set and the
 #     next run archives it back to Drive automatically.
 #
@@ -165,9 +165,9 @@ verify_and_register_unreadable_source() {
   local remote_root="$2"
   local relative="$3"
   local source_file="$source_root/$relative"
-  local before after staging escaped size
+  local before after staging escaped size sha after_sha
   [ -f "$source_file" ] && [ ! -L "$source_file" ] || return 1
-  before=$(sudo -n stat -c '%d:%i:%s:%Y:%a:%u:%g' -- "$source_file") || return 1
+  before=$(sudo -n stat -c '%d:%i:%s:%y:%z:%a:%u:%g' -- "$source_file") || return 1
   size=$(sudo -n stat -c '%s' -- "$source_file") || return 1
   staging=$(mktemp -d "${TMPDIR:-/tmp}/sau-offload-stage.XXXXXX") || return 1
   mkdir -p "$staging/$(dirname "$relative")" || { rm -rf "$staging"; return 1; }
@@ -179,19 +179,32 @@ verify_and_register_unreadable_source() {
     rm -rf "$staging"
     return 1
   fi
+  sha=$(sha256sum -- "$staging/$relative") || { rm -rf "$staging"; return 1; }
+  sha=${sha%% *}
   escaped=$(escape_rclone_filter_path "$relative")
   if ! "${RC[@]}" copyto "$staging/$relative" "$remote_root/$relative" --stats-one-line >/dev/null 2>&1 || \
-     ! "${RC[@]}" check "$staging" "$remote_root" --one-way --include "/$escaped" >/dev/null 2>&1; then
+     ! "${RC[@]}" check "$staging" "$remote_root" --download --one-way --include "/$escaped" >/dev/null 2>&1; then
     rm -rf "$staging"
     return 1
   fi
-  after=$(sudo -n stat -c '%d:%i:%s:%Y:%a:%u:%g' -- "$source_file") || { rm -rf "$staging"; return 1; }
-  if [ "$before" != "$after" ]; then
+  after=$(sudo -n stat -c '%d:%i:%s:%y:%z:%a:%u:%g' -- "$source_file") || { rm -rf "$staging"; return 1; }
+  after_sha=$(sudo -n sha256sum -- "$source_file") || { rm -rf "$staging"; return 1; }
+  after_sha=${after_sha%% *}
+  if [ "$before" != "$after" ] || [ "$sha" != "$after_sha" ]; then
     echo "[$(ts)] source changed during staged copy: $relative"
     rm -rf "$staging"
     return 1
   fi
-  if ! register_verified_source "$source_root" "$relative" "$size"; then
+  if ! register_verified_source "$source_root" "$relative" "$size" "$sha" "$staging/$relative"; then
+    rm -rf "$staging"
+    return 1
+  fi
+  # A DB lock/commit can take time: recheck the exact privileged source again.
+  after=$(sudo -n stat -c '%d:%i:%s:%y:%z:%a:%u:%g' -- "$source_file") || { rm -rf "$staging"; return 1; }
+  after_sha=$(sudo -n sha256sum -- "$source_file") || { rm -rf "$staging"; return 1; }
+  after_sha=${after_sha%% *}
+  if [ "$before" != "$after" ] || [ "$sha" != "$after_sha" ]; then
+    echo "[$(ts)] keeping source changed during registration: $relative"
     rm -rf "$staging"
     return 1
   fi
@@ -208,6 +221,7 @@ register_verified_source() {
   local source_root="$1"
   local relative="$2"
   local size="${3:-}"
+  local sha="${4:-}" verified_path="${5:-$source_root/$relative}"
   local root endpoint
   root=$(basename "$source_root")
   # The tier (inbox/published) is carried in the endpoint. Default to the
@@ -216,16 +230,33 @@ register_verified_source() {
   if [ -z "$size" ]; then
     size=$(stat -c%s -- "$source_root/$relative") || return 1
   fi
-  python3 - "$DB" "$DST" "$source_root" "$relative" "$size" "$endpoint" <<'PY'
+  python3 - "$DB" "$DST" "$source_root" "$relative" "$size" "$endpoint" "$sha" "$verified_path" <<'PY'
+import hashlib
+import re
 import sqlite3
 import sys
 from pathlib import Path
 
-db_path, dst, source_root, relative, size_raw, endpoint = sys.argv[1:]
+db_path, dst, source_root, relative, size_raw, endpoint, sha, verified_path = sys.argv[1:]
 root = Path(source_root).name
 remote = dst.split(":", 1)[0]
 relative = Path(relative).as_posix()
 size = int(size_raw)
+# Only executed stable local bytes are registrable. Staging is used for a
+# root-owned source; its caller also proves the privileged source digest equal.
+path = Path(verified_path)
+before = path.stat()
+digest = hashlib.sha256()
+with path.open("rb") as stream:
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+after = path.stat()
+stamp = lambda st: (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+actual_sha = digest.hexdigest()
+if (not path.is_file() or stamp(before) != stamp(after) or size != after.st_size
+        or (sha and (not re.fullmatch(r"[0-9a-f]{64}", sha) or sha != actual_sha))):
+    raise SystemExit("source changed or invalid verified integrity facts")
+sha = actual_sha
 if root not in {"videoFile", "uploads", "generated"}:
     raise SystemExit("unsupported source root")
 if not endpoint:
@@ -253,12 +284,11 @@ try:
     if not records:
         raise RuntimeError(f"no file_records row for {root}/{relative}")
     for row in records:
-        # rclone check immediately before this transaction proved these bytes
-        # exist remotely at the same size as this local source. Repair stale
-        # legacy filesize values from that verified fact before unlinking.
+        # All facts commit atomically. Missing migration0027 columns cause an
+        # SQL error/rollback; the caller keeps the local file, never downgrades.
         conn.execute(
-            "UPDATE file_records SET filesize=?, storage_key=?, storage_backend_id=? WHERE id=?",
-            (size, relative, backend["id"], row["id"]),
+            "UPDATE file_records SET filesize=?, storage_key=?, storage_backend_id=?, sha256=?, size_bytes=? WHERE id=?",
+            (size, relative, backend["id"], sha, size, row["id"]),
         )
     conn.commit()
 except Exception:
@@ -439,29 +469,19 @@ for tier in ("published", "inbox"):
 PY
 }
 
-# A freshly uploaded object can be readable but not yet carry its MD5 on Google
-# Drive, so a hash check seconds after the upload reports a difference that does
-# not exist. That produced 3 "remote copy is missing or differs" failures on
-# 2026-10-17/21/22 - each one paged the operator (rc=1), and each one verified
-# clean on the next run (campaign-2563: uploaded 21:25:54, "differs" at
-# 21:27:20, 0 differences at 21:37). Retry the hash check briefly, then accept a
-# size match, which is the check the header always claimed to use.
+# Download and compare content, including when a provider hash is unavailable.
+# A provider size-only match is not proof and must never authorise unlinking.
 verify_remote_copy() {
   local source_root="$1" remote_root="$2" escaped="$3" relative="$4"
   local attempt
   local retry_sleep=${SAU_OFFLOAD_VERIFY_RETRY_SLEEP:-5}
   for attempt in 1 2 3; do
-    if "${RC[@]}" check "$source_root" "$remote_root" --one-way \
+    if "${RC[@]}" check "$source_root" "$remote_root" --download --one-way \
          --include "/$escaped" >/dev/null 2>&1; then
       return 0
     fi
     sleep "$retry_sleep"
   done
-  if "${RC[@]}" check "$source_root" "$remote_root" --one-way --size-only \
-       --include "/$escaped" >/dev/null 2>&1; then
-    echo "[$(ts)] note: $relative verified by size only (remote hash not available yet)"
-    return 0
-  fi
   return 1
 }
 
@@ -524,22 +544,35 @@ purge_verified_sources() {
       fi
       continue
     fi
-    before_stat=$(stat -c '%d:%i:%s:%Y' -- "$source_file") || { failed=1; continue; }
+    before_stat=$(stat -c '%d:%i:%s:%y:%z' -- "$source_file") || { failed=1; continue; }
+    source_sha=$(sha256sum -- "$source_file") || { failed=1; continue; }
+    source_sha=${source_sha%% *}
+    source_size=$(stat -c '%s' -- "$source_file") || { failed=1; continue; }
     # Compare transfer roots so rclone can use content hashes when available.
     # Escaped includes make filename metacharacters literal; --one-way ignores
     # unrelated remote files without weakening verification of this source.
     escaped=$(escape_rclone_filter_path "$relative")
     if verify_remote_copy "$source_root" "$remote_root" "$escaped" "$relative"; then
-      after_stat=$(stat -c '%d:%i:%s:%Y' -- "$source_file") || { failed=1; continue; }
-      if [ "$before_stat" != "$after_stat" ]; then
+      after_stat=$(stat -c '%d:%i:%s:%y:%z' -- "$source_file") || { failed=1; continue; }
+      after_sha=$(sha256sum -- "$source_file") || { failed=1; continue; }
+      after_sha=${after_sha%% *}
+      if [ "$before_stat" != "$after_stat" ] || [ "$source_sha" != "$after_sha" ]; then
         echo "[$(ts)] keeping $relative: source changed during remote verification"
         failed=1
         continue
       fi
       # Persist the exact restore mapping before deletion. If registration or
       # privileged unlink fails, the verified local source remains available.
-      if ! register_verified_source "$source_root" "$relative"; then
+      if ! register_verified_source "$source_root" "$relative" "$source_size" "$source_sha"; then
         echo "[$(ts)] keeping $relative: verified remote copy could not be registered"
+        failed=1
+        continue
+      fi
+      after_stat=$(stat -c '%d:%i:%s:%y:%z' -- "$source_file") || { failed=1; continue; }
+      after_sha=$(sha256sum -- "$source_file") || { failed=1; continue; }
+      after_sha=${after_sha%% *}
+      if [ "$before_stat" != "$after_stat" ] || [ "$source_sha" != "$after_sha" ]; then
+        echo "[$(ts)] keeping $relative: source changed during registration"
         failed=1
         continue
       fi

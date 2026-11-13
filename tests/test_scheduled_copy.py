@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import closing
 
 import db.createTable as create_table
 from myUtils import campaigns, jobs, media_groups, profiles, scheduled_copy
@@ -31,7 +32,8 @@ class ScheduledCopyTests(unittest.TestCase):
             campaign.id, "twitter", account_ids=[], draft={"message": message, "title": "说明"},
             status="queued", db_path=self.db_path,
         )
-        job = jobs.enqueue_job(
+        from tests.legacy_queue import enqueue_legacy_job
+        job = enqueue_legacy_job(
             jobs.JobSpec(
                 platform="twitter",
                 payload={"campaignId": campaign.id, "campaignPostId": post.id,
@@ -40,7 +42,7 @@ class ScheduledCopyTests(unittest.TestCase):
             ),
             db_path=self.db_path,
         )
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "UPDATE publish_job_targets SET status=? WHERE job_id=?",
                 (status, job.id),
@@ -68,7 +70,7 @@ class ScheduledCopyTests(unittest.TestCase):
         result = scheduled_copy.apply_scheduled_copy(self.db_path, confirm=True)
 
         self.assertEqual(result["changed"], 1)
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             draft = json.loads(conn.execute(
                 "SELECT draft_json FROM campaign_posts WHERE id=?", (post_id,)
             ).fetchone()[0])

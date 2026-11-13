@@ -31,6 +31,7 @@ def _job_to_payload(job: Any) -> dict[str, Any]:
 
 
 def _target_to_payload(target: Any) -> dict[str, Any]:
+    safe = target.to_dict() if hasattr(target, "to_dict") else {}
     return {
         "id": target.id,
         "jobId": target.job_id,
@@ -42,6 +43,13 @@ def _target_to_payload(target: Any) -> dict[str, Any]:
         "lastError": target.last_error,
         "startedAt": target.started_at,
         "finishedAt": target.finished_at,
+        "nextAttemptAt": getattr(target, "next_attempt_at", None),
+        "errorCategory": getattr(target, "error_category", None),
+        "deliveryState": getattr(target, "delivery_state", None),
+        "readiness": safe.get("readiness", {}),
+        "retryEligibility": safe.get("retryEligibility", {"allowed": False, "reasonCode": "eligibility_unavailable"}),
+        "checkpoint": safe.get("checkpoint", {}),
+        "providerReceipt": (safe.get("checkpoint") or {}).get("provider_receipt"),
     }
 
 
@@ -119,6 +127,9 @@ def register(mcp: FastMCP) -> None:
                         "status": target["status"],
                         "attempts": target["attempts"],
                         "lastError": target["last_error"],
+                        "deliveryState": target.get("delivery_state"),
+                        "retryEligibility": target.get("retryEligibility", {"allowed": False}),
+                        "readiness": target.get("readiness", {}),
                     }
                 )
             return out
@@ -128,10 +139,10 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(
         name="jobs_target_reschedule",
         description=(
-            "Move a pending/retrying job target to a new scheduled time. "
-            "`scheduleAt` is an ISO-8601 datetime string. Clears the "
-            "target's previous errors and attempts. Rejects running/succeeded "
-            "targets."
+            "Change only an eligible target's future slot. ISO-8601 offsets are "
+            "normalized; attempts, errors, prepared generations, receipts and "
+            "state are preserved. Refuses delivery evidence, destination pacing "
+            "conflicts and reversed ordered parts. This is not a retry."
         ),
     )
     def jobs_target_reschedule(
@@ -149,9 +160,9 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(
         name="jobs_target_cancel",
         description=(
-            "Cancel a pending/retrying job target. Running targets are "
-            "untouched (the in-flight upload cannot be aborted). The owning "
-            "job's counters/status are recomputed."
+            "Stop local waiting work or receipt polling, preserving provider "
+            "evidence. This does not cancel or reject an accepted provider post. "
+            "Running work is untouched; owning job counters are recomputed."
         ),
     )
     def jobs_target_cancel(target_id: int, db_path: str | None = None) -> dict[str, Any]:
@@ -165,16 +176,17 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(
         name="jobs_target_resubmit",
         description=(
-            "Re-queue a failed or cancelled job target. If its original "
-            "schedule time is still in the future it is kept; otherwise it "
-            "is cleared so the worker picks it up immediately. Errors/attempts "
-            "are reset."
+            "Apply one maintained validated prepared recovery plan to its exact "
+            "failed target. A plain retry cannot reset evidence or attempts. "
+            "Cause, current grants, exact media, duplicates and paced complete "
+            "parts are rechecked. Scheduling is not confirmed delivery."
         ),
     )
-    def jobs_target_resubmit(target_id: int, db_path: str | None = None) -> dict[str, Any]:
+    def jobs_target_resubmit(target_id: int, db_path: str | None = None,
+                             recovery_plan: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             target = job_runtime.resubmit_target(
-                int(target_id), db_path=resolve_db_path(db_path))
+                int(target_id), db_path=resolve_db_path(db_path), recovery_plan=recovery_plan)
             return _target_to_payload(target)
         except Exception as exc:  # noqa: BLE001
             return error_payload(exc)

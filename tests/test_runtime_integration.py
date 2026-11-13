@@ -247,8 +247,10 @@ def test_public_restore_keeps_original_on_partial_download(tmp_path, monkeypatch
 
     monkeypatch.setattr(outbound_http.requests, "get", lambda *a, **k: Response())
 
-    with pytest.raises(media_remote_storage.RemoteStorageError, match="incomplete"):
+    with pytest.raises(media_remote_storage.RemoteStorageError, match="public URL restore refused") as failure:
         media_remote_storage.download_public_url("https://media.example/file.mp4", target)
+    assert isinstance(failure.value.__cause__, outbound_http.OutboundUrlError)
+    assert "incomplete" in str(failure.value.__cause__)
 
     assert target.read_bytes() == b"existing-good-bytes"
     assert not list(tmp_path.glob("*.part"))
@@ -280,7 +282,7 @@ def test_real_orphaned_child_is_killed(tmp_path, monkeypatch):
         stat = Path(f"/proc/{pid}/stat")
         try:
             state = stat.read_text().split()[2]
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             # Reaping can remove /proc between any separate exists/read calls.
             break
         if state == "Z":

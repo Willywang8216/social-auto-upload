@@ -22,6 +22,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import closing
+from unittest.mock import patch
 
 import db.createTable as create_table
 
@@ -35,6 +36,8 @@ if "conf" not in sys.modules:
 
 from myUtils import campaign_prep, campaigns, jobs, media_groups, profiles
 from myUtils.worker import PublishWorker, WorkerConfig
+from myUtils import media_compliance, publish_admission, publish_readiness
+from tests.test_atomic_publication_groups import prepared_video_metadata, prospective_draft_fixture, synthetic_video_probe
 
 
 def _iso_minutes_ago(minutes: int) -> str:
@@ -424,6 +427,14 @@ class RunCampaignPrepTests(unittest.TestCase):
         self.db_path = Path(self._tmp.name) / "runcamp.db"
         create_table.bootstrap(self.db_path)
         self.profile = profiles.create_profile("Brand", db_path=self.db_path)
+        self.source = Path(self._tmp.name) / "clip.mp4"
+        self.source.write_bytes(b"offline verified fixture bytes")
+        self.enterContext(patch.object(media_compliance, "_source_metadata", side_effect=synthetic_video_probe))
+        self.enterContext(patch.object(publish_readiness, "_project", return_value={
+            "ready": True, "reasonCode": "ready", "evidence": {"capabilities": ["video"]},
+        }))
+        self.enterContext(patch.object(publish_admission, "prospective_draft_options",
+                                      side_effect=prospective_draft_fixture, create=True))
         self.file_id = self._file_record("clip.mp4")
         self.media_group = media_groups.create_media_group(
             "Launch",
@@ -438,8 +449,9 @@ class RunCampaignPrepTests(unittest.TestCase):
         )
         self.account = profiles.add_account(
             self.profile.id,
-            profiles.PLATFORM_DOUYIN,
+            profiles.PLATFORM_TWITTER,
             "brand",
+            config={"twitterUserId": "offline-runner", "accessToken": "offline-token"},
             db_path=self.db_path,
         )
 
@@ -450,7 +462,7 @@ class RunCampaignPrepTests(unittest.TestCase):
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
             cursor = conn.execute(
                 "INSERT INTO file_records (filename, filesize, file_path) VALUES (?, ?, ?)",
-                (filename, 1.0, f"/tmp/{filename}"),
+                (filename, self.source.stat().st_size, str(self.source)),
             )
             conn.commit()
             return int(cursor.lastrowid)
@@ -472,9 +484,14 @@ class RunCampaignPrepTests(unittest.TestCase):
         )
         calls: list[str] = []
 
-        def prepare_artifacts(*_args, **_kwargs):
+        def prepare_artifacts(campaign_id, *_args, **_kwargs):
             calls.append("prepare")
-            return {"videoLocalPath": "/tmp/out.mp4"}
+            campaigns.add_campaign_artifact(
+                campaign_id, artifact_kind="prepared_video", source_file_record_id=self.file_id,
+                local_path=str(self.source), metadata=prepared_video_metadata(self.source, self.source, "twitter"),
+                db_path=self.db_path,
+            )
+            return {"videoLocalPath": str(self.source)}
 
         def generate_account_draft(*_args, **_kwargs):
             calls.append("draft")
@@ -485,7 +502,7 @@ class RunCampaignPrepTests(unittest.TestCase):
             db_path=self.db_path,
             prepare_artifacts=prepare_artifacts,
             generate_account_draft=generate_account_draft,
-            artifact_payloads_for_platform=lambda *_a, **_k: [{"local_path": "/tmp/out.mp4"}],
+            artifact_payloads_for_platform=lambda values, _platform: values,
             artifact_part_groups_for_platform=None,
             job_to_payload=lambda job: {"id": job.id},
         )
@@ -498,7 +515,7 @@ class RunCampaignPrepTests(unittest.TestCase):
         queued = jobs.get_job(
             result["jobs"][0]["id"], db_path=self.db_path
         )
-        self.assertEqual(queued.platform, profiles.PLATFORM_DOUYIN)
+        self.assertEqual(queued.platform, profiles.PLATFORM_TWITTER)
         self.assertEqual(queued.total_targets, 1)
 
     def test_run_campaign_prep_without_request_raises(self) -> None:

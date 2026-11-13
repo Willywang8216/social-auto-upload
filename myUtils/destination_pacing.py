@@ -239,3 +239,32 @@ def allocate_slot(
             raise
         raise PacingRefused("destination allocation is outside the supported datetime range") from None
     raise PacingRefused("destination allocation horizon exhausted")
+
+
+def assert_fixed_slots(conn: sqlite3.Connection, targets, *, now=None,
+                       configured_gap: int = 30, configured_cap: int = 3,
+                       operator_timezone: tzinfo = timezone.utc) -> None:
+    """SQL-only admission check; never move an approved target's schedule.
+
+    Caller owns the write reservation. Already-present idempotent requests must
+    be returned BEFORE this check, since their own bookings consume capacity.
+    Due/undated submissions reserve now, just like unresolved queue history.
+    """
+    current = utc_datetime(now if now is not None else datetime.now(timezone.utc))
+    aliases = account_refs(conn)
+    refs = {ref: identity for identity, values in aliases.items() for ref in values}
+    taken = booked_slots(conn, aliases, now=current)
+    gap = timedelta(minutes=effective_gap_minutes(configured_gap, 30))
+    cap = effective_daily_cap(configured_cap, 3)
+    for account_ref, _file_ref, schedule_at in targets:
+        identity = refs.get(account_ref)
+        if identity is None:
+            raise PacingRefused("Publishing destination is absent from the shared calendar")
+        slot = max(utc_datetime(schedule_at), current) if schedule_at else current
+        moments = [utc_datetime(value) for value in taken.setdefault(identity, [])]
+        day = slot.replace(tzinfo=timezone.utc).astimezone(operator_timezone).date()
+        if (any(abs(moment - slot) < gap for moment in moments)
+                or (cap and sum(moment.replace(tzinfo=timezone.utc).astimezone(operator_timezone).date() == day
+                                for moment in moments) >= cap)):
+            raise PacingRefused("Approved destination slot conflicts with the shared gap or daily cap")
+        taken[identity].append(slot.isoformat())

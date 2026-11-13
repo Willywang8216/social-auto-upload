@@ -11,7 +11,7 @@ import copy
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from myUtils import image_compliance, media_compliance as compliance, text_limits
+from myUtils import image_compliance, media_compliance as compliance, text_limits, media_integrity
 
 CONTEXT_SUFFIXES = {".txt", ".wav", ".mp3", ".flac", ".srt", ".vtt", ".json"}
 SUPPORT_ROLES = {"cover", "thumbnail", "screenshot", "video_cover"}
@@ -77,7 +77,7 @@ def _working_payload(payload: dict, platform: str) -> dict:
             raise compliance.MediaPreparationError("A supplied media artifact has no exact path or URL")
         previous = aliases.get(key)
         if previous is not None:
-            if (previous.get("metadata") or {}).get("sha256") != (item.get("metadata") or {}).get("sha256"):
+            if media_integrity.expected_sha256(previous) != media_integrity.expected_sha256(item):
                 raise compliance.MediaPreparationError("Media aliases refer to different approved bytes")
             if item.get("public_url") and not previous.get("public_url"):
                 previous["public_url"] = item["public_url"]
@@ -114,7 +114,23 @@ def _local_source(artifact: dict) -> Path:
 
 
 def _is_prepared(metadata: dict) -> bool:
-    return bool(metadata.get("preparation_policy_version") or "sha256" in metadata)
+    return bool(metadata.get("preparation_policy_version") or metadata.get("sha256"))
+
+
+def _has_derived_identity(artifact: dict) -> bool:
+    """Legacy part identity is independent of current policy/checksum evidence."""
+    metadata = artifact.get("metadata") or {}
+    return (str(artifact.get("artifact_kind") or "").startswith("prepared_")
+            or bool(metadata.get("preparation_policy_version"))
+            or any(key in metadata for key in ("part_index", "part_count", "preparation_group",
+                "source_start_seconds", "source_end_seconds", "reprepared_from", "source_parent")))
+
+
+def _verified_source(artifact: dict, source: Path, *, required: bool = False) -> dict:
+    try:
+        return media_integrity.verify_artifact(source, artifact, required=required)
+    except media_integrity.MediaIntegrityError as exc:
+        raise compliance.MediaPreparationError(str(exc)) from exc
 
 
 def _constraints(metadata: dict, platform: str, account_config: dict | None,
@@ -132,9 +148,8 @@ def _validate_artifact(artifact: dict, platform: str, account_config: dict | Non
     image = media_kind(artifact) == "image"
     if platform == "tiktok" and _is_prepared(metadata) and metadata.get("unwatermarked") is not True:
         raise compliance.MediaPreparationError("TikTok requires the prepared unwatermarked variant")
-    expected = metadata.get("sha256") if _is_prepared(metadata) else None
-    if _is_prepared(metadata) and not expected:
-        raise compliance.MediaPreparationError("Prepared media has no checksum")
+    _verified_source(artifact, source, required=_is_prepared(metadata))
+    expected = media_integrity.expected_sha256(artifact)
     module = image_compliance if image else compliance
     validator = module.validate_image if image else module.validate_video
     validator(source, platform=platform, account_config=account_config,
@@ -198,9 +213,11 @@ def validate_payload(payload: dict, *, platform: str, account_config: dict | Non
     if platform == "youtube":
         for cover in (item for item in working["artifacts"] if is_support_artifact(item)):
             metadata = cover.get("metadata") or {}
-            image_compliance.validate_image(_local_source(cover), platform="youtube",
+            source = _local_source(cover)
+            _verified_source(cover, source, required=_is_prepared(metadata))
+            image_compliance.validate_image(source, platform="youtube",
                 limits=_constraints(metadata, "youtube", account_config, False, None, image=True),
-                expected_sha256=metadata.get("sha256"))
+                expected_sha256=media_integrity.expected_sha256(cover))
 
 
 def _replacement(original: dict, part, source: Path, *, image: bool, platform: str) -> dict:
@@ -212,6 +229,12 @@ def _replacement(original: dict, part, source: Path, *, image: bool, platform: s
     for field in ("checksum", "sha256"):
         if field in replacement:
             replacement[field] = part.metadata["sha256"]
+    for fields in (replacement, replacement["metadata"]):
+        if "checksum" in fields:
+            fields["checksum"] = part.metadata["sha256"]
+        for field in ("size_bytes", "filesize", "size", "byte_count"):
+            if field in fields:
+                fields[field] = part.path.stat().st_size
     if platform == "tiktok":
         replacement["metadata"]["unwatermarked"] = True
     if part.path != source:
@@ -247,13 +270,13 @@ def prepare_payloads(payload: dict, *, platform: str, account_config: dict | Non
     for original in media:
         source, metadata = _local_source(original), original.get("metadata") or {}
         image = media_kind(original) == "image"
+        _verified_source(original, source, required=_is_prepared(metadata))
         if platform == "tiktok" and ("watermarked" in str(original.get("artifact_kind") or "")
                 or metadata.get("unwatermarked") is False
                 or (_is_prepared(metadata) and metadata.get("unwatermarked") is not True)):
             raise compliance.MediaPreparationError("TikTok requires the unwatermarked source variant")
         needs_prepare = True
-        if _is_prepared(metadata):
-            compliance.verify_checksum(source, metadata.get("sha256"))
+        if _is_prepared(metadata) or _has_derived_identity(original):
             try:
                 _validate_artifact(original, platform, account_config, backup_compatible,
                                    image_limits if image else video_limits)
@@ -273,8 +296,8 @@ def prepare_payloads(payload: dict, *, platform: str, account_config: dict | Non
                        limits=image_limits, backup_compatible=backup_compatible)
         for item in members:
             constraints = compliance.tighten_limits(constraints, (item.get("metadata") or {}).get("preparation_limits"))
-        origins = [_repair_origin(states[id(item)][1], states[id(item)][0], image=True)
-                   if _is_prepared(states[id(item)][1]) else None for item in members]
+        origins = [_repair_origin(states[id(item)][1], states[id(item)][0], image=True, artifact=item)
+                   if _has_derived_identity(item) else None for item in members]
         parts = image_compliance.prepare_images([states[id(item)][0] for item in members], root,
             platform=platform, account_config=account_config, limits=constraints,
             backup_compatible=backup_compatible, provenance=origins)
@@ -291,7 +314,8 @@ def prepare_payloads(payload: dict, *, platform: str, account_config: dict | Non
             replacements.append((False, [original]))
         else:
             constraints = _constraints(metadata, platform, account_config, backup_compatible, video_limits)
-            origin = _repair_origin(metadata, source, image=False) if _is_prepared(metadata) else None
+            origin = (_repair_origin(metadata, source, image=False, artifact=original)
+                      if _has_derived_identity(original) else _raw_origin(original, source))
             parts = compliance.prepare_video(source, root, platform=platform, account_config=account_config,
                 limits=constraints, backup_compatible=backup_compatible, provenance=origin,
                 force_generation=True)
@@ -345,16 +369,54 @@ def ensure_single_payload(payload: dict, *, platform: str, account_config: dict 
     delivery.save_payload_progress(payload)
 
 
-def _repair_origin(metadata: dict, source: Path, *, image: bool) -> dict:
+def _source_identity(artifact: dict, source: Path, source_sha: str | None) -> dict:
+    metadata = artifact.get("metadata") or {}
+    return copy.deepcopy(metadata.get("source_identity") or {
+        "source_file_record_id": artifact.get("source_file_record_id"),
+        "source_path": metadata.get("source_path") or str(source),
+        "source_public_url": artifact.get("public_url"),
+        "source_sha256": source_sha,
+        "content_variant": metadata.get("content_variant"),
+        "unwatermarked": metadata.get("unwatermarked"),
+        "origin_source_path": metadata.get("origin_source_path"),
+        "origin_source_sha256": metadata.get("origin_source_sha256")})
+
+
+def _raw_origin(artifact: dict, source: Path) -> dict:
+    facts = _verified_source(artifact, source)
+    duration = compliance._source_metadata(source)["duration"]
+    compliance.decode_video(source, duration=duration)
+    compliance.verify_checksum(source, facts["sha256"])
+    return {**facts, "source_sha256": facts["sha256"], "source_path": str(source),
+        "source_identity": _source_identity(artifact, source, facts["sha256"]),
+        "input_public_url": artifact.get("public_url"),
+        "source_is_complete": True, "source_duration_seconds": duration,
+        "source_start_seconds": 0.0, "source_end_seconds": duration,
+        "original_source_interval_start_seconds": 0.0, "original_source_interval_end_seconds": duration}
+
+
+def _repair_origin(metadata: dict, source: Path, *, image: bool, artifact: dict | None = None) -> dict:
+    artifact = artifact or {"local_path": str(source), "metadata": metadata}
+    facts = _verified_source(artifact, source, required=_is_prepared(metadata))
     origin = copy.deepcopy(metadata)
-    origin.setdefault("source_sha256", metadata["sha256"])
-    if not origin.get("source_path"):
-        origin["source_path"] = str(source)
-    if not image and ("source_start_seconds" not in origin or "source_end_seconds" not in origin):
-        if (origin.get("part_count") or 1) > 1 or (origin.get("part_index") or 1) > 1:
+    # The executed segment digest is input identity, never an invented raw SHA.
+    origin["sha256"] = facts["sha256"]
+    if image:
+        origin.setdefault("source_sha256", facts["sha256"])
+    origin["source_path"] = metadata.get("source_path") or str(source)
+    origin["source_identity"] = _source_identity(artifact, source, origin.get("source_sha256"))
+    origin["input_public_url"] = artifact.get("public_url")
+    origin["source_is_complete"] = False
+    if not image:
+        if "source_start_seconds" not in origin or "source_end_seconds" not in origin:
             raise compliance.MediaPreparationError("Older prepared part has no provable original source interval")
-        origin["source_start_seconds"] = 0.0
-        origin["source_end_seconds"] = compliance._source_metadata(source)["duration"]
+        for key in ("part_index", "part_count"):
+            if key in origin and (type(origin[key]) is not int or origin[key] < 1):
+                raise compliance.MediaPreparationError("Invalid parent part membership")
+        if origin.get("part_index", 1) > origin.get("part_count", 1):
+            raise compliance.MediaPreparationError("Invalid parent part membership")
+        origin.setdefault("original_source_interval_start_seconds", metadata.get("source_interval_start_seconds"))
+        origin.setdefault("original_source_interval_end_seconds", metadata.get("source_interval_end_seconds"))
     return origin
 
 
@@ -362,17 +424,17 @@ def _prepare_cover(cover: dict, root: Path, config: dict | None, allow_reprepare
     metadata = cover.get("metadata") or {}
     source = _local_source(cover)
     constraints = _constraints(metadata, "youtube", config, False, None, image=True)
+    _verified_source(cover, source, required=_is_prepared(metadata))
     if _is_prepared(metadata):
-        compliance.verify_checksum(source, metadata.get("sha256"))
         try:
             image_compliance.validate_image(source, platform="youtube", limits=constraints,
-                                           expected_sha256=metadata["sha256"])
+                                           expected_sha256=media_integrity.expected_sha256(cover))
             return cover
         except compliance.MediaPreparationError:
             if not allow_reprepare:
                 raise
     part = image_compliance.prepare_image(source, root, platform="youtube", limits=constraints,
-        provenance=_repair_origin(metadata, source, image=True) if _is_prepared(metadata) else None)
+        provenance=_repair_origin(metadata, source, image=True, artifact=cover) if _has_derived_identity(cover) else None)
     replacement = _replacement(cover, part, source, image=True, platform="youtube")
     replacement["metadata"]["role"] = "cover"
     return replacement

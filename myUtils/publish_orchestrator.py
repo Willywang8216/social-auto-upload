@@ -576,7 +576,6 @@ def _prepared_post_groups(artifacts, platform, media_files, *, supports_multi_me
     return groups
 
 
-@_serialize_slot_allocation
 def submit_publish(
     *,
     profile_ids: list[int],
@@ -634,11 +633,8 @@ def submit_publish(
     campaign_ids: list[int] = []
     queued_jobs: list[dict] = []
     skipped: list[dict] = []
-    stagger_offset = 0  # global ordering of targets across profiles
-    # All aliases (including rows with no targets yet) share mutable calendars.
+    stagger_offset = 0  # global ordering, but reservations start only at commit
     allocation_time = now_fn().astimezone(timezone.utc).replace(tzinfo=None)
-    account_keys: dict[str, str] = {}
-    booked_slots = _load_booked_slots(db_path, account_keys=account_keys, now=allocation_time)
 
     # Content rating is derived from the filenames — the operator's rule is
     # that only a name starting or ending with "sfw" is SFW, everything else is
@@ -703,8 +699,7 @@ def submit_publish(
             request_data["_backupCompatiblePlatforms"] = options["_backupCompatiblePlatforms"]
         from myUtils.preparation_context import configure_request
         request_data, _backup_contexts = configure_request(accounts, platforms, request_data,
-                                                         settings=profile.settings, has_video=has_video)
-        backup_platforms = platform_limits.backup_compatible_platforms(request_data) & platforms
+            settings=profile.settings, has_video=has_video, db_path=db_path)
         campaign = campaign_store.create_campaign(
             profile.id,
             media_group.id,
@@ -715,6 +710,11 @@ def submit_publish(
                 "notes": request_data.get("notes", ""),
                 "requestedPlatforms": sorted({account.platform for account in accounts}),
                 "source": "publish-center",
+                campaign_store.PREP_REQUEST_KEY: {
+                    "brief": brief, "options": options or {}, "schedule": schedule,
+                    "accountDrafts": account_drafts, "tiktokPostSettings": tiktok_post_settings,
+                    "mediaFilePaths": [str(path) for path in media_file_paths],
+                },
             },
             db_path=db_path,
         )
@@ -723,7 +723,6 @@ def submit_publish(
         media_files = _load_media_group_files_via_callback(
             media_group.id, db_path=db_path
         )
-        publishable_files = _files_with_roles(media_files)
         try:
             media_context = prepare_artifacts(
                 campaign.id,
@@ -755,188 +754,32 @@ def submit_publish(
             _logger.warning("could not record content language for campaign %s",
                             campaign.id, exc_info=True)
 
-        # group accounts by platform so each platform gets its own
-        # campaign_posts/job spec
-        grouped_accounts: dict[str, list[profile_registry.Account]] = {}
-        for account in accounts:
-            grouped_accounts.setdefault(account.platform, []).append(account)
-
-        link_in_first_comment = bool((options or {}).get("linkInFirstComment"))
-        # Publish publicly by default. The frontend toggle can still request a
-        # draft (inbox) upload, but the historical default of False meant every
-        # TikTok post silently landed in the drafts and was invisible on the
-        # profile. An unreviewed app rejects DIRECT_POST and the universal
-        # Sociamonials fallback then catches it.
-        tiktok_direct_post = bool((options or {}).get("tiktokDirectPost", True))
-
-        artifacts = [
-            artifact.to_dict()
-            for artifact in campaign_store.list_campaign_artifacts(campaign.id, db_path=db_path)
-        ]
-
-        for platform, platform_accounts in grouped_accounts.items():
-            supports_first_comment = platform_capabilities.platform_supports_first_comment(platform)
-            supports_multi_media = platform_capabilities.platform_supports_multi_media(platform)
-
-            try:
-                post_groups = _prepared_post_groups(
-                    artifacts, platform, publishable_files, supports_multi_media=supports_multi_media,
-                    artifact_payloads_for_platform=artifact_payloads_for_platform,
-                    artifact_part_groups_for_platform=artifact_part_groups_for_platform,
-                    account_config=request_data["_preparationAccountConfigs"].get(platform),
-                    backup_compatible=platform in backup_platforms,
-                    image_limits=(request_data.get("_imagePreparationLimits") or {}).get(platform),
-                    video_limits=(request_data.get("_preparationLimits") or {}).get(platform),
-                )
-            except (ValueError, OSError) as exc:
-                skipped.append({"profileId": profile_id, "platform": platform,
-                                "reason": f"prepared media validation failed: {exc}"})
-                continue
-            for account in platform_accounts:
-                # Cross-job duplicate guard. The target table is unique on
-                # (job_id, account_ref, file_ref), so the same media re-submitted
-                # under a new job used to queue again - that is how one account
-                # accumulated 662 targets for 356 files. Skip (and report) rather
-                # than silently piling on more scheduled sends.
-                if _already_queued_for_media(
-                    account.id, media_group.id, db_path=db_path, account_keys=account_keys
-                ):
-                    skipped.append({
-                        "profileId": profile_id,
-                        "accountId": account.id,
-                        "accountName": account.nickname or account.account_name,
-                        "platform": account.platform,
-                        "reason": "this media is already queued for this account "
-                                  "(directly, or through another profile's row for "
-                                  "the same publishing destination)",
-                    })
-                    continue
-                routing_skip = language_routing_skip_reason(
-                    _content_language(media_context, request_data, campaign.metadata),
-                    account,
-                    profile,
-                    include_zh_for_english=bool((options or {}).get("includeZhForEnglish")),
-                )
-                if routing_skip:
-                    skipped.append({
-                        "profileId": profile_id,
-                        "accountId": account.id,
-                        "accountName": account.nickname or account.account_name,
-                        "platform": account.platform,
-                        "reason": routing_skip,
-                    })
-                    continue
-                draft_override = account_drafts.get(str(account.id)) or account_drafts.get(account.id)
-                if isinstance(draft_override, dict) and draft_override.get("message"):
-                    # The override arrives from the client, and a model-backed
-                    # preview can leave the draft as a stringified JSON object or
-                    # a "Title: ... / Description: ..." blob. Normalise here, at
-                    # the one place the override is consumed, so every caller —
-                    # the web UI, the inbox one-click route and MCP — gets the
-                    # same clean copy the preview showed the operator.
-                    draft = content_rules.normalize_draft_fields(dict(draft_override))
-                else:
-                    try:
-                        # Draft content is account-specific (language, voice,
-                        # and connected identity may differ even on one platform).
-                        request_for_account = dict(request_data)
-                        effective_language = str(
-                            (account.config or {}).get("audience_language")
-                            or (account.config or {}).get("audienceLanguage")
-                            or (profile.settings or {}).get("default_language")
-                            or (profile.settings or {}).get("defaultLanguage")
-                            or ""
-                        ).strip()
-                        if platform == "twitter" and len(effective_language.replace(",", " ").replace("+", " ").split()) > 1:
-                            raise ValueError("X requires one language per account; use distinct account settings instead of a bilingual language list")
-                        if effective_language:
-                            request_for_account["_accountLanguage"] = effective_language
-                        draft = dict(generate_account_draft(
-                            account, profile, media_group, request_for_account, media_context
-                        ))
-                    except Exception as exc:  # noqa: BLE001
-                        account_config = account.config or {}
-                        account_settings = profile.settings or {}
-                        if (account_config.get("audience_language")
-                                or account_config.get("audienceLanguage")
-                                or account_settings.get("default_language")
-                                or account_settings.get("defaultLanguage")):
-                            skipped.append({
-                                "profileId": profile_id,
-                                "accountId": account.id,
-                                "reason": f"language-specific draft generation failed: {exc}",
-                            })
-                            continue
-                        if content_rules.is_usable_copy(brief):
-                            draft = {
-                                "message": (brief or "").strip(),
-                                "hashtags": [],
-                                "firstComment": "",
-                                "error": str(exc),
-                            }
-                        else:
-                            # No real copy and no usable brief: skip rather than
-                            # publish the media-group name / generic batch brief.
-                            skipped.append({
-                                "profileId": profile_id,
-                                "accountId": account.id,
-                                "reason": f"draft generation failed and no usable brief: {exc}",
-                            })
-                            continue
-
-                if not link_in_first_comment or not supports_first_comment:
-                    # If the platform does not support a first-comment
-                    # convention, fold any link back into the body so the
-                    # user does not lose it.
-                    if draft.get("firstComment") and not supports_first_comment:
-                        message = (draft.get("message") or "").rstrip()
-                        comment = (draft.get("firstComment") or "").strip()
-                        if comment and comment not in message:
-                            draft["message"] = (message + "\n\n" + comment).strip()
-                        draft["firstComment"] = ""
-                    elif not link_in_first_comment:
-                        draft["firstComment"] = ""
-
-                # The complete generation was checked before any post is added.
-                # Every video part uses the same draft/options and the existing
-                # queue, with source order followed by part order.
-                part_base = base_time or allocation_time
-                previous_part_slot = None
-                for part_index, (part_artifacts, file_ids) in enumerate(post_groups, start=1):
-                    post = campaign_store.add_campaign_post(
-                        campaign.id, platform, account_ids=[account.id], draft=draft,
-                        file_record_ids=file_ids, status=campaign_store.CAMPAIGN_POST_READY, db_path=db_path,
-                    )
-                    account_tt_settings = tiktok_post_settings.get(str(account.id)) or tiktok_post_settings.get(account.id)
-                    payload = _build_payload(
-                        campaign, post, draft, part_artifacts, platform,
-                        tiktok_direct_post=tiktok_direct_post,
-                        tiktok_post_settings=account_tt_settings if isinstance(account_tt_settings, dict) else None,
-                    )
-                    if file_ids is not None:
-                        payload["fileRecordIds"] = file_ids
-                    if len(post_groups) > 1:
-                        payload["partIndex"] = part_index
-                        payload["partCount"] = len(post_groups)
-                    part_slot = _next_free_slot(account.id, part_base, stagger_offset, booked_slots,
-                                                not_before=previous_part_slot)
-                    targets = [(f"account:{account.id}", f"campaign_post:{post.id}", part_slot)]
-                    previous_part_slot = part_slot
-                    stagger_offset += 1
-                    queued_jobs.append(_enqueue_post(
-                        platform, payload, targets, campaign, post, job_to_payload, db_path))
+        from myUtils.publication_groups import finalize_campaign
+        finalized = finalize_campaign(
+            campaign, profile=profile, accounts=accounts, media_context=media_context,
+            media_files=media_files, request_data=request_data, options=options or {},
+            account_drafts=account_drafts, tiktok_post_settings=tiktok_post_settings,
+            db_path=db_path, artifact_payloads_for_platform=artifact_payloads_for_platform,
+            artifact_part_groups_for_platform=artifact_part_groups_for_platform,
+            generate_account_draft=generate_account_draft, job_to_payload=job_to_payload,
+            base_time=base_time, offset_index=stagger_offset, now_fn=lambda: allocation_time,
+        )
+        profile_jobs = finalized["jobs"]
+        queued_jobs.extend(profile_jobs)
+        skipped.extend(finalized["skipped"])
+        stagger_offset += len(profile_jobs)
 
         # A prep that queued nothing must not regress a campaign that already has
         # queued posts (see campaigns.campaign_has_queued_posts).
         already_queued = False
-        if not queued_jobs:
+        if not profile_jobs:
             try:
                 already_queued = campaign_store.campaign_has_queued_posts(
                     campaign.id, db_path=db_path
                 )
             except Exception:  # noqa: BLE001 - status must never break prep
                 already_queued = False
-        succeeded = bool(queued_jobs) or already_queued
+        succeeded = bool(profile_jobs) or already_queued
         campaign_store.update_campaign(
             campaign.id,
             status=campaign_store.CAMPAIGN_PUBLISHING if succeeded else campaign_store.CAMPAIGN_NEEDS_REVIEW,
@@ -1049,7 +892,8 @@ def _next_free_slot(
     """
     return destination_pacing.allocate_slot(
         booked.setdefault(int(account_id), []), base_time, offset_index,
-        configured_gap=MIN_GAP_MINUTES, configured_cap=MAX_POSTS_PER_ACCOUNT_PER_DAY,
+        configured_gap=max(30, MIN_GAP_MINUTES),
+        configured_cap=destination_pacing.effective_daily_cap(MAX_POSTS_PER_ACCOUNT_PER_DAY, 3),
         requested_gap=min_gap_minutes, requested_cap=max_per_day, stagger_minutes=STAGGER_MINUTES,
         operator_timezone=_operator_timezone(), now_fn=now_fn, not_before=not_before,
     )
@@ -1069,7 +913,10 @@ def _build_payload(
         "message": draft.get("message", ""),
         "sheetRow": {},
         "artifacts": artifact_payloads,
+        "_preserveApprovedText": True,
     }
+    from myUtils.text_limits import composed_message
+    payload["message"] = composed_message(payload, platform)
     if platform == "tiktok":
         # publish_tiktok_sync reads payload.tiktokDirectPost first, then
         # falls back to account.config.publishMode. The explicit per-publish

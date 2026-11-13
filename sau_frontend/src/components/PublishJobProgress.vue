@@ -22,6 +22,7 @@
       </el-button>
     </div>
     <p v-if="publishActionHint(job.status)" class="polling-status">{{ publishActionHint(job.status) }}</p>
+    <p v-if="job.payload?.publishReadiness" class="polling-status">{{ publishReadinessDetails(job.payload.publishReadiness) }}</p>
     <div v-if="polling" class="polling-status" role="status">
       {{ pollingStatusText(polling) }}
       <el-button v-if="['error', 'paused', 'stopped'].includes(polling.status)" size="small" text @click="$emit('refresh')">更新狀態（不重送）</el-button>
@@ -90,7 +91,7 @@
 import { computed, ref, watch, onUnmounted } from 'vue'
 import { tiktokApi } from '@/api/tiktok'
 import { createPoller, invalidResponse, pollingStatusText } from '@/utils/polling'
-import { isTerminalJobStatus, needsPublishAction, normalizeTarget, publishActionHint, publishStatusLabel, publishStatusType, targetReliabilityDetails } from '@/utils/publish-status'
+import { isTerminalJobStatus, needsPublishAction, normalizeTarget, publishActionHint, publishReadinessDetails, publishStatusLabel, publishStatusType, targetReliabilityDetails } from '@/utils/publish-status'
 
 const props = defineProps({
   job: {

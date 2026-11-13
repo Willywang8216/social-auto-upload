@@ -232,26 +232,44 @@ class CliEntryPointTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "cli.db"
             create_table.bootstrap(db_path)
+            import os
 
-            jobs.enqueue_job(
-                _spec([("acct-1", "f1", None)]),
-                db_path=db_path,
-            )
+            from datetime import datetime, timezone
+            from myUtils import profiles, publish_readiness
+            profile = profiles.create_profile("CLI fixture", db_path=db_path)
+            account = profiles.add_account(profile.id, "telegram", "CLI destination", auth_type="manual",
+                config={"botToken": "fixture-only", "chatId": "@cli-fixture"}, db_path=db_path)
+            context = publish_readiness._context(account, profile.settings)
+            publish_readiness.record_destination_readiness(account, profile.settings, provider="direct", db_path=db_path,
+                proof={"verified": True, "live_check": True, "source": "provider_verification", "requires_approval": False,
+                    "config_fingerprint": context["fingerprint"], "identity": context["identity"],
+                    "permissions": {"posts.create": True}, "capabilities": ["text"],
+                    "verified_at": datetime.now(timezone.utc).isoformat()})
+            jobs.enqueue_job(jobs.JobSpec(platform="telegram", profile_id=profile.id,
+                payload={"message": "An exact approved CLI test intent."},
+                targets=[(f"account:{account.id}", "text-only", None)]), db_path=db_path)
 
-            # Override the default executor so we don't try to spin up a
-            # browser. We patch the symbol the CLI looks up directly.
+            # The CLI uses owned child-process dispatch; mock only that transport
+            # boundary, retaining the real claim/lease/SQL completion contract.
             calls = []
 
-            async def fake_executor(platform, payload, target):
-                calls.append((platform, target.id))
+            async def fake_child(parent, target, **_kwargs):
+                self.assertEqual(parent._db_path, db_path)
+                calls.append((jobs.get_job(target.job_id, db_path=db_path).platform, target.id))
+                self.assertTrue(jobs.mark_target_succeeded(target.id,
+                    lease_token=target.lease_token, db_path=db_path))
+                return 0
 
-            with patch("myUtils.worker.default_executor", fake_executor):
+            with patch("myUtils.target_runner.run_isolated_target", fake_child), \
+                    patch.dict(os.environ, {"SAU_TESTING": "0"}), \
+                    patch("myUtils.runtime.start_worker_maintenance") as maintenance:
                 exit_code = _cli([
                     "--once",
                     "--poll-interval", "0.001",
                     "--db-path", str(db_path),
                     "--max-attempts", "1",
                 ])
+                maintenance.assert_called_once_with(db_path)
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(len(calls), 1)

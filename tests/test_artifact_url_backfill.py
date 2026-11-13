@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import closing
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -26,13 +27,14 @@ class ArtifactUrlBackfillTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.db = Path(tmp.name) / "backfill.db"
+        self.root = Path(tmp.name)
         create_table.bootstrap(self.db)
         profile = profiles.create_profile("P", db_path=self.db)
         group = media_groups.create_media_group("G", db_path=self.db)
         self.campaign = campaigns.create_campaign(
             profile.id, group.id, status=campaigns.CAMPAIGN_PREPARING, db_path=self.db
         )
-        with sqlite3.connect(self.db) as conn:
+        with closing(sqlite3.connect(self.db)) as conn, conn:
             cursor = conn.execute(
                 "INSERT INTO file_records (filename, filesize, file_path) VALUES (?, ?, ?)",
                 ("source.mp4", 1.0, "/tmp/source.mp4"),
@@ -66,20 +68,13 @@ class ArtifactUrlBackfillTests(unittest.TestCase):
         self.assertEqual(str(part.get("public_url") or "").strip(), "")
 
     def test_same_file_sibling_still_backfills(self) -> None:
-        campaigns.add_campaign_artifact(
-            self.campaign.id,
-            artifact_kind="remote_upload",
-            source_file_record_id=self.source_id,
-            local_path="/tmp/full_pub.mp4",
-            public_url="https://cdn/full_pub.mp4",
-            db_path=self.db,
-        )
-        artifact = {
-            "campaign_id": self.campaign.id,
-            "artifact_kind": "watermarked_video",
-            "local_path": "/tmp/full_pub.mp4",
-            "source_file_record_id": self.source_id,
-        }
+        path = self.root / "full_pub.mp4"
+        path.write_bytes(b"exact fixture variant")
+        registered = campaigns.add_campaign_artifact(self.campaign.id,
+            artifact_kind="watermarked_video", source_file_record_id=self.source_id,
+            local_path=str(path), public_url="https://cdn/full_pub.mp4", db_path=self.db)
+        artifact = registered.to_dict()
+        artifact["public_url"] = None
         worker._backfill_artifact_public_urls([artifact], self.db)
         self.assertEqual(artifact.get("public_url"), "https://cdn/full_pub.mp4")
 

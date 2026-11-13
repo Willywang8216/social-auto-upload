@@ -178,7 +178,7 @@ def enumerate_routes() -> list[dict[str, str]]:
         view = app.view_functions[rule.endpoint]
         code = getattr(view, "__code__", None)
         source_file = (
-            str(Path(code.co_filename).resolve().relative_to(REPO_ROOT))
+            Path(code.co_filename).resolve().relative_to(REPO_ROOT).as_posix()
             if code and str(code.co_filename).startswith(str(REPO_ROOT))
             else (code.co_filename if code else "")
         )
