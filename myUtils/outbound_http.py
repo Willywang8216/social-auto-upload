@@ -184,7 +184,7 @@ def _receive_public_sync(url, sink, *, max_bytes, timeout, total_deadline, sessi
         if remaining <= 0 or stopped.is_set():
             raise OutboundUrlError("fetch exceeded its total time budget")
         request = http.head if head_only else http.get
-        with request(current, timeout=min(timeout, remaining), stream=True,
+        with request(current, timeout=min(timeout, total_deadline, remaining), stream=True,
                      allow_redirects=False) as response:
             register_response(response)
             if stopped.is_set():

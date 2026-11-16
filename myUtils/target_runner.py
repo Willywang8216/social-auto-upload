@@ -46,8 +46,9 @@ async def run_isolated_target(worker, target, *, timeout: float) -> None:
     error = None
     cancelled = False
     try:
-        code = await run_child(["--target", str(target.id), "--lease-token", str(target.lease_token),
-                                "--db", str(worker._db_path),
+        # URL-safe opaque values may begin with '-'; bind them to the option.
+        code = await run_child(["--target", str(target.id), f"--lease-token={target.lease_token}",
+                                f"--db={worker._db_path}",
                                 "--max-attempts", str(worker._config.retry.max_attempts)], timeout=timeout)
         if code:
             error = RuntimeError(f"Target child exited with code {code}")
@@ -76,8 +77,8 @@ async def run_isolated_target(worker, target, *, timeout: float) -> None:
 async def run_isolated_prep(worker, campaign, *, timeout: float) -> None:
     from myUtils import campaigns
     try:
-        code = await run_child(["--campaign", str(campaign.id), "--owner", worker._prep_owner,
-                                "--db", str(worker._db_path)], timeout=timeout)
+        code = await run_child(["--campaign", str(campaign.id), f"--owner={worker._prep_owner}",
+                                f"--db={worker._db_path}"], timeout=timeout)
         if code:
             raise RuntimeError(f"Prep child exited with code {code}")
     except (asyncio.TimeoutError, asyncio.CancelledError, RuntimeError) as exc:

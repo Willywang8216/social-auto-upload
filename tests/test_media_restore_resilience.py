@@ -598,3 +598,16 @@ def test_http_dns_and_header_stalls_obey_hard_deadline(tmp_path, monkeypatch, st
         outbound_http.download_public_file(URL, target, session=SlowSession(Response([MEDIA])), total_deadline=0.03)
     time.sleep(0.1)
     assert not target.exists() and not list(tmp_path.glob(".*.part"))
+
+
+def test_http_timeout_clamps_rounding_to_requested_total_budget(monkeypatch, public_dns):
+    from types import SimpleNamespace
+
+    budget = 0.03
+    clock = 1_000_000.0
+    assert (clock + budget) - clock > budget  # Floating-point subtraction rounds up.
+    monkeypatch.setattr(outbound_http, "time", SimpleNamespace(monotonic=lambda: clock))
+    session = Session(Response([MEDIA]))
+    assert outbound_http.fetch_public_bytes(URL, session=session, total_deadline=budget) == MEDIA
+    assert len(session.calls) == 1
+    assert session.calls[0]["timeout"] <= budget
