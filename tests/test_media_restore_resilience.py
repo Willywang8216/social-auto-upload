@@ -611,3 +611,50 @@ def test_http_timeout_clamps_rounding_to_requested_total_budget(monkeypatch, pub
     assert outbound_http.fetch_public_bytes(URL, session=session, total_deadline=budget) == MEDIA
     assert len(session.calls) == 1
     assert session.calls[0]["timeout"] <= budget
+
+
+@pytest.mark.parametrize("probe_budget,total_budget", [(20, 120), (45, 120), (45, 7)])
+def test_explicit_paced_probe_budget_keeps_overall_deadline_and_exact_integrity(registered, monkeypatch,
+        probe_budget, total_budget):
+    db, destination = registered
+    probes = []
+    def probe(source, **kwargs):
+        probes.append(kwargs["total_deadline"])
+        return {"size_bytes": len(MEDIA), "remote_checksum": {"algorithm": "sha256", "value": SHA}}
+    monkeypatch.setattr(media_restore, "probe_source", probe)
+    downloads = []
+    def download(backend, key, path, **kwargs):
+        downloads.append(kwargs["total_deadline"])
+        Path(path).write_bytes(MEDIA)
+        kwargs.get("facts", {}).update(content_type="video/mp4")
+        return Path(path)
+    monkeypatch.setattr(media_remote_storage, "download_from_backend", download)
+    result = media_restore.restore_artifact(destination, {"sha256": SHA}, [DRIVE], db_path=db,
+        reserve_bytes=0, required_checksum=True, total_deadline=total_budget, probe_deadline_seconds=probe_budget)
+    assert len(probes) == len(downloads) == 1
+    assert 0 < probes[0] <= min(probe_budget, total_budget)
+    assert destination.read_bytes() == MEDIA and result["sha256"] == SHA
+    assert _facts(db) == (SHA, len(MEDIA))
+
+
+@pytest.mark.parametrize("budget", [0, -1, 46, float("nan"), float("inf"), True])
+def test_invalid_maintenance_probe_budget_never_reads_or_changes_state(registered, monkeypatch, budget):
+    db, destination = registered
+    monkeypatch.setattr(media_restore, "probe_source", lambda *_a, **_k: pytest.fail("Invalid budget must not read"))
+    with pytest.raises(media_restore.PrerequisiteUnavailable):
+        media_restore.restore_artifact(destination, {"sha256": SHA}, [PUBLIC], db_path=db,
+            reserve_bytes=0, probe_deadline_seconds=budget)
+    assert not destination.exists() and _facts(db) == (None, None)
+
+
+def test_longer_probe_cannot_bypass_a_live_provider_cooldown(registered, monkeypatch):
+    db, destination = registered
+    def quota(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(1, ["rclone"], stderr="rateLimitExceeded")
+    monkeypatch.setattr(media_restore, "probe_source", quota)
+    _failure(db, destination, [DRIVE])
+    monkeypatch.setattr(media_restore, "probe_source", lambda *_a, **_k: pytest.fail("Do not bypass a live cooldown"))
+    with pytest.raises(media_restore.PrerequisiteUnavailable):
+        media_restore.restore_artifact(destination, {"sha256": SHA}, [DRIVE], db_path=db,
+            reserve_bytes=0, probe_deadline_seconds=45)
+    assert not destination.exists() and _facts(db) == (None, None)

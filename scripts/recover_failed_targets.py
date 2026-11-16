@@ -303,9 +303,12 @@ def _check_duplicates(conn, target, keys, identity, aliases):
                 raise RecoveryRefused(reason)
 
 
-def _snapshot(conn, target_id: int, *, resolved: bool, aliases=None, unstarted_pending: bool = False) -> dict:
+def _snapshot(conn, target_id: int, *, resolved: bool, aliases=None, unstarted_pending: bool = False,
+              reviewed_prerequisite: bool = False) -> dict:
+    if reviewed_prerequisite and unstarted_pending:
+        raise RecoveryRefused("Reviewed blocked recovery cannot select pending work")
     target = conn.execute("SELECT * FROM publish_job_targets WHERE id=?", (target_id,)).fetchone()
-    expected_status = "pending" if unstarted_pending else "failed"
+    expected_status = "blocked" if reviewed_prerequisite else "pending" if unstarted_pending else "failed"
     if target is None or target["status"] != expected_status:
         raise RecoveryRefused(f"target is missing or no longer {expected_status}")
     job = conn.execute("SELECT * FROM publish_jobs WHERE id=?", (target["job_id"],)).fetchone()
@@ -316,6 +319,12 @@ def _snapshot(conn, target_id: int, *, resolved: bool, aliases=None, unstarted_p
     if job_runtime._recovery_has_submission_evidence(target["checkpoint_json"], target["delivery_state"]):
         raise RecoveryRefused("submission evidence requires separate reconciliation")
     payload = _object(job["payload_json"], "job payload")
+    if reviewed_prerequisite:
+        from myUtils.reviewed_recovery import assert_prerequisite
+        try:
+            assert_prerequisite(target, job["payload_json"])
+        except ValueError as exc:
+            raise RecoveryRefused(str(exc)) from None
     if unstarted_pending:
         try:
             job_runtime._assert_unstarted_pending(target, job["payload_json"])

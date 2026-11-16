@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 from dataclasses import asdict, dataclass
@@ -149,22 +150,27 @@ def ensure_public_link(
 
 def _read_command(command: list[str], *, runner, connect_timeout: float,
                   operation_timeout: float, total_deadline: float):
-    """Single read attempt, including a subprocess wall-clock deadline."""
-    if min(connect_timeout, operation_timeout, total_deadline) <= 0:
+    """One paced read attempt; sleeps and I/O share the hard wall-clock budget."""
+    budgets = (connect_timeout, operation_timeout, total_deadline)
+    if any(not math.isfinite(value) or value <= 0 for value in budgets):
         raise TimeoutError("remote read budget exhausted")
     command = command + [
         "--contimeout", f"{min(connect_timeout, total_deadline):g}s",
         "--timeout", f"{min(operation_timeout, total_deadline):g}s",
         "--retries", "1", "--low-level-retries", "1",
+        # Drive path resolution can issue several API reads for one exact key.
+        # Pace the SAME selected client; do not add retries or rotate credentials.
+        "--tpslimit", "1", "--tpslimit-burst", "1", "--drive-pacer-min-sleep", "2s",
+        "--drive-pacer-burst", "0",
     ]
     return runner(command, capture_output=True, text=True, timeout=total_deadline)
 
 
 def stat_artifact(remote_path: str, *, remote_name: str | None = None,
                   remote_root: str | None = None, runner=run_subprocess,
-                  connect_timeout: float = 10.0, operation_timeout: float = 15.0,
+                  connect_timeout: float = 10.0, operation_timeout: float = 40.0,
                   total_deadline: float = 20.0) -> dict:
-    """Fresh exact-object read-only stat; never list/search by basename."""
+    """Fresh exact-object stat; by default paced I/O shares the full caller budget."""
     remote = _resolve_remote_name(remote_name)
     root = _resolve_remote_root(remote_root)
     key = str(PurePosixPath(root, remote_path)) if root else remote_path

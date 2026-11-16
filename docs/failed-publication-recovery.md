@@ -125,6 +125,55 @@ receipt-bearing and irreparable targets remain unchanged. `--resolved-target-id`
 requires evidence of an actual repair, not an assumption that a fresh web login
 fixed an API credential. Unsupported backup copy/settings stay exceptions.
 
+## Explicit review of resolved prerequisite blocks
+
+The ordinary retry/preprocessing APIs remain failed-only. After the operator
+approves compliant representations and the exact frozen recovery scope, use the
+separate `scripts/recover_reviewed_publications.py` boundary for maintained
+pre-submission prerequisite blocks. Configuration, permission, content-policy,
+cancelled/review/running states, leases and retained/unknown provider effects are
+never overridden. Missing media must be restored and verified first; rate-limit
+errors do not prove permanent loss or authorize a purge.
+
+```bash
+# IDs/paths are placeholders. Repeat the explicit review and SAME IDs at apply.
+python scripts/recover_reviewed_publications.py --review-resolved-prerequisites \
+  --target-id 123 --target-id 456 --prepare \
+  --out-dir /app/generated/PRIVATE_TASK_ID --plan-file /private/reviewed-plan.json
+python scripts/recover_reviewed_publications.py --review-resolved-prerequisites \
+  --target-id 123 --target-id 456 --apply --plan-file /private/reviewed-plan.json
+```
+
+A JSON manifest cannot grant review authority. All declared original siblings
+must be included in the frozen selection; unrelated/confirmed posts are not
+resent. A legacy selected clip without absolute raw offsets may be represented
+using **measured local coordinates of that exact approved file**, retaining its
+checksum, source-file identity and original parent membership. Absolute raw
+offsets and an unknown raw-source checksum remain unknown. Never substitute the
+whole raw video for that selected clip.
+
+If an old payload has no checksum field, reviewed preparation may bind the
+SHA256/byte count persisted by verified restoration on that **exact campaign
+artifact**. Its campaign, path, kind, source-file membership and other provenance
+must still match the approved payload. The full row is fingerprinted and re-read
+under the install transaction; missing/conflicting facts refuse recovery. A raw
+source-file checksum is never borrowed for a derivative.
+
+Fresh destination/grant/option/byte/provenance/budget/duplicate/slot checks precede
+the same-transaction fingerprint/CAS. Each complete original group is installed
+atomically. Active provider/prerequisite counters and the full old checkpoint,
+errors, status, scheduling and dispatch history survive. New ordered tail targets
+inherit the original counters rather than creating artificial zero-attempt credit.
+Later parts require the predecessor's **confirmed** provider receipt, not merely
+a queued/submitted/succeeded-without-receipt label. Receipt polling still drains.
+
+rclone exact reads use one bounded subprocess, one retry/low-level attempt, a
+1-request/second limiter with burst 1 and a 2-second Drive pacer with its separate
+burst disabled. Pacing and I/O share the hard wall-clock deadline; the normal
+probe deadline remains unchanged. Explicit maintenance may use a probe deadline
+up to 45 seconds, still within the overall restore deadline and existing live
+cooldown/admission/integrity/CAS guards. No account/client/credential rotation occurs.
+
 ## Opt-in repair of unstarted pending targets
 
 The default preprocessing selection remains **failed-only**. A separately frozen

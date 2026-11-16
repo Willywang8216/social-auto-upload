@@ -30,6 +30,7 @@ import math
 import re
 import secrets
 import sqlite3
+import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -416,6 +417,9 @@ def _eligible_targets(conn: sqlite3.Connection, now: str, excluded_accounts=(), 
         "ORDER BY COALESCE(julianday(schedule_at), 0), id", params,
     )
     for row in cursor:
+        from myUtils.reviewed_recovery import predecessor_confirmed
+        if not predecessor_confirmed(conn, row):
+            continue
         account_key = key(row["account_ref"])
         if account_key not in held:
             held.add(account_key)
@@ -1478,11 +1482,16 @@ def _prior_target_history(row) -> dict:
             "checkpoint": _decode_checkpoint(row["checkpoint_json"])}
 
 
-def _reset_target(conn, row, schedule_at) -> Target:
-    # Only guarded failed recovery calls this. Dispatch history and evidence
-    # survive; the installer retains the old checkpoint under its new generation.
-    _check_resubmission(row, {TARGET_FAILED})
-    conn.execute(
+def _reset_target(conn, row, schedule_at, *, reviewed_prerequisite: bool = False) -> Target:
+    # Ordinary recovery stays failed-only. The separate reviewed group boundary
+    # rechecks genuine pre-submission prerequisite state under the same lock.
+    if reviewed_prerequisite:
+        from myUtils.reviewed_recovery import assert_prerequisite
+        payload = conn.execute("SELECT payload_json FROM publish_jobs WHERE id=?", (row["job_id"],)).fetchone()[0]
+        assert_prerequisite(row, payload)
+    else:
+        _check_resubmission(row, {TARGET_FAILED})
+    changed = conn.execute(
         """
         UPDATE publish_job_targets
         SET schedule_at = ?, status = ?, last_error = NULL, error_category = NULL,
@@ -1492,6 +1501,8 @@ def _reset_target(conn, row, schedule_at) -> Target:
         """,
         (schedule_at, TARGET_PENDING, row["id"], row["status"], row["checkpoint_json"]),
     )
+    if changed.rowcount != 1:
+        raise ValueError("Recovery target changed; no history or counters reset")
     _recount_job(conn, row["job_id"], allow_reopen=True)
     return _row_to_target(conn.execute(
         "SELECT * FROM publish_job_targets WHERE id = ?", (row["id"],),
@@ -1689,6 +1700,79 @@ def reschedule_failed_target(
         return _row_to_target(conn.execute(
             "SELECT * FROM publish_job_targets WHERE id=?", (target_id,),
         ).fetchone())
+
+
+def recover_reviewed_group(entries: list[dict], *, reviewed_target_ids: Sequence[int],
+        expected_fingerprint: str, revalidate: Callable[[sqlite3.Connection], str],
+        workspace_id: str | None = None, db_path: Path | None = None) -> list[Target]:
+    """Atomic COMPLETE reviewed group; a manifest flag alone is not authority.
+
+    Frozen caller IDs, fresh read-only SQL/account/intent/duplicate/order/byte/
+    budget/pacing validation and all future part slots are mandatory. Failed-only
+    APIs are unchanged. No cancelled/review/unknown state or receipt override.
+    """
+    from myUtils.prepared_recovery import install_parts, validate_parts, _checkpoint
+    from myUtils.reviewed_recovery import assert_budget, assert_prerequisite
+    if (not isinstance(reviewed_target_ids, (list, tuple)) or not reviewed_target_ids
+            or any(type(value) is not int or not 0 < value <= 2**63 - 1 for value in reviewed_target_ids)
+            or len(set(reviewed_target_ids)) != len(reviewed_target_ids)):
+        raise ValueError("Reviewed recovery requires explicit nonempty frozen target IDs")
+    if (not isinstance(entries, list) or not 1 <= len(entries) <= 1000
+            or any(not isinstance(item, dict) or type(item.get("target_id")) is not int
+                   or item["target_id"] not in reviewed_target_ids for item in entries)
+            or len({item["target_id"] for item in entries}) != len(entries)
+            or not isinstance(expected_fingerprint, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_fingerprint) or not callable(revalidate)):
+        raise ValueError("Reviewed recovery needs a complete frozen group and fingerprint validator")
+    rows, slots = [], []
+    with _transaction(db_path, must_exist=True) as conn:
+        for item in entries:
+            row = _target_context(conn, item["target_id"], workspace_id=workspace_id)
+            payload = conn.execute("SELECT payload_json FROM publish_jobs WHERE id=?", (row["job_id"],)).fetchone()[0]
+            if row["status"] == TARGET_BLOCKED:
+                assert_prerequisite(row, payload)
+            else:
+                _check_resubmission(row, {TARGET_FAILED})
+            assert_budget(_recovery_json_object(row["checkpoint_json"]))
+            if (row["job_status"] not in {JOB_FAILED, JOB_PENDING, JOB_RUNNING, JOB_BLOCKED,
+                    JOB_AWAITING_DELIVERY, JOB_NEEDS_REVIEW}
+                    or any(row[key] is not None for key in ("lease_owner", "lease_token", "lease_expires_at"))
+                    or _recovery_has_submission_evidence(payload)):
+                raise ValueError("Reviewed group has changed intent, lease or submission evidence")
+            validate_parts(conn, row, item["prepared_payloads"], item["part_schedule_ats"],
+                           reviewed_selected_content=True)
+            moments = [_utc_datetime(slot) for slot in item["part_schedule_ats"]]
+            if not moments or any(moment <= _utc_datetime(_now_iso()) for moment in moments):
+                raise ValueError("Every reviewed part must have a future recovery slot")
+            slots.extend(moments)
+            rows.append(row)
+        if any(left >= right for left, right in zip(slots, slots[1:])):
+            raise ValueError("Reviewed group would reverse approved content order")
+        before = conn.total_changes
+        observed = revalidate(conn)
+        if conn.total_changes != before:
+            raise ValueError("Reviewed recovery validator must be read-only")
+        if not isinstance(observed, str) or not secrets.compare_digest(observed, expected_fingerprint):
+            raise ValueError("Stale reviewed recovery plan; regenerate")
+        installed = []
+        for row, item in zip(rows, entries):
+            _reset_target(conn, row, _utc_datetime(item["part_schedule_ats"][0]).isoformat(),
+                          reviewed_prerequisite=row["status"] == TARGET_BLOCKED)
+            installed.extend(install_parts(conn, row, item["prepared_payloads"],
+                                           item["part_schedule_ats"], item["expected_fingerprint"]))
+        # Cross-original and newly split parts use one durable confirmed-delivery
+        # chain. Queued/submitted/uncertain predecessors cannot release a tail.
+        for index, target_id in enumerate(installed):
+            checkpoint = _recovery_json_object(conn.execute(
+                "SELECT checkpoint_json FROM publish_job_targets WHERE id=?", (target_id,)).fetchone()[0])
+            checkpoint["reviewed_recovery"] = {"selected_target_ids": sorted(reviewed_target_ids),
+                "group_fingerprint": expected_fingerprint, "ordered_target_ids": installed}
+            if index:
+                checkpoint["recovery_predecessor_target_id"] = installed[index - 1]
+            conn.execute("UPDATE publish_job_targets SET checkpoint_json=? WHERE id=?",
+                         (_checkpoint(sys.modules[__name__], checkpoint), target_id))
+        return [_row_to_target(conn.execute("SELECT * FROM publish_job_targets WHERE id=?", (value,)).fetchone())
+                for value in installed]
 
 
 def repair_unstarted_pending_target(

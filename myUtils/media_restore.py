@@ -362,7 +362,8 @@ def _persist_verified(db_path: Path, destination: Path, artifact: dict, digest: 
 def restore_artifact(destination: Path, artifact: dict, sources: list[dict], *, db_path: Path,
                      reserve_bytes: int = DEFAULT_RESERVE_BYTES,
                      required_checksum: bool = False,
-                     total_deadline: float = OVERALL_DEADLINE_SECONDS) -> dict:
+                     total_deadline: float = OVERALL_DEADLINE_SECONDS,
+                     probe_deadline_seconds: float = PROBE_DEADLINE_SECONDS) -> dict:
     """Verify an exact registered source in bounded staging, record, then expose.
 
     Restoration always needs an artifact SHA or explicit provider checksum;
@@ -372,6 +373,11 @@ def restore_artifact(destination: Path, artifact: dict, sources: list[dict], *, 
     Otherwise an exact registered path/remote record or (id,campaign_id,local_path) row is required
     for recording executed verification before installation.
     """
+    # Default worker budget is unchanged. Explicit reviewed maintenance may
+    # allow paced provider reads up to 45s; never enlarge the overall deadline,
+    # clear a live cooldown, repeat an object attempt or skip integrity/CAS.
+    if type(probe_deadline_seconds) not in {int, float} or not 0 < probe_deadline_seconds <= 45:
+        raise PrerequisiteUnavailable("identity")
     destination = Path(destination)
     deadline = time.monotonic() + total_deadline
     expected = media_integrity.expected_sha256(artifact, required=False)
@@ -407,7 +413,7 @@ def restore_artifact(destination: Path, artifact: dict, sources: list[dict], *, 
             needs_probe = _admit(db_path, scope, fingerprint, "media_restore")
             object_probe = _admit(db_path, object_scope, object_fingerprint, "media_object")
             if needs_probe or object_probe or (source.get("backend", {}).get("provider") == "rclone"):
-                facts = probe_source(source, total_deadline=min(PROBE_DEADLINE_SECONDS, deadline - time.monotonic()))
+                facts = probe_source(source, total_deadline=min(probe_deadline_seconds, deadline - time.monotonic()))
                 if facts.get("size_bytes") is not None:
                     sizes.append(facts["size_bytes"])
                 proof = proof or facts.get("remote_checksum")

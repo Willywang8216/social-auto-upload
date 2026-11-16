@@ -8,6 +8,7 @@ Legacy CRF helpers remain available; new publishing uses this byte-budgeted path
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import math
 import os
@@ -336,6 +337,8 @@ def _part(path: Path, meta: dict, *, source_sha: str | None, group: str, platfor
         "source_duration_seconds": (provenance or {}).get("source_duration_seconds", interval[1] - interval[0]),
         "original_source_interval_start_seconds": (provenance or {}).get("original_source_interval_start_seconds", interval[0]),
         "original_source_interval_end_seconds": (provenance or {}).get("original_source_interval_end_seconds", interval[1]),
+        **({"selected_content_origin": copy.deepcopy(provenance["selected_content_origin"])}
+           if provenance and "selected_content_origin" in provenance else {}),
         **({"source_parent": provenance.get("source_parent") or {
             "path": str(input_path), "sha256": input_sha,
             "public_url": provenance.get("input_public_url"),

@@ -247,12 +247,14 @@ def _replacement(original: dict, part, source: Path, *, image: bool, platform: s
 def prepare_payloads(payload: dict, *, platform: str, account_config: dict | None = None,
                      out_dir: Path | None = None, backup_compatible: bool = False,
                      allow_reprepare: bool = False, video_limits: dict | None = None,
-                     image_limits: dict | None = None) -> list[dict]:
+                     image_limits: dict | None = None, reviewed_selected_content: bool = False) -> list[dict]:
     """Return EVERY ordered post. Never use this encoding API in a DB transaction."""
     from utils.conf_defaults import BASE_DIR
     platform = str(platform or "").strip().lower()
-    if type(allow_reprepare) is not bool or type(backup_compatible) is not bool:
+    if any(type(flag) is not bool for flag in (allow_reprepare, backup_compatible, reviewed_selected_content)):
         raise compliance.MediaPreparationError("Preparation flags must be booleans")
+    if reviewed_selected_content and not allow_reprepare:
+        raise compliance.MediaPreparationError("Reviewed legacy selection requires explicit re-preparation")
     working = _working_payload(payload, platform)
     if allow_reprepare:
         working["_preserveApprovedText"] = True
@@ -314,7 +316,8 @@ def prepare_payloads(payload: dict, *, platform: str, account_config: dict | Non
             replacements.append((False, [original]))
         else:
             constraints = _constraints(metadata, platform, account_config, backup_compatible, video_limits)
-            origin = (_repair_origin(metadata, source, image=False, artifact=original)
+            origin = (_repair_origin(metadata, source, image=False, artifact=original,
+                                     reviewed_selected_content=reviewed_selected_content)
                       if _has_derived_identity(original) else _raw_origin(original, source))
             parts = compliance.prepare_video(source, root, platform=platform, account_config=account_config,
                 limits=constraints, backup_compatible=backup_compatible, provenance=origin,
@@ -395,7 +398,8 @@ def _raw_origin(artifact: dict, source: Path) -> dict:
         "original_source_interval_start_seconds": 0.0, "original_source_interval_end_seconds": duration}
 
 
-def _repair_origin(metadata: dict, source: Path, *, image: bool, artifact: dict | None = None) -> dict:
+def _repair_origin(metadata: dict, source: Path, *, image: bool, artifact: dict | None = None,
+                   reviewed_selected_content: bool = False) -> dict:
     artifact = artifact or {"local_path": str(source), "metadata": metadata}
     facts = _verified_source(artifact, source, required=_is_prepared(metadata))
     origin = copy.deepcopy(metadata)
@@ -409,7 +413,14 @@ def _repair_origin(metadata: dict, source: Path, *, image: bool, artifact: dict 
     origin["source_is_complete"] = False
     if not image:
         if "source_start_seconds" not in origin or "source_end_seconds" not in origin:
-            raise compliance.MediaPreparationError("Older prepared part has no provable original source interval")
+            if not reviewed_selected_content:
+                raise compliance.MediaPreparationError("Older prepared part has no provable original source interval")
+            from myUtils.reviewed_recovery import legacy_selection
+            selected = legacy_selection(artifact, source, probe=True)
+            origin.update(selected_content_origin=selected, source_start_seconds=0.0,
+                          source_end_seconds=selected["duration_seconds"],
+                          original_source_interval_start_seconds=0.0,
+                          original_source_interval_end_seconds=selected["duration_seconds"])
         for key in ("part_index", "part_count"):
             if key in origin and (type(origin[key]) is not int or origin[key] < 1):
                 raise compliance.MediaPreparationError("Invalid parent part membership")

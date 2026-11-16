@@ -92,7 +92,8 @@ def _fingerprint(state: dict, parts: list[dict], slots: list[str], cap: int, bac
                                                       backup_compatible=backup)})
 
 
-def _validate_prepared(parts: list[dict], state: dict, backup: bool, context: dict | None = None) -> None:
+def _validate_prepared(parts: list[dict], state: dict, backup: bool, context: dict | None = None, *,
+                       reviewed_selected_content: bool = False) -> None:
     """Run final probe/validation OUTSIDE a queue write transaction."""
     cfg = profiles._row_to_account(state["account"]).config
     if backup and not context:
@@ -111,9 +112,13 @@ def _validate_prepared(parts: list[dict], state: dict, backup: bool, context: di
         from myUtils.prepared_recovery import validate_video_provenance
         original = jobs._recovery_json_object(state["job"]["payload_json"])
         original.update(jobs._recovery_json_object(state["target"]["checkpoint_json"]).get("payload") or {})
+        if reviewed_selected_content:
+            from myUtils.reviewed_recovery import bind_media_payload
+            original = bind_media_payload(original, state["media_records"])
         if not original.get("artifacts") and not state["target"]["file_ref"].startswith("campaign_post:"):
             original["artifacts"] = [{"local_path": state["target"]["file_ref"]}]
-        validate_video_provenance(original, videos, platform=state["job"]["platform"], probe_sources=True)
+        validate_video_provenance(original, videos, platform=state["job"]["platform"], probe_sources=True,
+                                  reviewed_selected_content=reviewed_selected_content)
 
 
 def _pending_guard(item: dict) -> dict | None:

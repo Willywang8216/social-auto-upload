@@ -10,7 +10,8 @@ from myUtils import media_compliance, media_integrity
 _MEDIA_FIELDS = {"artifacts", "preparedPart", "preparedPost", "partIndex", "partCount", "preparedImageBatch", "_preserveApprovedText"}
 
 
-def validate_parts(conn, target, parts: list[dict], schedules: list[str]) -> None:
+def validate_parts(conn, target, parts: list[dict], schedules: list[str], *,
+                   reviewed_selected_content: bool = False) -> None:
     from myUtils import jobs, publish_media_guard
 
     if (not isinstance(parts, list) or not 1 <= len(parts) <= media_compliance.MAX_PARTS
@@ -23,6 +24,9 @@ def validate_parts(conn, target, parts: list[dict], schedules: list[str]) -> Non
     original = jobs._recovery_json_object(conn.execute(
         "SELECT payload_json FROM publish_jobs WHERE id=?", (target["job_id"],)).fetchone()[0])
     original.update(jobs._recovery_json_object(target["checkpoint_json"]).get("payload") or {})
+    if reviewed_selected_content:
+        from myUtils.reviewed_recovery import bind_media_payload, collect_media_records
+        original = bind_media_payload(original, collect_media_records(conn, original))
     artifacts = []
     for index, part in enumerate(parts, 1):
         if part.get("_preserveApprovedText") is not True:
@@ -53,7 +57,8 @@ def validate_parts(conn, target, parts: list[dict], schedules: list[str]) -> Non
         source_payload["artifacts"] = [{"local_path": target["file_ref"]}]
     if artifacts or any(publish_media_guard.media_kind(a) == "video" for a in source_payload.get("artifacts") or []):
         platform = conn.execute("SELECT platform FROM publish_jobs WHERE id=?", (target["job_id"],)).fetchone()[0]
-        validate_video_provenance(source_payload, artifacts, platform=platform)
+        validate_video_provenance(source_payload, artifacts, platform=platform,
+                                  reviewed_selected_content=reviewed_selected_content)
 
 
 def _exact_path(value) -> Path:
@@ -70,7 +75,7 @@ def _span(metadata: dict, prefix: str = "source") -> tuple[float, float]:
 
 
 def validate_video_provenance(original: dict, artifacts: list[dict], *, platform: str,
-                              probe_sources: bool = False) -> None:
+                              probe_sources: bool = False, reviewed_selected_content: bool = False) -> None:
     """Bind EVERY output (including one) to exact approved source membership.
 
     Selected existing parts may remain a subset of their parent's generation.
@@ -140,13 +145,26 @@ def validate_video_provenance(original: dict, artifacts: list[dict], *, platform
             raise ValueError("Recovery source bytes differ from approved input")
         derived = guard._has_derived_identity(source)
         if derived:
-            # Absence is not evidence that a legacy segment was the full source.
-            interval = _span(selected)
+            legacy = "source_start_seconds" not in selected and "source_end_seconds" not in selected
+            if legacy:
+                if not reviewed_selected_content or not isinstance(metadata.get("selected_content_origin"), dict):
+                    raise ValueError("Legacy selected part has no original source interval; explicit frozen review required")
+                from myUtils.reviewed_recovery import legacy_selection
+                proof = legacy_selection(source, path,
+                    duration=metadata["selected_content_origin"].get("duration_seconds"), probe=probe_sources)
+                if proof != metadata["selected_content_origin"]:
+                    raise ValueError("Recovery changed exact selected file bytes or original membership")
+                interval = (0.0, proof["duration_seconds"])
+            else:
+                # Absence is not evidence that a legacy segment was the full raw source.
+                interval = _span(selected)
+                if metadata.get("selected_content_origin") != selected.get("selected_content_origin"):
+                    raise ValueError("Recovery changed reviewed source provenance")
             if (not isinstance(parent, dict) or parent.get("sha256") != facts["sha256"]
                     or any(parent.get(key) != selected.get(key) for key in
                            ("preparation_group", "part_index", "part_count"))
                     or _span(parent) != interval):
-                raise ValueError("Recovery lost parent part membership or original source interval")
+                raise ValueError("Recovery lost parent part membership or exact selected interval")
             if (metadata.get("source_sha256") != selected.get("source_sha256")
                     or metadata.get("source_parent") != (selected.get("source_parent") or parent)):
                 raise ValueError("Recovery changed original source hash or parent membership")
@@ -198,16 +216,19 @@ def _checkpoint(jobs, value) -> str:
     return text
 
 
-def install_parts(conn, target, parts: list[dict], schedules: list[str], generation: str) -> None:
+def install_parts(conn, target, parts: list[dict], schedules: list[str], generation: str) -> list[int]:
     from myUtils import jobs
 
     original_job = conn.execute("SELECT * FROM publish_jobs WHERE id=?", (target["job_id"],)).fetchone()
-    previous = {"attempts": target["attempts"], "last_error": target["last_error"],
-                "finished_at": target["finished_at"], "schedule_at": target["schedule_at"],
-                "checkpoint": jobs._decode_checkpoint(target["checkpoint_json"])}
+    prior = jobs._recovery_json_object(target["checkpoint_json"])
+    # Keep ACTIVE counters as well as the full immutable old checkpoint/history.
+    # A new generation must not make worker defaults refund spent provider credit.
+    base = {**copy.deepcopy(prior), "recovery_generation": generation,
+            "provider_budget_baseline": prior.get("provider_budget_baseline", target["attempts"]),
+            "previous_failure": jobs._prior_target_history(target)}
     conn.execute("UPDATE publish_job_targets SET checkpoint_json=? WHERE id=?", (
-        _checkpoint(jobs, {"recovery_generation": generation, "previous_failure": previous,
-                          "payload": parts[0]}), target["id"]))
+        _checkpoint(jobs, {**base, "payload": parts[0]}), target["id"]))
+    installed = [target["id"]]
     original_post_id = parts[0].get("campaignPostId")
     original_post = None
     if type(original_post_id) is int:
@@ -249,10 +270,13 @@ def install_parts(conn, target, parts: list[dict], schedules: list[str], generat
              json.dumps(payload, ensure_ascii=False, allow_nan=False), original_job["workspace_id"],
              jobs._intent_hash(spec, original_job["workspace_id"])))
         job_id = int(cursor.lastrowid)
-        conn.execute(
-            "INSERT INTO publish_job_targets (job_id,account_ref,file_ref,schedule_at,status,workspace_id,checkpoint_json) "
-            "VALUES (?,?,?,?,'pending',?,?)",
-            (job_id, target["account_ref"], file_ref, schedule, original_job["workspace_id"],
-             _checkpoint(jobs, {"recovery_generation": generation, "recovery_origin_target_id": target["id"]})))
+        cursor = conn.execute(
+            "INSERT INTO publish_job_targets (job_id,account_ref,file_ref,schedule_at,status,attempts,workspace_id,checkpoint_json) "
+            "VALUES (?,?,?,?,'pending',?,?,?)",
+            (job_id, target["account_ref"], file_ref, schedule, target["attempts"], original_job["workspace_id"],
+             _checkpoint(jobs, {**copy.deepcopy(base), "payload": payload,
+                               "recovery_origin_target_id": target["id"]})))
+        installed.append(int(cursor.lastrowid))
         if post_id is not None:
             conn.execute("UPDATE campaign_posts SET last_published_job_id=? WHERE id=?", (job_id, post_id))
+    return installed

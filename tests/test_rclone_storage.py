@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import tempfile
 import unittest
@@ -182,6 +183,70 @@ class RcloneDownloadTests(unittest.TestCase):
 
         self.assertEqual(calls[0][2], "drive:clip.mp4")
 
+class RclonePacedReadTests(unittest.TestCase):
+    def test_exact_stat_is_paced_once_with_unchanged_hard_default_deadline(self):
+        calls = []
+        def runner(command, **kwargs):
+            calls.append((command, kwargs))
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"Size": 123,
+                "Hashes": {"SHA-256": "a" * 64, "MD5": "b" * 32}}))
+        result = rclone_storage.stat_artifact("exact/part2.mp4", remote_name="selected-drive",
+            remote_root="registered/root", runner=runner)
+        self.assertEqual(len(calls), 1)
+        command, options = calls[0]
+        self.assertEqual(command[:5], ["rclone", "lsjson", "selected-drive:registered/root/exact/part2.mp4", "--stat", "--hash"])
+        self.assertEqual(options["timeout"], 20)
+        for flag, value in (("--retries", "1"), ("--low-level-retries", "1"), ("--tpslimit", "1"),
+                            ("--tpslimit-burst", "1"), ("--drive-pacer-min-sleep", "2s")):
+            self.assertEqual(command[command.index(flag) + 1], value)
+        self.assertNotIn("--drive-client-id", command)
+        self.assertEqual(command[command.index("--drive-pacer-burst") + 1], "0")
+        self.assertEqual(command[command.index("--timeout") + 1], "20s")
+        self.assertEqual(result["remote_checksum"], {"algorithm": "sha256", "value": "a" * 64})
+
+    def test_timeout_never_retries_or_exposes_partial_download(self):
+        calls = []
+        def runner(command, **kwargs):
+            calls.append((command, kwargs))
+            Path(command[3]).write_bytes(b"partial")
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "selected.mp4"
+            destination.write_bytes(b"original")
+            with self.assertRaises(subprocess.TimeoutExpired):
+                rclone_storage.download_artifact("exact.mp4", destination, remote_name="same-client",
+                    remote_root="", runner=runner, total_deadline=7)
+            self.assertEqual(destination.read_bytes(), b"original")
+            self.assertEqual(list(Path(directory).glob("*.part")), [])
+            self.assertEqual(len(calls), 1)
+            command, options = calls[0]
+            self.assertLessEqual(options["timeout"], 7)
+            self.assertEqual(command[command.index("--contimeout") + 1], f"{options['timeout']:g}s")
+            self.assertEqual(command[command.index("--timeout") + 1], f"{options['timeout']:g}s")
+
+    def test_invalid_or_exhausted_budgets_do_not_start_a_read(self):
+        for budget in (0, -1, float("nan"), float("inf")):
+            with self.subTest(budget=budget), patch.object(rclone_storage, "run_subprocess") as runner:
+                with self.assertRaises(TimeoutError):
+                    rclone_storage.stat_artifact("exact.mp4", remote_name="same-client", remote_root="",
+                        runner=runner, total_deadline=budget)
+                runner.assert_not_called()
+
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_explicit_paced_stat_budget_is_still_hard_bounded():
+    calls = []
+    def runner(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"Size": 1, "Hashes": {}}))
+    rclone_storage.stat_artifact("exact.mp4", remote_name="same-client", remote_root="",
+                                 total_deadline=45, runner=runner)
+    assert len(calls) == 1
+    command, options = calls[0]
+    assert options["timeout"] == 45
+    assert command[command.index("--timeout") + 1] == "40s"
+    assert command[command.index("--drive-pacer-burst") + 1] == "0"
