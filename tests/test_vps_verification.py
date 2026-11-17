@@ -54,3 +54,14 @@ def test_frontend_readiness_is_gated_before_the_passing_receipt():
 def test_readonly_verification_has_bounded_non_executable_standard_tmp():
     launcher = (ROOT / 'scripts/vps-gates.sh').read_text()
     assert '--tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777' in launcher
+
+
+def test_all_vps_images_define_a_real_non_login_identity_for_ssh_signatures():
+    for name in ('Dockerfile', 'Dockerfile.verify', 'Dockerfile.ops'):
+        image = (ROOT / name).read_text()
+        assert 'getent group 1000' in image, name
+        assert 'groupadd --gid 1000 sau' in image, name
+        assert 'getent passwd 1000' in image, name
+        assert 'useradd --uid 1000 --gid 1000 --no-create-home' in image, name
+        assert '--home-dir /nonexistent --shell /usr/sbin/nologin sau' in image, name
+        assert image.index('useradd --uid 1000') < image.rindex('USER 1000:1000'), name

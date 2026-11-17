@@ -17,6 +17,10 @@ RUN chmod 0444 /app/sau_inbox/*.py /app/scripts/push_credentials_vault.py /app/s
     && ln -s /app/sau-inbox /home/will/sau-inbox \
     && test ! -e /home/will/social-auto-upload/ops/inbox && test ! -L /home/will/social-auto-upload/ops/inbox \
     && ln -s /app/sau-inbox /home/will/social-auto-upload/ops/inbox
+# Keep the existing numeric identity while giving OpenSSH/rclone valid NSS data.
+RUN if ! getent group 1000 >/dev/null; then groupadd --gid 1000 sau; fi \
+    && if ! getent passwd 1000 >/dev/null; then useradd --uid 1000 --gid 1000 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sau; fi \
+    && test "$(getent passwd 1000 | cut -d: -f4)" = 1000
 USER 1000:1000
 WORKDIR /app
 ENTRYPOINT ["python", "/usr/local/bin/sau-ops-runner.py"]

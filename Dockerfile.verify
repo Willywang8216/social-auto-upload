@@ -15,6 +15,10 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 COPY docker/verify-entrypoint.sh /usr/local/bin/sau-verify
 RUN chmod 0555 /usr/local/bin/sau-verify
 LABEL io.sau.verification-tools="1"
+# OpenSSH signing requires a real passwd entry, not only Docker's numeric uid.
+RUN if ! getent group 1000 >/dev/null; then groupadd --gid 1000 sau; fi \
+    && if ! getent passwd 1000 >/dev/null; then useradd --uid 1000 --gid 1000 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sau; fi \
+    && test "$(getent passwd 1000 | cut -d: -f4)" = 1000
 USER 1000:1000
 WORKDIR /work
 ENTRYPOINT ["bash", "/usr/local/bin/sau-verify"]

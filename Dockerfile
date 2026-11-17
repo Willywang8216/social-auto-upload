@@ -76,6 +76,12 @@ COPY --from=builder /app/dist/vite.svg /app/assets
 RUN cp conf.example.py conf.py \
     && mkdir -p /app/videoFile /app/cookiesFile /app/cookies /app/db \
     && chmod -R u=rwX,go=rX /app
+# Numeric Docker users alone are not valid OpenSSH signing identities. The
+# runtime and Compose retain uid/gid 1000 without creating a login or home.
+RUN if ! getent group 1000 >/dev/null; then groupadd --gid 1000 sau; fi \
+    && if ! getent passwd 1000 >/dev/null; then useradd --uid 1000 --gid 1000 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sau; fi \
+    && test "$(getent passwd 1000 | cut -d: -f4)" = 1000
+USER 1000:1000
 EXPOSE 5409
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5409/readyz', timeout=3)"
