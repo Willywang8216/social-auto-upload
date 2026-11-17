@@ -62,6 +62,8 @@ def environment(job: str, root: Path, inherited: dict[str, str]) -> dict[str, st
     if job not in {"watcher", "inbox-monitor"}:
         files.append(root / ".env")
     for path in files:
+        if path == root / "sau-inbox" / ".env" and not path.exists():
+            continue  # native watcher/watchdog notifications are optional
         for key, value in read_values(path).items():
             env.setdefault(key, value)
     env.update({

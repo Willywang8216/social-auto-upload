@@ -191,5 +191,64 @@ class PlanAndApplyTests(unittest.TestCase):
         self.assertIn("drive:both/video/Published clip__sfw.mp4", state["processed"])
 
 
+def test_archive_honors_shared_lock_and_preserves_concurrent_publish_claim(tmp_path, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from myUtils import inbox_autopublish
+
+    state_path = tmp_path / 'state.json'
+    initial = {'ready': [{'id': 'done', 'remotePath': 'nw/video/done.mp4'},
+                         {'id': 'keep', 'remotePath': 'nw/video/keep.mp4', 'autoPublishAttempts': 1}],
+               'pending': [], 'quarantined': [], 'processed': {}}
+    state_path.write_text(json.dumps(initial))
+    monkeypatch.setattr(inbox_archive, 'LEDGER', tmp_path / 'ledger.json')
+    transfer_done = threading.Event()
+    read_started = threading.Event()
+    original_load = inbox_archive.load_state
+
+    def fake_transfer(args, **kwargs):
+        if args[0] == 'copyto':
+            transfer_done.set()
+        return SimpleNamespace(returncode=0, stderr='', stdout='')
+
+    def observed_load(path):
+        read_started.set()
+        return original_load(path)
+
+    monkeypatch.setattr(inbox_archive, '_rclone', fake_transfer)
+    monkeypatch.setattr(inbox_archive, 'load_state', observed_load)
+    item = {'remote_path': 'nw/video/done.mp4', 'entry_id': 'done',
+            'archived': 'done_SFW_20261117.mp4', 'campaign_id': 1, 'note': 'synthetic', 'published': True}
+    errors = []
+
+    def archive():
+        try:
+            assert inbox_archive.apply_archive(item, state_path) is None
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=archive, daemon=True)
+    handle = inbox_autopublish._state_lock(state_path)
+    try:
+        worker.start()
+        assert transfer_done.wait(3)
+        assert not read_started.wait(0.2), 'archive read state without honoring the shared lock'
+        current = original_load(state_path)
+        current['ready'][1].update(autoPublishAttempts=4, autoPublishState='publishing',
+                                   autoSubmissionStartAt='2026-11-18T21:00:00')
+        current['owner_receipt'] = {'original': 'retain'}
+        inbox_autopublish.save_state(state_path, current)
+    finally:
+        handle.close()
+        worker.join(5)
+    assert not worker.is_alive() and not errors
+    final = original_load(state_path)
+    assert [entry['id'] for entry in final['ready']] == ['keep']
+    assert final['ready'][0]['autoPublishAttempts'] == 4
+    assert final['ready'][0]['autoPublishState'] == 'publishing'
+    assert final['ready'][0]['autoSubmissionStartAt'] == '2026-11-18T21:00:00'
+    assert final['owner_receipt'] == {'original': 'retain'}
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,8 +9,14 @@ LABEL io.sau.operations-tools="1" \
 USER 0
 COPY sau_inbox/watch.py sau_inbox/thumb.py sau_inbox/manual_platforms.py sau_inbox/gen_title.py sau_inbox/inbox_monitor.py /app/sau_inbox/
 COPY scripts/push_credentials_vault.py scripts/push_llm_stt_vault.py /app/scripts/
+COPY myUtils/inbox_archive.py /app/myUtils/inbox_archive.py
 COPY docker/ops-entrypoint.py /usr/local/bin/sau-ops-runner.py
-RUN chmod 0444 /app/sau_inbox/*.py /app/scripts/push_credentials_vault.py /app/scripts/push_llm_stt_vault.py /usr/local/bin/sau-ops-runner.py
+RUN chmod 0444 /app/sau_inbox/*.py /app/scripts/push_credentials_vault.py /app/scripts/push_llm_stt_vault.py /app/myUtils/inbox_archive.py /usr/local/bin/sau-ops-runner.py \
+    && mkdir -p /home/will/social-auto-upload/ops \
+    && test ! -e /home/will/sau-inbox && test ! -L /home/will/sau-inbox \
+    && ln -s /app/sau-inbox /home/will/sau-inbox \
+    && test ! -e /home/will/social-auto-upload/ops/inbox && test ! -L /home/will/social-auto-upload/ops/inbox \
+    && ln -s /app/sau-inbox /home/will/social-auto-upload/ops/inbox
 USER 1000:1000
 WORKDIR /app
 ENTRYPOINT ["python", "/usr/local/bin/sau-ops-runner.py"]

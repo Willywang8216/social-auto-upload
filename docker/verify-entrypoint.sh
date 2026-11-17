@@ -26,7 +26,6 @@ export SAU_RELEASE_RULES_ROOT=/rules
 if [[ "$COMPONENT" == frontend ]]; then
   export SAU_RELEASE_KATEX_EXPORT=/output/katex
   bash scripts/release-gates.sh frontend --receipts /output
-  node --test sau_frontend/src/utils/__tests__/publish-readiness.node-test.mjs
 else
   version="${COMPONENT#backend-}"
   patch=3.12.14

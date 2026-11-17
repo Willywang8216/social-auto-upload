@@ -534,33 +534,48 @@ def _remote_rel_path(value: str) -> str | None:
     return str(path)
 
 
+def _known_inbox_remote_path(value: str | Path) -> str | None:
+    """Read retained identities through explicit aliases; never rewrite receipts."""
+    raw = str(value or "").replace("\\", "/")
+    if raw.startswith("drive:"):
+        return _remote_rel_path(raw[len("drive:"):])
+    path = PurePosixPath(raw)
+    if ".." in path.parts:
+        return None
+    bases = (
+        PurePosixPath(INBOX.resolve().as_posix()),
+        PurePosixPath(INBOX.absolute().as_posix()),
+        PurePosixPath("/home/will/sau-inbox"),
+        PurePosixPath("/home/will/social-auto-upload/ops/inbox"),
+        PurePosixPath("/app/sau-inbox"),
+    )
+    for base in bases:
+        try:
+            relative = path.relative_to(base)
+        except ValueError:
+            continue
+        return _remote_rel_path(relative.as_posix())
+    return _remote_rel_path(raw)
+
+
 def detect_new_files(state: dict) -> list[tuple[Path, str, str]]:
     """Download unprocessed Drive media to a temporary path for one scan."""
     remote, root = _drive_remote_and_root()
     processed = state.get("processed", {})
     processed_paths = set()
     for key in processed:
-        candidate = str(key)
-        if candidate.startswith("drive:"):
-            processed_paths.add(candidate[len("drive:"):])
-            continue
-        try:
-            processed_paths.add(Path(candidate).resolve().relative_to(INBOX.resolve()).as_posix())
-        except (ValueError, OSError):
-            continue
+        candidate = _known_inbox_remote_path(key)
+        if candidate:
+            processed_paths.add(candidate)
 
     def known_paths(status: str) -> set[str]:
         paths = set()
         for item in state.get(status, []):
-            remote_path = item.get("remotePath")
-            if remote_path:
-                paths.add(remote_path)
-                continue
-            source_path = str(item.get("sourcePath") or item.get("path") or "")
-            try:
-                paths.add(Path(source_path).resolve().relative_to(INBOX.resolve()).as_posix())
-            except (ValueError, OSError):
-                continue
+            candidate = _known_inbox_remote_path(
+                item.get("remotePath") or item.get("sourcePath") or item.get("path") or ""
+            )
+            if candidate:
+                paths.add(candidate)
         return paths
 
     ready_paths = known_paths("ready")
@@ -648,7 +663,17 @@ def detect_new_files(state: dict) -> list[tuple[Path, str, str]]:
 
 
 def _cleanup_scan_sources(paths: list[tuple[Path, str, str]]) -> None:
-    roots = {path.parents[3] for path, _, _ in paths}
+    roots = set()
+    for path, _, _ in paths:
+        try:
+            relative = path.absolute().relative_to(INBOX.absolute())
+        except ValueError:
+            relative = path.resolve().relative_to(INBOX.resolve())
+        if (len(relative.parts) < 2 or ".." in relative.parts
+                or not relative.parts[0].startswith(".sau-inbox-scan-")):
+            raise ValueError("Refusing to clean a source outside a generated scan")
+        _scan_host_to_container(path)  # also reject symlink escape
+        roots.add(INBOX / relative.parts[0])
     for root in roots:
         _cleanup_scan_root(root)
 
@@ -907,18 +932,15 @@ def process_paths(state: dict) -> dict:
     processed_before = dict(processed)
     now_s = utcnow()
 
-    # Migrate old local-path queue entries to remote identities before originals
-    # are removed; concurrent API mutations are blocked by scan_once's lock.
+    # Attach existing remote identities, then merge under the shared state lock
+    # below without resetting concurrent approvals/rejections or attempt fields.
     for status in ("ready", "pending", "quarantined"):
         for item in state.get(status, []):
             raw = str(item.get("sourcePath") or item.get("path") or "")
             if item.get("remotePath"):
                 continue
-            try:
-                rel = Path(raw).resolve().relative_to(INBOX.resolve()).as_posix()
-            except (ValueError, OSError):
-                continue
-            if _remote_rel_path(rel):
+            rel = _known_inbox_remote_path(raw)
+            if rel:
                 item["remotePath"] = rel
                 item["sourcePath"] = rel
                 if status == "pending":
@@ -1010,15 +1032,23 @@ def process_paths(state: dict) -> dict:
             processed[key] = now_s
         with _state_lock():
             latest = load_state()
+            existing_processed = set()
+            for key in latest.get("processed", {}):
+                candidate = _known_inbox_remote_path(key)
+                if candidate:
+                    existing_processed.add(candidate)
             for key, value in processed.items():
-                if key not in processed_before or processed_before.get(key) != value:
-                    latest.setdefault("processed", {})[key] = value
+                if (_known_inbox_remote_path(key) not in existing_processed
+                        and (key not in processed_before or processed_before.get(key) != value)):
+                    latest.setdefault("processed", {}).setdefault(key, value)
             for status, new_items in (("ready", new_ready), ("pending", new_pending)):
                 known = {
-                    str(item.get("remotePath") or item.get("path") or "")
+                    _known_inbox_remote_path(item.get("remotePath") or item.get("sourcePath") or item.get("path") or "")
+                    or str(item.get("remotePath") or item.get("path") or "")
                     for list_name in ("ready", "pending", "quarantined", "processed_items")
                     for item in latest.get(list_name, [])
                 }
+                known.update(existing_processed)
                 appended = []
                 for item in new_items:
                     identity = str(item.get("remotePath") or item.get("path") or "")
@@ -1048,12 +1078,14 @@ def process_paths(state: dict) -> dict:
                         else:
                             current["sourcePath"] = scanned.get("sourcePath", current.get("sourcePath"))
             latest_quarantined = {
-                str(item.get("remotePath") or item.get("path") or "")
+                _known_inbox_remote_path(item.get("remotePath") or item.get("sourcePath") or item.get("path") or "")
+                or str(item.get("remotePath") or item.get("path") or "")
                 for item in latest.get("quarantined", [])
             }
             for item in state.get("quarantined", []):
-                identity = str(item.get("remotePath") or item.get("path") or "")
-                if identity not in latest_quarantined:
+                identity = (_known_inbox_remote_path(item.get("remotePath") or item.get("sourcePath") or item.get("path") or "")
+                            or str(item.get("remotePath") or item.get("path") or ""))
+                if identity not in latest_quarantined and identity not in existing_processed:
                     latest.setdefault("quarantined", []).append(item)
                     latest_quarantined.add(identity)
             latest.setdefault("orphans", {}).update(state.get("orphans", {}))

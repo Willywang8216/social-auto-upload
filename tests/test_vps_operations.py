@@ -230,3 +230,97 @@ def test_operations_build_context_is_strictly_allowlisted():
     assert not any('.env' in row or 'ops/' in row or 'cookies/' in row or '.git' in row for row in lines)
     assert 'USER 1000:1000' in (ROOT / 'Dockerfile.ops').read_text()
     subprocess.run(['bash', '-n', str(ROOT / 'scripts/vps-ops.sh')], check=True, timeout=10)
+
+
+def test_missing_optional_notification_file_keeps_native_startup_behavior(runner, data):
+    (data / 'sau-inbox/.env').unlink()
+    for job in ('watcher', 'inbox-monitor'):
+        env = runner.environment(job, data, {})
+        assert 'SAU_API_TOKENS' not in env
+        assert 'SAU_WATCH_TG_BOT_TOKEN' not in env
+    assert runner.environment('inbox-autopublish', data, {})['SAU_WATCH_TG_BOT_TOKEN'] == 'fake-app-notifier'
+    (data / '.env').unlink()
+    with pytest.raises(FileNotFoundError):
+        runner.environment('vault-llm-stt', data, {})
+
+
+@pytest.mark.parametrize('prefix', ['/home/will/sau-inbox', '/home/will/social-auto-upload/ops/inbox', '/app/sau-inbox'])
+def test_legacy_processed_and_queue_identities_are_not_reingested(watcher, monkeypatch, prefix):
+    import json
+
+    state = {
+        'processed': {prefix + '/nw/video/rejected__sfw.mp4': 'original-owner-receipt'},
+        'ready': [{'sourcePath': prefix + '/nw/video/claimed__sfw.mp4', 'autoPublishState': 'publishing', 'autoPublishAttempts': 3}],
+        'pending': [{'path': prefix + '/nw/video/pending.mp4', 'lease': 'preserve'}],
+        'quarantined': [{'sourcePath': prefix + '/teaching/video/held__nsfw.mp4', 'reason': 'preserve'}],
+    }
+    before = json.dumps(state, sort_keys=True)
+    names = ['nw/video/rejected__sfw.mp4', 'nw/video/claimed__sfw.mp4', 'nw/video/pending.mp4', 'teaching/video/held__nsfw.mp4']
+    monkeypatch.setattr(watcher, '_drive_list', lambda: [{'Path': name} for name in names])
+    monkeypatch.setattr(watcher.subprocess, 'run', lambda *a, **k: pytest.fail('must not download/replay retained work'))
+    assert watcher.detect_new_files(state) == []
+    assert json.dumps(state, sort_keys=True) == before
+
+
+def test_nested_media_processing_cleans_the_scan_root_and_reports_success(watcher, monkeypatch):
+    import json
+
+    scan = watcher.INBOX / '.sau-inbox-scan-nested'
+    source = scan / '0/nw/video/subdir/clip__nsfw.mp4'
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b'synthetic media, no provider')
+    remote = 'nw/video/subdir/clip__nsfw.mp4'
+    monkeypatch.setattr(watcher, 'detect_new_files', lambda state: [(source, 'nw', remote)])
+    monkeypatch.setattr(watcher, 'detect_orphans', lambda state: [])
+    monkeypatch.setattr(watcher, 'build_thumb', lambda entry, *args: entry.update(thumbKind='titlecard', needsFrameSelection=True))
+    monkeypatch.setattr(watcher, '_maybe_auto_title', lambda *args: None)
+    announced = []
+    monkeypatch.setattr(watcher, '_announce_ready', lambda entry: announced.append(entry['remotePath']))
+    assert watcher.scan_once() == 1
+    assert not scan.exists()
+    assert announced == [remote]
+    assert json.loads(watcher.HEALTH_PATH.read_text())['new_ready'] == 1
+
+
+def test_concurrent_legacy_rejection_is_not_resurrected_or_overwritten(watcher, monkeypatch):
+    scan = watcher.INBOX / '.sau-inbox-scan-race'
+    source = scan / '0/nw/video/clip__nsfw.mp4'
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b'synthetic media')
+    remote = 'nw/video/clip__nsfw.mp4'
+    legacy = '/home/will/sau-inbox/' + remote
+
+    def during_transfer(state):
+        latest = watcher.load_state()
+        latest['processed'] = {legacy: 'signed-owner-rejection-original'}
+        latest['budget'] = {'attempts': 3, 'claim': 'keep'}
+        watcher.save_state(latest)
+        return [(source, 'nw', remote)]
+
+    monkeypatch.setattr(watcher, 'detect_new_files', during_transfer)
+    monkeypatch.setattr(watcher, 'detect_orphans', lambda state: [])
+    monkeypatch.setattr(watcher, 'build_thumb', lambda *args: None)
+    monkeypatch.setattr(watcher, '_maybe_auto_title', lambda *args: None)
+    result = watcher.process_paths(watcher.load_state())
+    latest = watcher.load_state()
+    assert result['ready'] == [] and latest['ready'] == []
+    assert latest['processed'] == {legacy: 'signed-owner-rejection-original'}
+    assert latest['budget'] == {'attempts': 3, 'claim': 'keep'}
+    assert not scan.exists()
+
+
+def test_rclone_mount_check_rejects_unrelated_remote_grants(runner, data):
+    config = data / 'rclone.conf'
+    config.write_text('[GDrive-willywang8216]\ntype = drive\n')
+    env = {'RCLONE_CONFIG': str(config)}
+    runner.check_mounts('watcher', data, env)
+    config.write_text(config.read_text() + '[unrelated]\ntype = s3\n')
+    with pytest.raises(RuntimeError, match='only its required remote'):
+        runner.check_mounts('watcher', data, env)
+
+
+def test_operations_overlay_keeps_known_inbox_aliases_and_shared_archive_lock():
+    dockerfile = (ROOT / 'Dockerfile.ops').read_text()
+    assert 'COPY myUtils/inbox_archive.py /app/myUtils/inbox_archive.py' in dockerfile
+    assert 'ln -s /app/sau-inbox /home/will/sau-inbox' in dockerfile
+    assert 'ln -s /app/sau-inbox /home/will/social-auto-upload/ops/inbox' in dockerfile

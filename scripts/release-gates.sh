@@ -76,6 +76,7 @@ backend() {
 frontend() {
   [[ "$(node --version)" == v22.21.1 ]] || { echo 'Use release Node 22.21.1.' >&2; exit 1; }
   (cd sau_frontend && run_clean npm ci && run_clean npm test && run_clean npm run build)
+  run_clean node --test sau_frontend/src/utils/__tests__/publish-readiness.node-test.mjs
   if [[ -n "${SAU_RELEASE_KATEX_EXPORT:-}" ]]; then
     [[ "$SAU_RELEASE_KATEX_EXPORT" == "$RECEIPTS/katex" \
        && ! -e "$SAU_RELEASE_KATEX_EXPORT" && ! -L "$SAU_RELEASE_KATEX_EXPORT" ]]

@@ -12,3 +12,5 @@
 !scripts
 !scripts/push_credentials_vault.py
 !scripts/push_llm_stt_vault.py
+!myUtils
+!myUtils/inbox_archive.py

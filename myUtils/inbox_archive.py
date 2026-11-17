@@ -353,33 +353,39 @@ def apply_archive(item: dict, state_path: Path, *, dry_run: bool = False) -> str
     finally:
         note_path.unlink(missing_ok=True)
 
-    state = load_state(state_path)
-    removed = False
-    for bucket in ("ready", "pending", "quarantined"):
-        keep = []
-        for entry in state.get(bucket, []):
-            same = (
-                str(entry.get("remotePath") or "") == item["remote_path"]
-                or (item.get("entry_id") and entry.get("id") == item["entry_id"])
+    # Network transfer is finished before taking the same short state lock as
+    # the watcher, API and autopublisher. Re-read only after acquiring it, so a
+    # concurrent claim, rejection or newly ingested item cannot be overwritten.
+    from myUtils.inbox_autopublish import _state_lock
+
+    with _state_lock(state_path):
+        state = load_state(state_path)
+        removed = False
+        for bucket in ("ready", "pending", "quarantined"):
+            keep = []
+            for entry in state.get(bucket, []):
+                same = (
+                    str(entry.get("remotePath") or "") == item["remote_path"]
+                    or (item.get("entry_id") and entry.get("id") == item["entry_id"])
+                )
+                if same:
+                    removed = True
+                    continue
+                keep.append(entry)
+            state[bucket] = keep
+        ledger = load_ledger()
+        ledger[item["remote_path"]] = {
+            "archived": item["archived"],
+            "campaign_id": item["campaign_id"],
+            "published_at_archive": bool(item.get("published")),
+            "archived_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"),
+        }
+        save_ledger(ledger)
+        if removed:
+            state.setdefault("processed", {})[f"drive:{item['remote_path']}"] = (
+                datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
             )
-            if same:
-                removed = True
-                continue
-            keep.append(entry)
-        state[bucket] = keep
-    ledger = load_ledger()
-    ledger[item["remote_path"]] = {
-        "archived": item["archived"],
-        "campaign_id": item["campaign_id"],
-        "published_at_archive": bool(item.get("published")),
-        "archived_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"),
-    }
-    save_ledger(ledger)
-    if removed:
-        state.setdefault("processed", {})[f"drive:{item['remote_path']}"] = (
-            datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
-        )
-        save_state(state_path, state)
+            save_state(state_path, state)
     return None
 
 
