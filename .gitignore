@@ -254,3 +254,6 @@ backups/
 
 # 1Panel / DB / env backups are operational artefacts, never source.
 backups/
+
+# Consolidated VPS operations: private receipts, rollback and ephemeral checks.
+/ops/

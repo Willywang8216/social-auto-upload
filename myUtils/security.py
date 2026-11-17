@@ -96,6 +96,9 @@ PUBLIC_PREFIXES: tuple[str, ...] = (
     "/assets/",
     "/static/",
     "/analytics/thumbnail/",
+    # Exact hash-bound media only after a durable Teaching release; the handler
+    # refuses unprepared/unreleased files and never serves private manuscript data.
+    "/teaching-repurpose-media/",
 )
 
 # The login endpoint is protected, but auth is read from a query-string

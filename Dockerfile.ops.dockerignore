@@ -1,0 +1,14 @@
+# An operations overlay must never receive the general source/runtime context.
+**
+!Dockerfile.ops
+!docker
+!docker/ops-entrypoint.py
+!sau_inbox
+!sau_inbox/watch.py
+!sau_inbox/thumb.py
+!sau_inbox/manual_platforms.py
+!sau_inbox/gen_title.py
+!sau_inbox/inbox_monitor.py
+!scripts
+!scripts/push_credentials_vault.py
+!scripts/push_llm_stt_vault.py

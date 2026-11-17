@@ -3184,7 +3184,7 @@ class PreparationDeferred:
 
 _EXECUTION_PAYLOAD_KEYS = {"_db_path", "_workspace_id", "_restore_account_id", "_telegramDeliveryKey",
     "_delivery", "_save_checkpoint", "_fallback_attempted", "_publish_max_attempts", "_native_route_started",
-    "_prerequisites_checked", "_defer_native_create_budget"}
+    "_prerequisites_checked", "_defer_native_create_budget", "_teaching_dispatch_check"}
 
 
 def _publication_payload(payload: dict) -> dict:
@@ -3332,6 +3332,10 @@ def _prepare_target_prerequisites(target: jobs.Target, job: jobs.Job, payload: d
         return None  # Receipt polls need neither bytes nor create authorization.
     if delivery.has_unresolved_submission(payload):
         raise delivery.DeliveryUnknown("Retained provider/media effects require reconciliation before preparation")
+    if 'articleRepurpose' in payload:
+        from myUtils.repurpose.dispatch import check as check_teaching_dispatch
+        payload['_teaching_dispatch_check'] = lambda: check_teaching_dispatch(payload, target, db_path=db_path)
+        payload['_teaching_dispatch_check']()
     account = _resolve_structured_account(target.account_ref, db_path=db_path)
     with jobs._connect(db_path, must_exist=True) as conn:
         row = conn.execute("SELECT workspace_id FROM publish_jobs WHERE id=?", (job.id,)).fetchone()

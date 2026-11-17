@@ -123,4 +123,36 @@ describe('request rejection contract (in-memory Axios adapters only)', () => {
     const body = { code: 200, data: { campaignIds: [7], jobs: [], status: 'preparing' } }
     await expect(http.post('/test', {}, { adapter: async (config) => ({ status: 202, config, data: body }) })).resolves.toEqual(body)
   })
+
+  it('returns a private Blob only with explicit binary opt-in and retains auth/CSRF headers', async () => {
+    const blob = new Blob(['unit-only'], { type: 'image/jpeg' })
+    await expect(http.get('/private-preview', undefined, { responseType: 'blob', sauBinary: true, adapter: async config => {
+      expect(config.headers.Authorization).toBe('Bearer test-bearer')
+      expect(config.headers['X-CSRF-Token']).toBe('test-csrf')
+      expect(config.withCredentials).toBe(true)
+      return { config, status: 200, data: blob }
+    } })).resolves.toBe(blob)
+  })
+
+  it('still rejects an unopted binary body instead of loosening the JSON envelope', async () => {
+    await expect(request.get('/unexpected', { silentError: true, responseType: 'blob', adapter: async config => ({
+      config, status: 200, data: new Blob(['not-json']),
+    }) })).rejects.toMatchObject({ code: 'ERR_INVALID_RESPONSE' })
+  })
+
+  it('cannot deliver late private bytes to a changed login', async () => {
+    await expect(request.get('/private-preview', { responseType: 'blob', sauBinary: true, adapter: async config => {
+      mocks.getAuthRevision.mockReturnValue(1)
+      return { config, status: 200, data: new Blob(['private-unit-only']) }
+    } })).rejects.toMatchObject({ code: 'ERR_CANCELED' })
+    expect(mocks.toast).not.toHaveBeenCalled()
+    expect(mocks.clearToken).not.toHaveBeenCalled()
+  })
+
+  it('binary 403 remains a permission rejection, not a logout or Blob success', async () => {
+    await expect(request.get('/private-preview', { ...failingAdapter(403), responseType: 'blob', sauBinary: true,
+      silentError: true })).rejects.toMatchObject({ response: { status: 403 } })
+    expect(mocks.clearToken).not.toHaveBeenCalled()
+    expect(mocks.clearCsrfToken).not.toHaveBeenCalled()
+  })
 })

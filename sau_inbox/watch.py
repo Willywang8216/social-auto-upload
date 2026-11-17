@@ -40,7 +40,7 @@ from typing import NamedTuple
 import thumb  # 同目錄的 thumb.py
 
 LOG = logging.getLogger("sau-watch")
-HERE = Path(__file__).resolve().parent
+HERE = Path(os.environ.get("SAU_WATCH_HOME", str(Path(__file__).resolve().parent)))
 
 
 def _load_dotenv() -> None:
@@ -196,11 +196,15 @@ def save_state(state: dict) -> None:
 
 @contextmanager
 def _watch_run_lock():
-    """Prevent overlapping one-minute cron scans from deleting each other's temp files."""
+    """Skip overlapping ticks; never queue scans or claim a false heartbeat."""
     INBOX.mkdir(parents=True, exist_ok=True)
     with (INBOX / ".watch-run.lock").open("a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        yield
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
 
 
 @contextmanager
@@ -292,14 +296,18 @@ def _drive_remote_and_root() -> tuple[str, str]:
     return remote, root
 
 
-def _rclone_command(args: list[str]) -> list[str]:
-    """Run via the application container, which owns the restricted Drive config."""
+def _rclone_mode() -> str:
     mode = os.environ.get("SAU_INBOX_RCLONE_MODE", "docker").strip().lower()
-    if mode == "host":
+    if mode not in {"docker", "host", "container"}:
+        raise ValueError("SAU_INBOX_RCLONE_MODE must be 'docker', 'host' or 'container'")
+    return mode
+
+
+def _rclone_command(args: list[str]) -> list[str]:
+    """Direct rclone inside an operations container, or the legacy host bridge."""
+    if _rclone_mode() in {"host", "container"}:
         config = os.environ.get("SAU_INBOX_RCLONE_CONFIG", "").strip()
-        return ["rclone", *( ["--config", config] if config else []), *args]
-    if mode != "docker":
-        raise ValueError("SAU_INBOX_RCLONE_MODE must be 'docker' or 'host'")
+        return ["rclone", *(["--config", config] if config else []), *args]
     return ["docker", "exec", "social-auto-upload", "rclone", *args]
 
 
@@ -308,17 +316,27 @@ def _scan_host_to_container(path: Path) -> str:
         relative = path.resolve().relative_to(INBOX.resolve())
     except ValueError as exc:
         raise ValueError("Temporary inbox download escaped the mounted inbox") from exc
+    if _rclone_mode() in {"host", "container"}:
+        return str(path.resolve())
     return f"/app/sau-inbox/{relative.as_posix()}"
 
 
 def _cleanup_scan_root(root: Path) -> None:
-    """Remove one generated scan directory, including root-owned Docker files."""
+    """Remove only a generated scan directory, never a symlink or other data."""
+    if root.is_symlink():
+        raise ValueError("Refusing to remove a symlink scan directory")
     try:
         relative = root.resolve().relative_to(INBOX.resolve())
     except ValueError as exc:
         raise ValueError("Refusing to remove scan directory outside inbox") from exc
     if len(relative.parts) != 1 or not relative.name.startswith(".sau-inbox-scan-"):
         raise ValueError("Refusing to remove non-scan inbox path")
+    if _rclone_mode() in {"host", "container"}:
+        try:
+            shutil.rmtree(root)
+        except FileNotFoundError:
+            pass
+        return
     try:
         container_path = _scan_host_to_container(root)
         if not container_path.startswith("/app/sau-inbox/.sau-inbox-scan-"):
@@ -493,6 +511,11 @@ def _download_sidecars(remote: str, root: str, rel: str, item_root: Path,
 
 
 def _chown_scan_root(item_root: Path) -> None:
+    # Direct downloads already belong to this non-root process. Validate the
+    # destination but do not chown other inbox/state/media files recursively.
+    _scan_host_to_container(item_root)
+    if _rclone_mode() in {"host", "container"}:
+        return
     subprocess.run(
         ["docker", "exec", "social-auto-upload", "chown", "-R",
          f"{os.getuid()}:{os.getgid()}", _scan_host_to_container(item_root)],
@@ -1103,14 +1126,18 @@ def check_cron_guard(*, runner=None) -> list[str]:
 
 
 def scan_once() -> int:
-    try:
-        check_cron_guard()
-    except Exception as exc:  # noqa: BLE001 - the guard must never break a scan
-        LOG.warning("cron guard 失敗: %s", exc)
+    if _rclone_mode() != "container":
+        try:
+            check_cron_guard()
+        except Exception as exc:  # noqa: BLE001 - the guard must never break a scan
+            LOG.warning("cron guard 失敗: %s", exc)
     # Serialize cron invocations for scan-temp ownership, while keeping the JSON
     # state lock short so approvals/rejections can happen during Drive transfer.
     try:
-        with _watch_run_lock():
+        with _watch_run_lock() as acquired:
+            if not acquired:
+                LOG.info("another watcher holds the scan lock; skipping this tick")
+                return 0
             result = process_paths(load_state())
     except DriveQuotaError as exc:
         # Expected to clear within a minute. Record it (so the watchdog can see

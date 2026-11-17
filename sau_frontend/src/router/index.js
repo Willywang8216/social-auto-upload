@@ -24,6 +24,7 @@ const OAuthReviewStatus  = () => import('../views/OAuthReviewStatus.vue')
 const Calendar           = () => import('../views/CalendarView.vue')
 const Queue              = () => import('../views/QueueView.vue')
 const Inbox              = () => import('../views/InboxView.vue')
+const TeachingRepurpose  = () => import('../views/TeachingRepurpose.vue')
 const Settings           = () => import('../views/SettingsView.vue')
 const Help               = () => import('../views/HelpView.vue')
 const PrivacyPolicy      = () => import('../views/PrivacyPolicy.vue')
@@ -90,6 +91,7 @@ const routes = [
       { path: 'calendar',   component: Calendar,       meta: { title: 'Calendar — Socialupload' } },
       { path: 'queue',      component: Queue,           meta: { title: 'Queue — Socialupload' } },
       { path: 'inbox',      component: Inbox,           meta: { title: '傳入佇列 — Socialupload' } },
+      { path: 'teaching-repurpose', component: TeachingRepurpose, meta: { title: 'Teaching 重製 — Socialupload' } },
     ]
   },
 

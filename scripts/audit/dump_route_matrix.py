@@ -146,12 +146,13 @@ def _tables_detected(view_func) -> str:
     return ";".join(sorted(found))
 
 
-# Files whose route decorators contribute to the live url_map. sau_backend.py
-# holds the 137 monolith routes (@app.route); the Phase 1 health blueprint adds
-# a couple more (@health_bp.route) that are registered via init_extensions.
+# Each source below contributes Flask route decorators to the live url_map.
+# Unaccounted routes still fail the count check before the matrix can be
+# regenerated; include Teaching even while its feature flags are disabled.
 ROUTE_DECORATOR_SOURCES = (
     REPO_ROOT / "sau_backend.py",
     REPO_ROOT / "sau_app" / "health.py",
+    REPO_ROOT / "sau_app" / "repurpose" / "routes.py",
 )
 
 
@@ -201,7 +202,7 @@ def enumerate_routes() -> list[dict[str, str]]:
     if len(rows) != decorator_count:
         raise SystemExit(
             f"route count mismatch: url_map has {len(rows)} app routes but "
-            f"sau_backend.py contains {decorator_count} @app.route decorators — "
+            f"registered route sources contain {decorator_count} Flask route decorators — "
             "investigate before regenerating the matrix"
         )
     return rows

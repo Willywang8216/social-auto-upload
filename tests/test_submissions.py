@@ -43,7 +43,7 @@ def schema_db(tmp_path_factory):
     command.stamp(cfg, create_table.RAW_SCHEMA_REVISION)
     command.upgrade(cfg, "head")
     with closing(sqlite3.connect(path)) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0027_publish_readiness_and_integrity"
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0028_teaching_repurpose"
         assert conn.execute("SELECT COUNT(*) FROM publish_submissions").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM publish_alert_outbox").fetchone()[0] == 0
     return path

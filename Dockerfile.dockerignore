@@ -29,3 +29,4 @@ rclone-backup
 **/*.pyc
 .pytest_cache
 db/publish.pause
+ops

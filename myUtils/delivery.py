@@ -46,6 +46,13 @@ def state(payload: dict) -> dict:
 
 
 def checkpoint(context: dict, **changes) -> dict:
+    if ('articleRepurpose' in context and changes.get('submission_started') is True
+            and not changes.get('provider_receipt') and not state(context).get('provider_receipt')):
+        recheck = context.get('_teaching_dispatch_check')
+        if not callable(recheck):
+            from myUtils.media_restore import PrerequisiteUnavailable
+            raise PrerequisiteUnavailable('configuration')
+        recheck()
     current = {**state(context), **copy.deepcopy(changes)}
     context["_delivery"] = current
     persist = context.get("_save_checkpoint")

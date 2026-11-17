@@ -311,3 +311,10 @@ def test_committed_route_matrix_matches_the_live_app():
         "route matrix is stale; run scripts/audit/refresh_route_matrix.py\n"
         + (proc.stdout or "")[-2000:] + (proc.stderr or "")[-2000:]
     )
+
+
+def test_route_inventory_includes_teaching_repurpose_source():
+    from scripts.audit import dump_route_matrix as audit
+
+    source = audit.REPO_ROOT / "sau_app" / "repurpose" / "routes.py"
+    assert source in audit.ROUTE_DECORATOR_SOURCES

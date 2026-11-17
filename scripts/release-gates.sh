@@ -46,12 +46,25 @@ run_clean() {
     TEMP="$SCRATCH" TMP="$SCRATCH" TMPDIR="$SCRATCH" \
     PYTHONUTF8=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$TREE" \
     SAU_TESTING=1 APP_ENV=testing SAU_PROCESS_ROLE=web AWS_EC2_METADATA_DISABLED=true \
-    UV_NO_ENV_FILE=1 UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$SCRATCH/venv}" "$@"
+    UV_NO_ENV_FILE=1 UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$SCRATCH/venv}" \
+    UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$SCRATCH/python}" \
+    UV_CACHE_DIR="${UV_CACHE_DIR:-$SCRATCH/uv-cache}" \
+    UV_PYTHON_PREFERENCE="${UV_PYTHON_PREFERENCE:-managed}" \
+    PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$SCRATCH/browsers}" \
+    REPURPOSE_TEST_RULES_ROOT="${SAU_RELEASE_RULES_ROOT:-}" \
+    REPURPOSE_TEST_KATEX_ROOT="${SAU_RELEASE_KATEX_ROOT:-}" "$@"
 }
 cd "$TREE"
 backend() {
   local version="$1"
   export UV_PROJECT_ENVIRONMENT="$SCRATCH/venv-$version"
+  if [[ -d myUtils/repurpose ]]; then
+    [[ -f "${SAU_RELEASE_RULES_ROOT:-}/humanizer/scripts/check_tells.py" \
+       && -f "${SAU_RELEASE_KATEX_ROOT:-}/katex.min.js" ]] || {
+      echo 'Teaching release tests require mounted private rules and locked offline KaTeX assets.' >&2
+      exit 1
+    }
+  fi
   run_clean uv sync --frozen --python "$version" --extra web --group dev --no-install-project
   local python="$UV_PROJECT_ENVIRONMENT/bin/python"
   run_clean "$python" -m patchright install chromium
@@ -63,6 +76,12 @@ backend() {
 frontend() {
   [[ "$(node --version)" == v22.21.1 ]] || { echo 'Use release Node 22.21.1.' >&2; exit 1; }
   (cd sau_frontend && run_clean npm ci && run_clean npm test && run_clean npm run build)
+  if [[ -n "${SAU_RELEASE_KATEX_EXPORT:-}" ]]; then
+    [[ "$SAU_RELEASE_KATEX_EXPORT" == "$RECEIPTS/katex" \
+       && ! -e "$SAU_RELEASE_KATEX_EXPORT" && ! -L "$SAU_RELEASE_KATEX_EXPORT" ]]
+    cp -R sau_frontend/node_modules/katex/dist "$SAU_RELEASE_KATEX_EXPORT"
+    cp sau_frontend/node_modules/katex/LICENSE "$SAU_RELEASE_KATEX_EXPORT/LICENSE"
+  fi
   run_clean "$PYTHON" scripts/release_checks.py clean --revision "$REVISION" >/dev/null
   run_clean "$PYTHON" scripts/release_checks.py record --revision "$REVISION" --receipts "$RECEIPTS" --component frontend
 }

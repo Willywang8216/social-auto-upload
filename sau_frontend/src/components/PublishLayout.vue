@@ -19,6 +19,7 @@ const tabs = [
   { id: 'calendar', label: 'Calendar', path: '/publish/calendar' },
   { id: 'queue',   label: 'Queue',   path: '/publish/queue' },
   { id: 'inbox',   label: '傳入佇列',  path: '/publish/inbox' },
+  { id: 'teaching-repurpose', label: 'Teaching 重製', path: '/publish/teaching-repurpose' },
 ]
 </script>
 

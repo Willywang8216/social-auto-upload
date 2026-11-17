@@ -104,11 +104,11 @@ services:
       - ${SAU_CONF_FILE:-./conf.py}:/app/conf.py
       - ./data:/app/data
       - ./db:/app/db
-      # SAU-Inbox (phone-first) state: the watcher lives at /home/will/sau-inbox
-      # (host absolute, sibling of this app dir). RW so the app can approve/
-      # reject items (atomic tmp+rename in inbox_ops); the watcher owns the
-      # media files, the app only ever touches state.json.
-      - /home/will/sau-inbox:/app/sau-inbox
+      # Canonical private inbox is under the single SAU operations root.
+      # Override only for an existing installation not yet consolidated.
+      # Production consolidation retains the old-path alias until all frozen
+      # mounts and queued references no longer need it; state bytes stay exact.
+      - ${SAU_INBOX_HOST_DIR:-./ops/inbox}:/app/sau-inbox
       # Offload + digest logs so MCP/UI system-health can show the last run.
       - ./logs:/app/logs
       # rclone config for reading the offload cache back. It holds ONLY the

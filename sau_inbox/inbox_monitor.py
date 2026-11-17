@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(os.environ.get("SAU_WATCH_HOME", str(Path(__file__).resolve().parent)))
 HEALTH = Path(os.environ.get("SAU_WATCH_HEALTH", str(HERE / ".watch-health.json")))
 STATE = HERE / ".monitor-state.json"
 ALERT_COOLDOWN = 3600.0

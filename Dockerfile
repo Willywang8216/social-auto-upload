@@ -32,7 +32,7 @@ COPY --from=rclone/rclone:1.76.0@sha256:7cbeec24a44f206067597c0368be4de90ae19a64
 # Debian fix, including four HIGH in openssl and libpcre2.
 RUN apt-get update \
     && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends fonts-noto-cjk libcups2t64 \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk libcups2t64 openssh-client \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 RUN rclone version
@@ -64,6 +64,9 @@ RUN python scripts/release_checks.py static
 # base's cached browser revision is still the one this lock requires.
 RUN python -m patchright install chromium
 COPY --from=builder /app/dist /app/sau_frontend/dist
+# Offline formula renderer: no runtime CDN or private writing rules in the image.
+COPY --from=builder /app/node_modules/katex/dist ./myUtils/repurpose/katex
+COPY --from=builder /app/node_modules/katex/LICENSE ./myUtils/repurpose/katex/LICENSE
 # Older routes still use these root-level SPA paths.
 COPY --from=builder /app/dist/index.html /app
 COPY --from=builder /app/dist/assets /app/assets

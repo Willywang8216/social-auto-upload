@@ -24,3 +24,7 @@ rclone-backup
 *.bak
 .playwright-mcp
 .claude
+ops
+**/__pycache__
+**/*.pyc
+.pytest_cache

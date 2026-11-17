@@ -15,6 +15,7 @@ uploads it. Safe to re-run.
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import subprocess
 import sys
@@ -26,8 +27,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 DEFAULT_REMOTE = "Onedrive-Yahooforsub-Tao:credentials"
-RCLONE_CONFIG = "/home/will/.config/rclone/rclone.conf"
-ENV = REPO / ".env"
+RCLONE_CONFIG = os.environ.get("RCLONE_CONFIG", "/home/will/.config/rclone/rclone.conf")
+ENV = Path(os.environ.get("SAU_VAULT_ENV_FILE", str(REPO / ".env")))
 
 
 def _env() -> dict[str, str]:
@@ -136,8 +137,7 @@ def main() -> int:
     print(f"STT: {payload['stt']['local']['base_url_in_container']} "
           f"({payload['stt']['local']['model']})")
     if args.dry_run:
-        print("(dry run) would upload sau-llm-stt-endpoints.json:")
-        print(text[:600])
+        print("(dry run) would upload sau-llm-stt-endpoints.json; credential payload is not logged")
         return 0
 
     with tempfile.TemporaryDirectory(prefix="sau-llm-vault-") as tmp:

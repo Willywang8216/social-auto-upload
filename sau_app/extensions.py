@@ -79,6 +79,11 @@ def init_extensions(app: Flask, *, environ: Mapping[str, str] | None = None) -> 
 
     register_auth(app, config)
 
+    # Always wire the authenticated status surface; generation and owner release
+    # remain separately disabled until explicitly configured by the maintainer.
+    from .repurpose import register as register_repurpose
+    register_repurpose(app)
+
     app.config[_INIT_FLAG] = True
     return config
 

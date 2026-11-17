@@ -1,0 +1,16 @@
+# Small operations overlay, not a new web/worker release.
+ARG SAU_RUNTIME_IMAGE
+FROM ${SAU_RUNTIME_IMAGE}
+ARG SAU_RUNTIME_ID
+ARG SAU_OPS_REVISION
+LABEL io.sau.operations-tools="1" \
+      io.sau.operations-revision="${SAU_OPS_REVISION}" \
+      io.sau.runtime-image="${SAU_RUNTIME_ID}"
+USER 0
+COPY sau_inbox/watch.py sau_inbox/thumb.py sau_inbox/manual_platforms.py sau_inbox/gen_title.py sau_inbox/inbox_monitor.py /app/sau_inbox/
+COPY scripts/push_credentials_vault.py scripts/push_llm_stt_vault.py /app/scripts/
+COPY docker/ops-entrypoint.py /usr/local/bin/sau-ops-runner.py
+RUN chmod 0444 /app/sau_inbox/*.py /app/scripts/push_credentials_vault.py /app/scripts/push_llm_stt_vault.py /usr/local/bin/sau-ops-runner.py
+USER 1000:1000
+WORKDIR /app
+ENTRYPOINT ["python", "/usr/local/bin/sau-ops-runner.py"]

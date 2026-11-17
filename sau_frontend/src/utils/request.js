@@ -99,6 +99,16 @@ function rejectResponse(error) {
 request.interceptors.response.use(
   (response) => {
     const { data } = response
+    if (response.config?.sauBinary === true && response.config?.responseType === 'blob'
+        && response.status >= 200 && response.status < 300 && data instanceof Blob) {
+      if (response.config._sauAuthRevision !== getAuthRevision()) {
+        const error = new Error('Authentication changed during private media request')
+        error.code = 'ERR_CANCELED'
+        error.config = response.config
+        return rejectResponse(error)
+      }
+      return data
+    }
     if (data && (data.code === 200 || data.success === true)) return data
     const error = new Error(data?.msg || data?.message || '無效的伺服器回應')
     // Preserve status/config for callers deciding whether an error is retryable.

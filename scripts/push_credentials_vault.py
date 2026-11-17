@@ -244,7 +244,7 @@ def main() -> int:
     args = parser.parse_args()
 
     db_path = Path(args.db_path)
-    env = _load_env(REPO / ".env")
+    env = _load_env(Path(os.environ.get("SAU_VAULT_ENV_FILE", str(REPO / ".env"))))
     accounts = _accounts()
 
     workdir = Path(tempfile.mkdtemp(prefix="sau-vault-"))
