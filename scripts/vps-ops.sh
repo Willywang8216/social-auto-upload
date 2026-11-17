@@ -69,7 +69,7 @@ docker run --rm --name "$NAME" --label io.sau.ops=cron --label "io.sau.job=$JOB"
   --memory 1g --memory-swap 1g --cap-drop ALL --security-opt no-new-privileges \
   --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 \
   --network 1panel-network --add-host host.docker.internal:host-gateway \
-  --log-opt max-size=10m --log-opt max-file=2 \
+  --log-driver local --log-opt max-size=10m --log-opt max-file=2 \
   "${MOUNTS[@]}" "$IMAGE" "${ARGS[@]}"
 RC=$?
 set -e

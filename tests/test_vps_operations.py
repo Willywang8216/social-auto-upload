@@ -178,7 +178,7 @@ def launcher(tmp_path):
                     '  "image inspect") case "$*" in *operations-tools*) echo 1;; *) echo "$FAKE_BASE";; esac;;\n'
                     '  "inspect --format") echo "$FAKE_BASE";;\n'
                     '  "container inspect") test -e "$FAKE_ORPHAN";;\n'
-                    '  "run --rm") exit 0;;\n'
+                    '  "run --rm") case "$*" in *"--log-driver local"*) exit 0;; *) echo "journald default rejects file rotation options" >&2; exit 125;; esac;;\n'
                     '  *) exit 2;;\n'
                     'esac\n')
     fake.chmod(0o755)
@@ -209,6 +209,18 @@ def test_host_controller_scopes_mounts_and_is_not_docker_in_docker(launcher):
     assert '/app/.env,readonly' in run and '/app/cookiesFile,readonly' in run
     assert '/config/onedrive,dst=/run/rclone' in run
     assert '/home/will/.config/rclone' not in run
+
+
+@pytest.mark.parametrize('job', ['watcher', 'inbox-monitor', 'pipeline-monitor', 'inbox-archive',
+                                 'inbox-autopublish', 'vault-credentials', 'vault-llm-stt'])
+def test_host_controller_pins_bounded_logging_on_journald_hosts(launcher, job):
+    # The fake daemon rejects file rotation options under its journald default
+    # unless the controller selects the supported, bounded local driver.
+    result, log = invoke(launcher, job)
+    assert result.returncode == 0, result.stderr
+    run = [line for line in log.splitlines() if line.startswith('run ')][-1]
+    assert '--log-driver local' in run
+    assert '--log-opt max-size=10m' in run and '--log-opt max-file=2' in run
 
 
 def test_host_controller_skips_competing_lock_and_refuses_existing_container(launcher):
