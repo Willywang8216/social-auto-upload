@@ -28,7 +28,7 @@ def test_vps_gate_runtime_is_isolated_and_fixed_toolchain():
     assert '/var/run/docker.sock' not in launcher
     assert '--read-only --no-healthcheck --init --pids-limit 256 --cpus 2' in launcher
     assert '--memory 6g --memory-swap 6g' in launcher
-    assert '/work:rw,exec,nosuid,nodev' in launcher
+    assert '/work:rw,exec,nosuid,nodev,size=6g,' in launcher
     assert '--cap-drop ALL --security-opt no-new-privileges' in launcher
     assert '/ops/verification/' in launcher and 'Existing container' in launcher
     assert 'node:22.21.1-slim' in tools and '^uv 0.12.7' in tools
