@@ -1240,13 +1240,14 @@ class PublishWorker:
                         and _ambiguous_transport_error(exc))
         if (safe_prerequisite or preview_only) and not delivery.has_unresolved_submission({"_delivery": checkpoint}):
             category = error_details.get("dependencyCategory", "transport") if safe_prerequisite else "browser_preparing"
+            cached_wait = safe_prerequisite and error_details.get("cachedDependencyWait") is True
             delay = max(1, getattr(exc, "retry_after_seconds", 120), _retry_after_seconds(exc))
             attempts = (checkpoint.get("prerequisites") or {}).get("attempts", 0)
-            if type(attempts) is int and attempts >= 0:
+            if not cached_wait and type(attempts) is int and attempts >= 0:
                 delay = max(delay, min(1800, 120 * 2 ** min(attempts, 4)))
             changed = jobs.defer_target_prerequisite(target.id, message, lease_token=target.lease_token,
                 category=category, delay_seconds=delay, retryable=getattr(exc, "retryable", True),
-                max_attempts=self._config.prerequisite_max_attempts, db_path=self._db_path,
+                max_attempts=self._config.prerequisite_max_attempts, db_path=self._db_path, cached_wait=cached_wait,
                 stage=error_details.get("stage", "waiting_dependency") if safe_prerequisite else "browser_preparing")
             if changed:
                 log.warning(f"Prerequisite deferred/stopped before provider create: {category}")

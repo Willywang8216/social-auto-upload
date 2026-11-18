@@ -368,20 +368,22 @@ def test_quota_uses_bounded_exact_registered_healthy_alternative_before_any_budg
     assert not current.checkpoint.get("publish_routes", {}).get("native", {}).get("attempts")
 
 
-def test_quota_hold_survives_restart_without_hammering_or_spending_native_budget(fixture, monkeypatch):
+def test_quota_hold_survives_restart_without_spending_prerequisite_or_native_budget(fixture, monkeypatch):
     install_backend(fixture)
     job, target = enqueue(fixture)
     probe = Mock(side_effect=RuntimeError("Drive quota exceeded"))
     transfer = Mock(side_effect=AssertionError("known quota must not download"))
     monkeypatch.setattr(worker.media_remote_storage, "stat_from_backend", probe)
     monkeypatch.setattr(worker.media_remote_storage, "download_from_backend", transfer)
-    for _ in range(2):
+    dispatches = jobs.PREREQUISITE_MAX_ATTEMPTS + 2
+    for _ in range(dispatches):
         asyncio.run(instance(fixture)._run_target_inline(claim(fixture)))
         current = jobs.get_target(target.id, db_path=fixture["path"])
         assert current.status == "retrying" and current.error_category == "prerequisite_quota"
         execute_sql(fixture["path"], "UPDATE publish_job_targets SET next_attempt_at='2000-01-01T00:00:00' WHERE id=?", (target.id,))
     current = jobs.get_target(target.id, db_path=fixture["path"])
-    assert current.attempts == 2 and current.checkpoint["prerequisites"]["attempts"] == 2
+    assert current.attempts == dispatches and current.checkpoint["prerequisites"]["attempts"] == 1
+    assert current.checkpoint["prerequisites"]["cached_wait"] is True
     assert not current.checkpoint.get("publish_routes", {}).get("native", {}).get("attempts")
     assert probe.call_count == 1
     transfer.assert_not_called()
@@ -560,3 +562,54 @@ def test_runtime_hash_excludes_only_admission_fields_not_copy_options_or_provena
                     {**payload, "artifacts": [{"sha256": "c" * 64, "metadata": {"source_sha256": "b" * 64}}]},
                     {**payload, "artifacts": [{"sha256": "a" * 64, "metadata": {"source_sha256": "d" * 64}}]}):
         assert jobs.derive_idempotency_key(replace(spec, payload=changed)) != key
+
+
+def test_cached_quota_wait_preserves_last_attempt_and_wakes_at_hold_expiry(fixture, monkeypatch):
+    install_backend(fixture)
+    _job, target = enqueue(fixture)
+    probe = Mock(side_effect=RuntimeError("Drive quota exceeded"))
+    monkeypatch.setattr(worker.media_remote_storage, "stat_from_backend", probe)
+    asyncio.run(instance(fixture)._run_target_inline(claim(fixture)))
+    current = jobs.get_target(target.id, db_path=fixture["path"])
+    checkpoint = current.checkpoint
+    checkpoint["prerequisites"]["attempts"] = jobs.PREREQUISITE_MAX_ATTEMPTS - 1
+    execute_sql(fixture["path"], "UPDATE publish_job_targets SET checkpoint_json=?,next_attempt_at='2000-01-01T00:00:00' WHERE id=?",
+                (json.dumps(checkpoint), target.id))
+    until = datetime.now(timezone.utc) + timedelta(seconds=30)
+    execute_sql(fixture["path"], "UPDATE publish_dependency_states SET blocked_until=? WHERE kind='media_restore'",
+                (until.isoformat(),))
+    asyncio.run(instance(fixture)._run_target_inline(claim(fixture)))
+    current = jobs.get_target(target.id, db_path=fixture["path"])
+    assert current.status == "retrying"
+    assert current.checkpoint["prerequisites"]["attempts"] == jobs.PREREQUISITE_MAX_ATTEMPTS - 1
+    assert not current.checkpoint["prerequisites"]["exhausted"]
+    due = jobs._utc_datetime(current.next_attempt_at).replace(tzinfo=timezone.utc)
+    assert 0 <= (due - until).total_seconds() < 3
+    assert current.attempts == 2 and probe.call_count == 1
+
+
+@pytest.mark.parametrize("mutation", ["cancel", "lease", "expired", "receipt", "unknown"])
+def test_cached_prerequisite_deferral_keeps_claim_and_submission_fences(fixture, mutation):
+    _job, target = enqueue(fixture)
+    claimed = claim(fixture)
+    if mutation == "cancel":
+        jobs.cancel_job(target.job_id, db_path=fixture["path"])
+    elif mutation == "lease":
+        execute_sql(fixture["path"], "UPDATE publish_job_targets SET lease_token='replacement' WHERE id=?", (target.id,))
+    elif mutation == "expired":
+        execute_sql(fixture["path"], "UPDATE publish_job_targets SET lease_expires_at='2000-01-01T00:00:00' WHERE id=?", (target.id,))
+    else:
+        evidence = {"submission_started": True}
+        if mutation == "receipt":
+            evidence["provider_receipt"] = {"provider": "twitter", "id": "123", "status": "processing"}
+        assert jobs.save_target_checkpoint(target.id, evidence, lease_token=claimed.lease_token, db_path=fixture["path"])
+    before = rows(fixture["path"], "publish_job_targets")
+    def defer():
+        return jobs.defer_target_prerequisite(target.id, "cached quota", lease_token=claimed.lease_token,
+            category="quota", delay_seconds=30, cached_wait=True, db_path=fixture["path"])
+    if mutation in {"receipt", "unknown"}:
+        with pytest.raises(delivery.DeliveryUnknown):
+            defer()
+    else:
+        assert defer() is False
+    assert rows(fixture["path"], "publish_job_targets") == before

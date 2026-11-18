@@ -658,3 +658,125 @@ def test_longer_probe_cannot_bypass_a_live_provider_cooldown(registered, monkeyp
         media_restore.restore_artifact(destination, {"sha256": SHA}, [DRIVE], db_path=db,
             reserve_bytes=0, probe_deadline_seconds=45)
     assert not destination.exists() and _facts(db) == (None, None)
+
+
+@pytest.mark.parametrize("stage", ["probe", "download"])
+def test_drive_download_quota_is_exact_object_scoped(registered, monkeypatch, stage):
+    db, destination = registered
+    other_destination = destination.with_name("other-exact.mp4")
+    other = dict(DRIVE, storage_key="registered/other-exact.mp4")
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("INSERT INTO file_records(filename,file_path,filesize) VALUES (?,?,?)",
+                     (other_destination.name, str(other_destination), .001))
+    calls = []
+    def quota():
+        raise subprocess.CalledProcessError(1, ["rclone"], stderr="403 downloadQuotaExceeded secret=never-persist")
+    def probe(source, **kwargs):
+        calls.append(("probe", source["storage_key"]))
+        if stage == "probe" and source["storage_key"] == DRIVE["storage_key"]:
+            quota()
+        return {"size_bytes": len(MEDIA)}
+    def download(backend, key, temporary, **kwargs):
+        calls.append(("download", key))
+        if stage == "download" and key == DRIVE["storage_key"]:
+            quota()
+        Path(temporary).write_bytes(MEDIA)
+    monkeypatch.setattr(media_restore, "probe_source", probe)
+    monkeypatch.setattr(media_remote_storage, "download_from_backend", download)
+    failure = _failure(db, destination, [DRIVE])
+    assert failure.details["dependencyCategory"] == "quota"
+    assert ":object:" in failure.details["dependencyScope"]
+    assert not failure.details.get("cachedDependencyWait", False)
+    before = list(calls)
+    assert _failure(db, destination, [DRIVE]).details["cachedDependencyWait"] is True
+    assert calls == before
+    result = media_restore.restore_artifact(other_destination, {"sha256": SHA}, [other], db_path=db, reserve_bytes=0)
+    assert result["sha256"] == SHA and other_destination.read_bytes() == MEDIA
+    assert media_restore.dependency_status(other, db_path=db)["status"] == "healthy"
+    with closing(sqlite3.connect(db)) as conn:
+        stored = repr(conn.execute("SELECT * FROM publish_dependency_states").fetchall())
+    assert "never-persist" not in stored and DRIVE["storage_key"] not in stored
+    assert not destination.exists() and not list(destination.parent.glob(".*.restore"))
+
+
+@pytest.mark.parametrize("message,status", [
+    ("quotaExceeded", None), ("userRateLimitExceeded", None), ("rateLimitExceeded", None),
+    ("dailyLimitExceeded", None), ("downloadQuotaExceeded userRateLimitExceeded", None),
+    ("downloadQuotaExceeded", 429),
+])
+def test_account_wide_quota_evidence_keeps_shared_remote_hold(registered, monkeypatch, message, status):
+    db, destination = registered
+    def blocked(source, **kwargs):
+        error = subprocess.CalledProcessError(1, ["rclone"], stderr=message)
+        error.response = SimpleNamespace(status_code=status)
+        raise error
+    monkeypatch.setattr(media_restore, "probe_source", blocked)
+    failure = _failure(db, destination, [DRIVE])
+    assert failure.details["dependencyCategory"] == "quota"
+    assert ":object:" not in failure.details["dependencyScope"]
+    assert media_restore.dependency_status(dict(DRIVE, storage_key="other"), db_path=db)["status"] == "blocked"
+
+
+def test_cached_first_source_does_not_hide_real_alternative_failure(registered, monkeypatch):
+    db, destination = registered
+    scope, fingerprint = media_restore.dependency_identity(DRIVE)
+    media_restore._admit(db, scope, fingerprint, "media_restore")
+    media_restore._record_state(db, scope, fingerprint, "quota")
+    monkeypatch.setattr(media_restore, "probe_source", lambda *a, **k: pytest.fail("cached Drive hold must not probe"))
+    downloads = []
+    def broken(url, temporary, **kwargs):
+        downloads.append(url)
+        raise RuntimeError("connection reset")
+    monkeypatch.setattr(outbound_http, "download_public_file", broken)
+    failure = _failure(db, destination, [DRIVE, PUBLIC])
+    assert failure.details["dependencyCategory"] == "transport"
+    assert not failure.details.get("cachedDependencyWait", False)
+    assert downloads == [URL]
+    assert media_restore.dependency_status(DRIVE, db_path=db)["status"] == "blocked"
+
+
+def test_cached_hold_rounds_retry_delay_up_without_changing_hold(registered, monkeypatch):
+    db, _destination = registered
+    now = media_restore._now()
+    monkeypatch.setattr(media_restore, "_now", lambda: now)
+    scope, fingerprint = media_restore.dependency_identity(DRIVE)
+    media_restore._admit(db, scope, fingerprint, "media_restore")
+    until = now + timedelta(seconds=30.75)
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("UPDATE publish_dependency_states SET status='blocked',reason='quota',blocked_until=? WHERE scope_key=?",
+                     (until.isoformat(), scope))
+    with pytest.raises(media_restore.PrerequisiteUnavailable) as caught:
+        media_restore._admit(db, scope, fingerprint, "media_restore")
+    assert caught.value.retry_after_seconds == 31
+    assert caught.value.details["cachedDependencyWait"] is True
+    assert media_restore.dependency_status(DRIVE, db_path=db)["blocked_until"] == until.isoformat()
+
+
+@pytest.mark.parametrize("stderr", ["googleapi: Error 429: downloadQuotaExceeded", "HTTP 429 downloadQuotaExceeded",
+                                   "downloadQuotaExceeded; rate limit exceeded"])
+def test_file_quota_with_http_or_account_rate_limit_stays_remote_scoped(registered, monkeypatch, stderr):
+    db, destination = registered
+    error = subprocess.CalledProcessError(1, ["rclone"], stderr=stderr)
+    monkeypatch.setattr(media_restore, "probe_source", lambda *a, **k: (_ for _ in ()).throw(error))
+    failure = _failure(db, destination, [DRIVE])
+    assert failure.details["dependencyCategory"] == "quota"
+    assert ":object:" not in failure.details["dependencyScope"]
+
+
+def test_quota_scope_never_uses_command_as_provider_evidence():
+    error = subprocess.CalledProcessError(1, ["rclone", "lsjson", "owned:downloadQuotaExceeded"],
+                                          stderr="quotaExceeded")
+    assert not media_restore._failure_is_object_scoped(DRIVE, error, "quota")
+
+
+def test_availability_probe_keeps_download_quota_on_exact_object(registered, monkeypatch):
+    db, _destination = registered
+    error = subprocess.CalledProcessError(1, ["rclone"], stderr="downloadQuotaExceeded")
+    monkeypatch.setattr(media_restore, "probe_source", lambda *a, **k: (_ for _ in ()).throw(error))
+    result = media_restore.source_availability(DRIVE, db_path=db)
+    assert not result["available"] and not result["integrity_verified"]
+    assert ":object:" in result["dependencyScope"]
+    before = media_restore.dependency_status(DRIVE, db_path=db)
+    cached = media_restore.source_availability(DRIVE, db_path=db)
+    assert cached["cachedDependencyWait"] is True
+    assert media_restore.dependency_status(DRIVE, db_path=db) == before

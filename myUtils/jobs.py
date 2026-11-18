@@ -1092,12 +1092,18 @@ def mark_target_awaiting_delivery(
 def defer_target_prerequisite(target_id: int, error: str, *, lease_token: str,
         category: str, delay_seconds: float = 120, retryable: bool = True,
         max_attempts: int = PREREQUISITE_MAX_ATTEMPTS, db_path: Path | None = None,
-        stage: str = "waiting_dependency") -> bool:
-    """Own bounded no-post holds; NEVER reset/refund publishing/dispatch history."""
+        stage: str = "waiting_dependency", cached_wait: bool = False) -> bool:
+    """Bounded no-post failures; cached waits spend no attempt or provider budget.
+
+    Existing counters/maxima are never reset or refunded. Claims and retained
+    submission evidence use the same fences for waits as for actual failures.
+    """
     from myUtils import delivery as evidence
     delay = _seconds(delay_seconds, positive=True)
     if type(max_attempts) is not int or not 1 <= max_attempts <= 100:
         raise ValueError("Prerequisite attempts must have a positive bounded limit")
+    if type(cached_wait) is not bool:
+        raise ValueError("Cached prerequisite wait must be a boolean")
     with _transaction(db_path, must_exist=True) as conn:
         row = _running_target(conn, target_id, lease_token)
         if row is None:
@@ -1110,12 +1116,12 @@ def defer_target_prerequisite(target_id: int, error: str, *, lease_token: str,
         if type(attempts) is not int or attempts < 0 or type(maximum) is not int or maximum < 1:
             raise evidence.DeliveryUnknown("Invalid prerequisite stage counter")
         maximum = min(maximum, max_attempts)
-        attempts += 1
+        attempts += 0 if cached_wait else 1
         stopped = not retryable or attempts >= maximum
         due = None if stopped else _after_seconds(delay)
         progress = {**prior, "attempts": attempts, "max_attempts": maximum,
                     "category": str(category)[:64], "next_attempt_at": due,
-                    "updated_at": _now_iso(), "exhausted": stopped}
+                    "updated_at": _now_iso(), "exhausted": stopped, "cached_wait": cached_wait}
         text, _ = _merge_checkpoint(row["checkpoint_json"], {"prerequisites": progress,
             "readiness": {"ready": False, "phase": "blocked_intent" if stopped else stage,
                           "stage": stage, "reasonCode": str(category)[:64], "nextAttemptAt": due}})

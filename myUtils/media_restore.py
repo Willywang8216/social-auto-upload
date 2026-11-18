@@ -9,7 +9,9 @@ from __future__ import annotations
 import configparser
 import hashlib
 import json
+import math
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -36,13 +38,16 @@ class PrerequisiteUnavailable(RuntimeError):
     """Safe no-post prerequisite failure; never contains URLs or credentials."""
 
     def __init__(self, category: str, *, retry_after_seconds: float | None = None,
-                 scope_key: str | None = None):
+                 scope_key: str | None = None, cached_wait: bool = False):
         self.retryable = category not in {"missing", "integrity", "identity"}
-        self.retry_after_seconds = max(1, int(retry_after_seconds or COOLDOWNS.get(category, 120)))
+        # A fractional remaining hold must never schedule a probe before expiry.
+        self.retry_after_seconds = max(1, math.ceil(retry_after_seconds or COOLDOWNS.get(category, 120)))
         self.details = {"prerequisiteFailure": True, "dependencyCategory": category,
                         "stage": "waiting_capacity" if category == "capacity" else "waiting_dependency"}
         if scope_key:
             self.details["dependencyScope"] = scope_key
+        if cached_wait:
+            self.details["cachedDependencyWait"] = True
         super().__init__(f"media prerequisite unavailable: {category}")
 
 
@@ -167,7 +172,7 @@ def _admit(db_path: Path, scope: str, fingerprint: str, kind: str) -> bool:
             except (TypeError, ValueError):
                 until = now + timedelta(seconds=COOLDOWNS.get(row["reason"], 120))
             if until > now:
-                raise PrerequisiteUnavailable(row["reason"] or "transport",
+                raise PrerequisiteUnavailable(row["reason"] or "transport", cached_wait=True,
                                               retry_after_seconds=(until - now).total_seconds(), scope_key=scope)
             conn.execute("""UPDATE publish_dependency_states SET status='probing',blocked_until=?,updated_at=?
                 WHERE scope_key=? AND config_fingerprint=?""",
@@ -217,6 +222,31 @@ def classify_failure(exc: Exception) -> str:
     if isinstance(exc, outbound_http.OutboundUrlError):
         return "identity"
     return "transport"
+
+
+def _failure_is_object_scoped(source: dict, exc: Exception, category: str) -> bool:
+    """Only explicit file-quota evidence narrows a quota hold; ambiguity stays shared.
+
+    Drive downloadQuotaExceeded applies to the selected file. HTTP 429 and
+    account/client rate limits must still block every object on that remote.
+    Inspect stderr only, never the CalledProcessError command/path (an object
+    named like an error code is not provider evidence).
+    """
+    if category in {"missing", "identity", "integrity"}:
+        return True
+    if (category != "quota" or (source.get("backend") or {}).get("provider") != "rclone"
+            or not isinstance(exc, subprocess.CalledProcessError)):
+        return False
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(response, dict):
+        status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    text = str(exc.stderr or "").lower()
+    shared = (r"\b(?:quotaexceeded|dailylimitexceeded|userratelimitexceeded|ratelimitexceeded|sharingratelimitexceeded)\b"
+              r"|\brate[\s_-]*limit\b|\btoo many requests\b"
+              r"|\b(?:http(?:/\d(?:\.\d)?)?\s*[:=]?\s*|error\s+)429\b")
+    return (str(status) != "429" and bool(re.search(r"\bdownloadquotaexceeded\b", text))
+            and not re.search(shared, text))
 
 
 def check_capacity(destination: Path, *, db_path: Path, input_bytes: int,
@@ -275,7 +305,7 @@ def source_availability(source: dict, *, db_path: Path,
         return {"available": True, "integrity_verified": False, **facts}
     except Exception as exc:
         category = classify_failure(exc)
-        target, token = (object_scope, object_fingerprint) if category in {"missing", "identity", "integrity"} else (scope, fingerprint)
+        target, token = (object_scope, object_fingerprint) if _failure_is_object_scoped(source, exc, category) else (scope, fingerprint)
         if not isinstance(exc, PrerequisiteUnavailable):
             _record_state(db_path, target, token, category)
         failure = exc if isinstance(exc, PrerequisiteUnavailable) else PrerequisiteUnavailable(category, scope_key=target)
@@ -469,14 +499,16 @@ def restore_artifact(destination: Path, artifact: dict, sources: list[dict], *, 
             return {"path": destination, "sha256": digest, "size_bytes": size, "source": source}
         except Exception as exc:
             category = classify_failure(exc)
-            target, token = (object_scope, object_fingerprint) if category in {"integrity", "identity", "missing"} else (scope, fingerprint)
+            target, token = (object_scope, object_fingerprint) if _failure_is_object_scoped(source, exc, category) else (scope, fingerprint)
             if not isinstance(exc, PrerequisiteUnavailable):
                 _record_state(db_path, target, token, category)
             failures.append(exc if isinstance(exc, PrerequisiteUnavailable) else PrerequisiteUnavailable(category, scope_key=target))
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
-    # A permanent exact-byte/identity failure must not be disguised as a quota hold.
+    # Permanent failures win; an actual alternative failure must not be hidden
+    # by an earlier cached hold and thereby escape the finite prerequisite budget.
     permanent = [failure for failure in failures if not failure.retryable]
-    failure = permanent[0] if permanent else failures[0]
+    attempted = [failure for failure in failures if not failure.details.get("cachedDependencyWait")]
+    failure = (permanent or attempted or failures)[0]
     raise failure from None
