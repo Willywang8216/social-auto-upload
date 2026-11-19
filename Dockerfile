@@ -8,6 +8,16 @@ ENV NODE_ENV=production
 ENV PATH=/app/node_modules/.bin:$PATH
 RUN npm run build
 
+# The official 1.76.0 image embeds Go 1.27.3 (CVE-2026-97054). Keep the stable
+# rclone source and module locks, but verify/build with official Go 1.27.4.
+ARG TARGETARCH
+COPY docker/build-rclone-fixed.sh /tmp/build-rclone-fixed.sh
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && TARGETARCH="$TARGETARCH" sh /tmp/build-rclone-fixed.sh \
+    && rm /tmp/build-rclone-fixed.sh
+
 # Production runtime is the base image's Python (3.12.14), asserted below.
 # Base rebuilt on Python 3.12.14 and pushed to GHCR. The digest below is the
 # REGISTRY MANIFEST digest (not the local image id) - rebuilding Dockerfile.base
@@ -23,9 +33,9 @@ WORKDIR /app
 COPY --from=uv /uv /usr/local/bin/uv
 
 # Preserve CJK rendering and the existing writable rclone-cache mount.
-# Pin the official multi-platform release that includes Go 1.27.3 and x/net
-# v0.62.0, fixing CVE-2026-111943 and CVE-2026-78661. Never use a floating tag.
-COPY --from=rclone/rclone:1.76.0@sha256:7cbeec24a44f206067597c0368be4de90ae19a64d5113c7d1938bd737a81e466 /usr/local/bin/rclone /usr/local/bin/rclone
+# Upstream stable source and fixed compiler are checksum-locked by the build
+# script; its version checks reject the vulnerable Go binary before copying.
+COPY --from=builder /rclone-fixed /usr/local/bin/rclone
 # Debian publishes security fixes after the base image is built, and the base is
 # pinned by digest, so without an explicit upgrade the OS packages freeze at
 # base-build time. The image scan found 55 findings that already had a published
