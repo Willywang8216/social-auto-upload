@@ -304,13 +304,15 @@ def _check_duplicates(conn, target, keys, identity, aliases):
 
 
 def _snapshot(conn, target_id: int, *, resolved: bool, aliases=None, unstarted_pending: bool = False,
-              reviewed_prerequisite: bool = False) -> dict:
-    if reviewed_prerequisite and unstarted_pending:
-        raise RecoveryRefused("Reviewed blocked recovery cannot select pending work")
+              reviewed_prerequisite: bool = False, reviewed_restored_dependency: bool = False) -> dict:
+    if (type(reviewed_restored_dependency) is not bool
+            or sum(bool(value) for value in (reviewed_prerequisite, unstarted_pending, reviewed_restored_dependency)) > 1):
+        raise RecoveryRefused("Reviewed recovery and pending preprocessing authorities must be disjoint")
     target = conn.execute("SELECT * FROM publish_job_targets WHERE id=?", (target_id,)).fetchone()
     expected_status = "blocked" if reviewed_prerequisite else "pending" if unstarted_pending else "failed"
-    if target is None or target["status"] != expected_status:
-        raise RecoveryRefused(f"target is missing or no longer {expected_status}")
+    statuses = {"blocked", "retrying"} if reviewed_restored_dependency else {expected_status}
+    if target is None or target["status"] not in statuses:
+        raise RecoveryRefused(f"target is missing or no longer {'blocked/retrying' if reviewed_restored_dependency else expected_status}")
     job = conn.execute("SELECT * FROM publish_jobs WHERE id=?", (target["job_id"],)).fetchone()
     if job is None or job["status"] not in _LIVE_JOBS or (unstarted_pending and job["status"] == "failed"):
         raise RecoveryRefused("terminal or missing parent intent")
@@ -319,10 +321,14 @@ def _snapshot(conn, target_id: int, *, resolved: bool, aliases=None, unstarted_p
     if job_runtime._recovery_has_submission_evidence(target["checkpoint_json"], target["delivery_state"]):
         raise RecoveryRefused("submission evidence requires separate reconciliation")
     payload = _object(job["payload_json"], "job payload")
-    if reviewed_prerequisite:
-        from myUtils.reviewed_recovery import assert_prerequisite
+    restored_proof = None
+    if reviewed_prerequisite or reviewed_restored_dependency:
+        from myUtils.reviewed_recovery import assert_prerequisite, assert_restored_dependency
         try:
-            assert_prerequisite(target, job["payload_json"])
+            if reviewed_restored_dependency:
+                restored_proof = assert_restored_dependency(target, job["payload_json"], conn=conn)
+            else:
+                assert_prerequisite(target, job["payload_json"])
         except ValueError as exc:
             raise RecoveryRefused(str(exc)) from None
     if unstarted_pending:
@@ -366,7 +372,7 @@ def _snapshot(conn, target_id: int, *, resolved: bool, aliases=None, unstarted_p
     # Recounts/projections change when another sibling in THIS plan is applied.
     # Exclude only those derived fields; terminal intent is always checked above.
     # Raw config (including encrypted token/expiry metadata) is hashed, not emitted.
-    return {
+    state = {
         "target": dict(target), "account": dict(account), "profile": dict(profile),
         "job": {key: job[key] for key in job.keys() if key not in _JOB_PROJECTION},
         "job_targets": [dict(row) for row in conn.execute(
@@ -375,6 +381,9 @@ def _snapshot(conn, target_id: int, *, resolved: bool, aliases=None, unstarted_p
         )],
         "campaign": campaign, "identity": identity, "policy": policy, "resolved": resolved,
     }
+    if restored_proof is not None:
+        state["restored_dependency"] = restored_proof
+    return state
 
 
 def _fingerprint(snapshot: dict, slot: str, per_day_cap: int | None) -> str:

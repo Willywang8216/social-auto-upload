@@ -2260,8 +2260,9 @@ def _exact_file_refs(path: Path, stored: str = "") -> tuple[str, ...]:
     return tuple(sorted(refs))
 
 
-def _registered_restore_sources(artifact: dict, path: Path, *, payload: dict, db_path: Path) -> tuple[dict, list[dict]]:
-    """Resolve exact registered variants only, outside any queue transaction.
+def _registered_restore_sources(artifact: dict, path: Path, *, payload: dict, db_path: Path | None = None,
+                                conn=None) -> tuple[dict, list[dict]]:
+    """Resolve exact variants in the caller's or an isolated read snapshot.
 
     A source_file_record_id is provenance, NOT a substitute for the selected
     part. It is usable only when its complete registered path is this exact file.
@@ -2275,9 +2276,13 @@ def _registered_restore_sources(artifact: dict, path: Path, *, payload: dict, db
     campaign_id = artifact.get("campaign_id", payload.get("campaignId"))
     identifier = artifact.get("id", artifact.get("artifact_id"))
     records, campaign_rows = [], []
-    with jobs._connect(db_path, must_exist=True) as conn:
-        conn.execute("PRAGMA query_only = ON")
-        conn.execute("BEGIN")
+    owned_connection = conn is None
+    if owned_connection and db_path is None:
+        raise ValueError("Exact source resolution requires an existing database or caller snapshot")
+    with (jobs._connect(db_path, must_exist=True) if owned_connection else contextlib.nullcontext(conn)) as conn:
+        if owned_connection:
+            conn.execute("PRAGMA query_only = ON")
+            conn.execute("BEGIN")
         if campaign_id is not None:
             if payload.get("campaignId") is not None and payload["campaignId"] != campaign_id:
                 raise media_restore.PrerequisiteUnavailable("identity")

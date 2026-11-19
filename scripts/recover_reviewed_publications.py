@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Explicitly reviewed recovery of complete failed/prerequisite publication groups.
 
-Requires --review-resolved-prerequisites AND frozen --target-id values in BOTH
-phases. A saved manifest never supplies that authority. Preparation restores only
+Requires --review-resolved-prerequisites and frozen --target-id values in BOTH
+phases. Restored quota waits also require --review-restored-dependency-waits in
+both phases. A saved manifest never supplies that authority. Preparation restores only
 registered selected media, validates current destinations/grants/options and
 encodes every exact selected interval. Apply revalidates under the same SQLite
 write transaction, preserves counters/history, and installs confirmed-delivery
@@ -28,7 +29,9 @@ from myUtils.secret_redaction import redact_text
 from scripts import recover_failed_targets as recovery, preprocess_failed_targets as prep
 
 
-def _selection(target_ids, reviewed: bool) -> list[int]:
+def _selection(target_ids, reviewed: bool, *, restored_waits: bool = False) -> list[int]:
+    if type(restored_waits) is not bool:
+        raise ValueError("Restored dependency review must be an explicit boolean authority")
     if reviewed is not True or target_ids is None:
         raise ValueError("Explicit prerequisite review and frozen target IDs are required at execution")
     ids = sorted(recovery._ids(target_ids, "target_ids"))
@@ -71,14 +74,17 @@ def _part_key(target, job, payload, identity):
     return key, index, count
 
 
-def _snapshot(conn, target_id: int, selected: list[int]) -> dict:
+def _snapshot(conn, target_id: int, selected: list[int], *, review_restored_dependency_waits: bool = False) -> dict:
     if target_id not in selected:
         raise recovery.RecoveryRefused("Target is outside the explicit frozen review")
-    row = conn.execute("SELECT status FROM publish_job_targets WHERE id=?", (target_id,)).fetchone()
+    row = conn.execute("SELECT status,error_category FROM publish_job_targets WHERE id=?", (target_id,)).fetchone()
     if row is None:
         raise recovery.RecoveryRefused("Selected target disappeared")
+    restored_wait = (review_restored_dependency_waits is True and row["status"] in {"blocked", "retrying"}
+                     and row["error_category"] == "prerequisite_quota")
     state = recovery._snapshot(conn, target_id, resolved=True,
-                               reviewed_prerequisite=row["status"] == "blocked")
+        reviewed_prerequisite=row["status"] == "blocked" and not restored_wait,
+        reviewed_restored_dependency=restored_wait)
     reviewed_recovery.assert_budget(jobs._recovery_json_object(state["target"]["checkpoint_json"]))
     key, index, count = _part_key(state["target"], state["job"], _payload(state), state["identity"])
     members = [(index, target_id, jobs._unstarted_pending_identity(state["target"], state["job"]["payload_json"]))]
@@ -108,15 +114,17 @@ def _snapshot(conn, target_id: int, selected: list[int]) -> dict:
         if [part[0] for part in members] != list(range(1, count + 1)):
             raise recovery.RecoveryRefused("Original group has missing, duplicated or inconsistent ordered members")
     state["review"] = {"selected_target_ids": selected, "group_key": list(key),
-                       "index": index, "count": count, "members": members}
-    state["media_records"] = reviewed_recovery.collect_media_records(conn, _payload(state))
+                       "index": index, "count": count, "members": members,
+                       "review_restored_dependency_waits": review_restored_dependency_waits}
+    state["media_records"] = reviewed_recovery.collect_media_records(
+        conn, {**_payload(state), "_workspace_id": state["target"]["workspace_id"]})
     return state
 
 
-def _state(db_path: Path, target_id: int, selected: list[int]) -> dict:
+def _state(db_path: Path, target_id: int, selected: list[int], *, review_restored_dependency_waits: bool = False) -> dict:
     with recovery._connect(db_path) as conn:
         conn.execute("BEGIN")
-        return _snapshot(conn, target_id, selected)
+        return _snapshot(conn, target_id, selected, review_restored_dependency_waits=review_restored_dependency_waits)
 
 
 def _fresh_context(state, db_path: Path):
@@ -159,13 +167,15 @@ def _intent(state):
 
 
 def prepare_plan(*, db_path: Path, target_ids, review_resolved_prerequisites: bool = False,
+                 review_restored_dependency_waits: bool = False,
                  out_dir: Path | None = None, per_day_cap: int | None = None, now=None) -> list[dict]:
-    selected = _selection(target_ids, review_resolved_prerequisites)
+    selected = _selection(target_ids, review_resolved_prerequisites, restored_waits=review_restored_dependency_waits)
     cap = min(recovery.effective_daily_cap(per_day_cap) or 3, 3)
     prepared, intents = {}, {}
     # Entire source groups are validated BEFORE any encode/restore. No sibling
     # is inferred from a filename or silently omitted from the review boundary.
-    states = {target_id: _state(db_path, target_id, selected) for target_id in selected}
+    states = {target_id: _state(db_path, target_id, selected,
+        review_restored_dependency_waits=review_restored_dependency_waits) for target_id in selected}
     for target_id in selected:
         state = states[target_id]
         intents[target_id] = _intent(state)
@@ -178,7 +188,8 @@ def prepare_plan(*, db_path: Path, target_ids, review_resolved_prerequisites: bo
         if not working["artifacts"]:
             raise recovery.RecoveryRefused("Reviewed recovery requires exact approved publishing media")
         _ensure_artifact_paths_local(working, db_path=db_path)
-        restored_state = _state(db_path, target_id, selected)
+        restored_state = _state(db_path, target_id, selected,
+                                review_restored_dependency_waits=review_restored_dependency_waits)
         working = reviewed_recovery.bind_media_payload(_payload(restored_state), restored_state["media_records"])
         working["artifacts"] = [a for a in working.get("artifacts") or [] if not guard.is_context_artifact(a)]
         _ensure_artifact_paths_local(working, db_path=db_path)  # validation-only, with independent recorded proofs
@@ -190,7 +201,7 @@ def prepare_plan(*, db_path: Path, target_ids, review_resolved_prerequisites: bo
         parts = guard.prepare_payloads(working, platform=state["job"]["platform"], account_config=account.config,
             out_dir=out_dir, backup_compatible=backup, allow_reprepare=True, reviewed_selected_content=True,
             video_limits=limits, image_limits=(context or {}).get("image_limits"))
-        fresh = _state(db_path, target_id, selected)
+        fresh = _state(db_path, target_id, selected, review_restored_dependency_waits=review_restored_dependency_waits)
         prep._check_pending_media(original_media)
         if _intent(fresh) != intents[target_id]:
             raise recovery.RecoveryRefused("Reviewed intent changed during preparation")
@@ -200,11 +211,12 @@ def prepare_plan(*, db_path: Path, target_ids, review_resolved_prerequisites: bo
             "original_status": state["target"]["status"], "prepared_payloads": parts, "original_media": original_media,
             "backup_compatible": backup, "backup_context": context, "account_constraints": native,
             "per_day_cap": cap, "selected_target_ids": selected,
+            "review_restored_dependency_waits": review_restored_dependency_waits,
             "group_target_ids": [member[1] for member in state["review"]["members"]]}
     # Fresh provider reads/decodes outside the write transaction, then hash-pin
     # all current SQL/config/membership/media facts for the atomic application.
     for target_id, item in prepared.items():
-        fresh = _state(db_path, target_id, selected)
+        fresh = _state(db_path, target_id, selected, review_restored_dependency_waits=review_restored_dependency_waits)
         if _intent(fresh) != intents[target_id]:
             raise recovery.RecoveryRefused("Reviewed intent changed before allocation")
         backup, context, native = _fresh_context(fresh, db_path)
@@ -226,7 +238,8 @@ def prepare_plan(*, db_path: Path, target_ids, review_resolved_prerequisites: bo
             previous = base
             for target_id in group:
                 item = prepared[target_id]
-                state = _snapshot(conn, target_id, selected)
+                state = _snapshot(conn, target_id, selected,
+                                   review_restored_dependency_waits=review_restored_dependency_waits)
                 if _intent(state) != intents[target_id]:
                     raise recovery.RecoveryRefused("Reviewed group changed during slot allocation")
                 slots = []
@@ -242,7 +255,7 @@ def prepare_plan(*, db_path: Path, target_ids, review_resolved_prerequisites: bo
     return result
 
 
-def _validate_plan(plan, selected):
+def _validate_plan(plan, selected, *, review_restored_dependency_waits: bool = False):
     if not isinstance(plan, list) or not plan or any(not isinstance(item, dict) for item in plan):
         raise ValueError("A complete prepared reviewed plan is required")
     seen = set()
@@ -250,7 +263,9 @@ def _validate_plan(plan, selected):
         target_id = item.get("target_id")
         if (type(target_id) is not int or target_id in seen or target_id not in selected
                 or item.get("selected_target_ids") != selected
-                or item.get("original_status") not in {"failed", "blocked"}
+                or item.get("original_status") not in ({"failed", "blocked", "retrying"}
+                                                       if review_restored_dependency_waits else {"failed", "blocked"})
+                or item.get("review_restored_dependency_waits", False) is not review_restored_dependency_waits
                 or type(item.get("per_day_cap")) is not int or not 1 <= item["per_day_cap"] <= 3
                 or type(item.get("backup_compatible")) is not bool
                 or not isinstance(item.get("account_constraints"), dict)
@@ -291,14 +306,15 @@ def _validate_plan(plan, selected):
             raise ValueError("Incomplete or inconsistent reviewed group")
 
 
-def _revalidate_group(conn, entries, selected):
+def _revalidate_group(conn, entries, selected, *, review_restored_dependency_waits: bool = False):
     aliases = recovery._account_refs(conn)
     booked = recovery._booked_slots(conn, aliases)
     fingerprints = []
     for item in entries:
         if item["per_day_cap"] != min(recovery.effective_daily_cap(item["per_day_cap"]) or 3, 3):
             raise recovery.RecoveryRefused("Reviewed plan would raise configured destination pacing")
-        state = _snapshot(conn, item["target_id"], selected)
+        state = _snapshot(conn, item["target_id"], selected,
+                           review_restored_dependency_waits=review_restored_dependency_waits)
         if [member[1] for member in state["review"]["members"]] != item["group_target_ids"]:
             raise recovery.RecoveryRefused("Original ordered group changed")
         prep._check_pending_media(item["original_media"])
@@ -310,16 +326,18 @@ def _revalidate_group(conn, entries, selected):
     return prep._digest(fingerprints)
 
 
-def apply_plan(plan, *, db_path: Path, target_ids=None, review_resolved_prerequisites: bool = False):
-    selected = _selection(target_ids, review_resolved_prerequisites)
-    _validate_plan(plan, selected)
+def apply_plan(plan, *, db_path: Path, target_ids=None, review_resolved_prerequisites: bool = False,
+               review_restored_dependency_waits: bool = False):
+    selected = _selection(target_ids, review_resolved_prerequisites, restored_waits=review_restored_dependency_waits)
+    _validate_plan(plan, selected, review_restored_dependency_waits=review_restored_dependency_waits)
     by_id = {item["target_id"]: item for item in plan}
     applied, queued, errors = [], [], []
     for group in sorted({tuple(item["group_target_ids"]) for item in plan}):
         entries = [by_id[value] for value in group]
         try:
             for item in entries:
-                state = _state(db_path, item["target_id"], selected)
+                state = _state(db_path, item["target_id"], selected,
+                               review_restored_dependency_waits=review_restored_dependency_waits)
                 backup, context, native = _fresh_context(state, db_path)
                 if (backup != item["backup_compatible"] or prep._digest(context) != prep._digest(item["backup_context"])
                         or native["video_limits"] != item["account_constraints"]["video_limits"]):
@@ -328,8 +346,10 @@ def apply_plan(plan, *, db_path: Path, target_ids=None, review_resolved_prerequi
                 prep._validate_prepared(item["prepared_payloads"], state, backup, context, reviewed_selected_content=True)
             with recovery.publish_orchestrator.slot_reservation_lock(db_path):
                 installed = jobs.recover_reviewed_group(entries, reviewed_target_ids=selected,
+                    review_restored_dependency_waits=review_restored_dependency_waits,
                     expected_fingerprint=_group_fingerprint(entries),
-                    revalidate=lambda conn: _revalidate_group(conn, entries, selected), db_path=db_path)
+                    revalidate=lambda conn: _revalidate_group(conn, entries, selected,
+                        review_restored_dependency_waits=review_restored_dependency_waits), db_path=db_path)
             applied.extend(group)
             queued.extend(target.id for target in installed)
         except Exception as exc:
@@ -343,6 +363,8 @@ def main(argv=None):
     parser.add_argument("--db-path", type=Path, default=recovery.DB_PATH)
     parser.add_argument("--target-id", action="append", type=int, required=True)
     parser.add_argument("--review-resolved-prerequisites", action="store_true")
+    parser.add_argument("--review-restored-dependency-waits", action="store_true",
+                        help="Explicitly review exact restored quota waits; required again when applying")
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--per-day-cap", type=int)
     parser.add_argument("--plan-file", type=Path, required=True)
@@ -351,18 +373,22 @@ def main(argv=None):
     mode.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
     try:
-        selected = _selection(args.target_id, args.review_resolved_prerequisites)
+        selected = _selection(args.target_id, args.review_resolved_prerequisites,
+                              restored_waits=args.review_restored_dependency_waits)
         if args.prepare:
             plan = prepare_plan(db_path=args.db_path, target_ids=selected, review_resolved_prerequisites=True,
-                                out_dir=args.out_dir, per_day_cap=args.per_day_cap)
-            prep._write_private(args.plan_file, {"version": 1, "selected_target_ids": selected, "plan": plan})
+                review_restored_dependency_waits=args.review_restored_dependency_waits,
+                out_dir=args.out_dir, per_day_cap=args.per_day_cap)
+            prep._write_private(args.plan_file, {"version": 1, "selected_target_ids": selected,
+                "review_restored_dependency_waits": args.review_restored_dependency_waits, "plan": plan})
             result = {"prepared_target_ids": selected, "parts": sum(len(item["prepared_payloads"]) for item in plan)}
         else:
             document = jobs._recovery_json_object(args.plan_file.read_text(encoding="utf-8"))
-            if document.get("version") != 1 or document.get("selected_target_ids") != selected:
+            if (document.get("version") != 1 or document.get("selected_target_ids") != selected
+                    or document.get("review_restored_dependency_waits", False) is not args.review_restored_dependency_waits):
                 raise ValueError("Application review does not match the frozen prepared selection")
             result = apply_plan(document["plan"], db_path=args.db_path, target_ids=selected,
-                                review_resolved_prerequisites=True)
+                review_resolved_prerequisites=True, review_restored_dependency_waits=args.review_restored_dependency_waits)
         print(json.dumps(result, ensure_ascii=True))
         return 1 if result.get("errors") else 0
     except (ValueError, OSError, KeyError) as exc:

@@ -1488,10 +1488,17 @@ def _prior_target_history(row) -> dict:
             "checkpoint": _decode_checkpoint(row["checkpoint_json"])}
 
 
-def _reset_target(conn, row, schedule_at, *, reviewed_prerequisite: bool = False) -> Target:
-    # Ordinary recovery stays failed-only. The separate reviewed group boundary
-    # rechecks genuine pre-submission prerequisite state under the same lock.
-    if reviewed_prerequisite:
+def _reset_target(conn, row, schedule_at, *, reviewed_prerequisite: bool = False,
+                  reviewed_restored_dependency: bool = False) -> Target:
+    # Ordinary recovery stays failed-only. Each distinct reviewed boundary
+    # rechecks pre-submission state and restored byte/dependency proof in-lock.
+    if reviewed_prerequisite and reviewed_restored_dependency:
+        raise ValueError("Reviewed recovery authorities must be disjoint")
+    if reviewed_restored_dependency:
+        from myUtils.reviewed_recovery import assert_restored_dependency
+        payload = conn.execute("SELECT payload_json FROM publish_jobs WHERE id=?", (row["job_id"],)).fetchone()[0]
+        assert_restored_dependency(row, payload, conn=conn)
+    elif reviewed_prerequisite:
         from myUtils.reviewed_recovery import assert_prerequisite
         payload = conn.execute("SELECT payload_json FROM publish_jobs WHERE id=?", (row["job_id"],)).fetchone()[0]
         assert_prerequisite(row, payload)
@@ -1710,6 +1717,7 @@ def reschedule_failed_target(
 
 def recover_reviewed_group(entries: list[dict], *, reviewed_target_ids: Sequence[int],
         expected_fingerprint: str, revalidate: Callable[[sqlite3.Connection], str],
+        review_restored_dependency_waits: bool = False,
         workspace_id: str | None = None, db_path: Path | None = None) -> list[Target]:
     """Atomic COMPLETE reviewed group; a manifest flag alone is not authority.
 
@@ -1718,7 +1726,9 @@ def recover_reviewed_group(entries: list[dict], *, reviewed_target_ids: Sequence
     APIs are unchanged. No cancelled/review/unknown state or receipt override.
     """
     from myUtils.prepared_recovery import install_parts, validate_parts, _checkpoint
-    from myUtils.reviewed_recovery import assert_budget, assert_prerequisite
+    from myUtils.reviewed_recovery import assert_budget, assert_prerequisite, assert_restored_dependency
+    if type(review_restored_dependency_waits) is not bool:
+        raise ValueError("Restored dependency review must be an explicit boolean authority")
     if (not isinstance(reviewed_target_ids, (list, tuple)) or not reviewed_target_ids
             or any(type(value) is not int or not 0 < value <= 2**63 - 1 for value in reviewed_target_ids)
             or len(set(reviewed_target_ids)) != len(reviewed_target_ids)):
@@ -1730,12 +1740,18 @@ def recover_reviewed_group(entries: list[dict], *, reviewed_target_ids: Sequence
             or not isinstance(expected_fingerprint, str)
             or not re.fullmatch(r"[0-9a-f]{64}", expected_fingerprint) or not callable(revalidate)):
         raise ValueError("Reviewed recovery needs a complete frozen group and fingerprint validator")
-    rows, slots = [], []
+    rows, slots, restored_proofs = [], [], {}
     with _transaction(db_path, must_exist=True) as conn:
         for item in entries:
             row = _target_context(conn, item["target_id"], workspace_id=workspace_id)
             payload = conn.execute("SELECT payload_json FROM publish_jobs WHERE id=?", (row["job_id"],)).fetchone()[0]
-            if row["status"] == TARGET_BLOCKED:
+            restored_wait = (row["status"] in {TARGET_BLOCKED, TARGET_RETRYING}
+                             and row["error_category"] == "prerequisite_quota")
+            if restored_wait:
+                if review_restored_dependency_waits is not True:
+                    raise ValueError("Restored dependency waits require explicit operator review")
+                restored_proofs[row["id"]] = assert_restored_dependency(row, payload, conn=conn)
+            elif row["status"] == TARGET_BLOCKED:
                 assert_prerequisite(row, payload)
             else:
                 _check_resubmission(row, {TARGET_FAILED})
@@ -1763,7 +1779,8 @@ def recover_reviewed_group(entries: list[dict], *, reviewed_target_ids: Sequence
         installed = []
         for row, item in zip(rows, entries):
             _reset_target(conn, row, _utc_datetime(item["part_schedule_ats"][0]).isoformat(),
-                          reviewed_prerequisite=row["status"] == TARGET_BLOCKED)
+                          reviewed_prerequisite=row["status"] == TARGET_BLOCKED and row["id"] not in restored_proofs,
+                          reviewed_restored_dependency=row["id"] in restored_proofs)
             installed.extend(install_parts(conn, row, item["prepared_payloads"],
                                            item["part_schedule_ats"], item["expected_fingerprint"]))
         # Cross-original and newly split parts use one durable confirmed-delivery
@@ -1772,7 +1789,11 @@ def recover_reviewed_group(entries: list[dict], *, reviewed_target_ids: Sequence
             checkpoint = _recovery_json_object(conn.execute(
                 "SELECT checkpoint_json FROM publish_job_targets WHERE id=?", (target_id,)).fetchone()[0])
             checkpoint["reviewed_recovery"] = {"selected_target_ids": sorted(reviewed_target_ids),
-                "group_fingerprint": expected_fingerprint, "ordered_target_ids": installed}
+                "group_fingerprint": expected_fingerprint, "ordered_target_ids": installed,
+                "review_restored_dependency_waits": review_restored_dependency_waits}
+            origin = checkpoint.get("recovery_origin_target_id", target_id)
+            if origin in restored_proofs:
+                checkpoint["reviewed_recovery"]["restored_dependency_proof"] = restored_proofs[origin]
             if index:
                 checkpoint["recovery_predecessor_target_id"] = installed[index - 1]
             conn.execute("UPDATE publish_job_targets SET checkpoint_json=? WHERE id=?",
