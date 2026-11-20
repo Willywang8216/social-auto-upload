@@ -8,7 +8,7 @@ unset PYTHONOPTIMIZE
 SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME="$SOURCE"
 PYTHON="${SAU_RELEASE_PYTHON:-python3}"
-REVISION="" REPLACE_HELD=""
+REVISION="" REPLACE_HELD="" ADOPT_MAINTENANCE="" MAINTENANCE_RECOVERY=""
 NO_BUILD=0 BUILD_ONLY=0 HOLD=0 RESUME=0 ALLOW_LEGACY=0
 while (( $# )); do
   case "$1" in
@@ -21,10 +21,18 @@ while (( $# )); do
       [[ $# -ge 2 && -z "$REPLACE_HELD" && "$2" =~ ^[0-9a-f]{40}$ ]] \
         || { echo '--replace-held requires one full lowercase prior SHA.' >&2; exit 2; }
       REPLACE_HELD="$2"; shift 2 ;;
+    --adopt-maintenance)
+      [[ $# -ge 2 && -z "$ADOPT_MAINTENANCE" && "$2" =~ ^[0-9a-f]{40}$ ]] \
+        || { echo '--adopt-maintenance requires one full lowercase prior SHA.' >&2; exit 2; }
+      ADOPT_MAINTENANCE="$2"; shift 2 ;;
+    --maintenance-recovery)
+      [[ $# -ge 2 && -z "$MAINTENANCE_RECOVERY" && "$2" == /* ]] \
+        || { echo '--maintenance-recovery requires one absolute private bundle path.' >&2; exit 2; }
+      MAINTENANCE_RECOVERY="$2"; shift 2 ;;
     --resume) RESUME=1; NO_BUILD=1; shift ;;
     --legacy-stop-web) ALLOW_LEGACY=1; shift ;;
     -h|--help)
-      echo 'deploy-local.sh [--revision FULL_SHA] [--runtime-root DIR] [--build-only|--hold|--resume] [--no-build] [--legacy-stop-web] [--replace-held FULL_OLD_SHA --hold]'
+      echo 'deploy-local.sh [--revision FULL_SHA] [--runtime-root DIR] [--build-only|--hold|--resume] [--no-build] [--legacy-stop-web] [--replace-held FULL_OLD_SHA --hold] [--adopt-maintenance FULL_OLD_SHA --maintenance-recovery PRIVATE_BUNDLE --hold]'
       exit 0 ;;
     *) echo "Unknown release option: $1" >&2; exit 2 ;;
   esac
@@ -33,6 +41,12 @@ done
 if [[ -n "$REPLACE_HELD" ]]; then
   (( HOLD == 1 && RESUME == 0 && BUILD_ONLY == 0 && ALLOW_LEGACY == 0 )) \
     || { echo '--replace-held requires --hold; it cannot resume, build-only, or stop legacy web.' >&2; exit 2; }
+fi
+if [[ -n "$ADOPT_MAINTENANCE" || -n "$MAINTENANCE_RECOVERY" ]]; then
+  [[ -n "$ADOPT_MAINTENANCE" && -n "$MAINTENANCE_RECOVERY" && -z "$REPLACE_HELD" ]] \
+    || { echo '--adopt-maintenance requires --maintenance-recovery and cannot replace a held stage.' >&2; exit 2; }
+  (( HOLD == 1 && RESUME == 0 && BUILD_ONLY == 0 && ALLOW_LEGACY == 0 )) \
+    || { echo '--adopt-maintenance requires --hold; it cannot resume, build-only, or stop legacy web.' >&2; exit 2; }
 fi
 [[ "$(uname -s)" == Linux ]] || { echo 'Deployment requires Linux.' >&2; exit 1; }
 for command in git docker flock "$PYTHON"; do command -v "$command" >/dev/null; done
@@ -56,6 +70,8 @@ else
 fi
 export SAU_RELEASE_LOCK_FD=9
 RUNTIME_HEAD="$("$PYTHON" "$CHECKS" --root "$RUNTIME" clean)"
+[[ -z "$ADOPT_MAINTENANCE" || ( "$ADOPT_MAINTENANCE" != "$REVISION" && "$ADOPT_MAINTENANCE" == "$RUNTIME_HEAD" ) ]] \
+  || { echo 'Maintenance adoption requires the exact current runtime SHA and a different candidate.' >&2; exit 2; }
 git -C "$RUNTIME" merge-base --is-ancestor "$RUNTIME_HEAD" "$REVISION" || {
   echo 'Unpublished/divergent local history: refusing to replace it.' >&2; exit 1;
 }
@@ -260,6 +276,34 @@ PY
   held_ready
 fi
 
+# A maintenance marker is not a held stage. Explicit recovery must prove a
+# separate, sealed CURRENT-version rollback; never invent old stage metadata.
+maintenance_state_read() {
+  PYTHONPATH="$SOURCE" "$PYTHON" - "$RUNTIME" "$ADOPT_MAINTENANCE" "$MAINTENANCE_RECOVERY" <<'PY'
+import json, pathlib, sys
+from scripts.release_recovery import maintenance_state
+try:
+    print(json.dumps(maintenance_state(pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])), sort_keys=True))
+except (OSError, ValueError, RuntimeError, KeyError, StopIteration):
+    raise SystemExit('Invalid maintenance pause/current-version recovery; no ownership changed') from None
+PY
+}
+maintenance_ready() {
+  local current
+  current="$(maintenance_state_read)" || fail 'Maintenance recovery verification failed; original pause is unchanged.'
+  [[ "$current" == "$MAINTENANCE_STATE" ]] || fail 'Maintenance ownership/configuration changed; original pause is unchanged.'
+  [[ "$(docker image inspect -f '{{.Id}}' "$MAINTENANCE_IMAGE")" == "$MAINTENANCE_IMAGE" ]] \
+    || fail 'Current maintenance rollback image is unavailable; original pause is unchanged.'
+  pair_ready paused '' "$MAINTENANCE_IMAGE" "$ADOPT_MAINTENANCE" >>"$DETAIL_LOG" 2>&1 \
+    || fail 'Maintenance pair is not the matching running split with fresh paused probes.'
+  activity_check || fail 'Maintenance has active/ambiguous work; refusing adoption rather than forcing drain.'
+}
+if [[ -n "$ADOPT_MAINTENANCE" ]]; then
+  MAINTENANCE_STATE="$(maintenance_state_read)" || fail 'Maintenance pause/recovery validation failed.'
+  MAINTENANCE_IMAGE="$("$PYTHON" -c 'import json,sys; print(json.loads(sys.argv[1])["image_id"])' "$MAINTENANCE_STATE")"
+  maintenance_ready
+fi
+
 if (( RESUME == 1 )); then
   [[ -f "$PAUSE" && ! -L "$PAUSE" && "$(cat "$PAUSE")" == "$REVISION" ]] || fail 'No matching release-owned pause to resume.'
   RELEASE_DIR="$("$PYTHON" - "$STAGED" "$REVISION" "$IMAGE_ID" "$RUNTIME/backups/releases" <<'PY'
@@ -288,7 +332,7 @@ PY
   PAUSE_OWNED=1 TOUCHED=1
   wait_ready paused || fail 'Staged candidate is no longer safe to activate.'
 else
-  [[ ! -e "$PAUSE" && ! -L "$PAUSE" && ! -e "$STAGED" && ! -L "$STAGED" ]] || [[ -n "$REPLACE_HELD" ]] || fail 'Existing pause/staged release requires explicit operator recovery or --resume.'
+  [[ ! -e "$PAUSE" && ! -L "$PAUSE" && ! -e "$STAGED" && ! -L "$STAGED" ]] || [[ -n "$REPLACE_HELD" ]] || [[ -n "$ADOPT_MAINTENANCE" ]] || fail 'Existing pause/staged release requires explicit operator recovery or --resume.'
   # A runtime marker must not make the later fast-forward cleanliness check fail.
   # Older checkouts can use the same exact rule in .git/info/exclude.
   git -C "$RUNTIME" check-ignore -q -- db/publish.pause \
@@ -303,6 +347,8 @@ else
   fi
   if [[ -n "$REPLACE_HELD" ]]; then
     [[ "$OLD_WEB" == "$HELD_IMAGE" && "$OLD_WORKER" == "$HELD_IMAGE" ]] || fail 'Held pair changed before baseline capture.'
+  elif [[ -n "$ADOPT_MAINTENANCE" ]]; then
+    [[ "$OLD_WEB" == "$MAINTENANCE_IMAGE" && "$OLD_WORKER" == "$MAINTENANCE_IMAGE" ]] || fail 'Maintenance pair changed before baseline capture.'
   else
     docker tag "$OLD_WEB" "${IMAGE_BASE}:previous"
   fi
@@ -312,7 +358,7 @@ else
   chmod 700 "$RELEASE_DIR" "$RELEASE_DIR/baseline"
   printf '%s\n' "$OLD_WEB" >"$RELEASE_DIR/baseline/web-image"
   printf '%s\n' "$OLD_WORKER" >"$RELEASE_DIR/baseline/worker-image"
-  printf '%s\n' "${REPLACE_HELD:-$RUNTIME_HEAD}" >"$RELEASE_DIR/baseline/git-revision"
+  printf '%s\n' "${REPLACE_HELD:-${ADOPT_MAINTENANCE:-$RUNTIME_HEAD}}" >"$RELEASE_DIR/baseline/git-revision"
   docker inspect "$WEB" >"$RELEASE_DIR/baseline/web-inspect.json"
   if [[ -n "$OLD_WORKER" ]]; then docker inspect "$WORKER" >"$RELEASE_DIR/baseline/worker-inspect.json"; fi
   render() {
@@ -406,6 +452,19 @@ PY
     PAUSE_OWNED=1
     docker tag "$OLD_WEB" "${IMAGE_BASE}:previous"
     log "Adopted finished hold $REPLACE_HELD without releasing claims; original bundle: $HELD_DIR"
+  elif [[ -n "$ADOPT_MAINTENANCE" ]]; then
+    maintenance_ready
+    PYTHONPATH="$SOURCE" "$PYTHON" - "$RUNTIME" "$MAINTENANCE_STATE" "$REVISION" "$RELEASE_DIR" <<'PY'
+import json, pathlib, sys
+from scripts.release_recovery import adopt_maintenance_pause
+try:
+    adopt_maintenance_pause(pathlib.Path(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3], pathlib.Path(sys.argv[4]))
+except (OSError, ValueError, RuntimeError, KeyError):
+    raise SystemExit('Maintenance pause adoption failed; preserve pause and all evidence') from None
+PY
+    PAUSE_OWNED=1
+    docker tag "$OLD_WEB" "${IMAGE_BASE}:previous"
+    log "Adopted maintenance pause $ADOPT_MAINTENANCE without synthesizing an old stage; verified current rollback: $MAINTENANCE_RECOVERY"
   else
     (set -o noclobber; printf '%s\n' "$REVISION" >"$PAUSE")
     PAUSE_OWNED=1

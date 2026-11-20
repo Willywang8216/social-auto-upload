@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -266,6 +267,167 @@ def adopt_held_pause(runtime: Path, expected: dict, revision: str, release: Path
         if held_state(runtime, expected["revision"]) != expected:
             raise RecoveryError("held release ownership changed before adoption")
         os.replace(temporary, pause)  # one rename, never an unpaused interval
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _maintenance_bundle(runtime: Path, bundle: Path) -> Path:
+    """Accept only an explicit nonsymlink bundle beneath this runtime."""
+    directory = Path(bundle)
+    releases = runtime / "backups/releases"
+    if (not directory.is_absolute() or ".." in directory.parts
+            or directory == releases or not directory.is_relative_to(releases)):
+        raise RecoveryError("maintenance recovery must be beneath runtime/backups/releases")
+    parent = runtime
+    for part in directory.relative_to(runtime).parts:
+        parent /= part
+        if not stat.S_ISDIR(parent.lstat().st_mode):
+            raise RecoveryError("maintenance recovery path must contain nonsymlink directories")
+    return _bundle_root(directory)
+
+
+def _maintenance_live_pair(runtime: Path, bundle: Path, revision: str, image: str) -> dict:
+    """Compare the actual split pair to the frozen rollback, without printing secrets."""
+    baseline = _json(_file(bundle, "baseline/compose.json"))["services"]
+    try:
+        objects = json.loads(subprocess.check_output(
+            ["docker", "inspect", "social-auto-upload", "social-auto-upload-worker"],
+            text=True, stderr=subprocess.DEVNULL, timeout=20))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise RecoveryError("maintenance live pair could not be inspected") from None
+    if not isinstance(objects, list) or len(objects) != 2:
+        raise RecoveryError("maintenance recovery requires the existing split pair")
+    fingerprints = {}
+    shared_binds = None
+    for obj, name, role in zip(objects, ("social-auto-upload", "worker"), ("web", "worker")):
+        saved = baseline[name]
+        env = dict(item.split("=", 1) for item in obj["Config"]["Env"])
+        saved_env = {key: value.replace("$$", "$") for key, value in saved["environment"].items()}
+        binds = {m["Destination"]: {"source": str(Path(m["Source"]).resolve(strict=True)), "rw": m["RW"]}
+                 for m in obj["Mounts"] if m["Type"] == "bind"}
+        saved_binds = {m["target"]: {"source": str(Path(m["source"]).resolve(strict=True)),
+                                   "rw": not m.get("read_only", False)}
+                       for m in saved.get("volumes", []) if m.get("type") == "bind"}
+        if (obj["Image"] != image or not obj["State"]["Running"] or obj["State"]["OOMKilled"]
+                or obj["Config"]["Labels"].get("org.opencontainers.image.revision") != revision
+                or env != saved_env or obj["Config"]["Cmd"] != saved.get("command")
+                or obj["Config"]["Entrypoint"] != saved.get("entrypoint")
+                or obj["Config"]["User"] != saved.get("user") or binds != saved_binds
+                or env.get("SAU_PROCESS_ROLE") != role or env.get("SAU_BUILD_REVISION") != revision
+                or env.get("SAU_DB_PATH") != "/app/db/database.db"
+                or env.get("SAU_PAUSE_CLAIMS_FILE") != "/app/db/publish.pause"
+                or binds.get("/app/db", {}).get("source") != str(runtime / "db")
+                or not binds.get("/app/db", {}).get("rw")
+                or (shared_binds is not None and binds != shared_binds)):
+            raise RecoveryError("maintenance live images/configuration/mounts differ from recovery")
+        if role == "worker" and obj["HostConfig"].get("PortBindings"):
+            raise RecoveryError("maintenance worker must not expose ingress")
+        shared_binds = binds
+        values = {"environment": env, "binds": binds, "command": obj["Config"]["Cmd"],
+                  "entrypoint": obj["Config"]["Entrypoint"], "user": obj["Config"]["User"]}
+        fingerprints[name] = {"id": obj["Id"], "image_id": image,
+                              "restart_count": obj["RestartCount"],
+                              "configuration_sha256": hashlib.sha256(json.dumps(
+                                  values, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+    state = sqlite_backup.activity(runtime / "db/database.db")
+    if state.get("drained") is not True or state.get("active_targets") != 0 or state.get("active_preps") != 0:
+        raise RecoveryError("maintenance recovery refuses active or ambiguous work")
+    return fingerprints
+
+
+def maintenance_state(runtime: Path, revision: str, recovery: Path) -> dict:
+    """Evidence for explicit maintenance-only adoption; JSON itself grants no authority.
+
+    Unlike held_state this requires ABSENT stage/active records and a verified
+    current-version rollback whose predecessor is the current split pair itself.
+    The CLI must additionally verify fresh paused role probes under ci-watch.lock.
+    """
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise RecoveryError("maintenance revision must be a full lowercase SHA")
+    runtime = runtime.resolve(strict=True)
+    if any(os.path.lexists(runtime / "logs" / name)
+           for name in ("release-staged.json", "release-active.json")):
+        raise RecoveryError("maintenance adoption requires absent stage and active records")
+    pause, pause_state = _regular_state(runtime / "db/publish.pause")
+    if pause not in (revision.encode("ascii"), (revision + "\n").encode("ascii")):
+        raise RecoveryError("pause does not belong to the requested maintenance revision")
+    bundle = _maintenance_bundle(runtime, recovery)
+    identities = _identities(bundle, None, None, None)
+    image = identities["candidate_image"]
+    if (identities["previous_web"] != image or identities["previous_worker"] != image
+            or _file(bundle, "baseline/git-revision").read_text(encoding="ascii").strip() != revision):
+        raise RecoveryError("maintenance recovery must freeze the current split version itself")
+    verify(bundle, candidate_image=image, previous_web=image, previous_worker=image)
+    candidate = _json(_file(bundle, "candidate.compose.json"))["services"]
+    baseline = _json(_file(bundle, "baseline/compose.json"))["services"]
+    if any(candidate[name].get("volumes") != baseline[name].get("volumes")
+           for name in ("social-auto-upload", "worker")):
+        raise RecoveryError("maintenance current-version recovery mount definitions differ")
+    conf = require_config_file(Path(next(v["source"] for v in candidate["social-auto-upload"]["volumes"]
+                                        if v["target"] == "/app/conf.py")))
+    configuration = {}
+    for name, source in ((".env", runtime / ".env"), ("conf.py", conf),
+                         ("rclone-cache.conf", runtime / "rclone-cache.conf")):
+        saved = bundle / "baseline" / name
+        if name == "rclone-cache.conf" and not os.path.lexists(source) and not os.path.lexists(saved):
+            continue
+        raw, current = _regular_state(source)
+        saved_raw, _ = _regular_state(saved)
+        if raw != saved_raw:
+            raise RecoveryError("maintenance runtime configuration differs from its recovery snapshot")
+        configuration[name] = dict(path=str(source), **current)
+    live = _maintenance_live_pair(runtime, bundle, revision, image)
+    _, manifest = _regular_state(bundle / MANIFEST)
+    return dict(revision=revision, image_id=image, release_dir=str(bundle), pause=pause_state,
+                recovery_manifest=manifest, configuration=configuration, live=live)
+
+
+def adopt_maintenance_pause(runtime: Path, expected: dict, revision: str, release: Path) -> None:
+    """Atomically hand off a verified maintenance pause; never synthesize a stage or restore DB.
+
+    Called only by the explicit --adopt-maintenance/--maintenance-recovery --hold
+    path after all new-image gates, rollback/config/live/drain and paused probes.
+    """
+    if (not isinstance(expected, dict) or not isinstance(revision, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", revision) or revision == expected.get("revision")):
+        raise RecoveryError("maintenance replacement must name a different full revision")
+    runtime = runtime.resolve(strict=True)
+    recovery = Path(expected["release_dir"])
+    if maintenance_state(runtime, expected["revision"], recovery) != expected:
+        raise RecoveryError("maintenance ownership changed before adoption")
+    destination = _maintenance_bundle(runtime, release)
+    if destination == recovery or (destination / MANIFEST).exists():
+        raise RecoveryError("maintenance adoption must preserve the sealed recovery bundle")
+    baseline = destination / "baseline"
+    if not stat.S_ISDIR(baseline.lstat().st_mode):
+        raise RecoveryError("replacement baseline must be a nonsymlink directory")
+    raw, fingerprint = _regular_state(runtime / "db/publish.pause")
+    if fingerprint != expected["pause"]:
+        raise RecoveryError("maintenance pause changed before adoption")
+    for path, data in ((baseline / "adopted-maintenance.pause", raw),
+                       (baseline / "maintenance-recovery-reference.json",
+                        (json.dumps(expected, sort_keys=True, indent=2) + "\n").encode())):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+    pause = runtime / "db/publish.pause"
+    fd, name = tempfile.mkstemp(prefix=".publish-pause-", dir=pause.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write((revision + "\n").encode("ascii"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        if maintenance_state(runtime, expected["revision"], recovery) != expected:
+            raise RecoveryError("maintenance ownership changed before adoption")
+        os.replace(temporary, pause)  # one rename, never an unpaused interval
+        directory_fd = os.open(pause.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
 

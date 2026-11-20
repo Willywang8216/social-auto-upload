@@ -221,6 +221,56 @@ adoption, retain the new pause and all evidence for explicit recovery (the old
 stage may remain if replacement did not finish); rollback is image/config-only,
 never a DB restore. Default existing-pause refusal and cron behavior are unchanged.
 
+### Adopt an explicitly owned maintenance pause when no stage exists
+
+A maintenance pause alone is **not** a held release. Do not create a fake
+`release-staged.json`, edit an old sealed bundle to point at a replacement image,
+or use `--replace-held` when the original stage/rollback evidence is missing.
+
+For this distinct case the parent/operator can use
+`--adopt-maintenance FULL_CURRENT_SHA --maintenance-recovery PRIVATE_BUNDLE --hold`.
+Both flags are required, the current SHA must match the clean runtime checkout,
+and the candidate must be a different clean, fast-forwardable revision. This
+option cannot resume, build-only, stop a legacy publisher, or replace an existing
+held stage. Any stage or active record, including a broken symlink, is refused.
+The watcher never supplies this authority automatically; JSON approval fields
+and checkpoint labels do not authorize adoption.
+
+Before invoking it, prepare a **new private current-version rollback bundle**
+under `runtime/backups/releases` using the actual current split pair. Its
+candidate and both baseline images must be the same available immutable current
+image, with the current Git SHA, literal container environments/commands/users,
+shared bind mounts, selected `conf.py`, `.env`, and any app `rclone-cache.conf`.
+Take an online SQLite snapshot and run the maintained `release_recovery.py seal`
+and `verify` contract, including an isolated restore. Retain older bundles and
+receipts unchanged; this snapshot is evidence, never a live DB rollback.
+
+```bash
+# In the clean, fully gated NEW source checkout, with a newly prepared bundle:
+CURRENT_SHA=$(git -C /home/will/social-auto-upload rev-parse HEAD)
+RECOVERY=/home/will/social-auto-upload/backups/releases/maintenance-current-REPLACE_WITH_ACTUAL_BUNDLE
+REV=$(git rev-parse HEAD)
+bash scripts/deploy-local.sh --revision "$REV" --runtime-root /home/will/social-auto-upload \
+  --no-build --adopt-maintenance "$CURRENT_SHA" --maintenance-recovery "$RECOVERY" --hold
+```
+
+Under the shared lock the helper re-verifies the original seal and isolated
+restore, current configuration bytes, actual running split images/revisions,
+literal environment/command/user/mounts, fresh paused role probes, and zero active
+or leased work. It compares the pause inode/content, recovery manifest, current
+configuration and container fingerprints again at adoption. A mismatch is a
+refusal, not a forced drain or budget reset.
+
+The new private baseline saves the original bytes as
+`baseline/adopted-maintenance.pause` and a redacted recovery reference. The pause
+changes to the new revision in one atomic rename, with no unpaused interval and
+no synthesized old stage. The normal drain/stop/new online snapshot/seal/migrate
+sequence then runs. Only a successfully verified paused deployment writes its
+real NEW `release-staged.json`. `--resume` remains a separate publishing decision
+after media, intent, grants, duplicates, budgets and complete-group ordering pass.
+Failure preserves the pause and evidence; no production DB restore, attempt
+refund, provider call or historical bundle rewrite is part of adoption.
+
 ```bash
 bash scripts/ci-watch.sh
 CI_WATCH_FORCE=1 bash scripts/ci-watch.sh     # no safety checks are bypassed
