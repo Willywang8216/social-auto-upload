@@ -136,6 +136,10 @@ def _context(account, settings):
         configured = bool(config.get("accessToken") or config.get("accessTokenEnv")
                           or config.get("botToken") or config.get("botTokenEnv")
                           or config.get("password") or _value(account, "cookie_path"))
+        from myUtils import native_destinations
+        if platform in native_destinations.SUPPORTED_PLATFORMS:
+            identity, credential_selection, configured = native_destinations.configured_destination(platform, config)
+            selected["nativeDestinationCredentials"] = credential_selection
     required = _caps(config.get("requiredCapabilities", []))
     policy = settings.get("publishing", {})
     if isinstance(policy, Mapping):
@@ -173,6 +177,13 @@ def _native_health(account, config):
     error = config.get('_nativeCredentialError')
     if config.get('_nativeCredentialState') == 'reconnect_required' or isinstance(error, dict) and str(error.get('code')).lower() in {'invalid_grant', 'invalid_token', 'token_revoked'}:
         state = 'reconnect_required'
+    platform = account_identity._platform(account)
+    from myUtils import native_destinations
+    if platform in native_destinations.SUPPORTED_PLATFORMS:
+        _, _, configured = native_destinations.configured_destination(platform, config)
+        native["configured"] = configured
+        if state == "missing" and configured:
+            state = "unknown"
     # Generic token checks do not prove destination identity/grants/capabilities.
     return {"state": state, "configured": bool(native["configured"]),
             "reconnectRequired": bool(native["reconnectRequired"]) or state == 'reconnect_required', "held": hold,

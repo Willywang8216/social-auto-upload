@@ -115,7 +115,7 @@ def configure_request(accounts, platforms, request_data: dict, *, settings=None,
     return request, contexts
 
 
-def verify_native_destination(account, *, settings=None, db_path, session=None):
+def verify_native_destination(account, *, settings=None, db_path, session=None, payload=None):
     """Actual read-only identity AND publishing-grant verification, no refresh.
 
     Unsupported native grant models stay configured_unverified; in particular
@@ -124,19 +124,23 @@ def verify_native_destination(account, *, settings=None, db_path, session=None):
     combine it with user/info open_id, never nickname/display-name identity.
     YouTube tokeninfo proves current token grant, channels mine exact identity.
     """
-    from myUtils import publish_readiness, token_state
+    from myUtils import publish_readiness, token_state, native_destinations
     before = publish_readiness._context(account, settings)
     if before["provider"] != "direct" or not before["identity"]:
         raise ValueError("Native verification needs an exact direct identity")
     platform = account.platform
     config = before["config"]
+    native_destinations.assert_effective_destination(platform, config, payload)
     token = prepared_publishers._config_value(config, "accessToken")
-    if not token:
+    non_oauth = platform in native_destinations.SUPPORTED_PLATFORMS
+    if not token and not non_oauth:
         raise ValueError("Native verification needs selected credentials")
     http = _BoundedHTTP(prepared_publishers._get_session(session))
-    expected = before["identity"]["id"]
+    expected = before["identity"].get("id")
     capabilities, limits, expiry = [], {}, None
-    if platform == "tiktok":
+    if non_oauth:
+        capabilities = native_destinations.verify_grant(platform, config, before["identity"], http)
+    elif platform == "tiktok":
         response = http.get("https://open.tiktokapis.com/v2/user/info/",
             headers={"Authorization": f"Bearer {token}"}, params={"fields": "open_id"})
         prepared_publishers._raise_for_status(response)
@@ -192,3 +196,36 @@ def verify_native_destination(account, *, settings=None, db_path, session=None):
         proof["expires_at"] = expiry
     return publish_readiness.record_destination_readiness(account, settings, proof=proof,
         provider="direct", db_path=db_path)
+
+
+def ensure_destination_ready(account, *, settings=None, db_path, payload=None, session=None):
+    """Refresh expired/unverified evidence once, outside any queue transaction.
+
+    Media/intent and enqueue admission remain separate checks. This performs no
+    upload, publication, credential refresh, approval override or source encoding.
+    """
+    from myUtils import publish_readiness, native_destinations, media_restore
+    from myUtils import native_authorization
+    if str((account.config or {}).get("publishingProvider") or "direct").lower() == "direct":
+        native_destinations.assert_effective_destination(account.platform, account.config, payload)
+    result = publish_readiness.destination_readiness(account, settings, db_path=db_path)
+    if result["ready"]:
+        return result
+    if result.get("reasonCode") == "dependency_cooldown":
+        raise media_restore.PrerequisiteUnavailable("transport", cached_wait=True,
+            scope_key=publish_readiness.destination_scope_key(account, settings))
+    if result.get("reasonCode") not in {"configured_unverified", "evidence_expired", "evidence_invalid", "configuration_changed"}:
+        raise ValueError("Current destination authorization is unavailable; repair configuration or review the account")
+    context = publish_readiness._context(account, settings)
+    if context["provider"] == "sociamonials":
+        backup_preparation.resolve_constraints(platform=account.platform, account=account, settings=settings,
+            payload=payload, db_path=db_path, session=session)
+    elif context["provider"] == "direct" and account.platform in ({"tiktok", "youtube"}
+            | native_authorization.SUPPORTED_PLATFORMS | native_destinations.SUPPORTED_PLATFORMS):
+        verify_native_destination(account, settings=settings, db_path=db_path, session=session, payload=payload)
+    else:
+        raise ValueError("The native destination has no implemented exact publishing-grant verifier")
+    result = publish_readiness.destination_readiness(account, settings, db_path=db_path)
+    if not result["ready"]:
+        raise ValueError("Fresh destination verification did not prove current exact authorization")
+    return result

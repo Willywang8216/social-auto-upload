@@ -2143,6 +2143,8 @@ def _media_group_payload(
 
 def _campaign_payload(campaign: campaign_store.Campaign, *, db_path: Path) -> dict:
     payload = campaign.to_dict()
+    payload["last_error"] = _publish_safe_text(campaign.last_error)
+    payload["lastError"] = payload["last_error"]
     payload["artifacts"] = [
         artifact.to_dict()
         for artifact in campaign_store.list_campaign_artifacts(campaign.id, db_path=db_path)
@@ -5451,7 +5453,11 @@ def jobs_cancel(job_id):
         job = job_runtime.cancel_job(job_id)
     except LookupError:
         return jsonify({"code": 404, "msg": "Job not found", "data": None}), 404
-    return jsonify({"code": 200, "msg": "cancelled", "data": _job_to_payload(job)}), 200
+    body = _job_to_payload(job)
+    # Read the authoritative destinations, including retained receipt state;
+    # cancelling local work is not evidence that a provider submission vanished.
+    body["targets"] = [_target_to_payload(target) for target in job_runtime.list_targets(job_id)]
+    return jsonify({"code": 200, "msg": "cancelled", "data": body}), 200
 
 
 @app.route("/jobs/run", methods=["POST"])
@@ -5535,6 +5541,18 @@ def _scheduled_target_payload(target: dict, job_meta: dict) -> dict:
     ``target`` here is the plain dict version of publish_job_targets columns,
     not a job_runtime.Target, so routes use this instead of _target_to_payload.
     """
+    # The row reader lacks the Target action projection. Use the same
+    # read-only eligibility calculation as job/entity detail, not a UI guess.
+    safe = job_runtime.Target(
+        id=target["id"], job_id=target["job_id"],
+        account_ref=target["account_ref"], file_ref=target["file_ref"],
+        schedule_at=target["schedule_at"], status=target["status"],
+        attempts=target["attempts"], last_error=target.get("last_error"),
+        next_attempt_at=target.get("next_attempt_at"),
+        error_category=target.get("error_category"),
+        checkpoint=target.get("checkpoint") or {},
+        delivery_state=target.get("delivery_state"),
+    ).to_dict()
     return {
         "targetId": target["id"],
         "jobId": target["job_id"],
@@ -5547,12 +5565,7 @@ def _scheduled_target_payload(target: dict, job_meta: dict) -> dict:
         "scheduleAt": target["schedule_at"],
         "status": target["status"],
         "attempts": target["attempts"],
-        "lastError": target["last_error"],
-        "nextAttemptAt": target.get("next_attempt_at"),
-        "errorCategory": target.get("error_category"),
-        "deliveryState": target.get("delivery_state"),
-        "retryEligibility": target.get("retryEligibility", {"allowed": False}),
-        "readiness": target.get("readiness", {}),
+        **_target_reliability_payload(safe),
     }
 
 
@@ -5745,9 +5758,77 @@ def jobs_schedule_shift():
     }), 200
 
 
+def _publish_safe_text(value: str | None) -> str | None:
+    """Bounded display text, never a private URL, filesystem path or credential."""
+    if value is None:
+        return None
+    import re
+
+    text = secret_redaction.redact_text(str(value))
+    text = re.sub(r'(?i)\b(?:token|secret|authorization|password|cookie|config(?:[_-]?json)?|lease[_-]?token)\s*[:=].*', '[redacted context]', text)
+    text = re.sub(r'(?i)\b(?:Bearer|Basic)\s+\S+', '[redacted credential]', text)
+    text = re.sub(r'(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"\']+', '[redacted-url]', text)
+    text = re.sub(r'(?i)(?:[a-z]:[\\/]|(?<![\w:/])/)[^\s<>"\']+', '[redacted-path]', text)
+    return text[:512]
+
+
+def _publish_safe_fields(value: dict, fields: tuple[str, ...]) -> dict:
+    """Allowlisted scalar fields only; nested request/response/config is private."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: _publish_safe_text(value[key]) if isinstance(value[key], str) else value[key]
+        for key in fields
+        if key in value and (value[key] is None or isinstance(value[key], (str, bool, int, float)))
+    }
+
+
+def _target_reliability_payload(safe: dict) -> dict:
+    """Shared public reliability projection for job, entity and calendar routes.
+
+    Even Target.to_dict() is not a license to expose its entire checkpoint:
+    receipts, readiness and recovery actions each have a small display allowlist.
+    No request/response, journal, payload, config or lease capability is returned.
+    """
+    checkpoint = safe.get("checkpoint") or {}
+    if not isinstance(checkpoint, dict):
+        checkpoint = {}
+    readiness = _publish_safe_fields(safe.get("readiness") or checkpoint.get("readiness"), (
+        "phase", "stage", "status", "ready", "provider", "reasonCode", "reason",
+        "checkedAt", "verifiedAt", "expiresAt", "nextAttemptAt", "nextSlot",
+        "artifactFingerprint", "destinationFingerprint", "evidenceFresh",
+    ))
+    raw_readiness = safe.get("readiness") or checkpoint.get("readiness") or {}
+    if isinstance(raw_readiness, dict):
+        progress = _publish_safe_fields(raw_readiness.get("partProgress"), ("completeParts", "totalParts"))
+        if progress:
+            readiness["partProgress"] = progress
+    eligibility = _publish_safe_fields(safe.get("retryEligibility"), (
+        "allowed", "evidenceRequired", "acceptsPreparedPlan", "reasonCode", "reason", "nextAttemptAt",
+    ))
+    eligibility["allowed"] = eligibility.get("allowed") is True
+    receipt = _publish_safe_fields(checkpoint.get("provider_receipt"), (
+        "provider", "id", "status", "operation", "submitted_at", "delivered_at", "checked_at", "updated_at",
+    ))
+    public_checkpoint = {"readiness": readiness}
+    if receipt:
+        public_checkpoint["provider_receipt"] = receipt
+    if isinstance(checkpoint.get("submission_started"), bool):
+        public_checkpoint["submission_started"] = checkpoint["submission_started"]
+    return {
+        "nextAttemptAt": _publish_safe_text(safe.get("next_attempt_at")),
+        "errorCategory": _publish_safe_text(safe.get("error_category")),
+        "deliveryState": _publish_safe_text(safe.get("delivery_state")),
+        "lastError": _publish_safe_text(safe.get("last_error")),
+        "retryEligibility": eligibility,
+        "readiness": readiness,
+        "checkpoint": public_checkpoint,
+        "providerReceipt": receipt or None,
+    }
+
+
 def _target_to_payload(target: job_runtime.Target) -> dict:
     display = _account_display_name(target.account_ref)
-    safe = target.to_dict()
     return {
         "id": target.id,
         "jobId": target.job_id,
@@ -5757,16 +5838,9 @@ def _target_to_payload(target: job_runtime.Target) -> dict:
         "scheduleAt": target.schedule_at,
         "status": target.status,
         "attempts": target.attempts,
-        "nextAttemptAt": target.next_attempt_at,
-        "errorCategory": target.error_category,
-        "deliveryState": target.delivery_state,
-        "lastError": _redact_entity_error(target.last_error),
         "startedAt": target.started_at,
         "finishedAt": target.finished_at,
-        "retryEligibility": safe.get("retryEligibility", {"allowed": False}),
-        "readiness": safe.get("readiness", {}),
-        "checkpoint": safe.get("checkpoint", {}),
-        "providerReceipt": (safe.get("checkpoint") or {}).get("provider_receipt"),
+        **_target_reliability_payload(target.to_dict()),
     }
 
 
@@ -6672,7 +6746,7 @@ def _entity_target_payload(
         "scheduleAt": target.schedule_at,
         "status": target.status,
         "attempts": target.attempts,
-        "lastError": _redact_entity_error(target.last_error),
+        **_target_reliability_payload(target.to_dict()),
         "startedAt": target.started_at,
         "finishedAt": target.finished_at,
     }
@@ -6780,40 +6854,41 @@ def _rollup_entity_status(
     *,
     has_schedule: bool,
 ) -> str:
-    """One status for the whole entity, failures and activity taking priority.
+    """Failures stay visible; outstanding work always precedes old successes.
 
-    ``record_statuses`` is the campaign + campaign-post statuses; ``targets``
-    are the already-mapped target payloads. The ordering is deliberate: a hard
-    failure anywhere surfaces first, then in-flight work, then scheduled/draft.
+    Campaign/post history can share a media group with a newer submission.
+    A published record is therefore never enough to override an action state,
+    receipt wait, queue, preparation or draft elsewhere in the group.
     """
     records = {status for status in record_statuses if status}
     jobs = {status for status in job_statuses if status}
     target_statuses = {t.get("status") for t in targets if t.get("status")}
+    states = records | jobs | target_statuses
 
-    if "failed" in records or "failed" in jobs or "failed" in target_statuses:
+    # Preserve partial-failure/cancellation visibility; destinations retain
+    # their own states so a pending sibling is still usable in the calendar.
+    if "failed" in states:
         return "failed"
-    if "cancelled" in records or "cancelled" in jobs or "cancelled" in target_statuses:
+    if "cancelled" in states:
         return "cancelled"
-    # "publishing" tracks work actually in flight; a campaign flagged publishing
-    # whose targets are all still pending reads as queued below.
+    for action in ("needs_review", "blocked", "awaiting_delivery"):
+        if action in states:
+            return action
     if "running" in jobs or "running" in target_statuses:
         return "publishing"
-    if "needs_review" in records:
-        return "needs_review"
-    if (
-        records & {"queued", "pending"}
-        or jobs & {"pending", "queued"}
-        or target_statuses & {"pending", "retrying"}
-    ):
+    if states & {"queued", "pending", "retrying"}:
         return "scheduled" if has_schedule else "queued"
-    if "preparing" in records:
+    if "preparing" in states:
         return "preparing"
-    if "published" in records or (jobs and jobs <= {"succeeded"}):
-        return "published"
-    if records & {"prepared", "ready"} or target_statuses & {"succeeded"}:
+    if records & {"prepared", "ready"}:
         return "scheduled" if has_schedule else "prepared"
     if "draft" in records:
         return "draft"
+    work = jobs | target_statuses
+    if (not work or work <= {"succeeded"}) and ("published" in records or "succeeded" in work):
+        return "published"
+    if "publishing" in records:
+        return "publishing"
     return "unknown"
 
 
@@ -6887,7 +6962,7 @@ def _build_media_group_entity(
             "createdAt": campaign.created_at,
             "preparedAt": campaign.prepared_at,
             "publishedAt": campaign.published_at,
-            "lastError": campaign.last_error,
+            "lastError": _publish_safe_text(campaign.last_error),
         })
         for post in cache.posts_for_campaign(campaign.id):
             record_statuses.append(post.status)

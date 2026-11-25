@@ -147,4 +147,34 @@ describe('submission validation and visible lifecycle states', () => {
     expect(campaign.jobs.map((job) => job.id)).toEqual([10, 11])
     expect(() => logic.campaignPreparation(undefined, 7)).toThrow()
   })
+
+  it('normalizes the real needs_review campaign last_error and presents its safe reason', () => {
+    const campaign = logic.campaignPreparation({ data: { id: 7, status: 'needs_review',
+      last_error: '帳號需重新連線 /private/campaign/checkpoint.json token=private-campaign-token',
+      posts: [{ status: 'needs_review' }],
+    } }, 7)
+    expect(campaign.lastError).toContain('帳號需重新連線')
+    expect(campaign.lastError).not.toMatch(/private-campaign-token|\/private\/campaign/)
+    const display = logic.submissionPresentation({ campaigns: [campaign], campaignIds: [7], jobs: [] })
+    expect(display.type).toBe('warning')
+    expect(display.message).toContain('需人工確認')
+    expect(display.message).toContain('原因：帳號需重新連線')
+    expect(display.message).toContain('勿直接重試')
+    expect(display.message).not.toContain('private-campaign-token')
+  })
+
+  it('renders only the public receipt summary and leaves raw checkpoints private', () => {
+    const target = { status: 'awaiting_delivery', deliveryState: 'awaiting_delivery',
+      providerReceipt: { provider: 'twitter', id: 'receipt-123', status: 'processing', submitted_at: '2026-11-25T12:00:00Z', request: 'private-request', response: 'private-response', config: 'private-config' },
+      checkpoint_json: JSON.stringify({ provider_receipt: { id: 'private-receipt' }, readiness: { reason: 'private-readiness' } }),
+      retryEligibility: { allowed: false, reason: 'delivery_evidence_retained' },
+    }
+    const details = targetReliabilityDetails(target)
+    expect(details).toContain('平台收據')
+    expect(details).toContain('receipt-123')
+    expect(details).toContain('平台處理中')
+    expect(details).toContain('請勿重複送出')
+    expect(details).not.toMatch(/private-request|private-response|private-config|private-receipt|private-readiness/)
+    expect(canRetryTarget(target)).toBe(false)
+  })
 })

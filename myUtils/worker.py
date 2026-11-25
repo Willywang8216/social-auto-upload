@@ -3280,11 +3280,13 @@ def _materialise_publish_media(payload: dict, target: jobs.Target, *, db_path: P
 
 def _fresh_preparation_context(account, payload: dict, *, db_path: Path, backup: bool = False) -> dict:
     """Current exact grants/caps with persistent scoped read-only dependency holds."""
-    from myUtils import preparation_context, backup_preparation, publish_readiness, media_restore
+    from myUtils import preparation_context, backup_preparation, publish_readiness, media_restore, native_destinations
     if account is None:
         raise media_restore.PrerequisiteUnavailable("configuration")
     settings = profile_registry.get_profile(account.profile_id, db_path=db_path).settings
     context = publish_readiness._context(account, settings)
+    if context["provider"] == "direct":
+        native_destinations.assert_effective_destination(account.platform, account.config, payload)
     projection = publish_readiness.destination_readiness(account, settings, db_path=db_path)
     scope = publish_readiness.destination_scope_key(account, settings)
     if backup and context["provider"] != "sociamonials":
@@ -3298,7 +3300,7 @@ def _fresh_preparation_context(account, payload: dict, *, db_path: Path, backup:
         fingerprint = context["fingerprint"]
     if projection.get("reasonCode") == "dependency_cooldown" and projection.get("nextAttemptAt"):
         delay = max(1, (jobs._utc_datetime(projection["nextAttemptAt"]) - _now_utc_naive()).total_seconds())
-        raise media_restore.PrerequisiteUnavailable("transport", retry_after_seconds=delay, scope_key=scope)
+        raise media_restore.PrerequisiteUnavailable("transport", retry_after_seconds=delay, scope_key=scope, cached_wait=True)
     managed = backup or context["provider"] == "sociamonials"
     needs_read = managed or not projection["ready"]
     if needs_read:
@@ -3311,9 +3313,10 @@ def _fresh_preparation_context(account, payload: dict, *, db_path: Path, backup:
             result["backup_compatible"] = True
         else:
             if not projection["ready"]:
-                if projection["reasonCode"] in {"disabled", "revoked", "expired", "native_hold", "configuration_required"} or account.platform not in {"tiktok", "youtube", "facebook", "instagram", "threads"}:
+                supported = {"tiktok", "youtube", "facebook", "instagram", "threads"} | native_destinations.SUPPORTED_PLATFORMS
+                if projection["reasonCode"] in {"disabled", "revoked", "expired", "native_hold", "configuration_required"} or account.platform not in supported:
                     raise media_restore.PrerequisiteUnavailable("configuration")
-                projection = preparation_context.verify_native_destination(account, settings=settings, db_path=db_path)
+                projection = preparation_context.verify_native_destination(account, settings=settings, db_path=db_path, payload=payload)
             if not projection["ready"]:
                 raise media_restore.PrerequisiteUnavailable("configuration")
             result = preparation_context.account_constraints(account)
@@ -3323,6 +3326,13 @@ def _fresh_preparation_context(account, payload: dict, *, db_path: Path, backup:
         return result
     except delivery.LeaseLost:
         raise
+    except ValueError as exc:
+        # A completed identity/grant check which refuses permission is not a
+        # transport outage. Do not spend eight retries repeating the same denial.
+        if needs_read:
+            media_restore._record_state(db_path, scope, fingerprint, "configuration")
+        raise MediaRestoreError("Destination authorization requires review: " + _scrub_secrets(str(exc))[:200],
+                                retryable=False, category="configuration") from exc
     except Exception as exc:
         if isinstance(exc, media_restore.PrerequisiteUnavailable):
             raise

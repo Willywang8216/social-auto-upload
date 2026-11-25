@@ -19,12 +19,14 @@
             <el-select v-model="entityStatusFilter" clearable placeholder="狀態" @change="loadEntities(true)">
               <el-option v-for="status in entityStatusOptions" :key="status" :label="entityStatusLabel(status)" :value="status" />
             </el-select>
-            <el-button @click="loadJobs">工作紀錄</el-button>
+            <el-button @click="openWorkHistory">工作紀錄</el-button>
             <el-button type="primary" @click="drainNow" :loading="draining">排空佇列</el-button>
           </div>
         </header>
+      <el-alert v-if="entityPageWarning" :title="entityPageWarning" type="warning" :closable="false" show-icon />
+      <el-button v-if="entityPageWarning" @click="loadEntities(true)">重新載入內容</el-button>
       <div v-if="entityLoading && !entities.length" class="entity-loading">正在載入排程…</div>
-      <el-empty v-else-if="entities.length === 0" description="目前沒有符合條件的排程" />
+      <el-empty v-else-if="entities.length === 0" :description="entityPageWarning ? '內容清單尚未完整載入' : '目前沒有符合條件的排程'" />
       <div v-else class="entity-card-grid">
         <article v-for="entity in entities" :key="entity.entityId" class="entity-card">
           <div class="entity-card-media-grid">
@@ -83,8 +85,27 @@
           </div>
         </article>
       </div>
-      <div class="jobs-pagination" v-if="entityHasMore"><span>Showing {{ entities.length }} of {{ entityTotal }} entities</span><el-button :loading="entityLoadingMore" @click="loadMoreEntities">Load more entities</el-button></div>
+      <div class="jobs-pagination" v-if="entityHasMore"><span>已顯示 {{ entities.length }} / {{ entityTotal }} 個內容項目</span><el-button :loading="entityLoadingMore" @click="loadMoreEntities">載入更多內容</el-button></div>
     </section>
+
+    <el-drawer v-model="historyDrawerVisible" title="工作紀錄" direction="rtl" size="min(760px, 95vw)">
+      <div class="jobs-list">
+        <el-select v-model="statusFilter" clearable placeholder="工作狀態" @change="loadJobs">
+          <el-option v-for="status in Object.values(JOB_STATUS)" :key="status" :label="statusLabel(status)" :value="status" />
+        </el-select>
+        <el-select v-model="platformFilter" clearable placeholder="平台" @change="loadJobs">
+          <el-option v-for="platform in platformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
+        </el-select>
+        <div v-if="loading">正在載入工作紀錄…</div>
+        <el-empty v-else-if="!jobs.length" description="目前沒有工作紀錄" />
+        <div v-for="job in jobs" :key="job.id" class="entity-target-row">
+          <el-button @click="openDetail(job)">任務 #{{ job.id }} · {{ job.title || platformLabel(job.platform) }}</el-button>
+          <el-tag :type="statusTagType(job.status)" effect="plain">{{ statusLabel(job.status) }}</el-tag>
+          <span>{{ job.completedTargets || 0 }} / {{ job.totalTargets || 0 }} 個目的地已完成</span>
+        </div>
+        <el-button v-if="hasMore" :loading="loadingMore" @click="loadMore">載入更多工作</el-button>
+      </div>
+    </el-drawer>
 
     <el-drawer
       v-model="entityDrawerVisible"
@@ -100,6 +121,7 @@
             <span>{{ entityDetails.profiles?.map((profile) => profile.name).filter(Boolean).join('、') || entityDetails.profile?.name || '未指定個人檔案' }}</span>
             <span>{{ entityDetails.scheduledAt || '尚未排程' }}</span>
           </div>
+          <p v-for="campaign in (entityDetails.campaigns || []).filter((item) => campaignFailureReason(item))" :key="campaign.id" class="entity-error">準備 #{{ campaign.id }} · 原因：{{ campaignFailureReason(campaign) }}</p>
         </section>
         <section class="entity-drawer-section">
           <h3>本次媒體</h3>
@@ -136,6 +158,19 @@
               <el-button v-if="target.status === 'pending' || target.status === 'retrying'" size="small" type="danger" @click="manageTarget('cancel', target)">取消</el-button>
               <el-button v-if="canRetryTarget(target)" size="small" type="warning" @click="manageTarget('retry', target)">重試</el-button>
             </div>
+          </div>
+        </section>
+        <section v-if="!entityDetails.posts?.length" class="entity-drawer-section">
+          <h3>發佈工作與目的地</h3>
+          <div v-for="job in entityDetails.jobs || []" :key="job.id">
+            <header>{{ platformLabel(job.platform) }} · 任務 #{{ job.id }} <el-tag :type="entityTagType(job.status)" effect="plain">{{ entityStatusLabel(job.status) }}</el-tag></header>
+            <div v-for="target in job.targets || []" :key="target.id" class="entity-target-row">
+              <el-tag :type="entityTagType(target.status)" effect="plain">{{ entityStatusLabel(target.status) }}</el-tag>
+              <span>{{ target.accountName || target.accountRef || '未設定帳號' }} · {{ target.scheduleAt || '立即發佈' }}</span>
+              <span v-if="target.lastError" class="entity-error">{{ target.lastError }}</span>
+              <span v-if="targetReliabilityDetails(target)">{{ targetReliabilityDetails(target) }}</span>
+            </div>
+            <el-button @click="openDetail(job)">開啟任務詳情</el-button>
           </div>
         </section>
         <section v-if="entityDetails.artifacts?.some((item) => item.url)" class="entity-drawer-section entity-links"><h3>媒體連結</h3><a v-for="link in artifactLinks(entityDetails.artifacts, 5)" :key="link.key" :href="link.url" target="_blank" rel="noopener">{{ link.text === '開啟媒體' ? '開啟媒體' : link.text + ' · 開啟連結' }}</a></section>
@@ -177,7 +212,8 @@ import { useProfilesStore } from '@/stores/profiles'
 import { getPlatformLabel, getPlatformTagType, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
 import { mediaPreviewSource, mediaStateLabel } from '@/utils/mediaState'
 import { artifactLinks } from '@/utils/entityLinks'
-import { canRetryTarget, publishStatusLabel, publishStatusType, targetReliabilityDetails } from '@/utils/publish-status'
+import { campaignFailureReason, canRetryTarget, publishStatusLabel, publishStatusType, targetReliabilityDetails } from '@/utils/publish-status'
+import { fetchEntityPages, mergeEntities } from '@/utils/entityPagination'
 import { pollingStatusText } from '@/utils/polling'
 import { showRequestError } from '@/utils/request'
 
@@ -206,6 +242,9 @@ const editingEntityCopy = ref('')
 const entities = ref([])
 const entityTotal = ref(0)
 const entityHasMore = ref(false)
+const entityOffset = ref(0)
+const entityPageWarning = ref('')
+const entityRefreshing = ref(false)
 const entityStatusFilter = ref('')
 const allDates = ref(false)
 const entityLoading = ref(false)
@@ -216,8 +255,10 @@ const currentDate = new Date()
 const todayDate = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(currentDate.getDate()).padStart(2, '0')}`
 let entitySearchTimer = null
 const drawerVisible = ref(false)
+const historyDrawerVisible = ref(false)
 const selectedJobId = ref(null)
 let refreshTimer = null
+let entityRequestSequence = 0
 
 const jobs = computed(() => jobsStore.jobs)
 const selectedJob = computed(() =>
@@ -239,6 +280,7 @@ watch(drawerVisible, (visible) => {
 })
 
 watch([entityDateRange, entityPlatformFilters, entityProfileFilters, entityAccountFilters, entityKeyword, entityStatusFilter, allDates], () => {
+  ++entityRequestSequence
   if (entitySearchTimer) window.clearTimeout(entitySearchTimer)
   entitySearchTimer = window.setTimeout(() => loadEntities(true), 250)
 })
@@ -260,59 +302,73 @@ function entityQuery(overrides = {}) {
 }
 
 async function loadEntities(reset = false) {
-  if (entityLoading.value) return
+  if (!reset && (entityLoading.value || entityLoadingMore.value || entityRefreshing.value)) return
+  const sequence = ++entityRequestSequence
   if (reset) {
     entities.value = []
     entityHasMore.value = false
+    entityOffset.value = 0
   }
   entityLoading.value = true
+  entityPageWarning.value = ''
   try {
-    const response = await jobsStore.refreshEntities(
-      entityQuery({ limit: entityPageSize, offset: reset ? 0 : entities.value.length })
-    )
-    entities.value = reset ? response.items || [] : [...entities.value, ...(response.items || [])]
-    entityTotal.value = response.total || 0
-    entityHasMore.value = Boolean(response.hasMore)
+    const response = await fetchEntityPages((params) => jobsStore.refreshEntities(params),
+      entityQuery({ offset: reset ? 0 : entityOffset.value }), { count: entityPageSize, pageSize: entityPageSize })
+    if (sequence !== entityRequestSequence) return
+    entities.value = reset ? response.items : mergeEntities(entities.value, response.items)
+    entityTotal.value = response.total
+    entityHasMore.value = response.hasMore
+    entityOffset.value = response.nextOffset
   } catch (error) {
-    showRequestError(error, error?.message || 'Unable to load content entities')
+    if (sequence !== entityRequestSequence) return
+    entityPageWarning.value = '內容清單尚未完整載入；請重新載入內容。'
+    showRequestError(error, '載入內容清單未完成')
   } finally {
-    entityLoading.value = false
+    if (sequence === entityRequestSequence) entityLoading.value = false
   }
 }
 
-// The 30s poll used to call loadEntities(true), which empties `entities` before
-// refetching — so the whole grid blanked and repainted every half minute, which
-// reads as constant flashing and makes the list hard to read. Refresh in place
-// instead: same filters, never fewer cards than are already on screen, no
-// spinner, and silent on failure because a background poll is not a user action.
+// Refresh the retained server range in <=200-row chunks, then replace atomically.
+// A partial/error response never drops cards that are already on screen.
 async function refreshEntitiesQuietly() {
-  if (entityLoading.value || entityLoadingMore.value || document.hidden) return
+  if (entityLoading.value || entityLoadingMore.value || entityRefreshing.value || document.hidden) return
+  const sequence = entityRequestSequence
+  entityRefreshing.value = true
   try {
-    const response = await jobsStore.refreshEntities(
-      entityQuery({ limit: Math.max(entityPageSize, entities.value.length), offset: 0 })
-    )
-    entities.value = response?.items || []
-    entityTotal.value = response?.total ?? entityTotal.value
-    entityHasMore.value = Boolean(response?.hasMore)
+    const response = await fetchEntityPages((params) => jobsStore.refreshEntities(params), entityQuery({ offset: 0 }),
+      { count: Math.max(entityPageSize, entityOffset.value, entities.value.length) })
+    if (sequence !== entityRequestSequence) return
+    entities.value = response.items
+    entityTotal.value = response.total
+    entityHasMore.value = response.hasMore
+    entityOffset.value = response.nextOffset
+    entityPageWarning.value = ''
   } catch {
-    // Keep what is on screen; the next tick tries again.
+    if (sequence === entityRequestSequence) entityPageWarning.value = '內容更新未完成，已保留目前清單；請重新載入內容。'
+  } finally {
+    entityRefreshing.value = false
   }
 }
 
 async function loadMoreEntities() {
-  if (entityLoadingMore.value || !entityHasMore.value) return
+  if (entityLoading.value || entityLoadingMore.value || entityRefreshing.value || !entityHasMore.value) return
+  const sequence = entityRequestSequence
   entityLoadingMore.value = true
   try {
-    const response = await jobsStore.refreshEntities(entityQuery({
-      limit: entityPageSize,
-      offset: entities.value.length,
-      q: entityKeyword.value.trim() || undefined
-    }))
-    entities.value.push(...(response.items || []))
-    entityTotal.value = response.total || 0
-    entityHasMore.value = Boolean(response.hasMore)
+    const response = await fetchEntityPages((params) => jobsStore.refreshEntities(params),
+      entityQuery({ offset: entityOffset.value }), { count: entityPageSize, pageSize: entityPageSize })
+    if (sequence !== entityRequestSequence) return
+    const merged = mergeEntities(entities.value, response.items)
+    if (response.items.length && merged.length === entities.value.length) throw new Error('內容分頁未前進')
+    entities.value = merged
+    entityTotal.value = response.total
+    entityHasMore.value = response.hasMore
+    entityOffset.value = response.nextOffset
+    entityPageWarning.value = ''
   } catch (error) {
-    showRequestError(error, error?.message || 'Unable to load more entities')
+    if (sequence !== entityRequestSequence) return
+    entityPageWarning.value = '載入更多內容未完成，已保留目前清單；請重新載入內容。'
+    showRequestError(error, '載入更多內容未完成')
   } finally {
     entityLoadingMore.value = false
   }
@@ -380,6 +436,11 @@ async function manageTarget(action, target) {
 const entityTagType = publishStatusType
 const entityStatusLabel = publishStatusLabel
 
+async function openWorkHistory() {
+  historyDrawerVisible.value = true
+  await loadJobs()
+}
+
 async function loadJobs() {
   loading.value = true
   try {
@@ -391,7 +452,7 @@ async function loadJobs() {
     })
     hasMore.value = response.hasMore
   } catch (error) {
-    console.error('載入任務清單失敗:', error)
+    showRequestError(error, '載入工作紀錄失敗')
   } finally {
     loading.value = false
   }
@@ -508,6 +569,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  ++entityRequestSequence
   if (entitySearchTimer) window.clearTimeout(entitySearchTimer)
   if (refreshTimer) {
     window.clearInterval(refreshTimer)

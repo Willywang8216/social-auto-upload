@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useJobsStore, JOB_STATUS, TARGET_STATUS } from '../jobs'
 
-const api = vi.hoisted(() => ({ get: vi.fn(), list: vi.fn(), create: vi.fn(), cancel: vi.fn(), resubmitTarget: vi.fn() }))
+const api = vi.hoisted(() => ({ get: vi.fn(), list: vi.fn(), create: vi.fn(), cancel: vi.fn(), resubmitTarget: vi.fn(), publishEntities: vi.fn() }))
 vi.mock('@/api/jobs', () => ({ jobsApi: api }))
 const snapshot = (id = 1, status = 'running', targets = []) => ({ code: 200, data: { id, status, targets } })
 const offline = () => Object.assign(new Error('offline'), { code: 'ERR_NETWORK' })
@@ -175,5 +175,67 @@ describe('per-job read polling', () => {
     await vi.advanceTimersByTimeAsync(60000)
     expect(api.get).toHaveBeenCalledTimes(2)
     expect(store.jobsById[1]).toBeUndefined()
+  })
+
+  it('reads authoritative destinations after a target-less cancellation, not cached pending targets', async () => {
+    store.jobsById[1] = { id: 1, status: 'pending', targets: [{ id: 10, status: 'pending' }] }
+    api.cancel.mockResolvedValue({ code: 200, data: { id: 1, status: 'cancelled' } })
+    const detail = deferred()
+    api.get.mockReturnValueOnce(detail.promise)
+    const cancelled = store.cancelJob(1)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(api.get).toHaveBeenCalledWith(1)
+    expect(store.jobsById[1]).toMatchObject({ status: 'pending', targets: [{ status: 'pending' }] })
+    detail.resolve(snapshot(1, 'cancelled', [
+      { id: 10, status: 'cancelled', deliveryState: 'awaiting_delivery', providerReceipt: { id: 'retained', status: 'processing' } },
+      { id: 11, status: 'succeeded', deliveryState: 'delivered' },
+    ]))
+    const job = await cancelled
+    expect(job.targets.map((target) => target.status)).toEqual(['cancelled', 'succeeded'])
+    expect(job.targets[0]).toMatchObject({ deliveryState: 'awaiting_delivery', providerReceipt: { id: 'retained' } })
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(api.get).toHaveBeenCalledOnce()
+  })
+
+  it('uses authoritative cancellation targets without another read or invented receipt states', async () => {
+    store.jobsById[1] = { id: 1, status: 'pending', targets: [{ id: 10, status: 'pending' }] }
+    api.cancel.mockResolvedValue(snapshot(1, 'cancelled', [
+      { id: 10, status: 'cancelled', delivery_state: 'unknown', retryEligibility: { allowed: false } },
+      { id: 11, status: 'succeeded', delivery_state: 'delivered' },
+    ]))
+    expect((await store.cancelJob(1)).targets).toMatchObject([
+      { status: 'cancelled', deliveryState: 'unknown' }, { status: 'succeeded', deliveryState: 'delivered' },
+    ])
+    expect(api.get).not.toHaveBeenCalled()
+  })
+
+  it.each(['offline', 'target-less'])('retains the last snapshot if cancellation detail is %s', async (failure) => {
+    store.jobsById[1] = { id: 1, status: 'pending', targets: [{ id: 10, status: 'pending' }] }
+    api.cancel.mockResolvedValue({ data: { id: 1, status: 'cancelled' } })
+    if (failure === 'offline') api.get.mockRejectedValueOnce(offline())
+    else api.get.mockResolvedValueOnce({ data: { id: 1, status: 'cancelled' } })
+    await expect(store.cancelJob(1)).rejects.toThrow()
+    expect(store.jobsById[1]).toMatchObject({ status: 'pending', targets: [{ status: 'pending' }] })
+  })
+
+  it('fences a stale in-flight poll after authoritative cancellation', async () => {
+    store.jobsById[1] = { id: 1, status: 'pending', targets: [{ id: 10, status: 'pending' }] }
+    const slow = deferred()
+    api.get.mockReturnValueOnce(slow.promise)
+    store.startPolling(1)
+    const signal = api.get.mock.calls[0][1].signal
+    api.cancel.mockResolvedValue(snapshot(1, 'cancelled', [{ id: 10, status: 'cancelled' }]))
+    await store.cancelJob(1)
+    expect(signal.aborted).toBe(true)
+    slow.resolve(snapshot(1, 'pending', [{ id: 10, status: 'pending' }]))
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(store.jobsById[1]).toMatchObject({ status: 'cancelled', targets: [{ status: 'cancelled' }] })
+    expect(api.get).toHaveBeenCalledOnce()
+  })
+
+  it('does not convert a malformed entity response into an empty calendar/list', async () => {
+    api.publishEntities.mockResolvedValue({ code: 200 })
+    await expect(store.refreshEntities({ offset: 200, limit: 200 })).rejects.toMatchObject({ code: 'ERR_INVALID_RESPONSE' })
   })
 })

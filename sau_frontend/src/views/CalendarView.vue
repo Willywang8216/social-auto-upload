@@ -40,11 +40,13 @@
         清除篩選（{{ activeFilterCount }}）
       </el-button>
     </div>
+    <el-alert v-if="loadWarning" :title="loadWarning" type="warning" :closable="false" show-icon />
+    <el-button v-if="loadWarning" @click="loadEvents">重新載入排程</el-button>
 
     <!-- Calendar grid -->
     <div class="cal-grid-scroll">
       <div v-if="loading" class="cal-loading">正在載入排程…</div>
-      <el-empty v-else-if="events.length === 0" description="本月沒有排程" />
+      <el-empty v-else-if="events.length === 0" :description="loadWarning ? '排程尚未完整載入' : '本月沒有排程'" />
       <div v-else class="cal-grid">
         <div v-for="dow in DOW" :key="dow" class="cal-dow">{{ dow }}</div>
         <div
@@ -106,6 +108,7 @@
               <span>{{ selectedEntity.profiles?.map((profile) => profile.name).filter(Boolean).join('、') || selectedEntity.profile?.name || '未指定個人檔案' }}</span>
               <span>{{ selectedEntity.scheduledAt || '尚未排程' }}</span>
             </section>
+            <p v-for="campaign in (selectedEntity.campaigns || []).filter((item) => campaignFailureReason(item))" :key="campaign.id" class="ev-error">準備 #{{ campaign.id }} · 原因：{{ campaignFailureReason(campaign) }}</p>
           </section>
           <div class="entity-media detail-section">
             <h3>媒體組</h3>
@@ -147,6 +150,19 @@
             </div>
           </div>
         </section>
+        <section v-if="!selectedEntity.posts?.length" class="detail-section">
+          <h3>發佈工作與目的地</h3>
+          <div v-for="job in selectedEntity.jobs || []" :key="job.id" class="entity-targets">
+            <header>{{ platformLabel(job.platform) }} · 任務 #{{ job.id }} <el-tag :type="statusTagType(job.status)" effect="plain">{{ statusLabel(job.status) }}</el-tag></header>
+            <div v-for="target in job.targets || []" :key="target.id" class="entity-target">
+              <el-tag :type="statusTagType(target.status)" effect="plain">{{ statusLabel(target.status) }}</el-tag>
+              <span>{{ target.accountName || target.accountRef || '未設定帳號' }} · {{ target.scheduleAt || '立即發佈' }}</span>
+              <span v-if="target.lastError" class="ev-error">{{ target.lastError }}</span>
+              <span v-if="targetReliabilityDetails(target)" class="target-reliability">{{ targetReliabilityDetails(target) }}</span>
+            </div>
+            <router-link :to="`/jobs?job=${job.id}`">開啟任務詳情</router-link>
+          </div>
+        </section>
         <section v-if="selectedEntity.artifacts?.length" class="entity-artifacts">
           <h4>已準備的媒體連結</h4>
           <a v-for="link in artifactLinks(selectedEntity.artifacts, 5)" :key="link.key" :href="link.url" target="_blank" rel="noopener">{{ link.text === '開啟媒體' ? '開啟媒體' : link.text + ' · 開啟連結' }}</a>
@@ -160,7 +176,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { icons } from '@/utils/icons'
@@ -169,7 +185,9 @@ import { useProfilesStore } from '@/stores/profiles'
 import { getPlatformLabel, getPlatformTagType, PUBLISH_PLATFORM_OPTIONS } from '@/utils/platforms'
 import { mediaPreviewSource, mediaStateLabel } from '@/utils/mediaState'
 import { artifactLinks } from '@/utils/entityLinks'
-import { canRetryTarget, publishStatusLabel, publishStatusType, targetReliabilityDetails } from '@/utils/publish-status'
+import { campaignFailureReason, canRetryTarget, publishStatusLabel, publishStatusType, targetReliabilityDetails } from '@/utils/publish-status'
+import { calendarEntityEvents } from '@/utils/calendarEvents'
+import { fetchEntityPages } from '@/utils/entityPagination'
 import { showRequestError } from '@/utils/request'
 import {
   applyCalendarFiltersToQuery,
@@ -212,6 +230,7 @@ const accountFilters = ref(initialFilters.accounts)
 const keyword = ref(initialFilters.q)
 const events = ref([])
 const loading = ref(false)
+const loadWarning = ref('')
 const showAll = ref(false)
 const dialogVisible = ref(false)
 const detailLoading = ref(false)
@@ -304,60 +323,29 @@ async function loadEvents() {
   activeController = new AbortController()
   const controller = activeController
   loading.value = true
+  loadWarning.value = ''
+  events.value = []
+  const options = { month: monthKey.value, showAll: showAll.value,
+    platforms: [...platformFilters.value], accountIds: [...accountFilters.value],
+    profileIds: [...profileFilters.value], summaryLength: EVENT_SUMMARY_LENGTH }
   try {
-    const month = `${view.value.y}-${String(view.value.m + 1).padStart(2, '0')}`
-    const result = await jobsStore.refreshEntities({
-      month,
-      status: showAll.value ? 'scheduled,queued,preparing,publishing,blocked,awaiting_delivery,needs_review,failed,cancelled,published' : 'scheduled,queued,preparing,publishing,blocked,awaiting_delivery,needs_review',
-      profileIds: profileFilters.value.join(','),
-      platforms: platformFilters.value.join(','),
-      accountIds: accountFilters.value.join(','),
+    const result = await fetchEntityPages((params) => jobsStore.refreshEntities(params, { signal: controller.signal }), {
+      month: options.month,
+      // Do not filter the aggregate status: failed/cancelled groups can have
+      // future pending or provider-waiting siblings. Filter expanded targets.
+      profileIds: options.profileIds.join(','),
+      platforms: options.platforms.join(','),
+      accountIds: options.accountIds.join(','),
       q: keyword.value.trim(),
-      limit: 200
-    }, { signal: controller.signal })
-    if (sequence !== requestSequence) return
-    events.value = (result.items || []).flatMap((entity) => {
-      const postsByRef = new Map((entity.posts || []).map((post) => [`campaign_post:${post.id}`, post]))
-      const destinations = (entity.jobs || []).flatMap((job) => (job.targets || []).map((target) => ({
-        ...target,
-        jobId: target.jobId || job.id,
-        post: postsByRef.get(target.fileRef)
-      }))).filter((target) => target.scheduleAt)
-      const mediaName = entity.mediaItems?.[0]?.filename
-      const postCopy = entity.posts?.find((post) => post.draft?.title || post.draft?.message)?.draft
-      const title = postCopy?.title || postCopy?.message || mediaName || `Publish ${entity.entityId}`
-      if (!destinations.length && entity.scheduledAt) {
-        destinations.push({
-          id: `entity:${entity.entityId}`,
-          scheduleAt: entity.scheduledAt,
-          status: entity.status,
-          accountName: '',
-          post: null
-        })
-      }
-      return destinations.map((target) => {
-        const targetDraft = target.post?.draft
-        const targetTitle = targetDraft?.title || targetDraft?.message || title
-        const normalizedTitle = String(targetTitle).replace(/\s+/g, ' ').trim()
-        return {
-          ...entity,
-          eventId: `${entity.entityId}:${target.jobId || 'entity'}:${target.id}`,
-          targetId: target.id,
-          jobId: target.jobId,
-          targetStatus: target.status,
-          targetFileRef: target.fileRef,
-          scheduleAt: target.scheduleAt,
-          time: target.scheduleAt.slice(11, 16),
-          title: targetTitle,
-          destinationLabel: [target.post?.platform, target.accountName].filter(Boolean).join(' · ') || '內容排程',
-          summary: normalizedTitle.slice(0, EVENT_SUMMARY_LENGTH),
-          hasMore: normalizedTitle.length > EVENT_SUMMARY_LENGTH
-        }
-      })
     })
+    if (sequence !== requestSequence) return
+    events.value = calendarEntityEvents(result.items, options)
   } catch (err) {
-    if (sequence === requestSequence && err?.code !== 'ERR_CANCELED' && err?.name !== 'CanceledError') {
-      showRequestError(err, err?.message || '載入行事曆失敗')
+    if (sequence === requestSequence && !controller.signal.aborted) {
+      const partial = err?.partial?.items || []
+      events.value = calendarEntityEvents(partial, options)
+      loadWarning.value = `行事曆尚未完整載入（已載入 ${partial.length} 個內容項目）；${err?.code === 'ERR_ENTITY_PAGINATION' ? err.message : '載入失敗，請重新載入排程。'}`
+      showRequestError(err, '載入行事曆未完成')
     }
   } finally {
     if (sequence === requestSequence) loading.value = false
@@ -374,6 +362,12 @@ onMounted(async () => {
     openEvent({ entityId: String(route.query.entity) })
     router.replace({ query: { ...route.query, entity: undefined } })
   }
+})
+
+onBeforeUnmount(() => {
+  ++requestSequence
+  activeController?.abort()
+  if (filterTimer) window.clearTimeout(filterTimer)
 })
 
 const move = (delta) => {

@@ -153,7 +153,7 @@ def test_size_or_opaque_etag_never_becomes_integrity(registered, monkeypatch, pr
     db, destination = registered
     calls = _download(monkeypatch)
     failure = _failure(db, destination, [dict(PUBLIC, remote_checksum=proof)], artifact={})
-    assert failure.details["dependencyCategory"] == "integrity"
+    assert failure.details["dependencyCategory"] == ("verification" if proof is None else "integrity")
     assert _facts(db) == (None, None) and not destination.exists()
     if proof is None:
         assert not calls
@@ -185,7 +185,7 @@ def test_fresh_exact_rclone_stat_hash_used_as_provider_proof(registered, monkeyp
     assert result["sha256"] == SHA
     command, kwargs = stat_calls[0]
     assert command[:5] == ["rclone", "lsjson", "owned-drive:registered-root/registered/part-1.mp4", "--stat", "--hash"]
-    assert kwargs["timeout"] <= 20 and command[command.index("--retries") + 1] == "1"
+    assert kwargs["timeout"] <= media_restore.PROBE_DEADLINE_SECONDS and command[command.index("--retries") + 1] == "1"
     assert "link" not in command and "copyto" not in command
 
 
@@ -200,7 +200,7 @@ def test_timeout_then_exact_alternative_no_blind_retry(registered, monkeypatch):
     monkeypatch.setattr(media_restore, "probe_source", timeout)
     _download(monkeypatch)
     media_restore.restore_artifact(destination, {"sha256": SHA}, [DRIVE, DRIVE, PUBLIC], db_path=db, reserve_bytes=0)
-    assert len(calls) == 1 and calls[0]["total_deadline"] <= 20
+    assert len(calls) == 1 and calls[0]["total_deadline"] <= media_restore.PROBE_DEADLINE_SECONDS
     assert _failure(db, destination, [DRIVE]).details["dependencyCategory"] == "transport"
     assert len(calls) == 1
 
@@ -780,3 +780,70 @@ def test_availability_probe_keeps_download_quota_on_exact_object(registered, mon
     cached = media_restore.source_availability(DRIVE, db_path=db)
     assert cached["cachedDependencyWait"] is True
     assert media_restore.dependency_status(DRIVE, db_path=db) == before
+
+
+def test_paced_exact_drive_checksum_can_arrive_after_twenty_seconds(registered, monkeypatch):
+    db, destination = registered
+    clock, probes, downloads = [0.0], [], []
+    monkeypatch.setattr(media_restore.time, "monotonic", lambda: clock[0])
+
+    def stat(source, **kwargs):
+        probes.append(source)
+        assert source == DRIVE and 27 < kwargs["total_deadline"] <= 45
+        clock[0] += 27.352
+        return {"size_bytes": len(MEDIA), "remote_checksum": {"algorithm": "sha256", "value": SHA}}
+
+    def download(backend, key, path, **kwargs):
+        downloads.append((backend, key))
+        assert kwargs["total_deadline"] <= media_restore.BACKEND_DEADLINE_SECONDS
+        clock[0] += 3
+        Path(path).write_bytes(MEDIA)
+
+    monkeypatch.setattr(media_restore, "probe_source", stat)
+    monkeypatch.setattr(media_remote_storage, "download_from_backend", download)
+    result = media_restore.restore_artifact(destination, {}, [PUBLIC, DRIVE], db_path=db, reserve_bytes=0)
+    assert result["sha256"] == SHA and result["source"] == DRIVE
+    assert probes == [DRIVE] and len(downloads) == 1
+    assert media_restore.OVERALL_DEADLINE_SECONDS == 240 and _facts(db) == (SHA, len(MEDIA))
+
+
+def test_missing_link_checksum_cannot_turn_alternative_timeout_into_permanent_corruption(registered, monkeypatch):
+    db, destination = registered
+    probes, downloads = [], _download(monkeypatch)
+
+    def stat(source, **kwargs):
+        probes.append(source)
+        if source == DRIVE:
+            raise subprocess.TimeoutExpired(["rclone"], kwargs["total_deadline"])
+        return {"size_bytes": len(MEDIA), "remote_checksum": None}
+
+    monkeypatch.setattr(media_restore, "probe_source", stat)
+    failure = _failure(db, destination, [PUBLIC, DRIVE], artifact={})
+    assert failure.retryable and failure.details["dependencyCategory"] == "transport"
+    assert probes == [DRIVE] and not downloads and not destination.exists()
+    assert _facts(db) == (None, None)
+    repeated = _failure(db, destination, [PUBLIC, DRIVE], artifact={})
+    assert repeated.retryable and repeated.details["cachedDependencyWait"]
+    assert probes == [DRIVE] and not downloads
+
+
+def test_no_checksum_evidence_never_authorizes_download_or_install(registered, monkeypatch):
+    db, destination = registered
+    monkeypatch.setattr(media_restore, "probe_source", lambda *a, **k: {"size_bytes": len(MEDIA)})
+    calls = _download(monkeypatch)
+    failure = _failure(db, destination, [PUBLIC], artifact={})
+    assert failure.details["dependencyCategory"] == "verification" and failure.retryable
+    assert "checksum evidence" in str(failure)
+    assert not calls and not destination.exists() and _facts(db) == (None, None)
+
+
+def test_known_stat_byte_conflict_is_permanent_even_without_checksum_proof(registered, monkeypatch):
+    db, destination = registered
+    destination.write_bytes(b"prior exact bytes retained")
+    monkeypatch.setattr(media_restore, "probe_source", lambda *a, **k: {"size_bytes": len(MEDIA) + 1, "remote_checksum": None})
+    download = __import__('unittest.mock', fromlist=['Mock']).Mock(side_effect=AssertionError("known byte conflict must not download"))
+    monkeypatch.setattr(media_remote_storage, "download_from_backend", download)
+    failure = _failure(db, destination, [DRIVE], artifact={})
+    assert not failure.retryable and failure.details["dependencyCategory"] == "integrity"
+    assert destination.read_bytes() == b"prior exact bytes retained" and _facts(db) == (None, None)
+    download.assert_not_called()

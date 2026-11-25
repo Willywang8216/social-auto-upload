@@ -134,4 +134,21 @@ describe('PublishCenter reliability wiring', () => {
     expect(api.job).not.toHaveBeenCalled()
     expect(api.campaign).toHaveBeenCalledOnce()
   })
+
+  it('renders a needs_review preparation last_error from the actual campaign response shape', async () => {
+    api.submit.mockResolvedValue({ code: 200, data: { campaignIds: [7], jobs: [], status: 'preparing' } })
+    api.campaign.mockResolvedValue({ code: 200, data: { id: 7, status: 'needs_review',
+      last_error: '帳號需重新連線 token=private-preparation-token', posts: [{ status: 'needs_review' }],
+    } })
+    const state = await open()
+    await state.submitAfterTiktokReview()
+    await flush()
+    expect(state.preparations[7].lastError).toContain('帳號需重新連線')
+    expect(state.preparationPolling[7].status).toBe('paused')
+    expect(state.submitDisplay.type).toBe('warning')
+    expect(textContent(view.root)).toContain('原因：帳號需重新連線')
+    expect(textContent(view.root)).toContain('需人工確認')
+    expect(textContent(view.root)).not.toContain('private-preparation-token')
+    expect(api.job).not.toHaveBeenCalled()
+  })
 })

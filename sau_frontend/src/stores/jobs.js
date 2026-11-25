@@ -81,14 +81,24 @@ export const useJobsStore = defineStore('jobs', () => {
 
   async function cancelJob(jobId) {
     const response = await jobsApi.cancel(jobId)
-    const job = _store(jobSnapshot(response, jobId))
-    if (isTerminalJobStatus(job.status)) stopPolling(jobId)
+    let snapshot = jobSnapshot(response, jobId)
+    // Fence stale in-flight reads before committing a cancellation snapshot.
+    stopPolling(jobId)
+    if (!Array.isArray(snapshot.targets)) {
+      // Older servers return only a summary. Its header cannot authorize us
+      // to invent cancelled target states or keep cached pending destinations.
+      snapshot = jobSnapshot(await jobsApi.get(jobId), jobId)
+      if (!Array.isArray(snapshot.targets)) throw invalidResponse()
+    }
+    const job = _store(snapshot)
+    if (!isTerminalJobStatus(job.status) && !needsPublishAction(job.status)) startPolling(jobId)
     return job
   }
 
   async function refreshEntities(params = {}, config = {}) {
     const response = await jobsApi.publishEntities(params, config)
-    return response?.data || { items: [], total: 0, hasMore: false }
+    if (!response?.data || !Array.isArray(response.data.items)) throw invalidResponse('無法確認內容清單；請更新後再試。')
+    return response.data
   }
 
   async function fetchEntity(entityId) {

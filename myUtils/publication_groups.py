@@ -465,6 +465,26 @@ def _validate_sources(conn, group):
         raise publish_admission.AdmissionError("Profile policy changed after preparation", "configuration_changed")
 
 
+def _refresh_group_destination(group: PublicationGroup, db_path: Path) -> None:
+    """One fresh grant check per complete group, never under the queue lock."""
+    from myUtils import profiles, preparation_context
+    from myUtils.secret_redaction import redact_text
+    account = profiles.get_account(group.account_id, db_path=db_path)
+    profile = profiles.get_profile(group.campaign.profile_id, db_path=db_path)
+    context = publish_readiness._context(account, profile.settings or {})
+    if context["fingerprint"] != group.configuration or context["provider"] != group.provider:
+        raise publish_admission.AdmissionError("Destination configuration changed after preparation", "configuration_changed")
+    if publish_readiness.destination_readiness(account, profile.settings, db_path=db_path)["ready"]:
+        return
+    try:
+        preparation_context.ensure_destination_ready(account, settings=profile.settings, db_path=db_path,
+                                                     payload=group.payloads[0])
+    except Exception as exc:
+        raise publish_admission.AdmissionError(
+            "Complete publication needs current verified destination/media evidence: " + redact_text(str(exc))[:200],
+            "destination_verification_required") from exc
+
+
 def install_group(group: PublicationGroup, *, db_path: Path, now: datetime) -> list[jobs.Job]:
     """Shared real commit boundary. Admission work is always outside the lock/TX.
 
@@ -482,6 +502,7 @@ def install_group(group: PublicationGroup, *, db_path: Path, now: datetime) -> l
             existing = _existing(conn, group)
             _duplicates(conn, group, keys)
             slots = existing[1] if existing else _slots(group, booked, now)
+        _refresh_group_destination(group, db_path)
         admitted = []
         for index, (payload, slot) in enumerate(zip(group.payloads, slots), 1):
             existing_payload = existing[0][index - 1].payload if existing else payload
@@ -779,6 +800,8 @@ def publish_saved_campaign(campaign, *, db_path, load_media_files, artifact_payl
                 slots = _slots(group, taken, now)
                 for post, slot in zip(posts, slots):
                     account_slots[(group.account_id, post["id"])] = slot
+        for group, _posts in groups:
+            _refresh_group_destination(group, db_path)
         specs = []
         for post in publishable:
             owners = [(group, posts) for group, posts in groups if any(row["id"] == post["id"] for row in posts)]

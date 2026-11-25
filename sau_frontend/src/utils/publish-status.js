@@ -54,10 +54,30 @@ function object(value) {
 function safeDetail(value) {
   return String(value || '')
     .replace(/\b(?:Bearer|Basic)\s+\S+/gi, '[redacted credential]')
-    .replace(/\b(?:token|secret|authorization|password|cookie|config(?:_json)?)\s*[:=].*/gi, '[redacted context]')
+    .replace(/\b(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key|lease[_-]?token|token|secret|authorization|password|cookie|config(?:[_-]?json)?)\s*[:=].*/gi, '[redacted context]')
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"']+/gi, '[redacted-url]')
-    .replace(/(?:[A-Z]:[\\/]|\/(?:home|tmp|var|app|media|mnt|opt)\/)[^\s<>"']+/gi, '[redacted-path]')
+    .replace(/(?:[A-Z]:[\\/]|(?<![\w:/])\/)[^\s<>"']+/gi, '[redacted-path]')
     .slice(0, 180)
+}
+
+export function campaignFailureReason(campaign) {
+  return safeDetail(campaign?.lastError || campaign?.last_error || campaign?.error)
+}
+
+export function providerReceiptDetails(target) {
+  // Only the public projection is read. Never render raw checkpoint_json or
+  // receipt request/response/config, and never make a signed receipt URL a link.
+  const checkpoint = object(target.checkpoint)
+  const receipt = object(target.providerReceipt ?? checkpoint?.provider_receipt)
+  if (!receipt) return ''
+  return [
+    '平台收據',
+    safeDetail(receipt.provider),
+    receipt.id ? `編號：${safeDetail(receipt.id)}` : '',
+    receipt.status ? `狀態：${publishStatusLabel(safeDetail(receipt.status))}` : '',
+    receipt.submitted_at ? `送交：${safeDetail(receipt.submitted_at)}` : '',
+    receipt.delivered_at ? `確認：${safeDetail(receipt.delivered_at)}` : '',
+  ].filter(Boolean).join(' · ')
 }
 
 export function normalizeTarget(target) {
@@ -81,7 +101,7 @@ export function publishReadinessDetails(value) {
   // A stored stage is not a delivery receipt and never replaces the job label.
   const verified = Date.parse(stage.verifiedAt)
   const fresh = Number.isFinite(verified) && verified <= Date.now() && Date.now() - verified < 900000
-  const declared = stage.phase || stage.status
+  const declared = stage.phase || stage.status || stage.stage
   const phase = declared === 'ready'
     ? (fresh && stage.evidenceFresh !== false && stage.artifactFingerprint && stage.destinationFingerprint && stage.provider ? 'ready' : 'configured_unverified')
     : ['preparing', 'waiting_configuration', 'waiting_media', 'waiting_dependency', 'waiting_capacity', 'blocked_intent'].includes(declared) ? declared : 'configured_unverified'
@@ -102,12 +122,18 @@ export function publishReadinessDetails(value) {
 
 export function targetReliabilityDetails(target) {
   const normalized = normalizeTarget(target)
-  const checkpoint = object(target.checkpoint ?? target.checkpoint_json)
-  const stage = target.readiness ?? checkpoint?.readiness
+  const checkpoint = object(target.checkpoint)
+  // Legacy API payloads carry readiness in JSON. Read only the stage's
+  // allowlisted/redacted fields; raw receipts and capabilities stay excluded.
+  const publicProjection = ['checkpoint', 'providerReceipt', 'readiness']
+    .some((key) => Object.prototype.hasOwnProperty.call(target, key))
+  const legacyStage = publicProjection ? null : object(target.checkpoint_json)?.readiness
+  const stage = target.readiness ?? checkpoint?.readiness ?? legacyStage
   const eligibility = normalized.retryEligibility
   return [
     publishActionHint(normalized.status),
     publishReadinessDetails(stage),
+    providerReceiptDetails(target),
     normalized.nextAttemptAt ? `下次嘗試：${safeDetail(normalized.nextAttemptAt)}` : '',
     normalized.scheduleAt ? `下個時段：${safeDetail(normalized.scheduleAt)}` : '',
     normalized.errorCategory ? `錯誤分類：${safeDetail(normalized.errorCategory)}` : '',

@@ -430,7 +430,7 @@
             {{ publishStatusLabel(preparations[campaignId]?.status || 'preparing') }}
           </el-tag>
           <span class="pc-subtle pc-ml-8">{{ preparations[campaignId]?.progressLabel || '正在取得準備進度' }}</span>
-          <p v-if="preparations[campaignId]?.error || preparations[campaignId]?.lastError" class="pc-subtle">{{ preparations[campaignId].error || preparations[campaignId].lastError }}</p>
+          <p v-if="campaignFailureReason(preparations[campaignId])" class="pc-subtle">原因：{{ campaignFailureReason(preparations[campaignId]) }}</p>
           <p class="pc-subtle" role="status">{{ pollingStatusText(preparationPolling[campaignId]) }}</p>
           <el-button v-if="['error', 'paused', 'stopped'].includes(preparationPolling[campaignId]?.status)" size="small" @click="startPreparationPolling(campaignId)">更新準備狀態</el-button>
         </div>
@@ -550,7 +550,7 @@ import TikTokReviewModal from '@/components/TikTokReviewModal.vue'
 import { useJobsStore } from '@/stores/jobs'
 import { campaignsApi } from '@/api/campaigns'
 import { createPoller, pollingStatusText } from '@/utils/polling'
-import { needsPublishAction, isTerminalJobStatus, publishStatusLabel, publishStatusType, publishActionHint, publishReadinessDetails, targetReliabilityDetails } from '@/utils/publish-status'
+import { campaignFailureReason, needsPublishAction, isTerminalJobStatus, publishStatusLabel, publishStatusType, publishActionHint, publishReadinessDetails, targetReliabilityDetails } from '@/utils/publish-status'
 import { createPublishSubmitter, campaignPreparation, lastSubmission, rememberSubmission, submissionPresentation } from '@/utils/publish-submission'
 
 const STAGGER_MINUTES = 5

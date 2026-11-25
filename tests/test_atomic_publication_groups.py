@@ -579,3 +579,41 @@ def test_loss_of_old_prep_lease_then_restart_cannot_install_obsolete_parts(setup
     assert _counts(setup) == (0, 0, 0)
     case.campaign = current
     _assert_complete(setup, case, setup.finalize(case))
+
+
+def test_normal_complete_group_refreshes_expired_destination_evidence_once_outside_queue_lock(setup, monkeypatch):
+    case = setup.make(count=3)
+    verified = [False]
+    monkeypatch.setattr(publish_readiness, "_project", lambda *a, **k: {
+        "ready": verified[0], "reasonCode": "ready" if verified[0] else "evidence_expired",
+        "evidence": {"capabilities": ["video", "image", "carousel", "first_comment"]}})
+
+    def refresh(account, **kwargs):
+        assert _counts(setup) == (0, 0, 0)
+        assert account.id == setup.account.id and kwargs["db_path"] == setup.db
+        # An actual provider read must not retain the enqueue writer transaction.
+        with closing(sqlite3.connect(setup.db, timeout=0.1)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.rollback()
+        verified[0] = True
+        return {"ready": True}
+
+    check = Mock(side_effect=refresh)
+    monkeypatch.setattr(preparation_context, "ensure_destination_ready", check)
+    result = setup.finalize(case)
+    _assert_complete(setup, case, result)
+    check.assert_called_once()
+    # An existing complete group must not replay preparation or verification.
+    assert setup.finalize(case) == result
+    check.assert_called_once()
+
+
+def test_permission_denial_before_complete_group_install_leaves_no_prefix(setup, monkeypatch):
+    case = setup.make(count=3)
+    monkeypatch.setattr(publish_readiness, "_project", lambda *a, **k: {"ready": False, "reasonCode": "evidence_expired"})
+    check = Mock(side_effect=ValueError("No verified content-write permission"))
+    monkeypatch.setattr(preparation_context, "ensure_destination_ready", check)
+    with pytest.raises(publish_admission.AdmissionError, match="current verified"):
+        setup.finalize(case)
+    assert _counts(setup) == (0, 0, 0)
+    check.assert_called_once()

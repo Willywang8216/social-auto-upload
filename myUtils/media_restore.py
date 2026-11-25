@@ -28,10 +28,13 @@ DEFAULT_RESERVE_BYTES = 512 * 1024 * 1024
 MAX_RESTORE_BYTES = 512 * 1024 * 1024
 OVERALL_DEADLINE_SECONDS = 240.0
 BACKEND_DEADLINE_SECONDS = 90.0
-PROBE_DEADLINE_SECONDS = 20.0
+# A paced Drive stat can spend >20s resolving an exact registered path before
+# returning its checksum. Keep one attempt, inside the SAME 240s total budget.
+PROBE_DEADLINE_SECONDS = 45.0
 MAX_SOURCES = 8
 COOLDOWNS = {"quota": 1800, "auth": 900, "missing": 900, "transport": 120,
-             "integrity": 3600, "identity": 3600, "capacity": 60, "configuration": 300}
+             "integrity": 3600, "identity": 3600, "capacity": 60, "configuration": 300,
+             "verification": 300}
 
 
 class PrerequisiteUnavailable(RuntimeError):
@@ -48,7 +51,8 @@ class PrerequisiteUnavailable(RuntimeError):
             self.details["dependencyScope"] = scope_key
         if cached_wait:
             self.details["cachedDependencyWait"] = True
-        super().__init__(f"media prerequisite unavailable: {category}")
+        reason = ": checksum evidence is not yet available" if category == "verification" else ""
+        super().__init__(f"media prerequisite unavailable: {category}{reason}")
 
 
 def _now() -> datetime:
@@ -232,7 +236,7 @@ def _failure_is_object_scoped(source: dict, exc: Exception, category: str) -> bo
     Inspect stderr only, never the CalledProcessError command/path (an object
     named like an error code is not provider evidence).
     """
-    if category in {"missing", "identity", "integrity"}:
+    if category in {"missing", "identity", "integrity", "verification"}:
         return True
     if (category != "quota" or (source.get("backend") or {}).get("provider") != "rclone"
             or not isinstance(exc, subprocess.CalledProcessError)):
@@ -403,9 +407,9 @@ def restore_artifact(destination: Path, artifact: dict, sources: list[dict], *, 
     Otherwise an exact registered path/remote record or (id,campaign_id,local_path) row is required
     for recording executed verification before installation.
     """
-    # Default worker budget is unchanged. Explicit reviewed maintenance may
-    # allow paced provider reads up to 45s; never enlarge the overall deadline,
-    # clear a live cooldown, repeat an object attempt or skip integrity/CAS.
+    # Pace the same configured client within a finite single-probe bound. This
+    # never enlarges the overall deadline, adds provider attempts, clears a live
+    # cooldown or skips integrity/registration/CAS checks.
     if type(probe_deadline_seconds) not in {int, float} or not 0 < probe_deadline_seconds <= 45:
         raise PrerequisiteUnavailable("identity")
     destination = Path(destination)
@@ -415,6 +419,12 @@ def restore_artifact(destination: Path, artifact: dict, sources: list[dict], *, 
         raise PrerequisiteUnavailable("identity")
     failures = []
     seen = set()
+    if not expected:
+        # An exact registered backend can provide an algorithm-labelled hash;
+        # an unhashed public link cannot. Try stronger evidence first, but every
+        # alternative must still pass the SAME identity/hash/size checks.
+        sources = sorted(sources, key=lambda source: (
+            0 if source.get("remote_checksum") else 1 if source.get("backend") else 2))
     for source in sources:
         if time.monotonic() >= deadline:
             failures.append(PrerequisiteUnavailable("transport"))
@@ -449,10 +459,13 @@ def restore_artifact(destination: Path, artifact: dict, sources: list[dict], *, 
                 proof = proof or facts.get("remote_checksum")
                 _record_state(db_path, scope, fingerprint, None)
                 _record_state(db_path, object_scope, object_fingerprint, None)
-            if not expected and not proof:
-                raise media_integrity.MediaIntegrityError("restoration needs verifiable checksum evidence")
             if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in sizes) or len(set(sizes)) > 1:
                 raise media_integrity.MediaIntegrityError("registered byte counts conflict")
+            if not expected and not proof:
+                # Missing proof can be retried, but NEVER mask a known byte
+                # conflict or authorize unverified content to be downloaded.
+                _record_state(db_path, object_scope, object_fingerprint, "verification")
+                raise PrerequisiteUnavailable("verification", scope_key=object_scope)
             size_bound = min(sizes[0] if sizes else MAX_RESTORE_BYTES, MAX_RESTORE_BYTES)
             check_capacity(destination, db_path=db_path, input_bytes=size_bound, reserve_bytes=reserve_bytes)
             destination.parent.mkdir(parents=True, exist_ok=True)

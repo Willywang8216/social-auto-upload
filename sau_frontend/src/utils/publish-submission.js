@@ -1,5 +1,5 @@
 import { invalidResponse, isTransientError } from './polling'
-import { publishActionHint, publishStatusLabel } from './publish-status'
+import { campaignFailureReason, publishActionHint, publishStatusLabel } from './publish-status'
 
 const KEY_PREFIX = 'sau.publish-submission.v1.'
 const LAST_RECEIPT_KEY = `${KEY_PREFIX}last`
@@ -126,7 +126,10 @@ export function submissionPresentation(data) {
   const states = [data.status, ...(data.campaigns || []).map((campaign) => campaign.status),
     ...jobs.flatMap((job) => [job.status, ...(job.targets || []).map((target) => target.status)])]
   for (const status of ['needs_review', 'blocked', 'awaiting_delivery']) {
-    if (states.includes(status)) return { type: status === 'awaiting_delivery' ? 'info' : 'warning', message: `${publishStatusLabel(status)}。${publishActionHint(status)}` }
+    if (states.includes(status)) {
+      const reason = campaignFailureReason((data.campaigns || []).find((campaign) => campaign.status === status))
+      return { type: status === 'awaiting_delivery' ? 'info' : 'warning', message: `${publishStatusLabel(status)}。${publishActionHint(status)}${reason ? ` 原因：${reason}` : ''}` }
+    }
   }
   if (states.includes('failed')) return { type: 'error', message: '部分準備或發佈失敗，請檢查各目的地的錯誤。' }
   if (states.includes('cancelled')) return { type: 'warning', message: '部分工作已取消；請確認其餘目的地的狀態。' }
@@ -166,5 +169,6 @@ export function campaignPreparation(response, campaignId) {
     }
   }
   const ready = posts.filter((post) => ['ready', 'prepared', 'queued', 'publishing', 'published', 'succeeded', 'awaiting_delivery'].includes(post.status)).length
-  return { ...campaign, jobs, progressLabel: posts.length ? `已準備 ${ready} / ${posts.length} 個貼文` : '等待媒體準備狀態' }
+  return { ...campaign, lastError: campaignFailureReason(campaign), jobs,
+    progressLabel: posts.length ? `已準備 ${ready} / ${posts.length} 個貼文` : '等待媒體準備狀態' }
 }

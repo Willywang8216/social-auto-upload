@@ -51,3 +51,26 @@ test('ready stage without artifact and destination proof is unverified', () => {
   assert.match(publishReadinessDetails({ phase: 'ready' }), /尚未驗證/)
   assert.equal(publishReadinessDetails('{bad'), '')
 })
+
+test('legacy readiness never renders raw receipt, config or lease capabilities', () => {
+  const checkpoint = {
+    readiness: { phase: 'waiting_media', reasonCode: 'verification_pending',
+      config_json: 'private-stage-config', lease_token: 'private-stage-lease' },
+    provider_receipt: { provider: 'private-provider', id: 'private-receipt',
+      request: 'private-request', response: 'private-response' },
+    config_json: 'private-config', lease_token: 'private-lease',
+  }
+  const detail = targetReliabilityDetails({ status: 'pending', checkpoint_json: JSON.stringify(checkpoint) })
+  assert.match(detail, /verification_pending/)
+  assert.doesNotMatch(detail, /private-|平台收據/)
+})
+
+test('public projection is authoritative even when its summary is empty', () => {
+  for (const key of ['checkpoint', 'providerReceipt', 'readiness']) {
+    for (const value of [null, {}]) {
+      const detail = targetReliabilityDetails({ status: 'pending', [key]: value,
+        checkpoint_json: JSON.stringify({ readiness: { phase: 'waiting_media', reasonCode: 'private-raw-stage' } }) })
+      assert.doesNotMatch(detail, /private-raw-stage/)
+    }
+  }
+})

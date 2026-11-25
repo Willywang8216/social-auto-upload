@@ -179,6 +179,12 @@ def validate_intent(payload, *, platform, effective_provider="direct", account_c
     draft = payload.get("draft") or {}
     if not isinstance(draft, dict):
         raise AdmissionError("draft must be an object")
+    if platform == "telegram" and effective_provider == "direct" and account_config is not None:
+        from myUtils import native_destinations
+        try:
+            native_destinations.assert_effective_destination(platform, account_config, payload)
+        except ValueError as exc:
+            raise AdmissionError(str(exc), "destination_changed") from exc
     artifacts = payload.get("artifacts") or []
     if not isinstance(artifacts, list) or any(not isinstance(a, dict) for a in artifacts):
         raise AdmissionError("artifacts must be a list of objects")

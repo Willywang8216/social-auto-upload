@@ -235,6 +235,12 @@ class PublishEntitiesApiTests(unittest.TestCase):
         self.assertEqual(entity["campaignIds"], [])
         self.assertEqual(entity["mediaItems"][0]["filename"], "legacy.mp4")
         self.assertEqual(entity["mediaItems"][0]["previewUrl"], "/getFile?filename=legacy.mp4")
+        self.assertEqual(entity["posts"], [])
+        self.assertEqual(entity["jobs"][0]["id"], job.id)
+        self.assertEqual(entity["jobs"][0]["targets"][0]["status"], "pending")
+        self.assertIn("retryEligibility", entity["jobs"][0]["targets"][0])
+        detail = self.client.get(f"/publish-entities/job-{job.id}").get_json()["data"]
+        self.assertEqual(detail["jobs"], entity["jobs"])
 
     def test_status_month_filters_and_pagination(self) -> None:
         profile_id = self._profile()
@@ -439,6 +445,155 @@ class PublishEntitiesApiTests(unittest.TestCase):
                 json={"message": "nope"},
             )
         self.assertEqual(foreign.status_code, 404)
+
+    def test_rollup_action_delivery_and_queue_precede_historical_success(self) -> None:
+        rollup = self.sau_backend._rollup_entity_status
+        for status in ("blocked", "awaiting_delivery", "needs_review"):
+            for source in ("record", "job", "target"):
+                for scheduled in (False, True):
+                    with self.subTest(status=status, source=source, scheduled=scheduled):
+                        records = ["published"] + ([status] if source == "record" else [])
+                        jobs = ["succeeded"] + ([status] if source == "job" else [])
+                        targets = [{"status": "succeeded"}] + ([{"status": status}] if source == "target" else [])
+                        self.assertEqual(rollup(records, jobs, targets, has_schedule=scheduled), status)
+        for terminal in ("failed", "cancelled"):
+            self.assertEqual(rollup(["published"], [terminal], [{"status": "pending"}], has_schedule=True), terminal)
+        for source_status in ("pending", "queued", "retrying"):
+            self.assertEqual(rollup(["published"], [source_status], [], has_schedule=False), "queued")
+            self.assertEqual(rollup(["published"], [], [{"status": source_status}], has_schedule=True), "scheduled")
+        self.assertEqual(rollup(["published", "preparing"], ["succeeded"], [], has_schedule=False), "preparing")
+        self.assertEqual(rollup(["published", "draft"], ["succeeded"], [], has_schedule=False), "draft")
+        self.assertEqual(rollup(["published"], ["succeeded"], [{"status": "succeeded"}], has_schedule=False), "published")
+
+    def test_reliability_status_filters_work_at_job_and_target_level(self) -> None:
+        profile_id = self._profile()
+        seeded = self._seed_campaign_entity(account_id=self._account(profile_id), profile_id=profile_id)
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE campaigns SET status='published' WHERE id=?", (seeded["campaign_id"],))
+            conn.execute("UPDATE campaign_posts SET status='published' WHERE id=?", (seeded["post_id"],))
+        for status in ("blocked", "awaiting_delivery", "needs_review"):
+            for source in ("job", "target", "both"):
+                with self.subTest(status=status, source=source):
+                    with closing(sqlite3.connect(self.db_path)) as conn, conn:
+                        conn.execute("UPDATE publish_jobs SET status=? WHERE id=?", (status if source != "target" else "succeeded", seeded["job_id"]))
+                        conn.execute("UPDATE publish_job_targets SET status=? WHERE job_id=?", (status if source != "job" else "succeeded", seeded["job_id"]))
+                    listing = self.client.get(f"/publish-entities?status={status}").get_json()["data"]
+                    self.assertEqual(listing["total"], 1)
+                    self.assertEqual(listing["items"][0]["status"], status)
+                    self.assertEqual(self.client.get("/publish-entities?status=published").get_json()["data"]["total"], 0)
+                    detail = self.client.get(f"/publish-entities/mg-{seeded['media_group_id']}").get_json()["data"]
+                    self.assertEqual(detail["status"], status)
+
+    def test_reused_media_group_keeps_new_receipt_wait_distinct_from_published_history(self) -> None:
+        from tests.legacy_queue import enqueue_legacy_job
+
+        profile_id = self._profile()
+        account_id = self._account(profile_id)
+        seeded = self._seed_campaign_entity(account_id=account_id, profile_id=profile_id)
+        store = self.sau_backend.campaign_store
+        runtime = self.sau_backend.job_runtime
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE campaigns SET status='published' WHERE id=?", (seeded["campaign_id"],))
+            conn.execute("UPDATE campaign_posts SET status='published' WHERE id=?", (seeded["post_id"],))
+            conn.execute("UPDATE publish_jobs SET status='succeeded' WHERE id=?", (seeded["job_id"],))
+            conn.execute("UPDATE publish_job_targets SET status='succeeded' WHERE job_id=?", (seeded["job_id"],))
+        campaign = store.create_campaign(profile_id, seeded["media_group_id"], status=store.CAMPAIGN_PUBLISHING, db_path=self.db_path)
+        post = store.add_campaign_post(campaign.id, "twitter", account_ids=[account_id], draft={"message": "New publication"}, status="awaiting_delivery", db_path=self.db_path)
+        job = enqueue_legacy_job(runtime.JobSpec(platform="twitter", profile_id=profile_id,
+            payload={"campaignId": campaign.id, "campaignPostId": post.id, "message": "New publication"},
+            targets=[(f"account:{account_id}", f"campaign_post:{post.id}", None)]), db_path=self.db_path)
+        receipt = {"provider": "twitter", "id": "new-receipt", "status": "processing", "submitted_at": "2099-12-12T09:00:00"}
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE publish_jobs SET status='awaiting_delivery' WHERE id=?", (job.id,))
+            conn.execute("UPDATE publish_job_targets SET status='awaiting_delivery', delivery_state='awaiting_delivery', schedule_at=?, checkpoint_json=? WHERE job_id=?",
+                ("2099-12-12T09:00:00", json.dumps({"provider_receipt": receipt}), job.id))
+        body = self.client.get("/publish-entities?status=awaiting_delivery").get_json()["data"]
+        self.assertEqual(body["total"], 1)
+        entity = body["items"][0]
+        self.assertEqual(entity["status"], "awaiting_delivery")
+        self.assertEqual(set(entity["campaignIds"]), {seeded["campaign_id"], campaign.id})
+        target = next(item for item in entity["jobs"] if item["id"] == job.id)["targets"][0]
+        self.assertEqual(target["providerReceipt"], receipt)
+        self.assertFalse(target["retryEligibility"]["allowed"])
+        self.assertEqual(self.client.get("/publish-entities?status=published").get_json()["data"]["total"], 0)
+
+    def test_job_entity_and_calendar_share_only_safe_reliability_fields(self) -> None:
+        profile_id = self._profile()
+        seeded = self._seed_campaign_entity(account_id=self._account(profile_id), profile_id=profile_id)
+        runtime = self.sau_backend.job_runtime
+        checkpoint = {
+            "submission_started": True,
+            "provider_receipt": {"provider": "twitter", "id": "receipt-123", "status": "processing", "submitted_at": "2099-12-12T09:00:00",
+                "request": {"body": "private-request"}, "response": {"body": "private-response"}, "config": {"apiKey": "private-config"}, "url": "https://cdn.example/private?sig=private-signature"},
+            "readiness": {"phase": "waiting_configuration", "provider": "twitter", "reasonCode": "reconnect", "reason": "Reconnect account; /private/local/media.mp4 token=private-error-token",
+                "checkedAt": "2099-12-12T09:00:00", "partProgress": {"completeParts": 1, "totalParts": 2, "debug": "private-progress"}, "request": "private-readiness"},
+            "payload": {"path": "/private/local/checkpoint.mp4"}, "request": "private-checkpoint-request", "response": "private-checkpoint-response", "lease_token": "private-lease",
+        }
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE campaigns SET status='needs_review', last_error=? WHERE id=?", ("Account needs reconnect; api_key=private-campaign-key", seeded["campaign_id"]))
+            conn.execute("UPDATE publish_jobs SET status='needs_review' WHERE id=?", (seeded["job_id"],))
+            conn.execute("UPDATE publish_job_targets SET status='needs_review', schedule_at=?, next_attempt_at=?, error_category='ambiguous', delivery_state='unknown', last_error=?, checkpoint_json=?, lease_token=? WHERE job_id=?",
+                ("2099-12-12T09:00:00", "2099-12-12T09:05:00", "Verify existing receipt; token=private-target-token", json.dumps(checkpoint), "private-lease", seeded["job_id"]))
+        with patch.object(runtime, "DB_PATH", self.db_path):
+            job = self.client.get(f"/jobs/{seeded['job_id']}").get_json()["data"]
+            calendar = self.client.get("/jobs/calendar?month=2099-12&status=needs_review").get_json()["data"]["items"][0]
+        listing = self.client.get("/publish-entities?status=needs_review").get_json()["data"]["items"][0]
+        detail = self.client.get(f"/publish-entities/mg-{seeded['media_group_id']}").get_json()["data"]
+        targets = [job["targets"][0], listing["jobs"][0]["targets"][0], detail["jobs"][0]["targets"][0], calendar]
+        fields = ("nextAttemptAt", "errorCategory", "deliveryState", "lastError", "readiness", "retryEligibility", "checkpoint", "providerReceipt")
+        for target in targets:
+            with self.subTest(route_target=target.get("id", target.get("targetId"))):
+                self.assertEqual({key: target[key] for key in fields}, {key: targets[0][key] for key in fields})
+                self.assertFalse(target["retryEligibility"]["allowed"])
+                self.assertEqual(target["readiness"]["partProgress"], {"completeParts": 1, "totalParts": 2})
+                self.assertEqual(set(target["providerReceipt"]), {"provider", "id", "status", "submitted_at"})
+                rendered = json.dumps(target)
+                for private in ("private-request", "private-response", "private-config", "private-signature", "private-progress", "private-readiness", "private-checkpoint", "private-lease", "private-error-token", "private-target-token", "/private/local", "checkpoint_json", "lease_token"):
+                    self.assertNotIn(private, rendered)
+        self.assertNotIn("private-campaign-key", json.dumps(listing))
+        campaign = self.client.get(f"/campaigns/{seeded['campaign_id']}").get_json()["data"]
+        self.assertEqual(campaign["last_error"], campaign["lastError"])
+        self.assertNotIn("private-campaign-key", campaign["lastError"])
+        self.assertIn("Account needs reconnect", campaign["lastError"])
+
+    def test_cancel_response_contains_authoritative_targets_and_retained_receipts(self) -> None:
+        profile_id = self._profile()
+        account_id = self._account(profile_id)
+        seeded = self._seed_campaign_entity(account_id=account_id, profile_id=profile_id)
+        receipt = {"provider": "twitter", "id": "accepted-receipt", "status": "processing"}
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            for index, (status, delivery_state) in enumerate((("awaiting_delivery", "awaiting_delivery"), ("succeeded", "delivered"), ("failed", "not_sent")), start=1):
+                conn.execute("INSERT INTO publish_job_targets (job_id, account_ref, file_ref, status, delivery_state, checkpoint_json) VALUES (?, ?, ?, ?, ?, ?)",
+                    (seeded["job_id"], f"account:{account_id + index}", f"campaign_post:{seeded['post_id']}", status, delivery_state, json.dumps({"provider_receipt": receipt}) if status == "awaiting_delivery" else "{}"))
+            conn.execute("UPDATE publish_jobs SET status='running', total_targets=4, completed_targets=1, failed_targets=1 WHERE id=?", (seeded["job_id"],))
+        with patch.object(self.sau_backend.job_runtime, "DB_PATH", self.db_path):
+            response = self.client.post(f"/jobs/{seeded['job_id']}/cancel")
+            self.assertEqual(response.status_code, 200)
+            body = response.get_json()["data"]
+            authoritative = self.client.get(f"/jobs/{seeded['job_id']}").get_json()["data"]
+        self.assertEqual(body["status"], "cancelled")
+        self.assertEqual(body["targets"], authoritative["targets"])
+        self.assertEqual([target["status"] for target in body["targets"]], ["cancelled", "cancelled", "succeeded", "failed"])
+        self.assertEqual(body["targets"][1]["deliveryState"], "awaiting_delivery")
+        self.assertEqual(body["targets"][1]["providerReceipt"], receipt)
+        self.assertFalse(body["targets"][1]["retryEligibility"]["allowed"])
+
+    def test_201_entities_paginate_at_existing_200_cap(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            for index in range(201):
+                cursor = conn.execute("INSERT INTO publish_jobs (idempotency_key, platform, payload_json, status, total_targets) VALUES (?, 'twitter', ?, 'pending', 1)",
+                    (f"entity-page-{index}", json.dumps({"title": f"Page {index}"})))
+                conn.execute("INSERT INTO publish_job_targets (job_id, account_ref, file_ref, status) VALUES (?, 'account:7', 'legacy.mp4', 'pending')", (cursor.lastrowid,))
+        first = self.client.get("/publish-entities?limit=999").get_json()["data"]
+        second = self.client.get("/publish-entities?limit=200&offset=200").get_json()["data"]
+        self.assertEqual(first["limit"], 200)
+        self.assertEqual(first["total"], 201)
+        self.assertEqual(len(first["items"]), 200)
+        self.assertTrue(first["hasMore"])
+        self.assertEqual(second["offset"], 200)
+        self.assertEqual(len(second["items"]), 1)
+        self.assertFalse(second["hasMore"])
+        self.assertEqual(len({item["entityId"] for item in first["items"] + second["items"]}), 201)
 
 
 if __name__ == "__main__":
