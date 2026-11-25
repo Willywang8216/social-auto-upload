@@ -11,7 +11,8 @@ from myUtils import delivery, media_compliance, media_integrity
 
 # Configuration, permission, content-policy and ambiguous delivery blocks are not
 # resolved by making compliant media. Only maintained no-post prerequisite holds.
-RESOLVABLE_CATEGORIES = {"integrity", "transport", "timeout", "missing", "capacity", "cooldown", "interrupted"}
+RESOLVABLE_CATEGORIES = {"integrity", "verification", "transport", "timeout", "missing",
+                         "capacity", "cooldown", "interrupted"}
 
 
 def assert_prerequisite(row, payload: str) -> None:

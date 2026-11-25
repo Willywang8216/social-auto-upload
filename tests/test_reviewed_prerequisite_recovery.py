@@ -90,8 +90,16 @@ def rows(path):
         return [dict(row) for row in conn.execute("SELECT * FROM publish_job_targets ORDER BY id")]
 
 
-def test_complete_reviewed_group_preserves_exact_selected_content_and_all_budgets(database, clips, tmp_path):
+@pytest.mark.parametrize("category", ["integrity", "verification"])
+def test_complete_reviewed_group_preserves_exact_selected_content_and_all_budgets(database, clips, tmp_path, category):
     path, ids, native = database
+    if category != "integrity":
+        with closing(sqlite3.connect(path)) as conn, conn:
+            for row in rows(path):
+                checkpoint = json.loads(row["checkpoint_json"])
+                checkpoint["prerequisites"]["category"] = category
+                conn.execute("UPDATE publish_job_targets SET error_category=?,checkpoint_json=? WHERE id=?",
+                    ("prerequisite_" + category, json.dumps(checkpoint), row["id"]))
     before = rows(path)
     jobs_before = [jobs.get_job(row["job_id"], db_path=path).payload for row in before]
     plan = prepare(database, tmp_path)

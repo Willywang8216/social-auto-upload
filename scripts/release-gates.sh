@@ -69,7 +69,7 @@ backend() {
   local python="$UV_PROJECT_ENVIRONMENT/bin/python"
   run_clean "$python" -m patchright install chromium
   run_clean "$python" -X utf8 scripts/release_checks.py static
-  run_clean "$python" -X utf8 -m pytest tests/ -q --basetemp "$SCRATCH/pytest-$version"
+  run_clean "$python" -X utf8 -m pytest tests/ -q --basetemp "$SCRATCH/pytest-$version" --junitxml "$RECEIPTS/backend-$version.junit.xml"
   run_clean "$python" scripts/release_checks.py clean --revision "$REVISION" >/dev/null
   run_clean "$python" scripts/release_checks.py record --revision "$REVISION" --receipts "$RECEIPTS" --component "backend-$version"
 }

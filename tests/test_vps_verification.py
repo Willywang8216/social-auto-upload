@@ -65,3 +65,16 @@ def test_all_vps_images_define_a_real_non_login_identity_for_ssh_signatures():
         assert 'useradd --uid 1000 --gid 1000 --no-create-home' in image, name
         assert '--home-dir /nonexistent --shell /usr/sbin/nologin sau' in image, name
         assert image.index('useradd --uid 1000') < image.rindex('USER 1000:1000'), name
+
+
+def test_verification_keeps_complete_bounded_logs_on_journald_hosts():
+    launcher = (ROOT / 'scripts/vps-gates.sh').read_text()
+    assert '--log-driver local' in launcher
+    assert '--log-opt max-size=10m' in launcher
+    assert '--log-opt max-file=2' in launcher
+
+
+def test_backend_gate_preserves_machine_readable_complete_failure_results():
+    gates = (ROOT / 'scripts/release-gates.sh').read_text()
+    assert '-m pytest tests/ -q' in gates
+    assert '--junitxml "$RECEIPTS/backend-$version.junit.xml"' in gates

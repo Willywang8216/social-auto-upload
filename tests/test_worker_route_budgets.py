@@ -32,7 +32,7 @@ def fixture(tmp_path, monkeypatch):
     createTable.bootstrap(path)
     profile = profiles.create_profile("Fixture", db_path=path)
     account = profiles.add_account(profile.id, platform="bluesky", account_name="Fixture",
-             auth_type="api", config={"did": "did:plc:offline-fixture", "identifier": "offline-fixture.test", "password": "fixture-only",
+             auth_type="api", config={"did": "did:plc:offline-fixture", "handle": "offline-fixture.test", "appPassword": "fixture-only",
                  "sociamonials": {"network": "blsk", "profile_refs": ["fixture"]}}, db_path=path)
     monkeypatch.setenv("SAU_SOCIAMONIALS_FALLBACK", "1")
     monkeypatch.setenv("SOCIAMONIALS_API_KEY", "fixture-only")

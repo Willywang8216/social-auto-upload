@@ -41,6 +41,7 @@ docker run --detach --name "$NAME" --label io.sau.ops=verification \
   --label "io.sau.source-revision=$REVISION" --label "io.sau.component=$COMPONENT" \
   --read-only --no-healthcheck --init --pids-limit 256 --cpus 2 \
   --cap-drop ALL --security-opt no-new-privileges \
+  --log-driver local --log-opt max-size=10m --log-opt max-file=2 \
   --memory 6g --memory-swap 6g --tmpfs /work:rw,exec,nosuid,nodev,size=6g,uid=1000,gid=1000,mode=0700 \
   --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 \
   --user 1000:1000 "${MOUNTS[@]}" "$IMAGE" "$REVISION" "$COMPONENT"
