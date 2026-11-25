@@ -316,3 +316,13 @@ def test_github_verifies_the_environment_selected_branch_not_default_main(regist
     with pytest.raises(ValueError, match="branch requires approval"):
         preparation.verify_native_destination(actor, db_path=db, session=http)
     assert http.calls[-1][1].endswith("/branches/release") and not stored(db)
+
+
+@pytest.mark.parametrize("chat", ["@test", "@lang-en", "@cli-fixture"])
+def test_malformed_telegram_selectors_cannot_acquire_a_destination_proof(registry, chat):
+    actor, db = registry("telegram", {"botToken": "fixture-only", "chatId": chat})
+    context = readiness._context(actor, {})
+    assert not context["configured"] and context["identity"] is None
+    result = readiness.destination_readiness(actor, db_path=db)
+    assert result["phase"] == "blocked_intent" and result["reasonCode"] == "configuration_required"
+    assert not stored(db)

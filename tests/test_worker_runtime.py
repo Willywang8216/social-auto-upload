@@ -238,7 +238,7 @@ class CliEntryPointTests(unittest.TestCase):
             from myUtils import profiles, publish_readiness
             profile = profiles.create_profile("CLI fixture", db_path=db_path)
             account = profiles.add_account(profile.id, "telegram", "CLI destination", auth_type="manual",
-                config={"botToken": "fixture-only", "chatId": "@cli-fixture"}, db_path=db_path)
+                config={"botToken": "fixture-only", "chatId": "@cli_fixture"}, db_path=db_path)
             context = publish_readiness._context(account, profile.settings)
             publish_readiness.record_destination_readiness(account, profile.settings, provider="direct", db_path=db_path,
                 proof={"verified": True, "live_check": True, "source": "provider_verification", "requires_approval": False,

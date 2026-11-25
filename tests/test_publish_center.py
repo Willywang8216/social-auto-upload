@@ -364,7 +364,7 @@ class PublishCenterSubmitTests(unittest.TestCase):
         from myUtils import publish_readiness
         profile = profile_registry.create_profile("Test Brand", db_path=self.db_path)
         configs = {
-            "telegram": {"chatId": "@test", "botToken": "fake-token"},
+            "telegram": {"chatId": "@test_fixture", "botToken": "fake-token"},
             "tiktok": {"openId": "offline-tiktok", "accessToken": "fake-token"},
             "instagram": {"igUserId": "offline-ig", "pageId": "offline-page", "accessToken": "fake-token"},
             "youtube": {"channelId": "offline-channel", "accessToken": "fake-token"},

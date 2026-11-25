@@ -100,7 +100,9 @@ class LanguageRoutingIntegrationTests(unittest.TestCase):
         from myUtils import media_compliance, publish_readiness
         from tests.test_atomic_publication_groups import synthetic_video_probe
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
         self._patches = ExitStack()
+        self.addCleanup(self._patches.close)
         self.db_path = Path(self._tmp.name) / "route.db"
         create_table.bootstrap(self.db_path)
         self.profile = profiles.create_profile("Brand", db_path=self.db_path)
@@ -117,7 +119,7 @@ class LanguageRoutingIntegrationTests(unittest.TestCase):
         accounts = []
         for name, language in (("en", "en"), ("zh", "zh-Hant"), ("bi", "en,zh-Hant")):
             account = profiles.add_account(self.profile.id, "telegram", name,
-                config={"audience_language": language, "botToken": "fixture-only", "chatId": f"@lang-{name}"}, db_path=self.db_path)
+                config={"audience_language": language, "botToken": "fixture-only", "chatId": f"@lang_{name}"}, db_path=self.db_path)
             context = publish_readiness._context(account, self.profile.settings)
             publish_readiness.record_destination_readiness(account, self.profile.settings, provider="direct", db_path=self.db_path,
                 proof={"verified": True, "live_check": True, "source": "provider_verification", "requires_approval": False,
@@ -126,10 +128,6 @@ class LanguageRoutingIntegrationTests(unittest.TestCase):
                     "verified_at": datetime.now(timezone.utc).isoformat()})
             accounts.append(account)
         self.en, self.zh, self.bi = accounts
-
-    def tearDown(self) -> None:
-        self._patches.close()
-        self._tmp.cleanup()
 
     def _run(self, language: str, *, include_zh: bool = False):
         def prepare(campaign_id, *_args, **_kwargs):
@@ -183,6 +181,23 @@ class LanguageRoutingIntegrationTests(unittest.TestCase):
         result = self._run("en", include_zh=True)
         self.assertEqual(len(result["jobs"]), 3)
         self.assertEqual(result["skipped"], [])
+
+
+def test_integration_fixture_cleans_probe_when_setup_is_interrupted():
+    from myUtils import media_compliance, publish_readiness
+
+    original_probe = media_compliance._source_metadata
+    original_decode = media_compliance.decode_video
+    case = LanguageRoutingIntegrationTests("test_chinese_content_skips_the_english_account")
+    result = unittest.TestResult()
+    with patch.object(publish_readiness, "record_destination_readiness",
+                      side_effect=RuntimeError("fixture setup interrupted")):
+        case.run(result)
+    assert len(result.errors) == 1 and not result.failures
+    assert "fixture setup interrupted" in result.errors[0][1]
+    assert media_compliance._source_metadata is original_probe
+    assert media_compliance.decode_video is original_decode
+    assert not Path(case._tmp.name).exists()
 
 
 if __name__ == "__main__":

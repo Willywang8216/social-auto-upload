@@ -24,4 +24,6 @@ Recovery must use the maintained reviewed-recovery and complete-group APIs with 
 
 Focused Linux regressions cover native destination grants, fingerprint drift, Telegram overrides, cached waits, media evidence/timeouts, complete-group refresh, entity states and HTTP projections. Frontend regressions cover pagination, partial calendar siblings, cancellation, legacy details and private diagnostic exclusions.
 
+Full-suite fixtures use publisher-compatible credential fields and valid Telegram selectors. Mock cleanup is registered before setup assertions, so interrupted setup cannot leak a synthetic media probe into subsequent real ffmpeg tests. A regression deliberately interrupts setup and verifies restoration. The generated route inventory is refreshed without altering human authorization annotations.
+
 A deploy additionally requires the maintained full frontend and Linux Python 3.12/3.13 receipts, source/image binding, non-root smoke, CVE policy and native pause/drain/rollback controls. Focused tests or a successful image build are not substitutes for those gates. See [ci-watch.md](ci-watch.md) and [vps-operations-layout.md](vps-operations-layout.md).

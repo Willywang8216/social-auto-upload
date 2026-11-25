@@ -25,8 +25,8 @@ def create_test_profile(path: Path, name: str):
 def native_config(platform: str) -> dict:
     """Explicit offline identities and native credentials, not a managed grant."""
     if platform == "bluesky":
-        return {"did": "did:plc:worker-fixture", "identifier": "worker-fixture.test",
-                "password": "fixture-only"}
+        return {"did": "did:plc:worker-fixture", "handle": "worker-fixture.test",
+                "appPassword": "fixture-only"}
     identity = {"twitter": "twitterUserId", "reddit": "userId"}[platform]
     return {identity: f"offline-{platform}-fixture", "accessToken": "fixture-access",
             "refreshToken": "fixture-refresh", "accessTokenExpiresAt": "2099-01-01T00:00:00+00:00",
